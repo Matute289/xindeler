@@ -23,11 +23,13 @@ cargo fmt --all -- --check
 cargo ci-clippy
 # expands to:
 # cargo clippy --all-targets --locked \
-#   --features="bin_cmd_doc_gen,bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat" \
-#   -- -D warnings
+#   --features="bin_cmd_doc_gen,bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat"
 ```
 
-All warnings are treated as errors (`-D warnings`). Fix every warning before proceeding.
+Fix every warning before proceeding. To treat warnings as errors (strict mode, matching CI):
+```bash
+cargo ci-clippy -- -D warnings
+```
 
 ## Step 3: Lint — Voxygen Publish Profile (CI exact command)
 
@@ -35,8 +37,7 @@ All warnings are treated as errors (`-D warnings`). Fix every warning before pro
 cargo ci-clippy2
 # expands to:
 # cargo clippy -p veloren-voxygen --locked \
-#   --no-default-features --features="default-publish" \
-#   -- -D warnings
+#   --no-default-features --features="default-publish"
 ```
 
 This checks the client in release mode (no hot-reloading). Catches feature-gated issues that only surface in publish builds.
