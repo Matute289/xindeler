@@ -20,9 +20,9 @@ Before touching any file, classify the work:
 | NPC behavior / AI | `server/agent/src/action_nodes.rs` | — (hot-reloadable dylib) |
 | NPC combat AI | `server/agent/src/attack.rs` | — |
 | New admin command | `common/src/cmd.rs` (enum) | + handler in `server/src/cmd.rs` |
-| New item / recipe | `assets/common/items/` (RON) | `assets/common/recipe_book.ron` |
+| New item / recipe | `assets/common/items/` (RON) | `assets/common/recipe_book_manifest.ron` |
 | New buff/debuff | `common/src/comp/buff.rs` | — |
-| New resource | `common/src/resources.rs` | `common-state/src/state.rs` |
+| New resource | `common/src/resources.rs` | `common/state/src/state.rs` |
 
 ## Step 1: Read the Existing Pattern
 
@@ -98,11 +98,10 @@ This is fast (~5-10s) and catches most errors before a full build.
 Use the `veloren-run` skill to launch the game and test the feature manually.
 
 Useful in-game commands for testing:
-- `/give <item_path>` — spawn an item
+- `/give_item <item_path>` — spawn an item
 - `/tp <x> <y> <z>` — teleport for positioning
 - `/spawn <entity>` — spawn an NPC
 - `/sudo <player> <command>` — run command as another entity
-- `/debug` — toggle debug rendering
 
 ## Key Reference Files by Area
 
