@@ -1,0 +1,30 @@
+name: Sync hot-fix after merge to main
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  sync-hotfix:
+    name: Sync hot-fix to main
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'hot-fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Reset hot-fix to main
+        run: |
+          git fetch origin main hot-fix
+          git checkout hot-fix
+          git reset --hard origin/main
+          git push origin hot-fix --force-with-lease
