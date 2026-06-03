@@ -23,9 +23,8 @@ In-game reproduction commands:
 - `/give_item <item>` — e.g. `/give_item common.items.weapons.sword.starter`
 - `/spawn <entity>` — e.g. `/spawn common.entity.npc.humanoid.villager`
 - `/time <hour>` — set time of day (e.g. `/time 12` for noon)
-- `/weather <type>` — change weather
+- `/weather_zone <kind> [radius] [time]` — change weather in a zone
 - `/debug_column` — show terrain column debug info at cursor
-- `/entity` — dump entity state at cursor
 - `/sudo <player> <cmd>` — act as another entity
 
 ## Step 2: Classify the Bug in ECS Terms
