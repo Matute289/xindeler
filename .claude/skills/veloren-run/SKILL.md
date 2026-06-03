@@ -12,9 +12,9 @@ Always ensure the Rust toolchain is on PATH before running:
 source "$HOME/.cargo/env"
 ```
 
-`VELOREN_ASSETS` must point to the assets directory. In the project root:
+`VELOREN_ASSETS` is resolved automatically when running from the project root (the build embeds the workspace path). Only set it manually when running a pre-built binary from a different directory or in CI:
 ```bash
-export VELOREN_ASSETS="$(pwd)/assets"
+export VELOREN_ASSETS="/path/to/veloren/assets"
 ```
 
 ## Launching the Client (GUI)
@@ -24,7 +24,7 @@ export VELOREN_ASSETS="$(pwd)/assets"
 cargo run --bin veloren-voxygen
 ```
 
-**Without hot-reloading** (faster startup, closer to release):
+**Minimal feature set** (omits discord, plugins, singleplayer — faster startup for net/logic testing):
 ```bash
 cargo test-voxygen
 ```
@@ -74,9 +74,9 @@ cargo run --bin veloren-voxygen
 
 ## Hot-Reloading Behavior
 
-In dev builds, two crates are compiled as dynamic libraries and reloaded at runtime without restarting:
-- `server-agent` — NPC AI behavior (gated by `hot-agent` feature)
-- `voxygen-anim` — character animations (gated by `hot-anim` feature)
+The `hot-reloading` feature is **on by default** in dev builds. It enables dynamic library reloading for:
+- `server-agent` — NPC AI behavior (sub-feature: `hot-agent`, enabled by default in server)
+- `voxygen-anim` — character animations (sub-feature: `hot-anim`, enabled by default in voxygen)
 
 To pick up changes: save the file → the game reloads it automatically within a few seconds.
 
@@ -91,5 +91,5 @@ Hot-reloading is **disabled** in `default-publish` (release) builds.
 ## Troubleshooting
 
 - **"assets not found"**: Make sure `VELOREN_ASSETS="$(pwd)/assets"` is set and you're running from the project root.
-- **Compilation errors on first run**: The project requires nightly Rust. Run `rustup show active-toolchain` — it should say `nightly-2025-09-08`.
+- **Compilation errors on first run**: The project requires nightly Rust. Run `rustup show active-toolchain` — it should match the version in the `rust-toolchain` file at the project root.
 - **Window doesn't appear**: Check macOS permissions (accessibility, network). Try running from terminal directly.
