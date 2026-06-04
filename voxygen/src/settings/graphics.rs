@@ -222,4 +222,104 @@ impl GraphicsSettings {
             entity: self.entity_view_distance,
         }
     }
+
+    /// Choose a graphics preset based on the detected GPU.
+    /// Called on first launch when no settings file exists.
+    pub fn auto_detect(adapter_info: &wgpu::AdapterInfo) -> Self {
+        let name = adapter_info.name.to_lowercase();
+        let is_discrete =
+            matches!(adapter_info.device_type, wgpu::DeviceType::DiscreteGpu);
+
+        let preset = if !is_discrete {
+            // Integrated / virtual / CPU fallback
+            Preset::Low
+        } else {
+            gpu_preset_from_name(&name)
+        };
+
+        tracing::info!(
+            gpu = %adapter_info.name,
+            ?preset,
+            "Auto-detected graphics preset"
+        );
+
+        let base = Self::default();
+        match preset {
+            Preset::Minimal => base.into_minimal(),
+            Preset::Low => base.into_low(),
+            Preset::Medium => base.into_medium(),
+            Preset::High => base.into_high(),
+            Preset::Ultra => base.into_ultra(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Preset {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+fn gpu_preset_from_name(name: &str) -> Preset {
+    // NVIDIA — match generation from model number
+    if name.contains("nvidia") || name.contains("geforce") || name.contains("quadro") {
+        // RTX 40xx
+        if contains_any(name, &["rtx 4090", "rtx 4080", "rtx 4070 ti"]) {
+            return Preset::Ultra;
+        }
+        if contains_any(name, &["rtx 40", "rtx 3090", "rtx 3080"]) {
+            return Preset::High;
+        }
+        if contains_any(name, &["rtx 30", "rtx 2080", "rtx 2070", "rtx 2060"]) {
+            return Preset::High;
+        }
+        if contains_any(name, &["rtx 20", "gtx 1080", "gtx 1070", "gtx 1660"]) {
+            return Preset::Medium;
+        }
+        // GTX 10xx and older
+        return Preset::Low;
+    }
+
+    // AMD — detect by RX series
+    if name.contains("radeon") || name.contains("amd") {
+        if contains_any(name, &["rx 7900", "rx 7800", "rx 6950", "rx 6900", "rx 6800"]) {
+            return Preset::Ultra;
+        }
+        if contains_any(name, &["rx 7", "rx 6700", "rx 6750", "rx 6650", "rx 6600"]) {
+            return Preset::High;
+        }
+        if contains_any(name, &["rx 5700", "rx 5600", "rx 5500", "rx 590", "rx 580"]) {
+            return Preset::Medium;
+        }
+        return Preset::Low;
+    }
+
+    // Intel Arc
+    if name.contains("arc") {
+        if contains_any(name, &["a770", "a750"]) {
+            return Preset::High;
+        }
+        if contains_any(name, &["a580", "a380"]) {
+            return Preset::Medium;
+        }
+        return Preset::Low;
+    }
+
+    // Apple Silicon (Metal — discrete-ish but powerful)
+    if name.contains("apple") {
+        if contains_any(name, &["m3 max", "m3 ultra", "m2 max", "m2 ultra", "m1 ultra"]) {
+            return Preset::High;
+        }
+        return Preset::Medium;
+    }
+
+    // Unknown discrete GPU — safe default
+    Preset::Medium
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| haystack.contains(n))
 }
