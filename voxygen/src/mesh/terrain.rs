@@ -234,7 +234,7 @@ fn calc_light<
 #[expect(clippy::type_complexity)]
 pub fn generate_mesh<'a>(
     vol: &'a VolGrid2d<TerrainChunk>,
-    (range, max_texture_size, _boi, smoothing): (
+    (range, max_texture_size, boi, smoothing): (
         Aabb<i32>,
         Vec2<u16>,
         &'a BlocksOfInterest,
@@ -262,12 +262,26 @@ pub fn generate_mesh<'a>(
 
     // Transvoxel path — smooth iso-surface meshing.
     if smoothing != TerrainSmoothingMode::Disabled {
+        // Chunks containing site structures (crafting stations, fireplaces,
+        // building entrances) must use the greedy mesher — Transvoxel would
+        // smooth away their flat vertical wall geometry making them invisible.
+        let has_structures = !boi.interactables.is_empty()
+            || !boi.smokers.is_empty()
+            || !boi.one_way_walls.is_empty();
+
+        if !has_structures {
         use crate::render::Tri;
         let s = range.size();
         let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
         let offset = range.min - Vec3::new(1, 1, 1);
         let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
-        smooth_density_field(&mut density);
+        let smooth_passes = match smoothing {
+            TerrainSmoothingMode::Soft => 1,
+            TerrainSmoothingMode::Smooth => 2,
+            TerrainSmoothingMode::Ultra => 3,
+            TerrainSmoothingMode::Disabled => unreachable!(),
+        };
+        smooth_density_field(&mut density, smooth_passes);
         let tris = mesh_transvoxel(&density);
 
         // ----------------------------------------------------------------
@@ -359,6 +373,7 @@ pub fn generate_mesh<'a>(
                 sun_occluder_z_bounds,
             ),
         );
+        } // end if !has_structures
     }
 
     // Find blocks that should glow
