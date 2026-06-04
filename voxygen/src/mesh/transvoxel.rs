@@ -441,9 +441,12 @@ pub struct TransvoxelTriangle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Estimate the density gradient at a floating-point position via tri-linear
-/// sampling of central differences. The gradient points from low to high
-/// density (i.e. from air towards solid).
+/// Estimate the outward surface normal at `pos` via central-differences on the
+/// density field. "Outward" means pointing from solid into air (away from the
+/// terrain surface, toward the viewer).
+///
+/// The raw gradient points toward increasing density (i.e. into solid), so we
+/// negate it to get the outward direction.
 fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
     let p = pos.map(|e| e as i32);
     let dx = field.get_or_zero(p + Vec3::new(1, 0, 0)) as f32
@@ -453,11 +456,12 @@ fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
     let dz = field.get_or_zero(p + Vec3::new(0, 0, 1)) as f32
         - field.get_or_zero(p + Vec3::new(0, 0, -1)) as f32;
     let g = Vec3::new(dx, dy, dz);
-    // Fall back to up-vector if the gradient is degenerate (flat field).
+    // Negate: raw gradient points into solid, we want outward (into air).
+    // Fall back to up-vector when the gradient is degenerate (flat field).
     if g.magnitude_squared() < 0.001 {
         Vec3::unit_z()
     } else {
-        g.normalized()
+        (-g).normalized()
     }
 }
 
@@ -480,9 +484,12 @@ pub fn mesh_transvoxel(field: &DensityField) -> Vec<TransvoxelTriangle> {
     let mut triangles = Vec::new();
     let size = field.size.map(|e| e as i32);
 
-    for cx in 0..size.x - 1 {
-        for cy in 0..size.y - 1 {
-            for cz in 0..size.z - 1 {
+    // Start at index 1 (skip the outer padding layer) so the mesh stays
+    // within the actual chunk boundary and doesn't generate floating geometry
+    // from the ±1 border added during DensityField construction.
+    for cx in 1..size.x - 1 {
+        for cy in 1..size.y - 1 {
+            for cz in 1..size.z - 1 {
                 let cell = Vec3::new(cx, cy, cz);
 
                 // Sample the 8 corner densities.

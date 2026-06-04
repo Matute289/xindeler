@@ -382,9 +382,9 @@ pub fn extract_collision_triangles(field: &DensityField, field_offset: Vec3<f32>
     let mut triangles = Vec::new();
     let size = field.size.map(|e| e as i32);
 
-    for cx in 0..size.x - 1 {
-        for cy in 0..size.y - 1 {
-            for cz in 0..size.z - 1 {
+    for cx in 1..size.x - 1 {
+        for cy in 1..size.y - 1 {
+            for cz in 1..size.z - 1 {
                 let cell = Vec3::new(cx, cy, cz);
 
                 let mut corners = [0u8; 8];

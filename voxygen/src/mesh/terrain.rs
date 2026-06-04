@@ -8,7 +8,7 @@ use crate::{
     },
     render::{
         AltIndices, FluidVertex, Mesh, TerrainAtlasData, TerrainSmoothingMode, TerrainVertex,
-        Vertex, pipelines::AtlasData,
+        Vertex,
     },
     scene::terrain::{BlocksOfInterest, DEEP_ALT, SHALLOW_ALT},
 };
@@ -261,7 +261,6 @@ pub fn generate_mesh<'a>(
     );
 
     // Transvoxel path — smooth iso-surface meshing.
-    // Atlas and normal encoding are placeholder until Task 8 / atlas integration.
     if smoothing != TerrainSmoothingMode::Disabled {
         use crate::render::Tri;
         let s = range.size();
@@ -271,18 +270,65 @@ pub fn generate_mesh<'a>(
         smooth_density_field(&mut density);
         let tris = mesh_transvoxel(&density);
 
+        // ----------------------------------------------------------------
+        // Build a colour atlas: one texel per (chunk-local x, y) column.
+        // Each texel stores the colour of the topmost solid block in that
+        // column, giving Transvoxel vertices their correct block colours.
+        // ----------------------------------------------------------------
+        let atlas_w = (s.w as usize).min(32);
+        let atlas_h = (s.h as usize).min(32);
+        let mut col_lights = vec![[0u8; 4]; atlas_w * atlas_h];
+        let kinds_atlas = vec![0u8; atlas_w * atlas_h];
+        {
+            let mut vol_cached = vol.cached();
+            for ax in 0..atlas_w {
+                for ay in 0..atlas_h {
+                    let wx = range.min.x + ax as i32;
+                    let wy = range.min.y + ay as i32;
+                    let mut color = Rgb::broadcast(128u8);
+                    for wz in (range.min.z..range.max.z).rev() {
+                        if let Ok(b) = vol_cached.get(Vec3::new(wx, wy, wz)) {
+                            if !b.is_filled() {
+                                continue;
+                            }
+                            color = b.get_color().unwrap_or(color);
+                            break;
+                        }
+                    }
+                    let idx = ax * atlas_h + ay;
+                    col_lights[idx] = TerrainVertex::make_col_light(254, 0, color, false);
+                }
+            }
+        }
+        let atlas_data = TerrainAtlasData {
+            col_lights,
+            kinds: kinds_atlas,
+        };
+        let atlas_size = Vec2::new(atlas_w as u16, atlas_h as u16);
+
+        // ----------------------------------------------------------------
+        // Emit mesh — atlas_pos maps each vertex to its (chunk-local x, y)
+        // column entry in the atlas built above.
+        // ----------------------------------------------------------------
         let mut opaque_mesh: Mesh<TerrainVertex> = Mesh::new();
-        // Convert field-local coords to greedy-mesher convention:
-        // chunk-local x/y (0..32) and world z.
-        // Field (1,1,1) = world range.min, so delta = (-1, -1, range.min.z - 1).
+        // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
         let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
+        let atlas_pos_for = |pos: Vec3<f32>| -> Vec2<u16> {
+            let cp = pos + mesh_delta;
+            let ax = cp.x.round() as i32;
+            let ay = cp.y.round() as i32;
+            Vec2::new(
+                ax.clamp(0, atlas_w as i32 - 1) as u16,
+                ay.clamp(0, atlas_h as i32 - 1) as u16,
+            )
+        };
         for tri in &tris {
             let [p0, p1, p2] = tri.positions;
             let [n0, n1, n2] = tri.normals;
             opaque_mesh.push_tri(Tri::new(
-                TerrainVertex::new(Vec2::zero(), p0 + mesh_delta, n0, false),
-                TerrainVertex::new(Vec2::zero(), p1 + mesh_delta, n1, false),
-                TerrainVertex::new(Vec2::zero(), p2 + mesh_delta, n2, false),
+                TerrainVertex::new(atlas_pos_for(p0), p0 + mesh_delta, n0, false),
+                TerrainVertex::new(atlas_pos_for(p1), p1 + mesh_delta, n1, false),
+                TerrainVertex::new(atlas_pos_for(p2), p2 + mesh_delta, n2, false),
             ));
         }
 
@@ -290,8 +336,6 @@ pub fn generate_mesh<'a>(
             min: range.min.map(|e| e as f32),
             max: range.max.map(|e| e as f32),
         };
-        // 1×1 placeholder atlas: uniform lit white texel.
-        let atlas_data = TerrainAtlasData::blank_with_size(Vec2::new(1, 1));
         let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
         return (
             opaque_mesh,
@@ -300,7 +344,7 @@ pub fn generate_mesh<'a>(
             (
                 bounds,
                 atlas_data,
-                Vec2::new(1u16, 1),
+                atlas_size,
                 Arc::new(|_| 1.0f32),
                 Arc::new(|_| 0.0f32),
                 AltIndices {
