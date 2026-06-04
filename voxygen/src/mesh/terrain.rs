@@ -234,7 +234,7 @@ fn calc_light<
 #[expect(clippy::type_complexity)]
 pub fn generate_mesh<'a>(
     vol: &'a VolGrid2d<TerrainChunk>,
-    (range, max_texture_size, _boi, smoothing): (
+    (range, max_texture_size, boi, smoothing): (
         Aabb<i32>,
         Vec2<u16>,
         &'a BlocksOfInterest,
@@ -262,6 +262,14 @@ pub fn generate_mesh<'a>(
 
     // Transvoxel path — smooth iso-surface meshing.
     if smoothing != TerrainSmoothingMode::Disabled {
+        // Chunks containing site structures (crafting stations, fireplaces,
+        // building entrances) must use the greedy mesher — Transvoxel would
+        // smooth away their flat vertical wall geometry making them invisible.
+        let has_structures = !boi.interactables.is_empty()
+            || !boi.smokers.is_empty()
+            || !boi.one_way_walls.is_empty();
+
+        if !has_structures {
         use crate::render::Tri;
         let s = range.size();
         let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
@@ -359,6 +367,7 @@ pub fn generate_mesh<'a>(
                 sun_occluder_z_bounds,
             ),
         );
+        } // end if !has_structures
     }
 
     // Find blocks that should glow
