@@ -33,7 +33,7 @@ use crate::{
     render::{
         CloudsLocals, Consts, CullingMode, Drawer, GlobalModel, Globals, GlobalsBindGroup, Light,
         Model, PointLightMatrix, PostProcessLocals, RainOcclusionLocals, Renderer, Shadow,
-        ShadowLocals, SkyboxVertex, create_skybox_mesh,
+        ShadowLocals, SkyboxVertex, TerrainSmoothingMode, create_skybox_mesh,
     },
     session::PlayerDebugLines,
     settings::Settings,
@@ -158,6 +158,7 @@ pub struct SceneData<'a> {
     pub is_aiming: bool,
     pub interpolated_time_of_day: Option<f64>,
     pub wind_vel: Vec2<f32>,
+    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl SceneData<'_> {

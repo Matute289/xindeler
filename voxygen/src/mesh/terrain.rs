@@ -4,12 +4,19 @@ use crate::{
     mesh::{
         MeshGen,
         greedy::{self, GreedyConfig, GreedyMesh},
+        transvoxel::mesh_transvoxel,
     },
-    render::{AltIndices, FluidVertex, Mesh, TerrainAtlasData, TerrainVertex, Vertex},
+    render::{
+        AltIndices, FluidVertex, Mesh, TerrainAtlasData, TerrainSmoothingMode, TerrainVertex,
+        Vertex, pipelines::AtlasData,
+    },
     scene::terrain::{BlocksOfInterest, DEEP_ALT, SHALLOW_ALT},
 };
 use common::{
-    terrain::{Block, TerrainChunk},
+    terrain::{
+        Block, TerrainChunk,
+        density::{convert_chunk_to_density_field, smooth_density_field},
+    },
     util::either_with,
     vol::{ReadVol, RectRasterableVol},
     volumes::vol_grid_2d::{CachedVolGrid2d, VolGrid2d},
@@ -227,7 +234,12 @@ fn calc_light<
 #[expect(clippy::type_complexity)]
 pub fn generate_mesh<'a>(
     vol: &'a VolGrid2d<TerrainChunk>,
-    (range, max_texture_size, _boi): (Aabb<i32>, Vec2<u16>, &'a BlocksOfInterest),
+    (range, max_texture_size, _boi, smoothing): (
+        Aabb<i32>,
+        Vec2<u16>,
+        &'a BlocksOfInterest,
+        TerrainSmoothingMode,
+    ),
 ) -> MeshGen<
     TerrainVertex,
     FluidVertex,
@@ -247,6 +259,55 @@ pub fn generate_mesh<'a>(
         "generate_mesh",
         "<&VolGrid2d as Meshable<_, _>>::generate_mesh"
     );
+
+    // Transvoxel path — smooth iso-surface meshing.
+    // Atlas and normal encoding are placeholder until Task 8 / atlas integration.
+    if smoothing != TerrainSmoothingMode::Disabled {
+        use crate::render::Tri;
+        let s = range.size();
+        let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
+        let offset = range.min - Vec3::new(1, 1, 1);
+        let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
+        smooth_density_field(&mut density);
+        let tris = mesh_transvoxel(&density);
+
+        let mut opaque_mesh: Mesh<TerrainVertex> = Mesh::new();
+        let mesh_delta = Vec3::new(0.0f32, 0.0, range.min.z as f32);
+        for tri in &tris {
+            let [p0, p1, p2] = tri.positions;
+            let [n0, n1, n2] = tri.normals;
+            opaque_mesh.push_tri(Tri::new(
+                TerrainVertex::new(Vec2::zero(), p0 + mesh_delta, n0, false),
+                TerrainVertex::new(Vec2::zero(), p1 + mesh_delta, n1, false),
+                TerrainVertex::new(Vec2::zero(), p2 + mesh_delta, n2, false),
+            ));
+        }
+
+        let bounds = Aabb {
+            min: range.min.map(|e| e as f32),
+            max: range.max.map(|e| e as f32),
+        };
+        // 1×1 placeholder atlas: uniform lit white texel.
+        let atlas_data = TerrainAtlasData::blank_with_size(Vec2::new(1, 1));
+        let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
+        return (
+            opaque_mesh,
+            Mesh::new(),
+            Mesh::new(),
+            (
+                bounds,
+                atlas_data,
+                Vec2::new(1u16, 1),
+                Arc::new(|_| 1.0f32),
+                Arc::new(|_| 0.0f32),
+                AltIndices {
+                    deep_end: 0,
+                    underground_end: 0,
+                },
+                sun_occluder_z_bounds,
+            ),
+        );
+    }
 
     // Find blocks that should glow
     // TODO: Search neighbouring chunks too!

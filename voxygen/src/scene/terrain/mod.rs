@@ -14,7 +14,7 @@ use crate::{
         AltIndices, CullingMode, FigureSpriteAtlasData, FirstPassDrawer, FluidVertex, GlobalModel,
         Instances, LodData, Mesh, Model, RenderError, Renderer, SPRITE_VERT_PAGE_SIZE,
         SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex, SpriteVerts,
-        TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainVertex,
+        TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainSmoothingMode, TerrainVertex,
         pipelines::{self, AtlasData, AtlasTextures},
     },
     scene::terrain::sprite::SpriteModelConfig,
@@ -258,6 +258,7 @@ fn mesh_worker(
     chunk: Arc<TerrainChunk>,
     range: Aabb<i32>,
     sprite_render_state: &SpriteRenderState,
+    terrain_smoothing: TerrainSmoothingMode,
 ) -> MeshWorkerResponse {
     span!(_guard, "mesh_worker");
     let blocks_of_interest = BlocksOfInterest::from_blocks(
@@ -292,6 +293,7 @@ fn mesh_worker(
                 range,
                 Vec2::new(max_texture_size, max_texture_size),
                 &blocks_of_interest,
+                terrain_smoothing,
             ),
         );
         mesh = Some(MeshWorkerResponseMesh {
@@ -1111,6 +1113,7 @@ impl<V: RectRasterableVol> Terrain<V> {
             let started_tick = todo.started_tick;
             let sprite_render_state = Arc::clone(&self.sprite_render_state);
             let cnt = Arc::clone(&self.mesh_todos_active);
+            let terrain_smoothing = scene_data.terrain_smoothing;
             cnt.fetch_add(1, Ordering::Relaxed);
             scene_data
                 .state
@@ -1126,6 +1129,7 @@ impl<V: RectRasterableVol> Terrain<V> {
                         chunk,
                         aabb,
                         &sprite_render_state,
+                        terrain_smoothing,
                     ));
                     cnt.fetch_sub(1, Ordering::Relaxed);
                 });
