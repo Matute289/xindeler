@@ -102,3 +102,6 @@ perf.*
 
 ## wgpu with the "trace" feature enabled
 wgpu-trace/
+
+# Visual brainstorming sessions
+.superpowers/
