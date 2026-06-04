@@ -120,6 +120,9 @@ impl Settings {
 
     fn get_path(config_dir: &Path) -> PathBuf { config_dir.join("settings.ron") }
 
+    /// Returns true if no settings file exists yet (first launch).
+    pub fn is_new_install(config_dir: &Path) -> bool { !Self::get_path(config_dir).exists() }
+
     pub fn display_warnings(&self) {
         if !self.graphics.render_mode.experimental_shaders.is_empty() {
             warn!(

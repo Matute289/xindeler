@@ -108,8 +108,7 @@ impl EcsAccessManager {
             //
             // The called closure can't escape the reference because it must be callable for
             // any set of lifetimes. Variance of the lifetime parameters in EcsWorld are
-            // not an issue for the same reason:
-            // https://discord.com/channels/273534239310479360/592856094527848449/1111018259815342202
+            // not an issue for the same reason.
             unsafe { ptr.as_ref() }
         });
         f(ecs_world)

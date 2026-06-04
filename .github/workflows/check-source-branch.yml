@@ -1,0 +1,21 @@
+name: Check source branch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check-branch:
+    name: Validate source branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch
+        run: |
+          SOURCE="${{ github.head_ref }}"
+          if [[ "$SOURCE" != "development" && "$SOURCE" != "hot-fix" ]]; then
+            echo "ERROR: PRs to 'main' are only allowed from 'development' or 'hot-fix'."
+            echo "Current source branch: $SOURCE"
+            exit 1
+          fi
+          echo "Source branch '$SOURCE' is allowed."

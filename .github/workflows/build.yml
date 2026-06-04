@@ -1,0 +1,144 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-22.04
+            script: .github/scripts/linux-x86_64.sh
+            artifact-path: |
+              target/release/veloren-server-cli
+              target/release/veloren-voxygen
+
+          - target: linux-aarch64
+            os: ubuntu-22.04
+            script: .github/scripts/linux-aarch64.sh
+            artifact-path: |
+              target/aarch64-unknown-linux-gnu/release/veloren-server-cli
+              target/aarch64-unknown-linux-gnu/release/veloren-voxygen
+
+          - target: windows-x86_64
+            os: ubuntu-22.04
+            script: .github/scripts/windows-x86_64.sh
+            artifact-path: |
+              target/x86_64-pc-windows-gnu/release/veloren-server-cli.exe
+              target/x86_64-pc-windows-gnu/release/veloren-voxygen.exe
+
+          - target: macos-x86_64
+            os: macos-13
+            rust-target: x86_64-apple-darwin
+
+          - target: macos-aarch64
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.target }}
+
+      # --- Linux x86_64 ---
+      - name: Install Linux x86_64 deps
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libshaderc-dev pkg-config libfontconfig1-dev libudev-dev \
+            libasound2-dev binutils
+
+      # --- Linux aarch64 ---
+      - name: Install Linux aarch64 cross-compile deps
+        if: matrix.target == 'linux-aarch64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libshaderc-dev pkg-config \
+            binutils-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
+      # --- Windows x86_64 ---
+      - name: Install Windows cross-compile deps
+        if: matrix.target == 'windows-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+            libshaderc-dev pkg-config
+          rustup target add x86_64-pc-windows-gnu
+
+      # --- macOS ---
+      - name: Install macOS deps (cmake + rust target)
+        if: runner.os == 'macOS'
+        run: |
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-macos-universal.tar.gz
+          tar -xzf cmake-3.31.8-macos-universal.tar.gz
+          echo "$(pwd)/cmake-3.31.8-macos-universal/CMake.app/Contents/bin" >> $GITHUB_PATH
+          rustup target add ${{ matrix.rust-target }}
+
+      # --- Build (Linux / Windows via script) ---
+      - name: Build (Linux/Windows)
+        if: runner.os == 'Linux'
+        run: |
+          source ./.github/scripts/env.sh
+          source ./${{ matrix.script }}
+
+      # --- Build (macOS native) ---
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          VELOREN_USERDATA_STRATEGY: executable
+          VELOREN_ASSETS: "${{ github.workspace }}/assets"
+          RUSTFLAGS: "-D warnings"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          cargo build --profile release \
+            --no-default-features --features default-publish \
+            --target ${{ matrix.rust-target }}
+          cp target/${{ matrix.rust-target }}/release/veloren-server-cli .
+          cp target/${{ matrix.rust-target }}/release/veloren-voxygen .
+
+      # --- Upload artifacts (Linux/Windows) ---
+      - name: Upload artifacts (Linux/Windows)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloren-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact-path }}
+            assets/
+            LICENSE
+          retention-days: 7
+
+      # --- Upload artifacts (macOS) ---
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloren-${{ matrix.target }}
+          path: |
+            veloren-server-cli
+            veloren-voxygen
+            assets/
+            LICENSE
+          retention-days: 7

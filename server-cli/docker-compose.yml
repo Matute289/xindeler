@@ -2,7 +2,7 @@ version: "3.5"
 
 services:
   game-server:
-    image: registry.gitlab.com/veloren/veloren/server-cli:weekly
+    image: ghcr.io/mgrinberg/veloren/server-cli:weekly
     stdin_open: true
     tty: true
     container_name: veloren-game-server-master

@@ -1,3 +1,6 @@
+# Claude Code context (personal, not shared)
+.cargo/CONTEXT.md
+
 # Project-specific
 ## Veloren
 *.log
@@ -20,6 +23,8 @@ userdata
 
 ## Export data
 *.csv
+# Allow CI data CSV files
+!ci-data/*.csv
 img-export/**/*.png
 
 ## Game data stored with SQLite
@@ -97,3 +102,6 @@ perf.*
 
 ## wgpu with the "trace" feature enabled
 wgpu-trace/
+
+# Visual brainstorming sessions
+.superpowers/

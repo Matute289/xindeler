@@ -232,8 +232,7 @@ impl Site {
             .reduce_max()
             .max(self.tiles.bounds.max.map(|e| e.abs()).reduce_max())
             // Temporary solution for giving giant_tree's leaves enough space to be painted correctly
-            // TODO: This will have to be replaced by a system as described on discord :
-            // https://discord.com/channels/449602562165833758/450064928720814081/937044837461536808
+            // TODO: This will have to be replaced by a system as described on discord
             + if self
                 .plots
                 .values()

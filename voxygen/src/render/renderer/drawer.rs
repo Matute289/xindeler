@@ -9,7 +9,7 @@ use super::{
         pipelines::{
             AtlasTextures, FigureSpriteAtlasData, GlobalsBindGroup, TerrainAtlasData, blit, bloom,
             clouds, debug, figure, fluid, lod_object, lod_terrain, particle, rope, shadow, skybox,
-            sprite, terrain, trail, ui,
+            smooth_terrain, sprite, terrain, trail, ui,
         },
     },
     Renderer, ShadowMap, ShadowMapRenderer,
@@ -1081,6 +1081,13 @@ impl<'pass> FirstPassDrawer<'pass> {
         }
     }
 
+    pub fn draw_smooth_terrain(&mut self) -> SmoothTerrainDrawer<'_, 'pass> {
+        let mut render_pass = self.render_pass.scope("smooth terrain");
+        render_pass.set_pipeline(&self.pipelines.smooth_terrain.pipeline);
+        // SmoothTerrainVertex::QUADS_INDEX = None — no index buffer needed
+        SmoothTerrainDrawer { render_pass }
+    }
+
     pub fn draw_particles(&mut self) -> ParticleDrawer<'_, 'pass> {
         let mut render_pass = self.render_pass.scope("particles");
 
@@ -1219,6 +1226,28 @@ impl<'pass_ref, 'pass: 'pass_ref> TerrainDrawer<'pass_ref, 'pass> {
         self.render_pass.set_vertex_buffer(0, submodel.buf());
         self.render_pass
             .draw_indexed(0..submodel.len() / 4 * 6, 0, 0..1);
+    }
+}
+
+#[must_use]
+pub struct SmoothTerrainDrawer<'pass_ref, 'pass: 'pass_ref> {
+    render_pass: Scope<'pass_ref, wgpu::RenderPass<'pass>>,
+}
+
+impl<'pass_ref, 'pass: 'pass_ref> SmoothTerrainDrawer<'pass_ref, 'pass> {
+    pub fn draw<'data: 'pass>(
+        &mut self,
+        model: &'data Model<smooth_terrain::SmoothTerrainVertex>,
+        locals: &'data terrain::BoundLocals,
+    ) {
+        if model.len() == 0 {
+            return;
+        }
+        // Locals at set 2 (smooth pipeline has no atlas at set 2).
+        self.render_pass.set_bind_group(2, &locals.bind_group, &[]);
+        self.render_pass.set_vertex_buffer(0, model.buf().slice(..));
+        // Direct triangle draw — no index buffer (QUADS_INDEX = None).
+        self.render_pass.draw(0..model.len() as u32, 0..1);
     }
 }
 
