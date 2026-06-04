@@ -375,7 +375,7 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 | Fase | Estado | Notas |
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline + tablas + atlas básico completos; pendiente: SmoothTerrainPipeline |
-| Fase 1 — SmoothTerrainVertex pipeline | ⬜ No iniciada | Siguiente subtarea de Fase 1 |
+| Fase 1 — SmoothTerrainVertex pipeline | ✅ Completa | Pipeline, shaders, drawer, mesh emission — all wired and verified |
 | Fase 2 — Escala de bloques | ⬜ No iniciada | Esperar Fase 1 estable |
 | Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse después de Fase 1 |
 
