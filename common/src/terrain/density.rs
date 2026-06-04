@@ -1,3 +1,4 @@
+use crate::{terrain::Block, vol::ReadVol};
 use vek::Vec3;
 
 /// A 3-D scalar field where 255 = fully solid, 0 = fully empty.
@@ -48,6 +49,64 @@ impl DensityField {
     }
 }
 
+/// Converts a voxel volume into a `DensityField`.
+///
+/// `offset` is the world-space position of the field's (0,0,0) corner.
+/// `size` is how many voxels to sample in each axis.
+///
+/// Mapping:
+/// - filled block → 255
+/// - air / water / any non-filled block → 0
+/// - out-of-bounds → 0
+pub fn convert_chunk_to_density_field<V>(vol: &V, offset: Vec3<i32>, size: Vec3<u32>) -> DensityField
+where
+    V: ReadVol<Vox = Block>,
+{
+    let mut field = DensityField::new(size);
+    for x in 0..size.x as i32 {
+        for y in 0..size.y as i32 {
+            for z in 0..size.z as i32 {
+                let pos = Vec3::new(x, y, z);
+                let val = match vol.get(offset + pos) {
+                    Ok(block) if block.is_filled() => 255,
+                    _ => 0,
+                };
+                field.set(pos, val);
+            }
+        }
+    }
+    field
+}
+
+/// Applies a 3×3×3 box-filter blur to a `DensityField` in-place.
+///
+/// Out-of-bounds neighbours are treated as density 0. Rounding is to nearest:
+/// `(sum + 13) / 27`.
+pub fn smooth_density_field(field: &mut DensityField) {
+    let snapshot = field.data.clone();
+    let snap = DensityField {
+        data: snapshot,
+        size: field.size,
+    };
+
+    for x in 0..field.size.x as i32 {
+        for y in 0..field.size.y as i32 {
+            for z in 0..field.size.z as i32 {
+                let mut sum: u32 = 0;
+                for dx in -1i32..=1 {
+                    for dy in -1i32..=1 {
+                        for dz in -1i32..=1 {
+                            sum += snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32;
+                        }
+                    }
+                }
+                let blended = ((sum + 13) / 27) as u8;
+                field.set(Vec3::new(x, y, z), blended);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +143,40 @@ mod tests {
         let mut field = DensityField::new(Vec3::new(4, 4, 4));
         field.set(Vec3::new(-1, 0, 0), 255); // must not panic
         assert!(field.data.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn smooth_reduces_sharp_boundary() {
+        // Solid half (x=0..3) vs air half (x=3..5) in a 3D field so all 27
+        // neighbours are in-bounds for interior voxels.
+        let mut field = DensityField::new(Vec3::new(5, 3, 3));
+        for x in 0..3i32 {
+            for y in 0..3i32 {
+                for z in 0..3i32 {
+                    field.set(Vec3::new(x, y, z), 255);
+                }
+            }
+        }
+        // x=3,4 stay 0
+
+        smooth_density_field(&mut field);
+
+        // Deep interior of solid region: all 27 neighbours are 255 → stays 255.
+        let v1 = field.get(Vec3::new(1, 1, 1)).unwrap();
+        assert!(v1 > 200, "deep interior of solid should stay high, got {v1}");
+
+        // First air voxel adjacent to the solid wall: some neighbours are 255.
+        let v3 = field.get(Vec3::new(3, 1, 1)).unwrap();
+        assert!(v3 > 0, "edge of air gets blended with neighbour solids, got {v3}");
+    }
+
+    #[test]
+    fn smooth_all_solid_stays_high() {
+        let mut field = DensityField::new(Vec3::new(3, 3, 3));
+        field.data.fill(255);
+        smooth_density_field(&mut field);
+        // Interior stays at max; edges get blended with OOB zeros so may be < 255
+        let center = field.get(Vec3::new(1, 1, 1)).unwrap();
+        assert_eq!(center, 255);
     }
 }
