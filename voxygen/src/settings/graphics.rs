@@ -243,8 +243,7 @@ impl GraphicsSettings {
     /// Called on first launch when no settings file exists.
     pub fn auto_detect(adapter_info: &wgpu::AdapterInfo) -> Self {
         let name = adapter_info.name.to_lowercase();
-        let is_discrete =
-            matches!(adapter_info.device_type, wgpu::DeviceType::DiscreteGpu);
+        let is_discrete = matches!(adapter_info.device_type, wgpu::DeviceType::DiscreteGpu);
 
         let preset = if !is_discrete {
             // Integrated / virtual / CPU fallback
@@ -301,7 +300,9 @@ fn gpu_preset_from_name(name: &str) -> Preset {
 
     // AMD — detect by RX series
     if name.contains("radeon") || name.contains("amd") {
-        if contains_any(name, &["rx 7900", "rx 7800", "rx 6950", "rx 6900", "rx 6800"]) {
+        if contains_any(name, &[
+            "rx 7900", "rx 7800", "rx 6950", "rx 6900", "rx 6800",
+        ]) {
             return Preset::Ultra;
         }
         if contains_any(name, &["rx 7", "rx 6700", "rx 6750", "rx 6650", "rx 6600"]) {
@@ -326,7 +327,9 @@ fn gpu_preset_from_name(name: &str) -> Preset {
 
     // Apple Silicon (Metal — discrete-ish but powerful)
     if name.contains("apple") {
-        if contains_any(name, &["m3 max", "m3 ultra", "m2 max", "m2 ultra", "m1 ultra"]) {
+        if contains_any(name, &[
+            "m3 max", "m3 ultra", "m2 max", "m2 ultra", "m1 ultra",
+        ]) {
             return Preset::High;
         }
         return Preset::Medium;
