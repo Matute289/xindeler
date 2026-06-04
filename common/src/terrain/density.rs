@@ -134,6 +134,26 @@ pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
     }
 }
 
+/// Returns the interpolated Z where density crosses 127 when descending from `z_start`
+/// downward in the field at column (x, y). Returns `None` if no crossing found.
+///
+/// Used by physics to find the smooth isosurface floor height.
+pub fn sample_isosurface_z(field: &DensityField, x: i32, y: i32, z_start: i32) -> Option<f32> {
+    let z_min = 0i32;
+    let z_max = (field.size.z as i32).min(z_start + 1);
+    for z in (z_min..z_max).rev() {
+        let d_above = field.get_or_zero(Vec3::new(x, y, z + 1)) as i32;
+        let d_here  = field.get_or_zero(Vec3::new(x, y, z)) as i32;
+        // Crossing: d_above < 127 and d_here >= 127
+        if d_above < 127 && d_here >= 127 {
+            // Linear interpolation between z and z+1
+            let t = (127 - d_here) as f32 / (d_above - d_here) as f32;
+            return Some(z as f32 + t.clamp(0.0, 1.0));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
