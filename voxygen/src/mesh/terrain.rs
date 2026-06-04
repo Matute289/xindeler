@@ -343,9 +343,9 @@ pub fn generate_mesh<'a>(
         };
         let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
         return (
-            Mesh::new(),            // opaque_mesh = empty (smooth replaces greedy here)
-            Mesh::new(),            // fluid_mesh = empty for Transvoxel path
-            smooth_opaque_mesh,     // slot 2: Mesh<SmoothTerrainVertex>
+            Mesh::new(),        // opaque_mesh = empty (smooth replaces greedy here)
+            Mesh::new(),        // fluid_mesh = empty for Transvoxel path
+            smooth_opaque_mesh, // slot 2: Mesh<SmoothTerrainVertex>
             (
                 bounds,
                 atlas_data,

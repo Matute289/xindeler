@@ -12,8 +12,8 @@ pub mod rain_occlusion;
 pub mod rope;
 pub mod shadow;
 pub mod skybox;
-pub mod sprite;
 pub mod smooth_terrain;
+pub mod sprite;
 pub mod terrain;
 pub mod trail;
 pub mod ui;
@@ -25,8 +25,11 @@ use common::{resources::TimeOfDay, terrain::BlockKind, util::srgb_to_linear};
 use std::marker::PhantomData;
 use vek::*;
 
-pub use self::{figure::FigureSpriteAtlasData, terrain::TerrainAtlasData};
-pub use self::smooth_terrain::{SmoothTerrainPipeline, SmoothTerrainVertex};
+pub use self::{
+    figure::FigureSpriteAtlasData,
+    smooth_terrain::{SmoothTerrainPipeline, SmoothTerrainVertex},
+    terrain::TerrainAtlasData,
+};
 
 // TODO: auto insert these into shaders
 pub const MAX_POINT_LIGHT_COUNT: usize = 20;

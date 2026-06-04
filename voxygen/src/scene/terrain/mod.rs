@@ -15,7 +15,8 @@ use crate::{
         Instances, LodData, Mesh, Model, RenderError, Renderer, SPRITE_VERT_PAGE_SIZE,
         SmoothTerrainVertex, SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex,
         SpriteVerts, TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainSmoothingMode,
-        TerrainVertex, pipelines::{self, AtlasData, AtlasTextures},
+        TerrainVertex,
+        pipelines::{self, AtlasData, AtlasTextures},
     },
     scene::terrain::sprite::SpriteModelConfig,
 };
@@ -1650,11 +1651,7 @@ impl<V: RectRasterableVol> Terrain<V> {
             });
     }
 
-    pub fn render_smooth<'a>(
-        &'a self,
-        drawer: &mut FirstPassDrawer<'a>,
-        focus_pos: Vec3<f32>,
-    ) {
+    pub fn render_smooth<'a>(&'a self, drawer: &mut FirstPassDrawer<'a>, focus_pos: Vec3<f32>) {
         span!(_guard, "render_smooth", "Terrain::render_smooth");
         let mut drawer = drawer.draw_smooth_terrain();
 
@@ -1669,9 +1666,7 @@ impl<V: RectRasterableVol> Terrain<V> {
             })
             .take(self.chunks.len())
             .filter(|(_, chunk)| chunk.visible.is_visible())
-            .filter_map(|(_, chunk)| {
-                Some((chunk.smooth_opaque_model.as_ref()?, &chunk.locals))
-            })
+            .filter_map(|(_, chunk)| Some((chunk.smooth_opaque_model.as_ref()?, &chunk.locals)))
             .for_each(|(model, locals)| drawer.draw(model, locals));
     }
 

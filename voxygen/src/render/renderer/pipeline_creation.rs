@@ -939,7 +939,10 @@ fn create_ingame_and_shadow_pipelines(
                 (postprocess, point_shadow),
                 (terrain_directed_shadow, (figure_directed_shadow, debug_directed_shadow)),
             ),
-            ((lod_object, (terrain_directed_rain_occlusion, figure_directed_rain_occlusion)), (rope, smooth_terrain)),
+            (
+                (lod_object, (terrain_directed_rain_occlusion, figure_directed_rain_occlusion)),
+                (rope, smooth_terrain),
+            ),
         ),
     ) = pool.join(
         || pool.join(|| pool.join(j1, j2), || pool.join(j3, j4)),

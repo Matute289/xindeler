@@ -1525,8 +1525,7 @@ impl Scene {
 
             self.terrain
                 .render(&mut first_pass, focus_pos, culling_mode);
-            self.terrain
-                .render_smooth(&mut first_pass, focus_pos);
+            self.terrain.render_smooth(&mut first_pass, focus_pos);
 
             self.figure_mgr.render(
                 &mut first_pass.draw_figures(),
