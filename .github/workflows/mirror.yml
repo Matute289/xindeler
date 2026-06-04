@@ -8,6 +8,9 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Install Git LFS
         run: |
@@ -16,16 +19,16 @@ jobs:
 
       - name: Mirror GitLab master → GitHub main
         env:
-          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN_GITHUB }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git clone --bare --branch master https://gitlab.com/veloren/veloren.git repo.git
           cd repo.git
           git lfs fetch --all
           git push \
             --force \
-            "https://x-access-token:${MIRROR_TOKEN}@github.com/${{ github.repository }}.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
             "+refs/heads/master:refs/heads/main"
           git push \
             --force \
-            "https://x-access-token:${MIRROR_TOKEN}@github.com/${{ github.repository }}.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
             --tags
