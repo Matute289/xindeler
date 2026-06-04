@@ -82,32 +82,55 @@ where
     field
 }
 
-/// Applies a 3×3×3 box-filter blur to a `DensityField` in-place.
+/// Applies a 3×3×3 Gaussian-weighted blur to a `DensityField` in-place, `passes` times.
 ///
-/// Out-of-bounds neighbours are treated as density 0. Rounding is to nearest:
-/// `(sum + 13) / 27`.
-pub fn smooth_density_field(field: &mut DensityField) {
-    let snapshot = field.data.clone();
-    let snap = DensityField {
-        data: snapshot,
-        size: field.size,
-    };
+/// Weight by distance from center:
+/// - center: 8, face-adjacent (6): 4, edge-adjacent (12): 2, corner (8): 1 → total 64
+///
+/// Multiple passes compound the smoothing for wider, softer transitions.
+pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
+    let mut snap_data = field.data.clone();
 
-    for x in 0..field.size.x as i32 {
-        for y in 0..field.size.y as i32 {
-            for z in 0..field.size.z as i32 {
-                let mut sum: u32 = 0;
-                for dx in -1i32..=1 {
-                    for dy in -1i32..=1 {
-                        for dz in -1i32..=1 {
-                            sum += snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32;
-                        }
-                    }
+    for _ in 0..passes {
+        let snap = DensityField {
+            data: snap_data.clone(),
+            size: field.size,
+        };
+
+        for x in 0..field.size.x as i32 {
+            for y in 0..field.size.y as i32 {
+                for z in 0..field.size.z as i32 {
+                    let center = snap.get_or_zero(Vec3::new(x, y, z)) as u32;
+
+                    let face_sum = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+                        .iter()
+                        .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
+                        .sum::<u32>();
+
+                    let edge_sum = [
+                        (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
+                        (1, 0, 1), (1, 0, -1), (-1, 0, 1), (-1, 0, -1),
+                        (0, 1, 1), (0, 1, -1), (0, -1, 1), (0, -1, -1),
+                    ]
+                    .iter()
+                    .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
+                    .sum::<u32>();
+
+                    let corner_sum = [
+                        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+                        (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1),
+                    ]
+                    .iter()
+                    .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
+                    .sum::<u32>();
+
+                    let weighted = 8 * center + 4 * face_sum + 2 * edge_sum + corner_sum;
+                    let blended = ((weighted + 32) / 64) as u8;
+                    field.set(Vec3::new(x, y, z), blended);
                 }
-                let blended = ((sum + 13) / 27) as u8;
-                field.set(Vec3::new(x, y, z), blended);
             }
         }
+        snap_data = field.data.clone();
     }
 }
 
@@ -163,7 +186,7 @@ mod tests {
         }
         // x=3,4 stay 0
 
-        smooth_density_field(&mut field);
+        smooth_density_field(&mut field, 1);
 
         // Deep interior of solid region: all 27 neighbours are 255 → stays 255.
         let v1 = field.get(Vec3::new(1, 1, 1)).unwrap();
@@ -184,7 +207,7 @@ mod tests {
     fn smooth_all_solid_stays_high() {
         let mut field = DensityField::new(Vec3::new(3, 3, 3));
         field.data.fill(255);
-        smooth_density_field(&mut field);
+        smooth_density_field(&mut field, 1);
         // Interior stays at max; edges get blended with OOB zeros so may be < 255
         let center = field.get(Vec3::new(1, 1, 1)).unwrap();
         assert_eq!(center, 255);

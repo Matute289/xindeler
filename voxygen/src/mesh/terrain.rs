@@ -275,7 +275,13 @@ pub fn generate_mesh<'a>(
         let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
         let offset = range.min - Vec3::new(1, 1, 1);
         let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
-        smooth_density_field(&mut density);
+        let smooth_passes = match smoothing {
+            TerrainSmoothingMode::Soft => 1,
+            TerrainSmoothingMode::Smooth => 2,
+            TerrainSmoothingMode::Ultra => 3,
+            TerrainSmoothingMode::Disabled => unreachable!(),
+        };
+        smooth_density_field(&mut density, smooth_passes);
         let tris = mesh_transvoxel(&density);
 
         // ----------------------------------------------------------------
