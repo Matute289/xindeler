@@ -1650,6 +1650,31 @@ impl<V: RectRasterableVol> Terrain<V> {
             });
     }
 
+    pub fn render_smooth<'a>(
+        &'a self,
+        drawer: &mut FirstPassDrawer<'a>,
+        focus_pos: Vec3<f32>,
+    ) {
+        span!(_guard, "render_smooth", "Terrain::render_smooth");
+        let mut drawer = drawer.draw_smooth_terrain();
+
+        let focus_chunk = Vec2::from(focus_pos).map2(TerrainChunk::RECT_SIZE, |e: f32, sz| {
+            (e as i32).div_euclid(sz as i32)
+        });
+
+        Spiral2d::new()
+            .filter_map(|rpos| {
+                let pos = focus_chunk + rpos;
+                Some((rpos, self.chunks.get(&pos)?))
+            })
+            .take(self.chunks.len())
+            .filter(|(_, chunk)| chunk.visible.is_visible())
+            .filter_map(|(_, chunk)| {
+                Some((chunk.smooth_opaque_model.as_ref()?, &chunk.locals))
+            })
+            .for_each(|(model, locals)| drawer.draw(model, locals));
+    }
+
     pub fn render_sprites<'a>(
         &'a self,
         sprite_drawer: &mut SpriteDrawer<'_, 'a>,
