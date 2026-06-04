@@ -1,0 +1,93 @@
+name: Translation Analysis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'assets/voxygen/i18n/**'
+      - '.github/workflows/translation.yml'
+      - '.github/scripts/translation.sh'
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PGHOST: localhost
+  PGPORT: 5432
+  PGDATABASE: veloren_ci
+  PGUSER: postgres
+  PGPASSWORD: postgres
+
+jobs:
+  analyze-translations:
+    name: Analyze i18n and persist data
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: veloren_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Initialize DB schema
+        run: psql -f .github/scripts/db/schema.sql
+
+      - name: Import existing translation history into DB
+        run: |
+          if [ -s ci-data/translations.csv ]; then
+            psql -f .github/scripts/db/import_translations.sql
+          else
+            echo "No existing translation history — starting fresh"
+          fi
+
+      - name: Run translation analysis
+        run: |
+          source .github/scripts/env.sh
+          source .github/scripts/translation.sh
+
+      - name: Load new translations into DB
+        run: |
+          if [ -f translation_analysis.csv ]; then
+            psql -c "\copy translations_stage (country_code, file_name, translation_key, status, git_commit) \
+                     FROM 'translation_analysis.csv' CSV HEADER"
+            psql -c "CALL public.load_translations_from_stage();"
+          else
+            echo "translation_analysis.csv not generated — skipping DB load"
+          fi
+
+      - name: Export updated translations to ci-data/
+        run: psql -f .github/scripts/db/export_translations.sql
+
+      - name: Commit updated translation data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ci-data/translations.csv
+          if git diff --staged --quiet; then
+            echo "No translation data changes"
+          else
+            git commit -m "ci: update translation analysis data [skip ci]"
+            git push
+          fi
