@@ -33,7 +33,7 @@ layout(std140, set = 2, binding = 0) uniform u_locals {
 
 layout(location = 0) out vec3 f_pos;
 layout(location = 1) flat out uint f_col_light;
-layout(location = 2) flat out vec3 f_norm;
+layout(location = 2) out vec3 f_norm;
 
 void main() {
     // Transform chunk-local float position to world-relative (focus-offset) space.

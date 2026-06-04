@@ -22,7 +22,7 @@
 // Inputs from smooth-terrain-vert.glsl
 layout(location = 0) in vec3 f_pos;
 layout(location = 1) flat in uint f_col_light;
-layout(location = 2) flat in vec3 f_norm;
+layout(location = 2) in vec3 f_norm;
 
 // Locals at set 2 (same layout as vert shader)
 layout(std140, set = 2, binding = 0) uniform u_locals {
@@ -66,7 +66,6 @@ void main() {
     vec3 f_norm_n  = face_norm;
 
     // Smooth terrain is never underwater / fluid-facing.
-    bool faces_fluid = false;
     float fluid_alt  = f_pos.z + 1.0;
 
     // -----------------------------------------------------------------------
@@ -124,7 +123,11 @@ void main() {
     max_light += sun_diffuse;
 
     // Apply baked light (same formula as terrain-frag)
+#if (FLUID_MODE == FLUID_MODE_LOW)
     f_light = f_light * sqrt(f_light);
+#else
+    f_light = not_underground * f_light * sqrt(f_light);
+#endif
 
     emitted_light  *= f_light;
     reflected_light *= f_light;
