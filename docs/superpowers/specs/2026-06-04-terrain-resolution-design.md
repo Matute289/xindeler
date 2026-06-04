@@ -264,7 +264,7 @@ Fase 3 (puede hacerse en paralelo a Fase 2):
 
 | Fase | Estado | Notas |
 |---|---|---|
-| Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline completo; REGULAR_VERTEX_DATA y atlas de color pendientes (Task 8) |
+| Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline completo + tablas correctas; pendiente: atlas de color y ECS resource |
 | Fase 2 — Escala de bloques | ⬜ No iniciada | Esperar Fase 1 estable |
 | Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse después de Fase 1 |
 
