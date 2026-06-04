@@ -1,0 +1,239 @@
+//! Smooth-collision triangle extraction from a [`DensityField`].
+//!
+//! Uses the same iso-surface algorithm and lookup tables as the Transvoxel
+//! visual mesher in `veloren-voxygen`, but lives in `common-systems` so the
+//! physics system can use it without depending on the render crate.
+//!
+//! # Table duplication
+//! The lookup tables below are identical to those in
+//! `voxygen/src/mesh/transvoxel.rs`. Once the tables are verified (Task 8) they
+//! should be moved to a shared `veloren-common-transvoxel` crate; for now
+//! duplication avoids a circular dep.
+
+use common::terrain::density::DensityField;
+use vek::*;
+
+const THRESHOLD: u8 = 127;
+
+/// A single collision triangle in field-local block coordinates.
+#[derive(Clone, Debug)]
+pub struct Triangle {
+    pub vertices: [Vec3<f32>; 3],
+    /// Surface normal pointing outward from solid (away from terrain).
+    pub normal: Vec3<f32>,
+}
+
+// ---------------------------------------------------------------------------
+// Lookup tables (identical to those in voxygen/src/mesh/transvoxel.rs)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct RegularCellData {
+    counts: u8,
+    indices: [u8; 15],
+}
+
+impl RegularCellData {
+    const fn vertex_count(self) -> usize { (self.counts >> 4) as usize }
+
+    const fn triangle_count(self) -> usize { (self.counts & 0x0F) as usize }
+}
+
+#[rustfmt::skip]
+const REGULAR_CELL_CLASS: [u8; 256] = [
+    0x00, 0x01, 0x01, 0x03, 0x01, 0x03, 0x02, 0x04,
+    0x01, 0x02, 0x03, 0x05, 0x03, 0x05, 0x04, 0x06,
+    0x01, 0x03, 0x02, 0x05, 0x02, 0x05, 0x06, 0x0B,
+    0x03, 0x05, 0x04, 0x09, 0x05, 0x0A, 0x07, 0x0D,
+    0x01, 0x02, 0x03, 0x05, 0x03, 0x04, 0x05, 0x09,
+    0x02, 0x06, 0x05, 0x0B, 0x04, 0x07, 0x09, 0x0D,
+    0x03, 0x05, 0x05, 0x0A, 0x04, 0x09, 0x07, 0x0E,
+    0x05, 0x0B, 0x09, 0x0C, 0x07, 0x0D, 0x0E, 0x00,
+    0x01, 0x03, 0x02, 0x05, 0x02, 0x05, 0x06, 0x0B,
+    0x03, 0x04, 0x05, 0x09, 0x05, 0x07, 0x0B, 0x0D,
+    0x02, 0x05, 0x06, 0x0B, 0x06, 0x0B, 0x08, 0x0F,
+    0x05, 0x09, 0x0B, 0x0C, 0x0B, 0x0D, 0x0F, 0x00,
+    0x03, 0x05, 0x05, 0x0A, 0x05, 0x09, 0x0B, 0x0E,
+    0x04, 0x07, 0x09, 0x0E, 0x09, 0x0E, 0x0C, 0x00,
+    0x05, 0x0A, 0x0B, 0x0C, 0x0B, 0x0E, 0x0F, 0x00,
+    0x09, 0x0E, 0x0C, 0x00, 0x0E, 0x00, 0x00, 0x00,
+    0x00, 0x8E, 0x8E, 0x8D, 0x8E, 0x8D, 0x8C, 0x8B,
+    0x8E, 0x8C, 0x8D, 0x88, 0x8D, 0x88, 0x8B, 0x87,
+    0x8E, 0x8D, 0x8C, 0x88, 0x8C, 0x88, 0x87, 0x86,
+    0x8D, 0x88, 0x8B, 0x85, 0x88, 0x84, 0x86, 0x83,
+    0x8E, 0x8C, 0x8D, 0x88, 0x8D, 0x8B, 0x88, 0x85,
+    0x8C, 0x87, 0x88, 0x86, 0x8B, 0x86, 0x85, 0x83,
+    0x8D, 0x88, 0x88, 0x84, 0x8B, 0x85, 0x86, 0x82,
+    0x88, 0x86, 0x85, 0x81, 0x86, 0x83, 0x82, 0x8E,
+    0x8E, 0x8D, 0x8C, 0x88, 0x8C, 0x88, 0x87, 0x86,
+    0x8D, 0x8B, 0x88, 0x85, 0x88, 0x86, 0x86, 0x83,
+    0x8C, 0x88, 0x87, 0x86, 0x87, 0x86, 0x85, 0x82,
+    0x88, 0x85, 0x86, 0x81, 0x86, 0x83, 0x82, 0x8E,
+    0x8D, 0x88, 0x88, 0x84, 0x88, 0x85, 0x86, 0x82,
+    0x8B, 0x86, 0x85, 0x82, 0x85, 0x82, 0x81, 0x8E,
+    0x88, 0x84, 0x86, 0x81, 0x86, 0x82, 0x82, 0x8E,
+    0x85, 0x82, 0x81, 0x8E, 0x82, 0x8E, 0x8E, 0x00,
+];
+
+#[rustfmt::skip]
+const REGULAR_CELL_DATA: [RegularCellData; 16] = [
+    RegularCellData { counts: 0x00, indices: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x31, indices: [0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x42, indices: [0, 1, 2, 0, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x42, indices: [0, 1, 2, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x42, indices: [0, 1, 3, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x53, indices: [0, 1, 2, 0, 2, 3, 2, 4, 3, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x53, indices: [0, 1, 4, 1, 3, 4, 1, 2, 3, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 2, 0, 2, 3, 4, 5, 0, 4, 0, 3, 0, 0, 0] },
+    RegularCellData { counts: 0x53, indices: [0, 1, 2, 3, 4, 0, 3, 0, 2, 0, 0, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 2, 3, 4, 5, 0, 2, 5, 0, 5, 3, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 4, 0, 4, 5, 1, 2, 3, 1, 3, 4, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 3, 2, 0, 1, 3, 4, 5, 1, 4, 1, 0, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 2, 3, 5, 4, 0, 4, 1, 1, 4, 5, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 4, 5, 0, 3, 4, 1, 2, 5, 1, 5, 4, 0, 0, 0] },
+    RegularCellData { counts: 0x64, indices: [0, 1, 5, 1, 4, 5, 1, 2, 4, 2, 3, 4, 0, 0, 0] },
+];
+
+// Placeholder — identical to voxygen's REGULAR_VERTEX_DATA.
+// Populated in Task 8 from https://transvoxel.org/Transvoxel.cpp
+const REGULAR_VERTEX_DATA: [[u16; 12]; 256] = [[0u16; 12]; 256];
+
+const CORNER_OFFSETS: [Vec3<i32>; 8] = [
+    Vec3::new(0, 0, 0),
+    Vec3::new(1, 0, 0),
+    Vec3::new(0, 1, 0),
+    Vec3::new(1, 1, 0),
+    Vec3::new(0, 0, 1),
+    Vec3::new(1, 0, 1),
+    Vec3::new(0, 1, 1),
+    Vec3::new(1, 1, 1),
+];
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Extract collision triangles from a density field.
+///
+/// `field_offset` is the world-space block-coordinate of the field's (0,0,0)
+/// corner. Returned triangle vertices are in world-space block coordinates.
+///
+/// Returns an empty `Vec` until `REGULAR_VERTEX_DATA` is populated (Task 8).
+pub fn extract_collision_triangles(field: &DensityField, field_offset: Vec3<f32>) -> Vec<Triangle> {
+    let mut triangles = Vec::new();
+    let size = field.size.map(|e| e as i32);
+
+    for cx in 0..size.x - 1 {
+        for cy in 0..size.y - 1 {
+            for cz in 0..size.z - 1 {
+                let cell = Vec3::new(cx, cy, cz);
+
+                let mut corners = [0u8; 8];
+                for (i, &off) in CORNER_OFFSETS.iter().enumerate() {
+                    corners[i] = field.get_or_zero(cell + off);
+                }
+
+                let mut case_idx: u8 = 0;
+                for (i, &d) in corners.iter().enumerate() {
+                    if d > THRESHOLD {
+                        case_idx |= 1 << i;
+                    }
+                }
+                if case_idx == 0 || case_idx == 255 {
+                    continue;
+                }
+
+                let class_raw = REGULAR_CELL_CLASS[case_idx as usize];
+                let class_idx = (class_raw & 0x0F) as usize;
+                let flip_normal = (class_raw & 0x80) != 0;
+
+                let cell_data = REGULAR_CELL_DATA[class_idx];
+                let vtx_count = cell_data.vertex_count();
+                let tri_count = cell_data.triangle_count();
+
+                let vertex_data = REGULAR_VERTEX_DATA[case_idx as usize];
+                let mut vtx_pos = [Vec3::zero(); 12];
+
+                for v in 0..vtx_count {
+                    let desc = vertex_data[v];
+                    let c0 = ((desc >> 8) & 0x07) as usize;
+                    let c1 = ((desc >> 4) & 0x07) as usize;
+                    let p0 = (cell + CORNER_OFFSETS[c0]).map(|e| e as f32) + field_offset;
+                    let p1 = (cell + CORNER_OFFSETS[c1]).map(|e| e as f32) + field_offset;
+                    let d0 = corners[c0] as f32;
+                    let d1 = corners[c1] as f32;
+                    let t = if (d1 - d0).abs() < 0.001 {
+                        0.5
+                    } else {
+                        (THRESHOLD as f32 - d0) / (d1 - d0)
+                    };
+                    vtx_pos[v] = p0 + (p1 - p0) * t;
+                }
+
+                for t in 0..tri_count {
+                    let i0 = cell_data.indices[t * 3] as usize;
+                    let i1 = cell_data.indices[t * 3 + 1] as usize;
+                    let i2 = cell_data.indices[t * 3 + 2] as usize;
+                    let (i0, i2) = if flip_normal { (i2, i0) } else { (i0, i2) };
+                    let a = vtx_pos[i0];
+                    let b = vtx_pos[i1];
+                    let c = vtx_pos[i2];
+                    let normal = (b - a)
+                        .cross(c - a)
+                        .try_normalized()
+                        .unwrap_or(Vec3::unit_z());
+                    triangles.push(Triangle {
+                        vertices: [a, b, c],
+                        normal,
+                    });
+                }
+            }
+        }
+    }
+
+    triangles
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::terrain::density::DensityField;
+
+    #[test]
+    fn empty_field_produces_no_triangles() {
+        let field = DensityField::new(Vec3::new(4, 4, 4));
+        let tris = extract_collision_triangles(&field, Vec3::zero());
+        assert!(tris.is_empty());
+    }
+
+    #[test]
+    fn solid_field_produces_no_triangles() {
+        let mut field = DensityField::new(Vec3::new(4, 4, 4));
+        field.data.fill(255);
+        let tris = extract_collision_triangles(&field, Vec3::zero());
+        assert!(tris.is_empty());
+    }
+
+    /// Requires REGULAR_VERTEX_DATA to be populated (Task 8).
+    #[test]
+    #[ignore = "requires REGULAR_VERTEX_DATA table (Task 8)"]
+    fn half_solid_produces_triangles() {
+        use common::terrain::density::smooth_density_field;
+        let mut field = DensityField::new(Vec3::new(6, 6, 6));
+        for x in 0..6i32 {
+            for y in 0..6i32 {
+                for z in 0..6i32 {
+                    field.set(Vec3::new(x, y, z), if z < 3 { 255 } else { 0 });
+                }
+            }
+        }
+        smooth_density_field(&mut field);
+        let tris = extract_collision_triangles(&field, Vec3::zero());
+        assert!(!tris.is_empty());
+    }
+}
