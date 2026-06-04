@@ -58,7 +58,11 @@ impl DensityField {
 /// - filled block → 255
 /// - air / water / any non-filled block → 0
 /// - out-of-bounds → 0
-pub fn convert_chunk_to_density_field<V>(vol: &V, offset: Vec3<i32>, size: Vec3<u32>) -> DensityField
+pub fn convert_chunk_to_density_field<V>(
+    vol: &V,
+    offset: Vec3<i32>,
+    size: Vec3<u32>,
+) -> DensityField
 where
     V: ReadVol<Vox = Block>,
 {
@@ -163,11 +167,17 @@ mod tests {
 
         // Deep interior of solid region: all 27 neighbours are 255 → stays 255.
         let v1 = field.get(Vec3::new(1, 1, 1)).unwrap();
-        assert!(v1 > 200, "deep interior of solid should stay high, got {v1}");
+        assert!(
+            v1 > 200,
+            "deep interior of solid should stay high, got {v1}"
+        );
 
         // First air voxel adjacent to the solid wall: some neighbours are 255.
         let v3 = field.get(Vec3::new(3, 1, 1)).unwrap();
-        assert!(v3 > 0, "edge of air gets blended with neighbour solids, got {v3}");
+        assert!(
+            v3 > 0,
+            "edge of air gets blended with neighbour solids, got {v3}"
+        );
     }
 
     #[test]
