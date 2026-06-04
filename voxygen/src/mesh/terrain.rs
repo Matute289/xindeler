@@ -7,8 +7,8 @@ use crate::{
         transvoxel::mesh_transvoxel,
     },
     render::{
-        AltIndices, FluidVertex, Mesh, TerrainAtlasData, TerrainSmoothingMode, TerrainVertex,
-        Vertex,
+        AltIndices, FluidVertex, Mesh, SmoothTerrainVertex, TerrainAtlasData, TerrainSmoothingMode,
+        TerrainVertex, Vertex,
     },
     scene::terrain::{BlocksOfInterest, DEEP_ALT, SHALLOW_ALT},
 };
@@ -243,7 +243,7 @@ pub fn generate_mesh<'a>(
 ) -> MeshGen<
     TerrainVertex,
     FluidVertex,
-    TerrainVertex,
+    SmoothTerrainVertex,
     (
         Aabb<f32>,
         TerrainAtlasData,
@@ -307,10 +307,10 @@ pub fn generate_mesh<'a>(
         let atlas_size = Vec2::new(atlas_w as u16, atlas_h as u16);
 
         // ----------------------------------------------------------------
-        // Emit mesh — atlas_pos maps each vertex to its (chunk-local x, y)
-        // column entry in the atlas built above.
+        // Emit smooth mesh — SmoothTerrainVertex with float pos,
+        // 10-10-10-2 normal, and per-vertex color baked from the atlas.
         // ----------------------------------------------------------------
-        let mut opaque_mesh: Mesh<TerrainVertex> = Mesh::new();
+        let mut smooth_opaque_mesh: Mesh<SmoothTerrainVertex> = Mesh::new();
         // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
         let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
         let atlas_pos_for = |pos: Vec3<f32>| -> Vec2<u16> {
@@ -322,13 +322,18 @@ pub fn generate_mesh<'a>(
                 ay.clamp(0, atlas_h as i32 - 1) as u16,
             )
         };
+        let col_light_for = |pos: Vec3<f32>| -> u32 {
+            let apos = atlas_pos_for(pos);
+            let cl = atlas_data.col_lights[apos.x as usize * atlas_h + apos.y as usize];
+            u32::from_le_bytes(cl)
+        };
         for tri in &tris {
             let [p0, p1, p2] = tri.positions;
             let [n0, n1, n2] = tri.normals;
-            opaque_mesh.push_tri(Tri::new(
-                TerrainVertex::new(atlas_pos_for(p0), p0 + mesh_delta, n0, false),
-                TerrainVertex::new(atlas_pos_for(p1), p1 + mesh_delta, n1, false),
-                TerrainVertex::new(atlas_pos_for(p2), p2 + mesh_delta, n2, false),
+            smooth_opaque_mesh.push_tri(Tri::new(
+                SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0)),
+                SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1)),
+                SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2)),
             ));
         }
 
@@ -338,9 +343,9 @@ pub fn generate_mesh<'a>(
         };
         let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
         return (
-            opaque_mesh,
-            Mesh::new(),
-            Mesh::new(),
+            Mesh::new(),            // opaque_mesh = empty (smooth replaces greedy here)
+            Mesh::new(),            // fluid_mesh = empty for Transvoxel path
+            smooth_opaque_mesh,     // slot 2: Mesh<SmoothTerrainVertex>
             (
                 bounds,
                 atlas_data,
@@ -640,7 +645,7 @@ pub fn generate_mesh<'a>(
             .chain(opaque_surface)
             .collect(),
         fluid_mesh,
-        Mesh::new(),
+        Mesh::<SmoothTerrainVertex>::new(),
         (
             bounds,
             atlas_data,

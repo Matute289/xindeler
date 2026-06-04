@@ -13,9 +13,9 @@ use crate::{
     render::{
         AltIndices, CullingMode, FigureSpriteAtlasData, FirstPassDrawer, FluidVertex, GlobalModel,
         Instances, LodData, Mesh, Model, RenderError, Renderer, SPRITE_VERT_PAGE_SIZE,
-        SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex, SpriteVerts,
-        TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainSmoothingMode, TerrainVertex,
-        pipelines::{self, AtlasData, AtlasTextures},
+        SmoothTerrainVertex, SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex,
+        SpriteVerts, TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainSmoothingMode,
+        TerrainVertex, pipelines::{self, AtlasData, AtlasTextures},
     },
     scene::terrain::sprite::SpriteModelConfig,
 };
@@ -79,6 +79,7 @@ pub struct TerrainChunkData {
     // GPU data
     load_time: f32,
     opaque_model: Option<Model<TerrainVertex>>,
+    smooth_opaque_model: Option<Model<SmoothTerrainVertex>>,
     fluid_model: Option<Model<FluidVertex>>,
     /// If this is `None`, this texture is not allocated in the current atlas,
     /// and therefore there is no need to free its allocation.
@@ -135,6 +136,7 @@ pub struct MeshWorkerResponseMesh {
     sun_occluder_z_bounds: (f32, f32),
     opaque_mesh: Mesh<TerrainVertex>,
     fluid_mesh: Mesh<FluidVertex>,
+    smooth_opaque_mesh: Mesh<SmoothTerrainVertex>,
     atlas_texture_data: TerrainAtlasData,
     atlas_size: Vec2<u16>,
     light_map: LightMapFn,
@@ -277,7 +279,7 @@ fn mesh_worker(
         let (
             opaque_mesh,
             fluid_mesh,
-            _shadow_mesh,
+            smooth_opaque_mesh,
             (
                 bounds,
                 atlas_texture_data,
@@ -302,6 +304,7 @@ fn mesh_worker(
             sun_occluder_z_bounds,
             opaque_mesh,
             fluid_mesh,
+            smooth_opaque_mesh,
             atlas_texture_data,
             atlas_size,
             light_map,
@@ -1225,6 +1228,7 @@ impl<V: RectRasterableVol> Terrain<V> {
                         self.insert_chunk(response.pos, TerrainChunkData {
                             load_time,
                             opaque_model: renderer.create_model(&mesh.opaque_mesh),
+                            smooth_opaque_model: renderer.create_model(&mesh.smooth_opaque_mesh),
                             fluid_model: renderer.create_model(&mesh.fluid_mesh),
                             atlas_alloc: Some(allocation.id),
                             atlas_textures: Arc::clone(&self.atlas_textures),
