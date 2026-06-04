@@ -28,6 +28,15 @@ impl fmt::Display for Fps {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TerrainSmoothingMode {
+    #[default]
+    Disabled,
+    Soft,
+    Smooth,
+    Ultra,
+}
+
 /// `GraphicsSettings` contains settings related to framerate and in-game
 /// visuals.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +59,7 @@ pub struct GraphicsSettings {
     pub window: WindowSettings,
     pub fullscreen: FullScreenSettings,
     pub lod_detail: u32,
+    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl Default for GraphicsSettings {
@@ -72,6 +82,7 @@ impl Default for GraphicsSettings {
             window: WindowSettings::default(),
             fullscreen: FullScreenSettings::default(),
             lod_detail: 250,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
         }
     }
 }
@@ -86,6 +97,7 @@ impl GraphicsSettings {
             sprite_render_distance: 80,
             figure_lod_render_distance: 100,
             lod_detail: 80,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
             render_mode: RenderMode {
                 aa: AaMode::FxUpscale,
                 cloud: CloudMode::Minimal,
@@ -112,6 +124,7 @@ impl GraphicsSettings {
             sprite_render_distance: 125,
             figure_lod_render_distance: 200,
             lod_detail: 200,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
             render_mode: RenderMode {
                 aa: AaMode::FxUpscale,
                 cloud: CloudMode::Low,
@@ -138,6 +151,7 @@ impl GraphicsSettings {
             sprite_render_distance: 250,
             figure_lod_render_distance: 350,
             lod_detail: 300,
+            terrain_smoothing: TerrainSmoothingMode::Soft,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::Medium,
@@ -167,6 +181,7 @@ impl GraphicsSettings {
             sprite_render_distance: 350,
             figure_lod_render_distance: 450,
             lod_detail: 375,
+            terrain_smoothing: TerrainSmoothingMode::Smooth,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::Medium,
@@ -196,6 +211,7 @@ impl GraphicsSettings {
             sprite_render_distance: 800,
             figure_lod_render_distance: 600,
             lod_detail: 500,
+            terrain_smoothing: TerrainSmoothingMode::Ultra,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::High,
