@@ -2268,6 +2268,7 @@ impl PlayState for SessionState {
                     is_aiming,
                     interpolated_time_of_day: self.scene.interpolated_time_of_day,
                     wind_vel: self.scene.wind_vel,
+                    terrain_smoothing: global_state.settings.graphics.terrain_smoothing,
                 };
 
                 // Runs if either in a multiplayer server or the singleplayer server is unpaused
@@ -2355,6 +2356,7 @@ impl PlayState for SessionState {
             is_aiming: self.is_aiming,
             interpolated_time_of_day: self.scene.interpolated_time_of_day,
             wind_vel: self.scene.wind_vel,
+            terrain_smoothing: settings.graphics.terrain_smoothing,
         };
 
         // Render world

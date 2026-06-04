@@ -1,5 +1,5 @@
 use crate::{
-    render::RenderMode,
+    render::{RenderMode, TerrainSmoothingMode},
     window::{FullScreenSettings, WindowSettings},
 };
 use common::ViewDistances;
@@ -50,6 +50,7 @@ pub struct GraphicsSettings {
     pub window: WindowSettings,
     pub fullscreen: FullScreenSettings,
     pub lod_detail: u32,
+    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl Default for GraphicsSettings {
@@ -72,6 +73,7 @@ impl Default for GraphicsSettings {
             window: WindowSettings::default(),
             fullscreen: FullScreenSettings::default(),
             lod_detail: 250,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
         }
     }
 }
@@ -86,6 +88,7 @@ impl GraphicsSettings {
             sprite_render_distance: 80,
             figure_lod_render_distance: 100,
             lod_detail: 80,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
             render_mode: RenderMode {
                 aa: AaMode::FxUpscale,
                 cloud: CloudMode::Minimal,
@@ -112,6 +115,7 @@ impl GraphicsSettings {
             sprite_render_distance: 125,
             figure_lod_render_distance: 200,
             lod_detail: 200,
+            terrain_smoothing: TerrainSmoothingMode::Disabled,
             render_mode: RenderMode {
                 aa: AaMode::FxUpscale,
                 cloud: CloudMode::Low,
@@ -138,6 +142,7 @@ impl GraphicsSettings {
             sprite_render_distance: 250,
             figure_lod_render_distance: 350,
             lod_detail: 300,
+            terrain_smoothing: TerrainSmoothingMode::Soft,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::Medium,
@@ -167,6 +172,7 @@ impl GraphicsSettings {
             sprite_render_distance: 350,
             figure_lod_render_distance: 450,
             lod_detail: 375,
+            terrain_smoothing: TerrainSmoothingMode::Smooth,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::Medium,
@@ -196,6 +202,7 @@ impl GraphicsSettings {
             sprite_render_distance: 800,
             figure_lod_render_distance: 600,
             lod_detail: 500,
+            terrain_smoothing: TerrainSmoothingMode::Ultra,
             render_mode: RenderMode {
                 aa: AaMode::Fxaa,
                 cloud: CloudMode::High,
@@ -227,12 +234,11 @@ impl GraphicsSettings {
     /// Called on first launch when no settings file exists.
     pub fn auto_detect(adapter_info: &wgpu::AdapterInfo) -> Self {
         let name = adapter_info.name.to_lowercase();
-        let is_discrete =
-            matches!(adapter_info.device_type, wgpu::DeviceType::DiscreteGpu);
+        let is_discrete = matches!(adapter_info.device_type, wgpu::DeviceType::DiscreteGpu);
 
         let preset = if !is_discrete {
-            // Integrated / virtual / CPU fallback
-            Preset::Low
+            // Integrated / virtual / CPU fallback — minimal preset to stay playable
+            Preset::Minimal
         } else {
             gpu_preset_from_name(&name)
         };
@@ -285,7 +291,9 @@ fn gpu_preset_from_name(name: &str) -> Preset {
 
     // AMD — detect by RX series
     if name.contains("radeon") || name.contains("amd") {
-        if contains_any(name, &["rx 7900", "rx 7800", "rx 6950", "rx 6900", "rx 6800"]) {
+        if contains_any(name, &[
+            "rx 7900", "rx 7800", "rx 6950", "rx 6900", "rx 6800",
+        ]) {
             return Preset::Ultra;
         }
         if contains_any(name, &["rx 7", "rx 6700", "rx 6750", "rx 6650", "rx 6600"]) {
@@ -310,7 +318,9 @@ fn gpu_preset_from_name(name: &str) -> Preset {
 
     // Apple Silicon (Metal — discrete-ish but powerful)
     if name.contains("apple") {
-        if contains_any(name, &["m3 max", "m3 ultra", "m2 max", "m2 ultra", "m1 ultra"]) {
+        if contains_any(name, &[
+            "m3 max", "m3 ultra", "m2 max", "m2 ultra", "m1 ultra",
+        ]) {
             return Preset::High;
         }
         return Preset::Medium;

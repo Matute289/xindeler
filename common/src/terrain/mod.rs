@@ -1,6 +1,7 @@
 pub mod biome;
 pub mod block;
 pub mod chonk;
+pub mod density;
 pub mod map;
 pub mod site;
 pub mod sprite;
@@ -12,6 +13,7 @@ use std::ops::{Add, Mul};
 pub use self::{
     biome::BiomeKind,
     block::{Block, BlockKind},
+    density::DensityField,
     map::MapSizeLg,
     site::SiteKindMeta,
     sprite::{SpriteCfg, SpriteKind, StructureSprite, UnlockKind},
