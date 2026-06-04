@@ -2,7 +2,7 @@
 */Cargo.toml
 Cargo.toml
 rust-toolchain
-.gitlab/scripts/*
+.github/scripts/*
 
 [Other]
 /.mailmap
