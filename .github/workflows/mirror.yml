@@ -21,14 +21,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          GITHUB_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git clone --bare --branch master https://gitlab.com/veloren/veloren.git repo.git
           cd repo.git
           git lfs fetch --all
-          git push \
-            --force \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
-            "+refs/heads/master:refs/heads/main"
-          git push \
-            --force \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
-            --tags
+          git remote add github "${GITHUB_URL}"
+          git lfs push --all github
+          git push --force github "+refs/heads/master:refs/heads/main"
+          git push --force github --tags
