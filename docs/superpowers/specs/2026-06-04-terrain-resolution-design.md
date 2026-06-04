@@ -260,11 +260,122 @@ Fase 3 (puede hacerse en paralelo a Fase 2):
 
 ---
 
+---
+
+## Fase 1 — Continuación: SmoothTerrainVertex Pipeline
+
+**Prerequisito:** Las tareas anteriores de Fase 1 están completas (Transvoxel + atlas de color básico).  
+**Problema a resolver:** `TerrainVertex` tiene posiciones enteras (6-bit x/y) y normales de 3 bits (6 direcciones axiales). Los vértices Transvoxel interpolados se truncan al grid entero y los normales suaves se redondean → shading plano visible (facetado).
+
+### Decisión de diseño: pipeline separado (Opción B)
+
+Se crea un `SmoothTerrainPipeline` completamente independiente del greedy pipeline existente. Razones:
+- No contamina `TerrainVertex` con campos que el greedy mesher nunca usaría
+- El smooth pipeline puede evolucionar (Fase 3: normal maps, LOD) sin afectar el greedy
+- Separación limpia de concerns: dos meshers → dos pipelines → dos shaders
+
+### Nuevo vertex format: `SmoothTerrainVertex`
+
+```rust
+// voxygen/src/render/pipelines/smooth_terrain.rs
+#[repr(C)]
+#[derive(Copy, Clone, Zeroable, Pod)]
+pub struct SmoothTerrainVertex {
+    pos:      [f32; 3],   // posición float en chunk-local coords (12 bytes)
+    norm:     u32,        // normal packed 10-10-10-2 snorm (4 bytes)
+    col_light: u32,       // RGBA color bakeado + light info (4 bytes)
+}
+// Total: 20 bytes/vértice (vs 8 bytes del TerrainVertex actual)
+```
+
+**Codificación del normal (10-10-10-2 snorm):**
+- x: bits 0-9   → float en –1..1 mapeado a –511..511
+- y: bits 10-19 → ídem
+- z: bits 20-29 → ídem
+- w: bits 30-31 → no usado (siempre 0)
+
+**Codificación del color (`col_light`):**  
+Mismo formato que `TerrainVertex::make_col_light` — compatible con el fragment shader de terreno existente para reutilizar la lógica de iluminación.
+
+### Archivos a crear
+
+```
+voxygen/src/render/pipelines/smooth_terrain.rs
+    - struct SmoothTerrainVertex
+    - impl SmoothTerrainVertex::new(pos, norm, col_light)
+    - fn pack_norm_10_10_10_2(norm: Vec3<f32>) -> u32
+    - struct SmoothTerrainPipeline
+    - impl SmoothTerrainPipeline::new(...)
+    - SmoothTerrainPipeline::draw() binding
+
+assets/voxygen/shaders/smooth-terrain-vert.glsl
+    - Lee pos como vec3 float (location 0)
+    - Lee norm como uint (location 1), decodifica a vec3
+    - Lee col_light como uint (location 2)
+    - Output: f_pos, f_norm, f_col_light (mismo layout que terrain-frag espera)
+
+assets/voxygen/shaders/smooth-terrain-frag.glsl
+    - Reutiliza #include <globals.glsl>, <srgb.glsl>, <lod.glsl>, <shadows.glsl>
+    - Recibe f_norm como vec3 float (en lugar de decodificar desde pos_norm)
+    - El resto del pipeline de iluminación es idéntico al terrain-frag.glsl existente
+```
+
+### Archivos a modificar
+
+```
+voxygen/src/render/pipelines/mod.rs
+    - pub mod smooth_terrain;
+    - Exportar SmoothTerrainVertex, SmoothTerrainPipeline
+
+voxygen/src/render/mod.rs
+    - Re-exportar SmoothTerrainVertex, SmoothTerrainPipeline
+    - Agregar smooth-terrain-vert/frag a la lista de shaders compilados al startup
+
+voxygen/src/render/renderer/pipeline_creation.rs
+    - Crear SmoothTerrainPipeline junto al resto de pipelines
+
+voxygen/src/scene/terrain/mod.rs
+    - Agregar a TerrainChunkData:
+        smooth_opaque_model: Option<Model<SmoothTerrainVertex>>
+    - En el loop de render: si terrain_smoothing != Disabled, draw smooth_opaque_model
+      con SmoothTerrainPipeline; si Disabled, draw opaque_model con TerrainPipeline
+
+voxygen/src/mesh/terrain.rs
+    - El path Transvoxel ya retorna early; cambiar el tipo de output de
+      Mesh<TerrainVertex> a Mesh<SmoothTerrainVertex>
+    - Construir SmoothTerrainVertex con pos float real (sin truncar) y
+      normal 10-10-10-2 (sin cuantizar a 6 ejes)
+```
+
+### Flujo de datos
+
+```
+DensityField → mesh_transvoxel() → Vec<TransvoxelTriangle>
+    ↓ (por cada vértice)
+    pos float (field-local) + mesh_delta → SmoothTerrainVertex.pos
+    density_gradient() → pack_norm_10_10_10_2() → SmoothTerrainVertex.norm
+    atlas color lookup → make_col_light() → SmoothTerrainVertex.col_light
+    ↓
+Mesh<SmoothTerrainVertex> → GPU via SmoothTerrainPipeline
+    ↓
+smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
+```
+
+### Testing
+
+1. Verificar que `Disabled` no crea ningún `smooth_opaque_model` (sin regresión al greedy)
+2. Verificar que con `Smooth` la superficie se ve sin facetado (comparar screenshot)
+3. `cargo ci-clippy -- -D warnings` limpio
+4. `cargo ci-clippy2 -- -D warnings` limpio (publish profile)
+
+---
+
 ## Seguimiento de progreso
 
 | Fase | Estado | Notas |
 |---|---|---|
-| Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline completo + tablas correctas; pendiente: atlas de color y ECS resource |
+| Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline + tablas + atlas básico completos; pendiente: SmoothTerrainPipeline |
+| Fase 1 — SmoothTerrainVertex pipeline | ⬜ No iniciada | Siguiente subtarea de Fase 1 |
 | Fase 2 — Escala de bloques | ⬜ No iniciada | Esperar Fase 1 estable |
 | Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse después de Fase 1 |
 
