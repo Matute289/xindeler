@@ -489,7 +489,7 @@ mod tests {
                 }
             }
         }
-        smooth_density_field(&mut field);
+        smooth_density_field(&mut field, 1);
         let tris = extract_collision_triangles(&field, Vec3::zero());
         assert!(!tris.is_empty());
     }
