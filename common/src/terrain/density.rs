@@ -30,9 +30,8 @@ impl DensityField {
             return None;
         }
         Some(
-            (pos.x as u32 * self.size.y * self.size.z
-                + pos.y as u32 * self.size.z
-                + pos.z as u32) as usize,
+            (pos.x as u32 * self.size.y * self.size.z + pos.y as u32 * self.size.z + pos.z as u32)
+                as usize,
         )
     }
 

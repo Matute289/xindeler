@@ -384,6 +384,35 @@ impl BloomMode {
     fn is_on(&self) -> bool { matches!(self, BloomMode::On(_)) }
 }
 
+/// Terrain meshing algorithm quality tier.
+/// Disabled = existing greedy mesher; Soft/Smooth/Ultra = Transvoxel with
+/// increasing LOD.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+    strum::Display,
+)]
+pub enum TerrainSmoothingMode {
+    /// Use existing greedy mesher — zero performance overhead, identical to
+    /// today.
+    #[default]
+    Disabled,
+    /// Transvoxel, 1 LOD level, smooth collision. Minimum: GTX 1060 / RX 580.
+    Soft,
+    /// Transvoxel, 3 LOD levels, smooth collision. Minimum: RTX 3060 / RX 6600.
+    Smooth,
+    /// Transvoxel, 3 LOD levels + normal maps, smooth collision. Minimum: RTX
+    /// 3070 / RX 6800.
+    Ultra,
+}
+
 /// Render modes
 #[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

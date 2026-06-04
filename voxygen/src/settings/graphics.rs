@@ -1,5 +1,5 @@
 use crate::{
-    render::RenderMode,
+    render::{RenderMode, TerrainSmoothingMode},
     window::{FullScreenSettings, WindowSettings},
 };
 use common::ViewDistances;
@@ -26,15 +26,6 @@ impl fmt::Display for Fps {
             Fps::Unlimited => write!(f, "Unlimited"),
         }
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum TerrainSmoothingMode {
-    #[default]
-    Disabled,
-    Soft,
-    Smooth,
-    Ultra,
 }
 
 /// `GraphicsSettings` contains settings related to framerate and in-game
