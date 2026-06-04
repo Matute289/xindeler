@@ -2,7 +2,7 @@
 use crate::plugin::PluginMgr;
 #[cfg(feature = "plugins")]
 use crate::plugin::memory_manager::EcsWorld;
-use crate::{BuildArea, NoDurabilityArea};
+use crate::{BuildArea, NoDurabilityArea, SmoothTerrainSettings};
 #[cfg(feature = "plugins")]
 use common::uid::IdMaps;
 use common::{
@@ -369,6 +369,7 @@ impl State {
         ecs.insert(Trades::default());
         ecs.insert(PlayerPhysicsSettings::default());
         ecs.insert(VolumeRiders::default());
+        ecs.insert(SmoothTerrainSettings::default());
 
         // Load plugins from asset directory
         #[cfg(feature = "plugins")]
