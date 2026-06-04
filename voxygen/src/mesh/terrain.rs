@@ -272,7 +272,10 @@ pub fn generate_mesh<'a>(
         let tris = mesh_transvoxel(&density);
 
         let mut opaque_mesh: Mesh<TerrainVertex> = Mesh::new();
-        let mesh_delta = Vec3::new(0.0f32, 0.0, range.min.z as f32);
+        // Convert field-local coords to greedy-mesher convention:
+        // chunk-local x/y (0..32) and world z.
+        // Field (1,1,1) = world range.min, so delta = (-1, -1, range.min.z - 1).
+        let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
         for tri in &tris {
             let [p0, p1, p2] = tri.positions;
             let [n0, n1, n2] = tri.normals;
