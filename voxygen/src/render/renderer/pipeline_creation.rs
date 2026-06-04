@@ -9,7 +9,7 @@ use super::{
         ReflectionMode, RenderError, ShadowMode,
         pipelines::{
             blit, bloom, clouds, debug, figure, fluid, lod_object, lod_terrain, particle,
-            postprocess, rope, shadow, skybox, sprite, terrain, trail, ui,
+            postprocess, rope, shadow, skybox, smooth_terrain, sprite, terrain, trail, ui,
         },
     },
     ImmutableLayouts, Layouts,
@@ -35,6 +35,7 @@ pub struct Pipelines {
     pub skybox: skybox::SkyboxPipeline,
     pub sprite: sprite::SpritePipeline,
     pub lod_object: lod_object::LodObjectPipeline,
+    pub smooth_terrain: smooth_terrain::SmoothTerrainPipeline,
     pub terrain: terrain::TerrainPipeline,
     pub ui: ui::UiPipeline,
     pub premultiply_alpha: ui::PremultiplyAlphaPipeline,
@@ -60,6 +61,7 @@ pub struct IngamePipelines {
     sprite: sprite::SpritePipeline,
     lod_object: lod_object::LodObjectPipeline,
     terrain: terrain::TerrainPipeline,
+    pub smooth_terrain: smooth_terrain::SmoothTerrainPipeline,
 }
 
 pub struct ShadowPipelines {
@@ -106,6 +108,7 @@ impl Pipelines {
             skybox: ingame.skybox,
             sprite: ingame.sprite,
             lod_object: ingame.lod_object,
+            smooth_terrain: ingame.smooth_terrain,
             terrain: ingame.terrain,
             ui: interface.ui,
             premultiply_alpha: interface.premultiply_alpha,
@@ -157,6 +160,8 @@ struct ShaderModules {
     light_shadows_debug_vert: wgpu::ShaderModule,
     rain_occlusion_directed_vert: wgpu::ShaderModule,
     rain_occlusion_figure_vert: wgpu::ShaderModule,
+    smooth_terrain_vert: wgpu::ShaderModule,
+    smooth_terrain_frag: wgpu::ShaderModule,
 }
 
 impl ShaderModules {
@@ -397,6 +402,8 @@ impl ShaderModules {
                 "rain-occlusion-figure-vert",
                 ShaderStage::Vertex,
             )?,
+            smooth_terrain_vert: create_shader("smooth-terrain-vert", ShaderStage::Vertex)?,
+            smooth_terrain_frag: create_shader("smooth-terrain-frag", ShaderStage::Fragment)?,
         })
     }
 }
@@ -483,7 +490,7 @@ fn create_ingame_and_shadow_pipelines(
     needs: PipelineNeeds,
     pool: &rayon::ThreadPool,
     // TODO: Reduce the boilerplate in this file
-    tasks: [Task; 20],
+    tasks: [Task; 21],
     format: wgpu::TextureFormat,
 ) -> IngameAndShadowPipelines {
     prof_span!(_guard, "create_ingame_and_shadow_pipelines");
@@ -520,6 +527,7 @@ fn create_ingame_and_shadow_pipelines(
         debug_directed_shadow_task,
         terrain_directed_rain_occlusion_task,
         figure_directed_rain_occlusion_task,
+        smooth_terrain_task,
     ] = tasks;
 
     // TODO: pass in format of target color buffer
@@ -589,6 +597,23 @@ fn create_ingame_and_shadow_pipelines(
                 )
             },
             "terrain pipeline creation",
+        )
+    };
+    // Pipeline for rendering smooth (Transvoxel) terrain
+    let create_smooth_terrain = || {
+        smooth_terrain_task.run(
+            || {
+                smooth_terrain::SmoothTerrainPipeline::new(
+                    device,
+                    &shaders.smooth_terrain_vert,
+                    &shaders.smooth_terrain_frag,
+                    &layouts.global,
+                    &layouts.terrain,
+                    pipeline_modes.aa,
+                    format,
+                )
+            },
+            "smooth terrain pipeline creation",
         )
     };
     // Pipeline for rendering fluids
@@ -901,7 +926,7 @@ fn create_ingame_and_shadow_pipelines(
             )
         })
     };
-    let j8 = create_rope;
+    let j8 = || pool.join(create_rope, create_smooth_terrain);
 
     // Ignore this
     let (
@@ -914,7 +939,7 @@ fn create_ingame_and_shadow_pipelines(
                 (postprocess, point_shadow),
                 (terrain_directed_shadow, (figure_directed_shadow, debug_directed_shadow)),
             ),
-            ((lod_object, (terrain_directed_rain_occlusion, figure_directed_rain_occlusion)), rope),
+            ((lod_object, (terrain_directed_rain_occlusion, figure_directed_rain_occlusion)), (rope, smooth_terrain)),
         ),
     ) = pool.join(
         || pool.join(|| pool.join(j1, j2), || pool.join(j3, j4)),
@@ -936,6 +961,7 @@ fn create_ingame_and_shadow_pipelines(
             skybox,
             sprite,
             lod_object,
+            smooth_terrain,
             terrain,
             // player_shadow_pipeline,
         },

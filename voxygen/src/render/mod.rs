@@ -39,6 +39,7 @@ pub use self::{
             Instance as SpriteInstance, SpriteGlobalsBindGroup, SpriteVerts,
             VERT_PAGE_SIZE as SPRITE_VERT_PAGE_SIZE, Vertex as SpriteVertex,
         },
+        smooth_terrain::{SmoothTerrainPipeline, SmoothTerrainVertex},
         terrain::{Locals as TerrainLocals, TerrainLayout, Vertex as TerrainVertex},
         trail::Vertex as TrailVertex,
         ui::{

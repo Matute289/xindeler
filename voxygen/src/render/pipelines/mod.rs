@@ -13,6 +13,7 @@ pub mod rope;
 pub mod shadow;
 pub mod skybox;
 pub mod sprite;
+pub mod smooth_terrain;
 pub mod terrain;
 pub mod trail;
 pub mod ui;
@@ -25,6 +26,7 @@ use std::marker::PhantomData;
 use vek::*;
 
 pub use self::{figure::FigureSpriteAtlasData, terrain::TerrainAtlasData};
+pub use self::smooth_terrain::{SmoothTerrainPipeline, SmoothTerrainVertex};
 
 // TODO: auto insert these into shaders
 pub const MAX_POINT_LIGHT_COUNT: usize = 20;
