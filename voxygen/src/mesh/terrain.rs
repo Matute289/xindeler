@@ -270,133 +270,133 @@ pub fn generate_mesh<'a>(
             || !boi.one_way_walls.is_empty();
 
         if !has_structures {
-        use crate::render::Tri;
-        let s = range.size();
-        let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
-        let offset = range.min - Vec3::new(1, 1, 1);
-        let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
-        let smooth_passes = match smoothing {
-            TerrainSmoothingMode::Soft => 1,
-            TerrainSmoothingMode::Smooth => 2,
-            TerrainSmoothingMode::Ultra => 3,
-            TerrainSmoothingMode::Disabled => unreachable!(),
-        };
-        smooth_density_field(&mut density, smooth_passes);
-        // Threshold calibrated so the isosurface lands at the block surface
-        // after N passes of Gaussian smoothing (analytically derived for flat
-        // terrain: the post-smoothed density at the first air block gives the
-        // threshold that places the surface at the solid/air block boundary).
-        let transvoxel_threshold: u8 = match smooth_passes {
-            1 => 64,
-            2 => 94,
-            3 => 101,
-            _ => 127,
-        };
-        let tris = mesh_transvoxel(&density, transvoxel_threshold);
+            use crate::render::Tri;
+            let s = range.size();
+            let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
+            let offset = range.min - Vec3::new(1, 1, 1);
+            let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
+            let smooth_passes = match smoothing {
+                TerrainSmoothingMode::Soft => 1,
+                TerrainSmoothingMode::Smooth => 2,
+                TerrainSmoothingMode::Ultra => 3,
+                TerrainSmoothingMode::Disabled => unreachable!(),
+            };
+            smooth_density_field(&mut density, smooth_passes);
+            // Threshold calibrated so the isosurface lands at the block surface
+            // after N passes of Gaussian smoothing (analytically derived for flat
+            // terrain: the post-smoothed density at the first air block gives the
+            // threshold that places the surface at the solid/air block boundary).
+            let transvoxel_threshold: u8 = match smooth_passes {
+                1 => 64,
+                2 => 94,
+                3 => 101,
+                _ => 127,
+            };
+            let tris = mesh_transvoxel(&density, transvoxel_threshold);
 
-        // ----------------------------------------------------------------
-        // Build a colour atlas: one texel per (chunk-local x, y) column.
-        // Each texel stores the colour of the topmost solid block in that
-        // column, giving Transvoxel vertices their correct block colours.
-        // ----------------------------------------------------------------
-        let atlas_w = (s.w as usize).min(32);
-        let atlas_h = (s.h as usize).min(32);
-        let mut col_lights = vec![[0u8; 4]; atlas_w * atlas_h];
-        let kinds_atlas = vec![0u8; atlas_w * atlas_h];
-        {
-            let mut vol_cached = vol.cached();
-            for ax in 0..atlas_w {
-                for ay in 0..atlas_h {
-                    let wx = range.min.x + ax as i32;
-                    let wy = range.min.y + ay as i32;
-                    let mut color = Rgb::broadcast(128u8);
-                    for wz in (range.min.z..range.max.z).rev() {
-                        if let Ok(b) = vol_cached.get(Vec3::new(wx, wy, wz)) {
-                            if !b.is_filled() {
-                                continue;
+            // ----------------------------------------------------------------
+            // Build a colour atlas: one texel per (chunk-local x, y) column.
+            // Each texel stores the colour of the topmost solid block in that
+            // column, giving Transvoxel vertices their correct block colours.
+            // ----------------------------------------------------------------
+            let atlas_w = (s.w as usize).min(32);
+            let atlas_h = (s.h as usize).min(32);
+            let mut col_lights = vec![[0u8; 4]; atlas_w * atlas_h];
+            let kinds_atlas = vec![0u8; atlas_w * atlas_h];
+            {
+                let mut vol_cached = vol.cached();
+                for ax in 0..atlas_w {
+                    for ay in 0..atlas_h {
+                        let wx = range.min.x + ax as i32;
+                        let wy = range.min.y + ay as i32;
+                        let mut color = Rgb::broadcast(128u8);
+                        for wz in (range.min.z..range.max.z).rev() {
+                            if let Ok(b) = vol_cached.get(Vec3::new(wx, wy, wz)) {
+                                if !b.is_filled() {
+                                    continue;
+                                }
+                                color = b.get_color().unwrap_or(color);
+                                break;
                             }
-                            color = b.get_color().unwrap_or(color);
-                            break;
                         }
+                        let idx = ax * atlas_h + ay;
+                        col_lights[idx] = TerrainVertex::make_col_light(254, 0, color, false);
                     }
-                    let idx = ax * atlas_h + ay;
-                    col_lights[idx] = TerrainVertex::make_col_light(254, 0, color, false);
                 }
             }
-        }
-        let atlas_data = TerrainAtlasData {
-            col_lights,
-            kinds: kinds_atlas,
-        };
-        let atlas_size = Vec2::new(atlas_w as u16, atlas_h as u16);
-
-        // ----------------------------------------------------------------
-        // Emit smooth mesh — SmoothTerrainVertex with float pos,
-        // 10-10-10-2 normal, and per-vertex color baked from the atlas.
-        // ----------------------------------------------------------------
-        let mut smooth_opaque_mesh: Mesh<SmoothTerrainVertex> = Mesh::new();
-        // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
-        let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
-        // Bilinear col_light sampling: blend the 4 nearest atlas texels by
-        // fractional vertex position. Using .round() caused alternating
-        // bright/dark triangles on flat terrain (the diamond checkerboard
-        // pattern) because adjacent vertices would snap to different texels.
-        let col_light_for = |pos: Vec3<f32>| -> u32 {
-            let cp = pos + mesh_delta;
-            let ax = cp.x.clamp(0.0, (atlas_w - 1) as f32);
-            let ay = cp.y.clamp(0.0, (atlas_h - 1) as f32);
-            let ax0 = (ax.floor() as usize).min(atlas_w - 1);
-            let ay0 = (ay.floor() as usize).min(atlas_h - 1);
-            let ax1 = (ax0 + 1).min(atlas_w - 1);
-            let ay1 = (ay0 + 1).min(atlas_h - 1);
-            let tx = ax - ax.floor();
-            let ty = ay - ay.floor();
-            let s = |x: usize, y: usize| atlas_data.col_lights[x * atlas_h + y];
-            let [c00, c10, c01, c11] = [s(ax0, ay0), s(ax1, ay0), s(ax0, ay1), s(ax1, ay1)];
-            let lerp_ch = |v00: u8, v10: u8, v01: u8, v11: u8| -> u8 {
-                let v0 = v00 as f32 * (1.0 - tx) + v10 as f32 * tx;
-                let v1 = v01 as f32 * (1.0 - tx) + v11 as f32 * tx;
-                (v0 * (1.0 - ty) + v1 * ty) as u8
+            let atlas_data = TerrainAtlasData {
+                col_lights,
+                kinds: kinds_atlas,
             };
-            u32::from_le_bytes([
-                lerp_ch(c00[0], c10[0], c01[0], c11[0]),
-                lerp_ch(c00[1], c10[1], c01[1], c11[1]),
-                lerp_ch(c00[2], c10[2], c01[2], c11[2]),
-                lerp_ch(c00[3], c10[3], c01[3], c11[3]),
-            ])
-        };
-        for tri in &tris {
-            let [p0, p1, p2] = tri.positions;
-            let [n0, n1, n2] = tri.normals;
-            smooth_opaque_mesh.push_tri(Tri::new(
-                SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0)),
-                SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1)),
-                SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2)),
-            ));
-        }
+            let atlas_size = Vec2::new(atlas_w as u16, atlas_h as u16);
 
-        let bounds = Aabb {
-            min: range.min.map(|e| e as f32),
-            max: range.max.map(|e| e as f32),
-        };
-        let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
-        return (
-            Mesh::new(),        // opaque_mesh = empty (smooth replaces greedy here)
-            Mesh::new(),        // fluid_mesh = empty for Transvoxel path
-            smooth_opaque_mesh, // slot 2: Mesh<SmoothTerrainVertex>
-            (
-                bounds,
-                atlas_data,
-                atlas_size,
-                Arc::new(|_| 1.0f32),
-                Arc::new(|_| 0.0f32),
-                AltIndices {
-                    deep_end: 0,
-                    underground_end: 0,
-                },
-                sun_occluder_z_bounds,
-            ),
-        );
+            // ----------------------------------------------------------------
+            // Emit smooth mesh — SmoothTerrainVertex with float pos,
+            // 10-10-10-2 normal, and per-vertex color baked from the atlas.
+            // ----------------------------------------------------------------
+            let mut smooth_opaque_mesh: Mesh<SmoothTerrainVertex> = Mesh::new();
+            // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
+            let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
+            // Bilinear col_light sampling: blend the 4 nearest atlas texels by
+            // fractional vertex position. Using .round() caused alternating
+            // bright/dark triangles on flat terrain (the diamond checkerboard
+            // pattern) because adjacent vertices would snap to different texels.
+            let col_light_for = |pos: Vec3<f32>| -> u32 {
+                let cp = pos + mesh_delta;
+                let ax = cp.x.clamp(0.0, (atlas_w - 1) as f32);
+                let ay = cp.y.clamp(0.0, (atlas_h - 1) as f32);
+                let ax0 = (ax.floor() as usize).min(atlas_w - 1);
+                let ay0 = (ay.floor() as usize).min(atlas_h - 1);
+                let ax1 = (ax0 + 1).min(atlas_w - 1);
+                let ay1 = (ay0 + 1).min(atlas_h - 1);
+                let tx = ax - ax.floor();
+                let ty = ay - ay.floor();
+                let s = |x: usize, y: usize| atlas_data.col_lights[x * atlas_h + y];
+                let [c00, c10, c01, c11] = [s(ax0, ay0), s(ax1, ay0), s(ax0, ay1), s(ax1, ay1)];
+                let lerp_ch = |v00: u8, v10: u8, v01: u8, v11: u8| -> u8 {
+                    let v0 = v00 as f32 * (1.0 - tx) + v10 as f32 * tx;
+                    let v1 = v01 as f32 * (1.0 - tx) + v11 as f32 * tx;
+                    (v0 * (1.0 - ty) + v1 * ty) as u8
+                };
+                u32::from_le_bytes([
+                    lerp_ch(c00[0], c10[0], c01[0], c11[0]),
+                    lerp_ch(c00[1], c10[1], c01[1], c11[1]),
+                    lerp_ch(c00[2], c10[2], c01[2], c11[2]),
+                    lerp_ch(c00[3], c10[3], c01[3], c11[3]),
+                ])
+            };
+            for tri in &tris {
+                let [p0, p1, p2] = tri.positions;
+                let [n0, n1, n2] = tri.normals;
+                smooth_opaque_mesh.push_tri(Tri::new(
+                    SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0)),
+                    SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1)),
+                    SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2)),
+                ));
+            }
+
+            let bounds = Aabb {
+                min: range.min.map(|e| e as f32),
+                max: range.max.map(|e| e as f32),
+            };
+            let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
+            return (
+                Mesh::new(),        // opaque_mesh = empty (smooth replaces greedy here)
+                Mesh::new(),        // fluid_mesh = empty for Transvoxel path
+                smooth_opaque_mesh, // slot 2: Mesh<SmoothTerrainVertex>
+                (
+                    bounds,
+                    atlas_data,
+                    atlas_size,
+                    Arc::new(|_| 1.0f32),
+                    Arc::new(|_| 0.0f32),
+                    AltIndices {
+                        deep_end: 0,
+                        underground_end: 0,
+                    },
+                    sun_occluder_z_bounds,
+                ),
+            );
         } // end if !has_structures
     }
 

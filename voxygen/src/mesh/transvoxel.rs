@@ -17,7 +17,8 @@
 use common::terrain::density::DensityField;
 use vek::*;
 
-/// Default iso-surface threshold: voxels with density > `THRESHOLD` are considered solid.
+/// Default iso-surface threshold: voxels with density > `THRESHOLD` are
+/// considered solid.
 pub const THRESHOLD: u8 = 127;
 
 // ---------------------------------------------------------------------------
@@ -452,9 +453,7 @@ pub struct TransvoxelTriangle {
 fn sample_trilinear(field: &DensityField, pos: Vec3<f32>) -> f32 {
     let p0 = pos.map(|e| e.floor() as i32);
     let t = pos - pos.map(|e| e.floor());
-    let d = |dx: i32, dy: i32, dz: i32| {
-        field.get_or_zero(p0 + Vec3::new(dx, dy, dz)) as f32
-    };
+    let d = |dx: i32, dy: i32, dz: i32| field.get_or_zero(p0 + Vec3::new(dx, dy, dz)) as f32;
     let c00 = d(0, 0, 0) * (1.0 - t.x) + d(1, 0, 0) * t.x;
     let c10 = d(0, 1, 0) * (1.0 - t.x) + d(1, 1, 0) * t.x;
     let c01 = d(0, 0, 1) * (1.0 - t.x) + d(1, 0, 1) * t.x;

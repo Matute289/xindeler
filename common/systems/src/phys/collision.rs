@@ -323,7 +323,8 @@ pub(super) fn box_voxel_collision<T: BaseVol<Vox = Block> + ReadVol>(
             .copied();
     }
 
-    // Smooth floor correction: snap entity Z to the Transvoxel isosurface to match visual mesh.
+    // Smooth floor correction: snap entity Z to the Transvoxel isosurface to match
+    // visual mesh.
     if smooth_passes > 0 && physics_state.on_ground.is_some() {
         let foot = pos.0;
         let sample_offset = Vec3::new(

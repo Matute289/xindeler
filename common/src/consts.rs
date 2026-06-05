@@ -4,8 +4,8 @@ pub const BLOCK_SIZE: f32 = 0.15;
 #[cfg(not(feature = "terrain-hires"))]
 pub const BLOCK_SIZE: f32 = 0.30;
 
-/// Multiplier applied to all block-unit constants when the block size is halved.
-/// 2.0 with `terrain-hires` feature, 1.0 otherwise.
+/// Multiplier applied to all block-unit constants when the block size is
+/// halved. 2.0 with `terrain-hires` feature, 1.0 otherwise.
 #[cfg(feature = "terrain-hires")]
 pub const HIRES_SCALE: f32 = 2.0;
 #[cfg(not(feature = "terrain-hires"))]

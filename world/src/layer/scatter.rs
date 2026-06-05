@@ -174,8 +174,8 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     * 200.0
                     * (!col.snow_cover) as i32 as f32 /* To prevent spawning in snow covered areas */
                     * density_factor_by_altitude(-500.0 * HIRES_SCALE, col.alt, 500.0 * HIRES_SCALE), /* To prevent
-                                                                            * spawning at high
-                                                                            * altitudes */
+                                                                                                       * spawning at high
+                                                                                                       * altitudes */
                     Some((0.0, 128.0, 0.30)),
                 )
             },
@@ -207,9 +207,13 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     )) * col.tree_density
                         * MUSH_FACT
                         * 600.0
-                        * density_factor_by_altitude(200.0 * HIRES_SCALE, col.alt, 1000.0 * HIRES_SCALE), /* To control
-                                                                               * spawning based
-                                                                               * on altitude */
+                        * density_factor_by_altitude(
+                            200.0 * HIRES_SCALE,
+                            col.alt,
+                            1000.0 * HIRES_SCALE,
+                        ), /* To control
+                            * spawning based
+                            * on altitude */
                     Some((0.0, 100.0, 0.15)),
                 )
             },

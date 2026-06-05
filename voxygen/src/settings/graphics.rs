@@ -2,7 +2,7 @@ use crate::{
     render::{RenderMode, TerrainSmoothingMode},
     window::{FullScreenSettings, WindowSettings},
 };
-use common::{consts::HIRES_SCALE, ViewDistances};
+use common::{ViewDistances, consts::HIRES_SCALE};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

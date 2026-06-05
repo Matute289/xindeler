@@ -87,10 +87,12 @@ where
     field
 }
 
-/// Applies a 3×3×3 Gaussian-weighted blur to a `DensityField` in-place, `passes` times.
+/// Applies a 3×3×3 Gaussian-weighted blur to a `DensityField` in-place,
+/// `passes` times.
 ///
 /// Weight by distance from center:
-/// - center: 8, face-adjacent (6): 4, edge-adjacent (12): 2, corner (8): 1 → total 64
+/// - center: 8, face-adjacent (6): 4, edge-adjacent (12): 2, corner (8): 1 →
+///   total 64
 ///
 /// Multiple passes compound the smoothing for wider, softer transitions.
 pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
@@ -107,23 +109,45 @@ pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
                 for z in 0..field.size.z as i32 {
                     let center = snap.get_or_zero(Vec3::new(x, y, z)) as u32;
 
-                    let face_sum = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
-                        .iter()
-                        .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
-                        .sum::<u32>();
+                    let face_sum = [
+                        (1, 0, 0),
+                        (-1, 0, 0),
+                        (0, 1, 0),
+                        (0, -1, 0),
+                        (0, 0, 1),
+                        (0, 0, -1),
+                    ]
+                    .iter()
+                    .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
+                    .sum::<u32>();
 
                     let edge_sum = [
-                        (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
-                        (1, 0, 1), (1, 0, -1), (-1, 0, 1), (-1, 0, -1),
-                        (0, 1, 1), (0, 1, -1), (0, -1, 1), (0, -1, -1),
+                        (1, 1, 0),
+                        (1, -1, 0),
+                        (-1, 1, 0),
+                        (-1, -1, 0),
+                        (1, 0, 1),
+                        (1, 0, -1),
+                        (-1, 0, 1),
+                        (-1, 0, -1),
+                        (0, 1, 1),
+                        (0, 1, -1),
+                        (0, -1, 1),
+                        (0, -1, -1),
                     ]
                     .iter()
                     .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
                     .sum::<u32>();
 
                     let corner_sum = [
-                        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
-                        (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1),
+                        (1, 1, 1),
+                        (1, 1, -1),
+                        (1, -1, 1),
+                        (1, -1, -1),
+                        (-1, 1, 1),
+                        (-1, 1, -1),
+                        (-1, -1, 1),
+                        (-1, -1, -1),
                     ]
                     .iter()
                     .map(|&(dx, dy, dz)| snap.get_or_zero(Vec3::new(x + dx, y + dy, z + dz)) as u32)
@@ -139,8 +163,9 @@ pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
     }
 }
 
-/// Returns the interpolated Z where density crosses 127 when descending from `z_start`
-/// downward in the field at column (x, y). Returns `None` if no crossing found.
+/// Returns the interpolated Z where density crosses 127 when descending from
+/// `z_start` downward in the field at column (x, y). Returns `None` if no
+/// crossing found.
 ///
 /// Used by physics to find the smooth isosurface floor height.
 pub fn sample_isosurface_z(field: &DensityField, x: i32, y: i32, z_start: i32) -> Option<f32> {
@@ -148,7 +173,7 @@ pub fn sample_isosurface_z(field: &DensityField, x: i32, y: i32, z_start: i32) -
     let z_max = (field.size.z as i32).min(z_start + 1);
     for z in (z_min..z_max).rev() {
         let d_above = field.get_or_zero(Vec3::new(x, y, z + 1)) as i32;
-        let d_here  = field.get_or_zero(Vec3::new(x, y, z)) as i32;
+        let d_here = field.get_or_zero(Vec3::new(x, y, z)) as i32;
         // Crossing: d_above < 127 and d_here >= 127
         if d_above < 127 && d_here >= 127 {
             // Linear interpolation between z and z+1

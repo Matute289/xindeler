@@ -20,9 +20,9 @@ use common::{
     util::{Dir, Projection, SpatialGrid},
     weather::WeatherGrid,
 };
-use common_state::SmoothTerrainSettings;
 use common_base::{prof_span, span};
 use common_ecs::{Job, Origin, ParMode, Phase, PhysicsMetrics, System};
+use common_state::SmoothTerrainSettings;
 use rayon::iter::ParallelIterator;
 use specs::{
     Entities, Join, LendJoin, ParJoin, Read, ReadExpect, ReadStorage, SystemData, Write,

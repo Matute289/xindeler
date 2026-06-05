@@ -1,5 +1,7 @@
-use common::assets::{BoxedError, FileAsset, load_ron};
-use common::consts;
+use common::{
+    assets::{BoxedError, FileAsset, load_ron},
+    consts,
+};
 use serde::Deserialize;
 use std::borrow::Cow;
 use vek::*;
