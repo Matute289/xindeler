@@ -14,7 +14,7 @@ use crate::{
 };
 use common::{
     terrain::{
-        Block, BlockKind, TerrainChunk,
+        Block, TerrainChunk,
         density::{convert_chunk_to_density_field, smooth_density_field},
     },
     util::either_with,
@@ -267,38 +267,7 @@ pub fn generate_mesh<'a>(
         // smooth away their flat vertical wall geometry making them invisible.
         let has_structures = !boi.interactables.is_empty()
             || !boi.smokers.is_empty()
-            || !boi.one_way_walls.is_empty()
-            || {
-                // Scan every 3rd column for structural block kinds (walls, roofs).
-                // Stops at the first solid block in each column — buildings have
-                // wood/rock walls above the natural terrain.
-                let s = range.size();
-                let mut found = false;
-                'scan: for sx in (0..s.w).step_by(3) {
-                    for sy in (0..s.h).step_by(3) {
-                        for sz in (0..s.d).rev() {
-                            let wpos = range.min + Vec3::new(sx, sy, sz);
-                            if let Ok(b) = vol.get(wpos) {
-                                if b.is_filled()
-                                    && matches!(
-                                        b.kind(),
-                                        BlockKind::Wood
-                                            | BlockKind::Rock
-                                            | BlockKind::WeakRock
-                                            | BlockKind::Misc
-                                    )
-                                {
-                                    found = true;
-                                    break 'scan;
-                                } else if b.is_filled() {
-                                    break; // first solid in column — stop descending
-                                }
-                            }
-                        }
-                    }
-                }
-                found
-            };
+            || !boi.one_way_walls.is_empty();
 
         if !has_structures {
         use crate::render::Tri;
