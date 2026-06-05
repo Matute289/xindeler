@@ -73,7 +73,12 @@ where
                 let pos = Vec3::new(x, y, z);
                 let val = match vol.get(offset + pos) {
                     Ok(block) if block.is_filled() => 255,
-                    _ => 0,
+                    Ok(_) => 0,
+                    // Unloaded neighbor: assume solid to prevent false solid→air
+                    // transitions at chunk boundaries that would generate spurious
+                    // vertical cap triangles (backface-culled → visible as holes).
+                    // The chunk re-meshes when the neighbor loads with correct data.
+                    Err(_) => 255,
                 };
                 field.set(pos, val);
             }
