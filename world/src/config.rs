@@ -1,4 +1,5 @@
 use common::assets::{BoxedError, FileAsset, load_ron};
+use common::consts;
 use serde::Deserialize;
 use std::borrow::Cow;
 use vek::*;
@@ -58,8 +59,8 @@ pub struct Config {
 }
 
 pub const CONFIG: Config = Config {
-    sea_level: 140.0,
-    mountain_scale: 2048.0,
+    sea_level: 140.0 * consts::HIRES_SCALE,
+    mountain_scale: 2048.0 * consts::HIRES_SCALE,
     // temperature
     snow_temp: -0.8,
     temperate_temp: -0.4,
