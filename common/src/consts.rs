@@ -1,3 +1,16 @@
+/// World-space size of one block in metres.
+#[cfg(feature = "terrain-hires")]
+pub const BLOCK_SIZE: f32 = 0.15;
+#[cfg(not(feature = "terrain-hires"))]
+pub const BLOCK_SIZE: f32 = 0.30;
+
+/// Multiplier applied to all block-unit constants when the block size is halved.
+/// 2.0 with `terrain-hires` feature, 1.0 otherwise.
+#[cfg(feature = "terrain-hires")]
+pub const HIRES_SCALE: f32 = 2.0;
+#[cfg(not(feature = "terrain-hires"))]
+pub const HIRES_SCALE: f32 = 1.0;
+
 // The limit on distance between the entity and a collectible (squared)
 pub const MAX_PICKUP_RANGE: f32 = 5.0;
 pub const MAX_MOUNT_RANGE: f32 = 5.0;

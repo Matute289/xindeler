@@ -23,6 +23,7 @@ This package includes the official client, Voxygen.
 """
 
 [features]
+terrain-hires = ["common/terrain-hires", "world/terrain-hires", "common-systems/terrain-hires"]
 hot-anim = ["anim/use-dyn-lib"]
 hot-egui = ["voxygen-egui/use-dyn-lib", "egui"]
 hot-reloading = ["common/hot-reloading"]

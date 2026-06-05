@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
+terrain-hires = ["common/terrain-hires"]
 simd = ["vek/platform_intrinsics"]
 plugins = ["common-state/plugins"]
 
