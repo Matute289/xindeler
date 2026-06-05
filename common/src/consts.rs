@@ -24,7 +24,7 @@ pub const MAX_WAYPOINT_RANGE: f32 = 4.0;
 // reliable)
 pub const MAX_CAMPFIRE_RANGE: f32 = MAX_WAYPOINT_RANGE - 0.001;
 
-pub const GRAVITY: f32 = 25.0;
+pub const GRAVITY: f32 = 25.0 * HIRES_SCALE;
 pub const FRIC_GROUND: f32 = 0.15;
 
 // Values for air taken from http://www-mdp.eng.cam.ac.uk/web/library/enginfo/aerothermal_dvd_only/aero/atmos/atmos.html

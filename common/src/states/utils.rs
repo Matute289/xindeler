@@ -22,7 +22,7 @@ use crate::{
         skills::{SKILL_MODIFIERS, Skill, SwimSkill},
         theropod,
     },
-    consts::{FRIC_GROUND, GRAVITY, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
+    consts::{FRIC_GROUND, GRAVITY, HIRES_SCALE, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
     event::{BuffEvent, ChangeStanceEvent, ComboChangeEvent, InventoryManipEvent, LocalEvent},
     mounting::Volume,
     outcome::Outcome,
@@ -47,7 +47,7 @@ use strum::Display;
 use tracing::warn;
 use vek::*;
 
-pub const MOVEMENT_THRESHOLD_VEL: f32 = 3.0;
+pub const MOVEMENT_THRESHOLD_VEL: f32 = 3.0 * HIRES_SCALE;
 
 impl Body {
     pub fn base_accel(&self) -> f32 {
