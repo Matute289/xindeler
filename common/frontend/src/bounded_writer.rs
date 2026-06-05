@@ -2,7 +2,7 @@ use chrono::Utc;
 use flate2::{Compression, write::GzEncoder};
 use std::{
     fs::{self, File},
-    io::{self, BufWriter, Write},
+    io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -61,12 +61,21 @@ impl BoundedMakeWriter {
             .expect("spawn compress thread");
 
         let bucket = current_bucket(&rotation);
-        let (path, writer) = open_log_file(base_dir, prefix, &bucket, 1);
+        // Find the highest existing seq for this bucket to avoid overwriting
+        let seq = find_next_seq(base_dir, prefix, &bucket);
+        let (path, writer) = open_log_file(base_dir, prefix, &bucket, seq)
+            .unwrap_or_else(|e| {
+                eprintln!("[log] cannot create log file in {}: {e}", base_dir.display());
+                // Fall back to /dev/null equivalent: create a temp file
+                let path = std::env::temp_dir().join(format!("{bucket}_{prefix}_fallback.log"));
+                let file = File::create(&path).expect("cannot create fallback log");
+                (path, BufWriter::new(file))
+            });
         let state = Arc::new(Mutex::new(WriterState {
             writer,
             path,
             line_count: 0,
-            seq: 1,
+            seq,
             bucket,
         }));
         (
@@ -91,24 +100,52 @@ fn current_bucket(r: &Rotation) -> String {
     }
 }
 
-fn open_log_file(dir: &Path, prefix: &str, bucket: &str, seq: u32) -> (PathBuf, BufWriter<File>) {
-    let _ = fs::create_dir_all(dir);
+fn open_log_file(dir: &Path, prefix: &str, bucket: &str, seq: u32) -> io::Result<(PathBuf, BufWriter<File>)> {
+    fs::create_dir_all(dir)?;
     let name = if seq == 1 {
         format!("{bucket}_{prefix}.log")
     } else {
         format!("{bucket}_{prefix}.{seq}.log")
     };
     let path = dir.join(&name);
-    let file = File::create(&path).unwrap_or_else(|e| panic!("cannot create log {}: {e}", path.display()));
-    (path, BufWriter::new(file))
+    let file = File::create(&path)?;
+    Ok((path, BufWriter::new(file)))
+}
+
+/// Scan the directory for existing files matching the current bucket and return
+/// `max_found_seq + 1` so we never overwrite a previous run's logs.
+fn find_next_seq(dir: &Path, prefix: &str, bucket: &str) -> u32 {
+    let Ok(entries) = fs::read_dir(dir) else { return 1 };
+    let base = format!("{bucket}_{prefix}");
+    let mut max_seq = 0u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&base) && (name.ends_with(".log") || name.ends_with(".log.gz")) {
+            max_seq = max_seq.max(1);
+            // Try to parse seq number: "{base}.{seq}.log[.gz]"
+            let stripped = name
+                .strip_prefix(base.as_str())
+                .and_then(|s| s.strip_suffix(".log").or_else(|| s.strip_suffix(".log.gz")));
+            if let Some(mid) = stripped {
+                if let Some(seq_str) = mid.strip_prefix('.') {
+                    if let Ok(n) = seq_str.parse::<u32>() {
+                        max_seq = max_seq.max(n);
+                    }
+                }
+            }
+        }
+    }
+    if max_seq == 0 { 1 } else { max_seq + 1 }
 }
 
 fn compress_file(path: &Path) -> io::Result<()> {
     let gz_path = path.with_extension("log.gz");
-    let data = fs::read(path)?;
-    let gz_file = File::create(&gz_path)?;
-    let mut enc = GzEncoder::new(gz_file, Compression::default());
-    enc.write_all(&data)?;
+    let src = fs::File::open(path)?;
+    let mut reader = BufReader::new(src);
+    let gz_file = fs::File::create(&gz_path)?;
+    let mut enc = GzEncoder::new(BufWriter::new(gz_file), Compression::default());
+    io::copy(&mut reader, &mut enc)?;
     enc.finish()?;
     fs::remove_file(path)?;
     Ok(())
@@ -145,19 +182,31 @@ impl Drop for BoundedWriter<'_> {
             let _ = self.state.writer.flush();
             let old_path = self.state.path.clone();
             // queue old file for gzip; non-blocking (sync_channel with capacity)
-            let _ = self.compress_tx.try_send(old_path);
+            if self.compress_tx.try_send(old_path.clone()).is_err() {
+                eprintln!(
+                    "[log] compression queue full or disconnected, file will not be compressed: {}",
+                    old_path.display()
+                );
+            }
 
             let (seq, bucket) = if needs_time_rotate {
                 (1u32, new_bucket)
             } else {
                 (self.state.seq + 1, self.state.bucket.clone())
             };
-            let (path, writer) = open_log_file(self.base_dir, self.prefix, &bucket, seq);
-            self.state.writer = writer;
-            self.state.path = path;
-            self.state.line_count = 0;
-            self.state.seq = seq;
-            self.state.bucket = bucket;
+            match open_log_file(self.base_dir, self.prefix, &bucket, seq) {
+                Ok((path, writer)) => {
+                    self.state.writer = writer;
+                    self.state.path = path;
+                    self.state.line_count = 0;
+                    self.state.seq = seq;
+                    self.state.bucket = bucket;
+                },
+                Err(e) => {
+                    // Cannot open new file — keep writing to the old one
+                    eprintln!("[log] rotation failed, keeping old log file: {e}");
+                },
+            }
         }
     }
 }
