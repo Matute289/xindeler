@@ -4,6 +4,11 @@ pub use bounded_writer::{BoundedMakeWriter, CompressionGuard, Rotation};
 mod lifecycle;
 pub use lifecycle::{ErrorDetectorLayer, LogLifecycleManager};
 
+#[cfg(feature = "logging-verbose")]
+mod telemetry_layer;
+#[cfg(feature = "logging-verbose")]
+pub use telemetry_layer::TelemetryLayer;
+
 #[cfg(not(feature = "tracy"))] use std::fs;
 use std::path::Path;
 
