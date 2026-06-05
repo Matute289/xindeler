@@ -127,13 +127,11 @@ fn find_next_seq(dir: &Path, prefix: &str, bucket: &str) -> u32 {
             let stripped = name
                 .strip_prefix(base.as_str())
                 .and_then(|s| s.strip_suffix(".log").or_else(|| s.strip_suffix(".log.gz")));
-            if let Some(mid) = stripped {
-                if let Some(seq_str) = mid.strip_prefix('.') {
-                    if let Ok(n) = seq_str.parse::<u32>() {
+            if let Some(mid) = stripped
+                && let Some(seq_str) = mid.strip_prefix('.')
+                    && let Ok(n) = seq_str.parse::<u32>() {
                         max_seq = max_seq.max(n);
                     }
-                }
-            }
         }
     }
     if max_seq == 0 { 1 } else { max_seq + 1 }

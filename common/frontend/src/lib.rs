@@ -23,8 +23,10 @@ use tracing_subscriber::{
 
 const RUST_LOG_ENV: &str = "RUST_LOG";
 
+#[cfg(feature = "logging-verbose")]
 const CLIENT_INFO_MAX_LINES: u64  = 5_000;
 const CLIENT_ERR_MAX_LINES: u64   = 1_000;
+#[cfg(feature = "logging-verbose")]
 const SERVER_INFO_MAX_LINES: u64  = 10_000;
 const SERVER_ERR_MAX_LINES: u64   = 1_000;
 
@@ -241,7 +243,9 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
     let (err_writer, err_compress) =
         BoundedMakeWriter::new(logs_dir, &format!("{prefix}_err"), Rotation::Daily, err_max);
 
+    #[allow(unused_mut)]
     let mut worker_guards: Vec<WorkerGuard> = vec![term_guard];
+    #[allow(unused_mut)]
     let mut compress_guards: Vec<CompressionGuard> = vec![err_compress];
 
     // Optional info sink (logging-verbose only) — Option<L> implements Layer<S>
