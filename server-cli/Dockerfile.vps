@@ -1,17 +1,14 @@
+# syntax=docker/dockerfile:1
 # Multi-stage build for VPS deployment (x86_64 Linux)
-# Build: docker build -f server-cli/Dockerfile.vps -t ghcr.io/matute289/veloren/server-cli:master .
-#
-# Stage 1: Compile server-cli from source
+# Uses BuildKit cache mounts for fast incremental rebuilds (~2-5 min after first build)
+
+# Stage 1: Compile
 FROM rust:slim-bookworm AS builder
 
-# GIT_VERSION passed from deploy script as "commit_hash/commit_timestamp"
-# Bypasses the .git directory requirement in veloren-common build script
-ARG GIT_VERSION="0/0"
-
 ENV VELOREN_USERDATA_STRATEGY=executable \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true \
-    VELOREN_GIT_VERSION=${GIT_VERSION}
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
 
+# System deps — cached unless this layer changes
 RUN apt-get update && apt-get install -y \
     binutils \
     pkg-config \
@@ -21,19 +18,31 @@ RUN apt-get update && apt-get install -y \
     clang \
     && rm -rf /var/lib/apt/lists/*
 
+# Rust toolchain — cached unless nightly version changes
 RUN rustup toolchain install nightly-2025-09-08 \
     && rustup default nightly-2025-09-08
 
 WORKDIR /src
 COPY . .
 
-RUN cargo build --release \
+# GIT_VERSION goes here (after COPY) so apt/rustup layers stay cached
+ARG GIT_VERSION="0/0"
+ENV VELOREN_GIT_VERSION=${GIT_VERSION}
+
+# BuildKit cache mounts:
+#   /usr/local/cargo/registry  — crate downloads (persists on VPS between builds)
+#   /src/target                — incremental compile artifacts (persists on VPS)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release \
         --no-default-features \
         --features default-publish \
         -p veloren-server-cli \
+    && cp target/release/veloren-server-cli /tmp/veloren-server-cli \
     && objcopy --compress-debug-sections=zlib \
-        target/release/veloren-server-cli \
-        /tmp/veloren-server-cli
+        /tmp/veloren-server-cli \
+        /tmp/veloren-server-cli-compressed \
+    && mv /tmp/veloren-server-cli-compressed /tmp/veloren-server-cli
 
 # Stage 2: Minimal runtime image
 FROM debian:stable-slim
