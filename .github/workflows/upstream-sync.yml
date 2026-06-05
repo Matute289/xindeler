@@ -56,6 +56,45 @@ jobs:
         if: steps.check.outputs.has_new_commits == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: |
+            ## Upstream changes to review
+
+            This is an automated **draft PR** for manual review of new commits from the Veloren GitLab upstream.
+
+            **DO NOT merge this PR automatically.** A human must:
+
+            1. Review the diff
+            2. Identify which upstream changes are safe to integrate (bug fixes, asset updates, non-conflicting features)
+            3. Identify which upstream changes conflict with our custom modifications (terrain rendering, Transvoxel, collision, etc.)
+            4. For each conflict: adapt the upstream change to work alongside our code, or discard it if it reverts our work
+            5. Only merge after conflicts are resolved and changes are validated
+
+            ## Our priority areas (never let upstream overwrite these)
+
+            - `voxygen/src/mesh/terrain.rs` — Transvoxel meshing path
+            - `voxygen/src/mesh/transvoxel.rs` — Transvoxel algorithm
+            - `voxygen/src/render/pipelines/smooth_terrain.rs` — smooth pipeline
+            - `assets/voxygen/shaders/smooth-terrain-*.glsl` — smooth shaders
+            - `common/src/terrain/density.rs` — density field
+            - `common/systems/src/phys_smooth.rs` — smooth collision
+            - `voxygen/src/settings/graphics.rs` — TerrainSmoothingMode
+            - `docs/superpowers/` — our internal docs
+
+            ## How to resolve conflicts
+
+            ```bash
+            # 1. Pull the review branch locally
+            git fetch origin
+            git checkout upstream/review-YYYY-MM-DD
+
+            # 2. Create a working integration branch
+            git checkout -b upstream/integrate-YYYY-MM-DD origin/main
+
+            # 3. Merge and resolve conflicts manually, keeping our changes
+            git merge upstream/review-YYYY-MM-DD
+
+            # 4. Push integration branch and update this PR
+            ```
         run: |
           UPSTREAM_SHORT="${{ steps.check.outputs.upstream_short }}"
           DATE=$(date +%Y-%m-%d)
@@ -66,47 +105,7 @@ jobs:
             --head "$BRANCH" \
             --draft \
             --title "⚠️ [Upstream Review] veloren/veloren@${UPSTREAM_SHORT} — ${DATE}" \
-            --body "$(cat <<'EOF'
-## Upstream changes to review
-
-This is an automated **draft PR** for manual review of new commits from the Veloren GitLab upstream.
-
-**DO NOT merge this PR automatically.** A human must:
-
-1. Review the diff
-2. Identify which upstream changes are safe to integrate (bug fixes, asset updates, non-conflicting features)
-3. Identify which upstream changes conflict with our custom modifications (terrain rendering, Transvoxel, collision, etc.)
-4. For each conflict: adapt the upstream change to work alongside our code, or discard it if it reverts our work
-5. Only merge after conflicts are resolved and changes are validated
-
-## Our priority areas (never let upstream overwrite these)
-
-- `voxygen/src/mesh/terrain.rs` — Transvoxel meshing path
-- `voxygen/src/mesh/transvoxel.rs` — Transvoxel algorithm
-- `voxygen/src/render/pipelines/smooth_terrain.rs` — smooth pipeline
-- `assets/voxygen/shaders/smooth-terrain-*.glsl` — smooth shaders
-- `common/src/terrain/density.rs` — density field
-- `common-systems/src/phys_smooth.rs` — smooth collision
-- `voxygen/src/settings/graphics.rs` — TerrainSmoothingMode
-- `docs/superpowers/` — our internal docs
-
-## How to resolve conflicts
-
-```bash
-# 1. Pull the review branch locally
-git fetch origin
-git checkout upstream/review-YYYY-MM-DD
-
-# 2. Create a working integration branch
-git checkout -b upstream/integrate-YYYY-MM-DD origin/main
-
-# 3. Merge and resolve conflicts manually, keeping our changes
-git merge upstream/review-YYYY-MM-DD
-
-# 4. Push integration branch and update this PR
-```
-EOF
-)"
+            --body "$PR_BODY"
 
       - name: Report no new commits
         if: steps.check.outputs.has_new_commits == 'false'
