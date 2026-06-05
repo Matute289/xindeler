@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     build-essential \
     git \
+    mold \
+    clang \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup toolchain install nightly-2025-09-08 \

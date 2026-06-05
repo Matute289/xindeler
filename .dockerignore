@@ -1,1 +1,28 @@
-**/target
+# Build artifacts (33GB — never send to build context)
+**/target/
+
+# Git history
+.git/
+.gitlab/
+
+# Local dev files
+userdata/
+*.log
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Docs and plans (not needed in image)
+docs/
+.claude/
+.superpowers/
+
+# Screenshots and exports
+screenshots/
+img-export/
