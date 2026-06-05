@@ -547,6 +547,21 @@ impl Scene {
         // Get player position.
         let ecs = scene_data.state.ecs();
 
+        // Sync the graphics-side TerrainSmoothingMode into the ECS resource so
+        // that the physics system can read the correct pass count every frame.
+        {
+            use common_state::SmoothTerrainSettings;
+            let passes = match scene_data.terrain_smoothing {
+                TerrainSmoothingMode::Disabled => 0u8,
+                TerrainSmoothingMode::Soft => 1,
+                TerrainSmoothingMode::Smooth => 2,
+                TerrainSmoothingMode::Ultra => 3,
+            };
+            if let Some(mut smooth) = ecs.try_fetch_mut::<SmoothTerrainSettings>() {
+                smooth.passes = passes;
+            }
+        }
+
         let dt = ecs.fetch::<DeltaTime>().0;
 
         self.local_time += dt as f64 * ecs.fetch::<TimeScale>().0;

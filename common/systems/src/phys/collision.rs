@@ -7,7 +7,10 @@ use common::{
     consts::FRIC_GROUND,
     outcome::Outcome,
     resources::DeltaTime,
-    terrain::{Block, BlockKind},
+    terrain::{
+        Block, BlockKind,
+        density::{convert_chunk_to_density_field, sample_isosurface_z, smooth_density_field},
+    },
     uid::Uid,
     vol::{BaseVol, ReadVol},
 };
@@ -18,6 +21,7 @@ use vek::*;
 use super::PhysicsRead;
 
 #[expect(clippy::too_many_lines)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn box_voxel_collision<T: BaseVol<Vox = Block> + ReadVol>(
     cylinder: (f32, f32, f32), // effective collision cylinder
     terrain: &T,
@@ -35,6 +39,7 @@ pub(super) fn box_voxel_collision<T: BaseVol<Vox = Block> + ReadVol>(
     ori: &Ori,
     // Get the proportion of surface friction that should be applied based on the current velocity
     friction_factor: impl Fn(Vec3<f32>) -> f32,
+    smooth_passes: u8,
 ) {
     // We cap out scale at 10.0 to prevent an enormous amount of lag
     let scale = read.scales.get(entity).map_or(1.0, |s| s.0.min(10.0));
@@ -316,6 +321,29 @@ pub(super) fn box_voxel_collision<T: BaseVol<Vox = Block> + ReadVol>(
             .get(Vec3::new(pos.0.x, pos.0.y, pos.0.z - 0.01).map(|e| e.floor() as i32))
             .ok()
             .copied();
+    }
+
+    // Smooth floor correction: snap entity Z to the Transvoxel isosurface to match visual mesh.
+    if smooth_passes > 0 && physics_state.on_ground.is_some() {
+        let foot = pos.0;
+        let sample_offset = Vec3::new(
+            (foot.x - 1.0).floor() as i32,
+            (foot.y - 1.0).floor() as i32,
+            (foot.z - 3.0).floor() as i32,
+        );
+        let sample_size = Vec3::new(3u32, 3, 5);
+        let mut density = convert_chunk_to_density_field(terrain, sample_offset, sample_size);
+        smooth_density_field(&mut density, smooth_passes);
+        let fx = (foot.x - sample_offset.x as f32).round() as i32;
+        let fy = (foot.y - sample_offset.y as f32).round() as i32;
+        let fz = (foot.z - sample_offset.z as f32).ceil() as i32;
+        if let Some(smooth_z_local) = sample_isosurface_z(&density, fx, fy, fz) {
+            let smooth_z_world = smooth_z_local + sample_offset.z as f32;
+            let block_floor = pos.0.z;
+            if smooth_z_world >= block_floor - 0.05 && smooth_z_world - block_floor < 1.0 {
+                pos.0.z = smooth_z_world;
+            }
+        }
     }
 
     // Find liquid immersion and wall collision all in one round of iteration
