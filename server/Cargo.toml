@@ -15,6 +15,7 @@ persistent_world = []
 hot-reloading = ["common/hot-reloading"]
 hot-agent = ["server-agent/use-dyn-lib"]
 hot-site = ["world/use-dyn-lib"]
+terrain-hires = ["common/terrain-hires"]
 
 default = ["worldgen", "plugins", "persistent_world", "simd"]
 
