@@ -526,7 +526,7 @@ impl Airships {
     ];
     /// The distance from the docking position where the airship starts the
     /// transition flight phase.
-    const DOCKING_TRANSITION_OFFSET: f32 = 175.0;
+    const DOCKING_TRANSITION_OFFSET: f32 = 175.0 * HIRES_SCALE;
     /// The vector from the dock alignment point when the airship is docked on
     /// the port side.
     const DOCK_ALIGN_POS_PORT: Vec2<f32> =
@@ -540,7 +540,7 @@ impl Airships {
     // should be used.
     /// The absolute offset from the airship's position to the docking alignment
     /// point on the X axis. The airship is assumed to be facing positive Y.
-    const DOCK_ALIGN_X: f32 = 18.0;
+    const DOCK_ALIGN_X: f32 = 18.0 * HIRES_SCALE;
     /// The offset from the airship's position to the docking alignment point on
     /// the Y axis. The airship is assumed to be facing positive Y.
     /// This is positive if the docking alignment point is in front of the
@@ -548,7 +548,7 @@ impl Airships {
     const DOCK_ALIGN_Y: f32 = 1.0;
     /// The minimum distance from the route leg midpoint to the world
     /// boundaries.
-    const ROUTE_LEG_MIDPOINT_MARGIN: f32 = 200.0;
+    const ROUTE_LEG_MIDPOINT_MARGIN: f32 = 200.0 * HIRES_SCALE;
     /// The angle for calculating the route leg midpoint.
     const ROUTE_LEG_MIDPOINT_OFFSET_RADIANS: f32 = 0.087266;
 

@@ -12,13 +12,13 @@ pub const HIRES_SCALE: f32 = 2.0;
 pub const HIRES_SCALE: f32 = 1.0;
 
 // The limit on distance between the entity and a collectible (squared)
-pub const MAX_PICKUP_RANGE: f32 = 5.0;
-pub const MAX_MOUNT_RANGE: f32 = 5.0;
-pub const MAX_SPRITE_MOUNT_RANGE: f32 = 2.0;
-pub const MAX_TRADE_RANGE: f32 = 5.0;
-pub const MAX_NPCINTERACT_RANGE: f32 = 8.0;
-pub const MAX_INTERACT_RANGE: f32 = 5.0;
-pub const MAX_WAYPOINT_RANGE: f32 = 4.0;
+pub const MAX_PICKUP_RANGE: f32 = 5.0 * HIRES_SCALE;
+pub const MAX_MOUNT_RANGE: f32 = 5.0 * HIRES_SCALE;
+pub const MAX_SPRITE_MOUNT_RANGE: f32 = 2.0 * HIRES_SCALE;
+pub const MAX_TRADE_RANGE: f32 = 5.0 * HIRES_SCALE;
+pub const MAX_NPCINTERACT_RANGE: f32 = 8.0 * HIRES_SCALE;
+pub const MAX_INTERACT_RANGE: f32 = 5.0 * HIRES_SCALE;
+pub const MAX_WAYPOINT_RANGE: f32 = 4.0 * HIRES_SCALE;
 // Player-imperceptible offset to ensure campfire healing is always
 // within waypoint range (may not be necessary if floating point handling is
 // reliable)
@@ -47,9 +47,9 @@ pub const HUMAN_DENSITY: f32 = 990.0; // value we use to make humanoids gently f
 pub const MIN_RECOMMENDED_RAYON_THREADS: usize = 2;
 pub const MIN_RECOMMENDED_TOKIO_THREADS: usize = 2;
 
-pub const SOUND_TRAVEL_DIST_PER_VOLUME: f32 = 3.0;
+pub const SOUND_TRAVEL_DIST_PER_VOLUME: f32 = 3.0 * HIRES_SCALE;
 
-pub const TELEPORTER_RADIUS: f32 = 3.;
+pub const TELEPORTER_RADIUS: f32 = 3. * HIRES_SCALE;
 
 // Map settings
 pub const DAY_LENGTH_DEFAULT: f64 = 30.0;
