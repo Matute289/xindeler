@@ -375,7 +375,7 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 | Fase | Estado | Notas |
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
-| Fase 2 — Escala de bloques | 🔄 En progreso | Feature flag + constantes base listas; Task 7 (NPCs, world gen detallado) pendiente |
+| Fase 2 — Escala de bloques | 🔄 En progreso | Task 7 completo (base_accel, dimensions, server vd, world gen, interaction ranges); solo save migration pendiente |
 | Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Task 7 de Fase 2 |
 
 Actualizar esta tabla a medida que avanza la implementación:
@@ -424,12 +424,13 @@ source "$HOME/.cargo/env"
 cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
 ```
 
-**Task 7 — Ongoing audit (pendiente):**
-- `base_accel()` por especie en `common/src/states/utils.rs` (~100 valores, todos en blocks/s²)
-- Hitboxes de criaturas: todas las `Vec3::new(x,y,z)` en `common/src/comp/body/mod.rs` dimensions()
-- World gen detallado: `world/src/sim/mod.rs`, `world/src/layer/`, `world/src/site/`
-- Server view distance en `server/src/settings.rs`
-- Save migration: coordenadas de bloque en `userdata/` necesitan ×2 al cargar con terrain-hires
+**Task 7 — Completado (2026-06-05, HEAD: 9881ad3558):**
+- ✅ `base_accel()` todas las especies × HIRES_SCALE (commit 0d7c2a4b64)
+- ✅ `dimensions()` todos los body types × HIRES_SCALE (commit 197ba04045)
+- ✅ server `max_view_distance` × HIRES_SCALE + server/Cargo.toml feature (commit 075ed503be)
+- ✅ World gen: cave.rs, scatter.rs, column.rs, airship_travel.rs × HIRES_SCALE (commits c74b4f3fee + 9881ad3558)
+- ✅ Interaction ranges: MAX_PICKUP_RANGE, MAX_MOUNT_RANGE, etc. × HIRES_SCALE (commit 9881ad3558)
+- ❌ Save migration: coordenadas de bloque en `userdata/` necesitan ×2 al cargar con terrain-hires (pendiente — plan separado)
 
 **Plan completo:** `docs/superpowers/plans/2026-06-05-fase2-block-scale.md`
 
