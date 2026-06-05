@@ -573,672 +573,672 @@ impl Body {
         match self {
             Body::BipedLarge(body) => match body.species {
                 biped_large::Species::Cyclops => {
-                    Vec3::new(5.6, 3.0, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(5.6, 3.0, 8.0)
                 },
                 biped_large::Species::Dullahan => {
-                    Vec3::new(4.6, 3.0, 5.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 5.5)
                 },
                 biped_large::Species::Mightysaurok => {
-                    Vec3::new(4.0, 3.0, 3.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 3.0, 3.4)
                 },
                 biped_large::Species::Mindflayer => {
-                    Vec3::new(4.4, 3.0, 8.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.4, 3.0, 8.5)
                 },
                 biped_large::Species::Minotaur => {
-                    Vec3::new(6.0, 3.0, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(6.0, 3.0, 8.0)
                 },
                 biped_large::Species::Occultsaurok => {
-                    Vec3::new(4.0, 3.0, 3.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 3.0, 3.4)
                 },
                 biped_large::Species::Slysaurok => {
-                    Vec3::new(4.0, 3.0, 3.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 3.0, 3.4)
                 },
                 biped_large::Species::Werewolf => {
-                    Vec3::new(4.0, 3.0, 3.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 3.0, 3.5)
                 },
                 biped_large::Species::Harvester => {
-                    Vec3::new(4.6, 3.0, 5.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 5.4)
                 },
                 biped_large::Species::Cultistwarlord => {
-                    Vec3::new(3.0, 3.0, 4.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.0, 3.0, 4.5)
                 },
                 biped_large::Species::Cultistwarlock => {
-                    Vec3::new(3.0, 3.0, 3.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.0, 3.0, 3.5)
                 },
                 biped_large::Species::Huskbrute => {
-                    Vec3::new(4.6, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 5.0)
                 },
                 biped_large::Species::Tursus => {
-                    Vec3::new(4.0, 3.0, 4.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 3.0, 4.0)
                 },
                 biped_large::Species::Gigasfrost => {
-                    Vec3::new(6.0, 3.0, 11.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(6.0, 3.0, 11.0)
                 },
                 biped_large::Species::Gigasfire => {
-                    Vec3::new(6.0, 3.0, 11.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(6.0, 3.0, 11.0)
                 },
                 biped_large::Species::AdletElder => {
-                    Vec3::new(3.5, 3.0, 4.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.5, 3.0, 4.0)
                 },
                 biped_large::Species::SeaBishop => {
-                    Vec3::new(3.7, 2.5, 3.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.7, 2.5, 3.4)
                 },
                 biped_large::Species::HaniwaGeneral => {
-                    Vec3::new(3.3, 2.3, 3.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.3, 2.3, 3.6)
                 },
                 biped_large::Species::TerracottaBesieger => {
-                    Vec3::new(3.8, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.8, 3.0, 5.0)
                 },
                 biped_large::Species::TerracottaDemolisher => {
-                    Vec3::new(3.3, 2.5, 3.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.3, 2.5, 3.6)
                 },
                 biped_large::Species::TerracottaPunisher => {
-                    Vec3::new(3.3, 2.5, 3.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.3, 2.5, 3.8)
                 },
                 biped_large::Species::TerracottaPursuer => {
-                    Vec3::new(3.3, 2.5, 3.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.3, 2.5, 3.8)
                 },
                 biped_large::Species::Cursekeeper => {
-                    Vec3::new(3.8, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.8, 3.0, 5.0)
                 },
                 biped_large::Species::Forgemaster => {
-                    Vec3::new(6.5, 5.0, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(6.5, 5.0, 8.0)
                 },
                 biped_large::Species::Strigoi => {
-                    Vec3::new(3.8, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.8, 3.0, 5.0)
                 },
                 biped_large::Species::Executioner => {
-                    Vec3::new(2.8, 2.8, 4.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.8, 2.8, 4.7)
                 },
                 biped_large::Species::Tidalwarrior => {
-                    Vec3::new(7.0, 8.2, 6.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(7.0, 8.2, 6.8)
                 },
                 biped_large::Species::Cavetroll => {
-                    Vec3::new(4.6, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 5.0)
                 },
                 biped_large::Species::Mountaintroll => {
-                    Vec3::new(4.6, 3.0, 5.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 5.0)
                 },
                 biped_large::Species::Swamptroll => {
-                    Vec3::new(4.6, 3.0, 4.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 4.5)
                 },
-                biped_large::Species::Yeti => Vec3::new(4.6, 3.0, 4.8) * crate::consts::HIRES_SCALE,
+                biped_large::Species::Yeti => Vec3::new(4.6, 3.0, 4.8),
                 biped_large::Species::Blueoni => {
-                    Vec3::new(4.6, 3.0, 4.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 4.8)
                 },
                 biped_large::Species::Redoni => {
-                    Vec3::new(4.6, 3.0, 4.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 4.5)
                 },
                 biped_large::Species::Ogre => match body.body_type {
                     biped_large::BodyType::Male => {
-                        Vec3::new(4.6, 3.0, 5.6) * crate::consts::HIRES_SCALE
+                        Vec3::new(4.6, 3.0, 5.6)
                     },
                     biped_large::BodyType::Female => {
-                        Vec3::new(4.6, 3.0, 5.9) * crate::consts::HIRES_SCALE
+                        Vec3::new(4.6, 3.0, 5.9)
                     },
                 },
                 biped_large::Species::Wendigo => {
-                    Vec3::new(4.6, 3.0, 6.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.6, 3.0, 6.0)
                 },
             },
             Body::BipedSmall(body) => match body.species {
                 biped_small::Species::Gnarling => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 biped_small::Species::Haniwa => {
-                    Vec3::new(1.3, 1.0, 2.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 2.2)
                 },
                 biped_small::Species::Adlet => {
-                    Vec3::new(1.3, 1.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 2.0)
                 },
                 biped_small::Species::Sahagin => {
-                    Vec3::new(1.3, 2.0, 1.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 2.0, 1.7)
                 },
                 biped_small::Species::Myrmidon => {
-                    Vec3::new(1.3, 1.0, 2.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 2.2)
                 },
-                biped_small::Species::Husk => Vec3::new(1.7, 0.7, 2.7) * crate::consts::HIRES_SCALE,
+                biped_small::Species::Husk => Vec3::new(1.7, 0.7, 2.7),
                 biped_small::Species::Boreal => {
-                    Vec3::new(2.6, 2.0, 4.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.6, 2.0, 4.6)
                 },
                 biped_small::Species::Ashen => {
-                    Vec3::new(1.3, 2.0, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 2.0, 2.5)
                 },
                 biped_small::Species::Bushly => {
-                    Vec3::new(1.2, 1.3, 1.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.3, 1.6)
                 },
                 biped_small::Species::Cactid => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 biped_small::Species::Irrwurz => {
-                    Vec3::new(1.5, 1.5, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.5, 1.5, 2.0)
                 },
                 biped_small::Species::IronDwarf => {
-                    Vec3::new(1.3, 2.0, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 2.0, 2.5)
                 },
                 biped_small::Species::ShamanicSpirit => {
-                    Vec3::new(1.3, 2.0, 2.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 2.0, 2.3)
                 },
                 biped_small::Species::Jiangshi => {
-                    Vec3::new(1.3, 1.8, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.8, 2.5)
                 },
                 biped_small::Species::Flamekeeper => {
-                    Vec3::new(1.5, 1.5, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.5, 1.5, 2.5)
                 },
                 biped_small::Species::TreasureEgg => {
-                    Vec3::new(1.1, 1.1, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.1, 1.1, 1.4)
                 },
                 biped_small::Species::GnarlingChieftain => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 biped_small::Species::BloodmoonHeiress => {
-                    Vec3::new(3.5, 3.5, 5.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.5, 3.5, 5.5)
                 },
                 biped_small::Species::Bloodservant => {
-                    Vec3::new(1.3, 1.8, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.8, 2.5)
                 },
                 biped_small::Species::Harlequin => {
-                    Vec3::new(1.3, 2.0, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 2.0, 2.5)
                 },
                 biped_small::Species::GoblinThug => {
-                    Vec3::new(1.3, 1.0, 1.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 1.6)
                 },
                 biped_small::Species::GoblinChucker => {
-                    Vec3::new(1.3, 1.0, 1.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 1.6)
                 },
                 biped_small::Species::GoblinRuffian => {
-                    Vec3::new(1.3, 1.0, 1.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.0, 1.6)
                 },
                 biped_small::Species::GreenLegoom => {
-                    Vec3::new(0.9, 0.8, 1.15) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.9, 0.8, 1.15)
                 },
                 biped_small::Species::OchreLegoom => {
-                    Vec3::new(0.9, 0.8, 1.15) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.9, 0.8, 1.15)
                 },
                 biped_small::Species::PurpleLegoom => {
-                    Vec3::new(0.9, 0.8, 1.15) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.9, 0.8, 1.15)
                 },
                 biped_small::Species::RedLegoom => {
-                    Vec3::new(0.9, 0.8, 1.15) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.9, 0.8, 1.15)
                 },
                 biped_small::Species::UmberLegoom => {
-                    Vec3::new(0.9, 0.8, 1.15) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.9, 0.8, 1.15)
                 },
                 biped_small::Species::Gnome => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 // TODO: doublecheck, derived from default
                 biped_small::Species::Mandragora => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 biped_small::Species::Kappa => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
                 biped_small::Species::Gnoll => {
-                    Vec3::new(1.0, 0.75, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 0.75, 1.4)
                 },
             },
             Body::BirdLarge(body) => match body.species {
                 bird_large::Species::Cockatrice => {
-                    Vec3::new(2.5, 5.5, 3.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 5.5, 3.5)
                 },
-                bird_large::Species::Roc => Vec3::new(2.2, 7.5, 4.0) * crate::consts::HIRES_SCALE,
+                bird_large::Species::Roc => Vec3::new(2.2, 7.5, 4.0),
                 bird_large::Species::FlameWyvern
                 | bird_large::Species::FrostWyvern
                 | bird_large::Species::CloudWyvern
                 | bird_large::Species::SeaWyvern
                 | bird_large::Species::WealdWyvern => {
-                    Vec3::new(2.5, 9.0, 4.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 9.0, 4.5)
                 },
                 bird_large::Species::Phoenix => {
-                    Vec3::new(2.0, 6.0, 4.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 6.0, 4.4)
                 },
             },
             Body::Dragon(body) => match body.species {
                 dragon::Species::Reddragon => {
-                    Vec3::new(16.0, 10.0, 16.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(16.0, 10.0, 16.0)
                 },
             },
             Body::FishMedium(body) => match body.species {
                 fish_medium::Species::Marlin => {
-                    Vec3::new(0.5, 2.0, 0.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.5, 2.0, 0.8)
                 },
                 fish_medium::Species::Icepike => {
-                    Vec3::new(0.5, 2.0, 0.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.5, 2.0, 0.8)
                 },
             },
             Body::FishSmall(body) => match body.species {
                 fish_small::Species::Clownfish => {
-                    Vec3::new(0.3, 1.2, 0.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.3, 1.2, 0.6)
                 },
                 fish_small::Species::Piranha => {
-                    Vec3::new(0.3, 1.2, 0.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.3, 1.2, 0.6)
                 },
             },
             Body::Golem(body) => match body.species {
-                golem::Species::CoralGolem => Vec3::new(3.0, 5.0, 4.0) * crate::consts::HIRES_SCALE,
-                golem::Species::ClayGolem => Vec3::new(6.8, 3.5, 7.5) * crate::consts::HIRES_SCALE,
+                golem::Species::CoralGolem => Vec3::new(3.0, 5.0, 4.0),
+                golem::Species::ClayGolem => Vec3::new(6.8, 3.5, 7.5),
                 golem::Species::AncientEffigy => {
-                    Vec3::new(2.5, 2.5, 3.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 2.5, 3.8)
                 },
-                golem::Species::Mogwai => Vec3::new(2.5, 2.5, 3.8) * crate::consts::HIRES_SCALE,
+                golem::Species::Mogwai => Vec3::new(2.5, 2.5, 3.8),
                 golem::Species::StoneGolem => {
-                    Vec3::new(10.0, 4.5, 9.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(10.0, 4.5, 9.0)
                 },
-                golem::Species::Treant => Vec3::new(7.8, 4.5, 5.8) * crate::consts::HIRES_SCALE,
-                golem::Species::WoodGolem => Vec3::new(5.8, 4.5, 7.2) * crate::consts::HIRES_SCALE,
+                golem::Species::Treant => Vec3::new(7.8, 4.5, 5.8),
+                golem::Species::WoodGolem => Vec3::new(5.8, 4.5, 7.2),
                 golem::Species::Gravewarden => {
-                    Vec3::new(7.3, 4.5, 7.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(7.3, 4.5, 7.7)
                 },
-                golem::Species::IronGolem => Vec3::new(9.8, 4.5, 9.4) * crate::consts::HIRES_SCALE,
+                golem::Species::IronGolem => Vec3::new(9.8, 4.5, 9.4),
             },
             Body::Humanoid(humanoid) => {
                 let height = humanoid.height();
-                Vec3::new(height / 1.7, 0.8 * crate::consts::HIRES_SCALE, height)
+                Vec3::new(height / 1.7, 0.8, height)
             },
             Body::Object(object) => object.dimensions(),
             Body::Item(item) => item.dimensions(),
             Body::QuadrupedMedium(body) => match body.species {
                 quadruped_medium::Species::Akhlut => {
-                    Vec3::new(2.5, 7.0, 3.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 7.0, 3.0)
                 },
                 quadruped_medium::Species::Barghest => {
-                    Vec3::new(2.0, 4.4, 2.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.4, 2.7)
                 },
                 quadruped_medium::Species::Bear => {
-                    Vec3::new(2.0, 3.8, 3.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.8, 3.0)
                 },
                 quadruped_medium::Species::Catoblepas => {
-                    Vec3::new(2.0, 4.0, 2.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.0, 2.3)
                 },
                 quadruped_medium::Species::Cattle => {
-                    Vec3::new(2.0, 3.6, 2.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.6, 2.4)
                 },
                 quadruped_medium::Species::Deer => {
-                    Vec3::new(2.0, 3.0, 2.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.2)
                 },
                 quadruped_medium::Species::Dreadhorn => {
-                    Vec3::new(3.5, 7.0, 4.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.5, 7.0, 4.0)
                 },
                 quadruped_medium::Species::Frostfang => {
-                    Vec3::new(1.5, 3.0, 1.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.5, 3.0, 1.5)
                 },
                 quadruped_medium::Species::Grolgar => {
-                    Vec3::new(2.0, 4.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.0, 2.0)
                 },
                 quadruped_medium::Species::Highland => {
-                    Vec3::new(2.0, 3.6, 2.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.6, 2.4)
                 },
                 quadruped_medium::Species::Horse => {
-                    Vec3::new(1.6, 3.0, 2.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.6, 3.0, 2.4)
                 },
                 quadruped_medium::Species::Lion => {
-                    Vec3::new(2.0, 3.3, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.3, 2.0)
                 },
                 quadruped_medium::Species::Moose => {
-                    Vec3::new(2.0, 4.0, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.0, 2.5)
                 },
                 quadruped_medium::Species::Bristleback => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Roshwalr => {
-                    Vec3::new(3.4, 5.2, 3.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.4, 5.2, 3.7)
                 },
                 quadruped_medium::Species::Saber => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Tarasque => {
-                    Vec3::new(2.0, 4.0, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.0, 2.6)
                 },
                 quadruped_medium::Species::Yak => {
-                    Vec3::new(2.0, 3.6, 3.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.6, 3.0)
                 },
                 quadruped_medium::Species::Mammoth => {
-                    Vec3::new(7.5, 11.5, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(7.5, 11.5, 8.0)
                 },
                 quadruped_medium::Species::Elephant => {
-                    Vec3::new(7.5, 11.5, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(7.5, 11.5, 8.0)
                 },
                 quadruped_medium::Species::Ngoubou => {
-                    Vec3::new(2.0, 3.2, 2.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.2, 2.4)
                 },
                 quadruped_medium::Species::Llama => {
-                    Vec3::new(2.0, 2.5, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 2.5, 2.6)
                 },
                 quadruped_medium::Species::ClaySteed => {
-                    Vec3::new(2.2, 4.8, 4.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.2, 4.8, 4.0)
                 },
                 quadruped_medium::Species::Alpaca => {
-                    Vec3::new(2.0, 2.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 2.0, 2.0)
                 },
                 quadruped_medium::Species::Camel => {
-                    Vec3::new(2.0, 4.0, 3.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 4.0, 3.5)
                 },
                 quadruped_medium::Species::Wolf => {
-                    Vec3::new(1.25, 3.0, 1.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.25, 3.0, 1.8)
                 },
                 // TODO: doublecheck, derived from default
                 quadruped_medium::Species::Tiger => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Tuskram => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Mouflon => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Bonerattler => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Hirdrasil => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Donkey => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Zebra => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Antelope => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Kelpie => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Darkhound => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Panda => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
                 quadruped_medium::Species::Snowleopard => {
-                    Vec3::new(2.0, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.0)
                 },
             },
             Body::QuadrupedSmall(body) => match body.species {
                 quadruped_small::Species::Batfox => {
-                    Vec3::new(1.4, 1.7, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.4, 1.7, 1.3)
                 },
                 quadruped_small::Species::Holladon => {
-                    Vec3::new(1.3, 1.9, 1.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.9, 1.5)
                 },
                 quadruped_small::Species::Hyena => {
-                    Vec3::new(1.2, 1.4, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.4, 1.3)
                 },
                 quadruped_small::Species::Truffler => {
-                    Vec3::new(1.2, 1.8, 2.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.8, 2.2)
                 },
                 quadruped_small::Species::MossySnail => {
-                    Vec3::new(1.4, 1.4, 1.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.4, 1.4, 1.2)
                 },
                 quadruped_small::Species::Gecko => {
-                    Vec3::new(1.2, 1.2, 0.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 0.5)
                 },
                 // TODO: doublecheck, derived from default
                 quadruped_small::Species::Pig => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Fox => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Sheep => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Boar => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Jackalope => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Skunk => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Cat => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Raccoon => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Quokka => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Goat => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Rabbit => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Frog => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Rat => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Axolotl => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Turtle => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Squirrel => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Fungome => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Porcupine => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Beaver => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Hare => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Dog => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::Seal => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 quadruped_small::Species::TreantSapling => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
             },
             Body::QuadrupedLow(body) => match body.species {
                 quadruped_low::Species::Asp => {
-                    Vec3::new(2.0, 3.0, 1.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 1.7)
                 },
                 quadruped_low::Species::Crocodile => {
-                    Vec3::new(1.0, 2.8, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 2.8, 1.3)
                 },
                 quadruped_low::Species::SeaCrocodile => {
-                    Vec3::new(1.2, 4.5, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 4.5, 1.3)
                 },
                 quadruped_low::Species::Deadwood => {
-                    Vec3::new(1.3, 1.3, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.3, 1.4)
                 },
                 quadruped_low::Species::Hakulaq => {
-                    Vec3::new(1.8, 3.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.8, 3.0, 2.0)
                 },
                 quadruped_low::Species::Dagon => {
-                    Vec3::new(3.0, 6.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.0, 6.0, 2.0)
                 },
                 quadruped_low::Species::Icedrake => {
-                    Vec3::new(2.0, 5.5, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 5.5, 2.5)
                 },
                 quadruped_low::Species::Lavadrake => {
-                    Vec3::new(2.0, 5.5, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 5.5, 2.5)
                 },
                 quadruped_low::Species::Mossdrake => {
-                    Vec3::new(2.0, 5.5, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 5.5, 2.5)
                 },
                 quadruped_low::Species::Maneater => {
-                    Vec3::new(2.0, 3.7, 4.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.7, 4.0)
                 },
                 quadruped_low::Species::Monitor => {
-                    Vec3::new(1.4, 3.2, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.4, 3.2, 1.3)
                 },
                 quadruped_low::Species::Pangolin => {
-                    Vec3::new(1.0, 2.6, 1.1) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 2.6, 1.1)
                 },
                 quadruped_low::Species::Rocksnapper => {
-                    Vec3::new(2.5, 3.5, 2.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 3.5, 2.9)
                 },
                 quadruped_low::Species::Rootsnapper => {
-                    Vec3::new(2.5, 3.5, 2.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 3.5, 2.9)
                 },
                 quadruped_low::Species::Reefsnapper => {
-                    Vec3::new(2.5, 3.5, 2.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.5, 3.5, 2.9)
                 },
                 quadruped_low::Species::Sandshark => {
-                    Vec3::new(2.1, 4.3, 1.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.1, 4.3, 1.7)
                 },
                 quadruped_low::Species::Basilisk => {
-                    Vec3::new(2.7, 6.0, 2.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.7, 6.0, 2.9)
                 },
                 quadruped_low::Species::Salamander => {
-                    Vec3::new(1.7, 4.0, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.7, 4.0, 1.3)
                 },
                 quadruped_low::Species::Elbst => {
-                    Vec3::new(1.7, 4.0, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.7, 4.0, 1.3)
                 },
                 quadruped_low::Species::Tortoise => {
-                    Vec3::new(1.7, 2.7, 1.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.7, 2.7, 1.5)
                 },
                 quadruped_low::Species::Driggle => {
-                    Vec3::new(1.6, 2.7, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.6, 2.7, 1.0)
                 },
                 quadruped_low::Species::Snaretongue => {
-                    Vec3::new(2.0, 2.8, 1.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 2.8, 1.6)
                 },
                 quadruped_low::Species::Hydra => {
-                    Vec3::new(3.0, 5.0, 2.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.0, 5.0, 2.8)
                 },
                 // TODO: doublecheck, derived from default
                 quadruped_low::Species::Alligator => {
-                    Vec3::new(1.0, 1.6, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 1.6, 1.3)
                 },
             },
             Body::Ship(ship) => ship.dimensions(),
             Body::Theropod(body) => match body.species {
                 theropod::Species::Archaeos => {
-                    Vec3::new(4.5, 8.5, 8.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.5, 8.5, 8.0)
                 },
-                theropod::Species::Ntouka => Vec3::new(4.5, 9.0, 6.6) * crate::consts::HIRES_SCALE,
-                theropod::Species::Odonto => Vec3::new(4.5, 8.0, 6.6) * crate::consts::HIRES_SCALE,
+                theropod::Species::Ntouka => Vec3::new(4.5, 9.0, 6.6),
+                theropod::Species::Odonto => Vec3::new(4.5, 8.0, 6.6),
                 theropod::Species::Dodarock => {
-                    Vec3::new(2.0, 3.0, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.6)
                 },
                 theropod::Species::Sandraptor => {
-                    Vec3::new(2.0, 3.0, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.6)
                 },
                 theropod::Species::Snowraptor => {
-                    Vec3::new(2.0, 3.0, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.6)
                 },
                 theropod::Species::Sunlizard => {
-                    Vec3::new(2.0, 3.6, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.6, 2.5)
                 },
                 theropod::Species::Woodraptor => {
-                    Vec3::new(2.0, 3.0, 2.6) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 3.0, 2.6)
                 },
-                theropod::Species::Yale => Vec3::new(2.0, 3.2, 4.0) * crate::consts::HIRES_SCALE,
-                theropod::Species::Axebeak => Vec3::new(2.0, 3.6, 3.0) * crate::consts::HIRES_SCALE,
+                theropod::Species::Yale => Vec3::new(2.0, 3.2, 4.0),
+                theropod::Species::Axebeak => Vec3::new(2.0, 3.6, 3.0),
             },
             Body::Arthropod(body) => match body.species {
                 arthropod::Species::Tarantula => {
-                    Vec3::new(4.0, 4.0, 1.8) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 4.0, 1.8)
                 },
                 arthropod::Species::Blackwidow => {
-                    Vec3::new(4.0, 4.0, 2.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 4.0, 2.0)
                 },
                 arthropod::Species::Antlion => {
-                    Vec3::new(4.0, 4.0, 2.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 4.0, 2.2)
                 },
                 arthropod::Species::Hornbeetle => {
-                    Vec3::new(3.2, 3.2, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 3.2, 1.3)
                 },
                 arthropod::Species::Leafbeetle => {
-                    Vec3::new(2.4, 2.8, 1.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.4, 2.8, 1.2)
                 },
                 arthropod::Species::Stagbeetle => {
-                    Vec3::new(3.2, 3.2, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 3.2, 1.3)
                 },
-                arthropod::Species::Weevil => Vec3::new(2.2, 2.4, 1.1) * crate::consts::HIRES_SCALE,
+                arthropod::Species::Weevil => Vec3::new(2.2, 2.4, 1.1),
                 arthropod::Species::Cavespider => {
-                    Vec3::new(4.0, 4.0, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(4.0, 4.0, 1.4)
                 },
                 arthropod::Species::Moltencrawler => {
-                    Vec3::new(3.2, 4.0, 1.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 4.0, 1.5)
                 },
                 arthropod::Species::Mosscrawler => {
-                    Vec3::new(3.2, 4.0, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 4.0, 1.4)
                 },
                 arthropod::Species::Sandcrawler => {
-                    Vec3::new(3.2, 4.0, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 4.0, 1.4)
                 },
                 arthropod::Species::Dagonite => {
-                    Vec3::new(3.2, 4.7, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.2, 4.7, 1.4)
                 },
                 arthropod::Species::Emberfly => {
-                    Vec3::new(1.3, 1.5, 0.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.3, 1.5, 0.9)
                 },
             },
             Body::BirdMedium(body) => match body.species {
                 bird_medium::Species::SnowyOwl => {
-                    Vec3::new(1.2, 1.2, 0.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 0.9)
                 },
                 bird_medium::Species::HornedOwl => {
-                    Vec3::new(1.2, 1.2, 0.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 0.9)
                 },
-                bird_medium::Species::Duck => Vec3::new(0.8, 1.3, 0.8) * crate::consts::HIRES_SCALE,
+                bird_medium::Species::Duck => Vec3::new(0.8, 1.3, 0.8),
                 bird_medium::Species::Cockatiel => {
-                    Vec3::new(0.8, 1.0, 0.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.8, 1.0, 0.7)
                 },
                 bird_medium::Species::Chicken => {
-                    Vec3::new(1.2, 1.5, 0.9) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.5, 0.9)
                 },
-                bird_medium::Species::Bat => Vec3::new(2.0, 1.8, 1.3) * crate::consts::HIRES_SCALE,
+                bird_medium::Species::Bat => Vec3::new(2.0, 1.8, 1.3),
                 bird_medium::Species::Penguin => {
-                    Vec3::new(1.0, 1.0, 1.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 1.0, 1.2)
                 },
                 bird_medium::Species::Goose => {
-                    Vec3::new(1.5, 1.5, 1.1) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.5, 1.5, 1.1)
                 },
                 bird_medium::Species::Peacock => {
-                    Vec3::new(1.6, 1.8, 1.4) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.6, 1.8, 1.4)
                 },
                 bird_medium::Species::Eagle => {
-                    Vec3::new(1.5, 2.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.5, 2.2, 1.0)
                 },
                 bird_medium::Species::Parrot => {
-                    Vec3::new(1.2, 1.5, 1.1) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.5, 1.1)
                 },
-                bird_medium::Species::Crow => Vec3::new(1.0, 1.2, 0.8) * crate::consts::HIRES_SCALE,
-                bird_medium::Species::Dodo => Vec3::new(1.2, 1.8, 1.1) * crate::consts::HIRES_SCALE,
+                bird_medium::Species::Crow => Vec3::new(1.0, 1.2, 0.8),
+                bird_medium::Species::Dodo => Vec3::new(1.2, 1.8, 1.1),
                 bird_medium::Species::Parakeet => {
-                    Vec3::new(0.8, 0.9, 0.7) * crate::consts::HIRES_SCALE
+                    Vec3::new(0.8, 0.9, 0.7)
                 },
                 bird_medium::Species::Puffin => {
-                    Vec3::new(1.0, 1.0, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.0, 1.0, 1.0)
                 },
                 bird_medium::Species::Toucan => {
-                    Vec3::new(2.1, 1.1, 1.2) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.1, 1.1, 1.2)
                 },
                 bird_medium::Species::BloodmoonBat => {
-                    Vec3::new(3.5, 3.5, 2.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(3.5, 3.5, 2.5)
                 },
                 bird_medium::Species::VampireBat => {
-                    Vec3::new(2.0, 1.8, 1.3) * crate::consts::HIRES_SCALE
+                    Vec3::new(2.0, 1.8, 1.3)
                 },
             },
             Body::Crustacean(body) => match body.species {
-                crustacean::Species::Crab => Vec3::new(1.2, 1.2, 0.7) * crate::consts::HIRES_SCALE,
+                crustacean::Species::Crab => Vec3::new(1.2, 1.2, 0.7),
                 crustacean::Species::SoldierCrab => {
-                    Vec3::new(1.2, 1.2, 1.0) * crate::consts::HIRES_SCALE
+                    Vec3::new(1.2, 1.2, 1.0)
                 },
                 crustacean::Species::Karkatha => {
-                    Vec3::new(10.0, 10.0, 7.5) * crate::consts::HIRES_SCALE
+                    Vec3::new(10.0, 10.0, 7.5)
                 },
             },
             Body::Plugin(body) => body.dimensions(),
