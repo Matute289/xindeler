@@ -374,13 +374,87 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 
 | Fase | Estado | Notas |
 |---|---|---|
-| Fase 1 — Transvoxel + colisión | 🔄 En progreso | Pipeline + tablas + atlas básico completos; pendiente: SmoothTerrainPipeline |
-| Fase 1 — SmoothTerrainVertex pipeline | ✅ Completa | Pipeline, shaders, drawer, mesh emission — all wired and verified |
-| Fase 2 — Escala de bloques | ⬜ No iniciada | Esperar Fase 1 estable |
-| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse después de Fase 1 |
+| Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
+| Fase 2 — Escala de bloques | 🔄 En progreso | Feature flag + constantes base listas; Task 7 (NPCs, world gen detallado) pendiente |
+| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Task 7 de Fase 2 |
 
 Actualizar esta tabla a medida que avanza la implementación:
 - ⬜ No iniciada
 - 🔄 En progreso
 - ✅ Completa
 - ⏸ Pausada
+
+---
+
+## Estado detallado al 2026-06-05
+
+### Fase 1 — Completa ✅
+
+Todo el pipeline Transvoxel está funcionando en el juego:
+- `SmoothTerrainPipeline` + shaders `smooth-terrain-vert/frag.glsl`
+- `TerrainSmoothingMode` enum (Disabled/Soft/Smooth/Ultra) en settings
+- `DensityField` + `smooth_density_field` (Gaussian, N passes)
+- `mesh_transvoxel` con threshold calibrado por passes (Soft=64, Smooth=94, Ultra=101)
+- `density_gradient` con interpolación trilineal (paredes visibles)
+- `col_light_for` con interpolación bilineal (sin patrón de diamantes)
+- `has_structures` fallback greedy (chunks con boi.interactables/smokers/one_way_walls)
+- Smooth floor physics correction (SmoothTerrainSettings resource)
+- `convert_chunk_to_density_field`: Err→255 (sin triángulos transparentes por vecinos no cargados)
+- GitHub CI limpio (8 workflows upstream eliminados, upstream-sync.yml YAML fixeado)
+
+**Limitaciones conocidas (cosmética, para detallar post-Fase 3):**
+- Paredes de edificios sin boi (plain walls) todavía algo invisibles
+- Transición abrupta entre chunks smooth y greedy en bordes
+- Terreno flat tiene leve textura triangular (cosmético)
+
+### Fase 2 — En progreso 🔄
+
+**HEAD:** `18fb5c97b2` (branch: main)
+
+**Commits completados (Task 1-5 del plan):**
+- `59e878f257` — Feature flag + BLOCK_SIZE/HIRES_SCALE en common/Cargo.toml + consts.rs
+- `0630fa36c0` — GRAVITY y MOVEMENT_THRESHOLD_VEL × HIRES_SCALE
+- `6aab42dec3` — Humanoid collider height/width × HIRES_SCALE
+- `994d2b8cb0` — World gen sea_level + mountain_scale × HIRES_SCALE
+- `18fb5c97b2` — terrain_view_distance todos los presets × HIRES_SCALE
+
+**Cómo activar y probar:**
+```bash
+source "$HOME/.cargo/env"
+cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
+```
+
+**Task 7 — Ongoing audit (pendiente):**
+- `base_accel()` por especie en `common/src/states/utils.rs` (~100 valores, todos en blocks/s²)
+- Hitboxes de criaturas: todas las `Vec3::new(x,y,z)` en `common/src/comp/body/mod.rs` dimensions()
+- World gen detallado: `world/src/sim/mod.rs`, `world/src/layer/`, `world/src/site/`
+- Server view distance en `server/src/settings.rs`
+- Save migration: coordenadas de bloque en `userdata/` necesitan ×2 al cargar con terrain-hires
+
+**Plan completo:** `docs/superpowers/plans/2026-06-05-fase2-block-scale.md`
+
+### Fase 3 — No iniciada ⬜
+
+Puede iniciarse mientras Task 7 de Fase 2 sigue en progreso (son independientes).
+Ver sección Fase 3 del spec arriba.
+
+---
+
+## Prompt de reanudación
+
+```
+Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md sección "Estado detallado al 2026-06-05".
+Luego: git log --oneline -5 && git status
+
+Estado actual:
+- Fase 1 completa
+- Fase 2: Task 1-5 completos (HEAD 18fb5c97b2), Task 7 pendiente
+- Para probar Fase 2: cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
+
+Próximos pasos (elegir uno):
+A) Continuar Task 7 de Fase 2 (audit base_accel/hitboxes NPC, world gen detallado)
+B) Arrancar Fase 3 (Normal Maps) — independiente de Task 7
+C) Testear Fase 2 con el flag activo y reportar
+
+No me hagas preguntas — toda la info está en la spec y en los planes linkados.
+```
