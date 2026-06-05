@@ -2,19 +2,20 @@ version: "3.5"
 
 services:
   game-server:
-    image: ghcr.io/mgrinberg/veloren/server-cli:weekly
+    image: ghcr.io/matute289/veloren/server-cli:master
     stdin_open: true
     tty: true
     container_name: veloren-game-server-master
     ports:
-      - "14004:14004"
-      - "14005:14005"
+      - "14004:14004/tcp"
+      - "14004:14004/udp"
+      - "14005:14005/tcp"
       - "14006:14006/udp"
-    restart: on-failure:0
+    restart: unless-stopped
     volumes:
         - "./userdata:/opt/userdata"
     environment:
-        - RUST_LOG=debug,common::net=info
+        - RUST_LOG=info,common::net=warn
   watchtower:
     image: containrrr/watchtower
     volumes:
