@@ -1,5 +1,17 @@
 # Logging System Design
 
+## Estado de Implementación
+
+| Fase | Estado | HEAD al completar |
+|------|--------|-------------------|
+| Phase 1 — Infrastructure | ✅ Completa | `abcfe350c9` |
+| Phase 2 — Coverage | 🔲 Pendiente | — |
+| Phase 3 — Report Bug | 🔲 Pendiente | — |
+
+**Para continuar:** implementar Plan B (`docs/superpowers/plans/2026-06-05-logging-coverage.md`), luego Plan C.
+
+---
+
 ## Goal
 
 Implement a structured, multi-sink logging system for Veloren with six log files (client + server × info + err + telemetry), log rotation and retention policies, comprehensive in-code coverage, and an in-game "Report Bug" button that uploads client logs to a VPS endpoint.
@@ -8,7 +20,7 @@ Implement a structured, multi-sink logging system for Veloren with six log files
 
 Three independent phases, each testeable in isolation:
 
-- **Phase 1 — Infrastructure**: 6-file logging system + feature flag + telemetry layer
+- **Phase 1 — Infrastructure**: 6-file logging system + feature flag + telemetry layer ✅
 - **Phase 2 — Coverage**: Add `info!`/`warn!`/`debug!`/`error!`/telemetry calls throughout client and server code
 - **Phase 3 — Report Bug**: In-game button + HTTP POST to VPS endpoint
 
@@ -70,19 +82,22 @@ Returns a `has_errors: Arc<AtomicBool>` that is set to `true` whenever a WARN or
 
 The existing `init()` and `init_stdout()` functions are left untouched. All existing call sites continue to work.
 
-### Call Sites
+### Call Sites ✅ Implementado
 
-**`voxygen/src/main.rs`** — replace `init_stdout(Some(...))`:
+**`voxygen/src/main.rs`** — reemplaza `init_stdout(Some(...))`:
 ```rust
-let (log_dir) = userdata_dir.join("voxygen").join("logs");
-let (_guards, has_errors) = common_frontend::init_split_logs("client", &log_dir);
+let log_guards = common_frontend::init_split_logs("client", &logs_dir);
+// al final de main():
+log_guards.lifecycle.cleanup_on_exit(&log_guards.has_errors);
 ```
 
-**`server-cli/src/main.rs`** — add alongside existing init:
+**`server-cli/src/main.rs`** — reemplaza el bloque basic/TUI:
 ```rust
-let log_dir = common_base::userdata_dir().join("server").join("logs");
-let (_guards, _has_errors) = common_frontend::init_split_logs("server", &log_dir);
+let server_logs_dir = common_base::userdata_dir().join("server").join("logs");
+let _log_guards = common_frontend::init_split_logs("server", &server_logs_dir);
 ```
+
+**Nota real de implementación:** `init_split_logs()` retorna `LogGuards` (no una tupla). La función `build_split_filter()` extrae la lógica de filtros. Las constantes de tamaño se gatan con `#[cfg(feature = "logging-verbose")]`.
 
 ### Rotation Policy
 
