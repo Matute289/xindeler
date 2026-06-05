@@ -5,6 +5,7 @@ use crate::{
     util::{DHashMap, DHashSet, seed_expan},
 };
 use common::{
+    consts::HIRES_SCALE,
     store::{Id, Store},
     terrain::{MapSizeLg, TERRAIN_CHUNK_BLOCKS_LG},
     util::Dir,
@@ -517,7 +518,12 @@ impl Airships {
     pub const AIRSHIP_TRANSITION_SPEED_RATIO: f32 = 0.75;
     /// The cruising height varies by route index and there can be only four
     /// routes.
-    pub const CRUISE_HEIGHTS: [f32; 4] = [400.0, 475.0, 550.0, 625.0];
+    pub const CRUISE_HEIGHTS: [f32; 4] = [
+        400.0 * HIRES_SCALE,
+        475.0 * HIRES_SCALE,
+        550.0 * HIRES_SCALE,
+        625.0 * HIRES_SCALE,
+    ];
     /// The distance from the docking position where the airship starts the
     /// transition flight phase.
     const DOCKING_TRANSITION_OFFSET: f32 = 175.0;
