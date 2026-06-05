@@ -447,17 +447,40 @@ pub struct TransvoxelTriangle {
 ///
 /// The raw gradient points toward increasing density (i.e. into solid), so we
 /// negate it to get the outward direction.
+/// Trilinear interpolation of density at a fractional position.
+///
+/// Evaluating at the exact vertex position (not truncated to integer) gives
+/// nonzero gradients for thin vertical walls (1-block thick) where integer
+/// sampling gives d(W+1)==d(W-1) (both air) → gradient=0 → wrong upward normal.
+fn sample_trilinear(field: &DensityField, pos: Vec3<f32>) -> f32 {
+    let p0 = pos.map(|e| e.floor() as i32);
+    let t = pos - pos.map(|e| e.floor());
+    let d = |dx: i32, dy: i32, dz: i32| {
+        field.get_or_zero(p0 + Vec3::new(dx, dy, dz)) as f32
+    };
+    let c00 = d(0, 0, 0) * (1.0 - t.x) + d(1, 0, 0) * t.x;
+    let c10 = d(0, 1, 0) * (1.0 - t.x) + d(1, 1, 0) * t.x;
+    let c01 = d(0, 0, 1) * (1.0 - t.x) + d(1, 0, 1) * t.x;
+    let c11 = d(0, 1, 1) * (1.0 - t.x) + d(1, 1, 1) * t.x;
+    let c0 = c00 * (1.0 - t.y) + c10 * t.y;
+    let c1 = c01 * (1.0 - t.y) + c11 * t.y;
+    c0 * (1.0 - t.z) + c1 * t.z
+}
+
 fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
-    let p = pos.map(|e| e as i32);
-    let dx = field.get_or_zero(p + Vec3::new(1, 0, 0)) as f32
-        - field.get_or_zero(p + Vec3::new(-1, 0, 0)) as f32;
-    let dy = field.get_or_zero(p + Vec3::new(0, 1, 0)) as f32
-        - field.get_or_zero(p + Vec3::new(0, -1, 0)) as f32;
-    let dz = field.get_or_zero(p + Vec3::new(0, 0, 1)) as f32
-        - field.get_or_zero(p + Vec3::new(0, 0, -1)) as f32;
+    // Central-difference gradient evaluated at the exact fractional vertex
+    // position via trilinear interpolation. This gives correct nonzero
+    // horizontal gradients for thin walls (1-block thick) where integer
+    // sampling would see equal air densities on both sides → gradient=0.
+    let dx = sample_trilinear(field, pos + Vec3::new(1.0, 0.0, 0.0))
+        - sample_trilinear(field, pos + Vec3::new(-1.0, 0.0, 0.0));
+    let dy = sample_trilinear(field, pos + Vec3::new(0.0, 1.0, 0.0))
+        - sample_trilinear(field, pos + Vec3::new(0.0, -1.0, 0.0));
+    let dz = sample_trilinear(field, pos + Vec3::new(0.0, 0.0, 1.0))
+        - sample_trilinear(field, pos + Vec3::new(0.0, 0.0, -1.0));
     let g = Vec3::new(dx, dy, dz);
     // Negate: raw gradient points into solid, we want outward (into air).
-    // Fall back to up-vector when the gradient is degenerate (flat field).
+    // Fall back to up-vector when the gradient is degenerate.
     if g.magnitude_squared() < 0.001 {
         Vec3::unit_z()
     } else {

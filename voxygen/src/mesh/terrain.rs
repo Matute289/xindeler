@@ -337,19 +337,33 @@ pub fn generate_mesh<'a>(
         let mut smooth_opaque_mesh: Mesh<SmoothTerrainVertex> = Mesh::new();
         // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
         let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
-        let atlas_pos_for = |pos: Vec3<f32>| -> Vec2<u16> {
-            let cp = pos + mesh_delta;
-            let ax = cp.x.round() as i32;
-            let ay = cp.y.round() as i32;
-            Vec2::new(
-                ax.clamp(0, atlas_w as i32 - 1) as u16,
-                ay.clamp(0, atlas_h as i32 - 1) as u16,
-            )
-        };
+        // Bilinear col_light sampling: blend the 4 nearest atlas texels by
+        // fractional vertex position. Using .round() caused alternating
+        // bright/dark triangles on flat terrain (the diamond checkerboard
+        // pattern) because adjacent vertices would snap to different texels.
         let col_light_for = |pos: Vec3<f32>| -> u32 {
-            let apos = atlas_pos_for(pos);
-            let cl = atlas_data.col_lights[apos.x as usize * atlas_h + apos.y as usize];
-            u32::from_le_bytes(cl)
+            let cp = pos + mesh_delta;
+            let ax = cp.x.clamp(0.0, (atlas_w - 1) as f32);
+            let ay = cp.y.clamp(0.0, (atlas_h - 1) as f32);
+            let ax0 = (ax.floor() as usize).min(atlas_w - 1);
+            let ay0 = (ay.floor() as usize).min(atlas_h - 1);
+            let ax1 = (ax0 + 1).min(atlas_w - 1);
+            let ay1 = (ay0 + 1).min(atlas_h - 1);
+            let tx = ax - ax.floor();
+            let ty = ay - ay.floor();
+            let s = |x: usize, y: usize| atlas_data.col_lights[x * atlas_h + y];
+            let [c00, c10, c01, c11] = [s(ax0, ay0), s(ax1, ay0), s(ax0, ay1), s(ax1, ay1)];
+            let lerp_ch = |v00: u8, v10: u8, v01: u8, v11: u8| -> u8 {
+                let v0 = v00 as f32 * (1.0 - tx) + v10 as f32 * tx;
+                let v1 = v01 as f32 * (1.0 - tx) + v11 as f32 * tx;
+                (v0 * (1.0 - ty) + v1 * ty) as u8
+            };
+            u32::from_le_bytes([
+                lerp_ch(c00[0], c10[0], c01[0], c11[0]),
+                lerp_ch(c00[1], c10[1], c01[1], c11[1]),
+                lerp_ch(c00[2], c10[2], c01[2], c11[2]),
+                lerp_ch(c00[3], c10[3], c01[3], c11[3]),
+            ])
         };
         for tri in &tris {
             let [p0, p1, p2] = tri.positions;
