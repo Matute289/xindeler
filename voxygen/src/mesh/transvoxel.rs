@@ -17,11 +17,8 @@
 use common::terrain::density::DensityField;
 use vek::*;
 
-// ---------------------------------------------------------------------------
-// Iso-surface threshold: voxels with density > THRESHOLD are considered solid.
-// ---------------------------------------------------------------------------
-
-const THRESHOLD: u8 = 127;
+/// Default iso-surface threshold: voxels with density > `THRESHOLD` are considered solid.
+pub const THRESHOLD: u8 = 127;
 
 // ---------------------------------------------------------------------------
 // Lookup table types
@@ -605,14 +602,14 @@ mod tests {
     #[test]
     fn all_empty_produces_no_triangles() {
         let field = DensityField::new(Vec3::new(4, 4, 4));
-        assert!(mesh_transvoxel(&field).is_empty());
+        assert!(mesh_transvoxel(&field, THRESHOLD).is_empty());
     }
 
     #[test]
     fn all_solid_produces_no_triangles() {
         let mut field = DensityField::new(Vec3::new(4, 4, 4));
         field.data.fill(255);
-        assert!(mesh_transvoxel(&field).is_empty());
+        assert!(mesh_transvoxel(&field, THRESHOLD).is_empty());
     }
 
     #[test]
@@ -625,8 +622,8 @@ mod tests {
                 }
             }
         }
-        smooth_density_field(&mut field);
-        let tris = mesh_transvoxel(&field);
+        smooth_density_field(&mut field, 1);
+        let tris = mesh_transvoxel(&field, THRESHOLD);
         assert!(
             !tris.is_empty(),
             "expected triangles at the solid/air boundary"
