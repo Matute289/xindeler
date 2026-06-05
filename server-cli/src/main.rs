@@ -65,11 +65,8 @@ fn main() -> io::Result<()> {
 
     let shutdown_signal = Arc::new(AtomicBool::new(false));
 
-    let (_guards, _guards2) = if basic {
-        (Vec::new(), common_frontend::init_stdout(None))
-    } else {
-        (common_frontend::init(None, &|| LOG.clone()), Vec::new())
-    };
+    let server_logs_dir = common_base::userdata_dir().join("server").join("logs");
+    let _log_guards = common_frontend::init_split_logs("server", &server_logs_dir);
 
     // Load settings
     let settings = settings::Settings::load().ok_or(io::ErrorKind::Other)?;
