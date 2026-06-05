@@ -30,7 +30,6 @@ use veloren_voxygen::{
     window::Window,
 };
 
-use chrono::Utc;
 use common::clock::Clock;
 use std::{panic, path::PathBuf};
 use tracing::{info, warn};
@@ -82,10 +81,8 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| userdata_dir.join("voxygen").join("logs"));
 
-    // Init logging and hold the guards.
-    let now = Utc::now();
-    let log_filename = format!("{}_voxygen.log", now.format("%Y-%m-%d"));
-    let _guards = common_frontend::init_stdout(Some((&logs_dir, &log_filename)));
+    // Init split logging (err always, info+telemetry with logging-verbose feature).
+    let log_guards = common_frontend::init_split_logs("client", &logs_dir);
 
     // Re-run userdata selection so any warnings will be logged
     common_base::userdata_dir();
@@ -128,7 +125,10 @@ fn main() {
     }
     settings.display_warnings();
 
-    panic_handler::set_panic_hook(log_filename, logs_dir);
+    panic_handler::set_panic_hook(
+        format!("{}_client_err.log", chrono::Utc::now().format("%Y-%m-%d")),
+        logs_dir.clone(),
+    );
 
     // Setup tokio runtime
     use common::consts::MIN_RECOMMENDED_TOKIO_THREADS;
@@ -267,4 +267,6 @@ fn main() {
     };
 
     run::run(global_state, event_loop).unwrap();
+    // Clean-exit: delete info/telemetry logs if no errors occurred this session
+    log_guards.lifecycle.cleanup_on_exit(&log_guards.has_errors);
 }
