@@ -340,7 +340,9 @@ pub(super) fn box_voxel_collision<T: BaseVol<Vox = Block> + ReadVol>(
         if let Some(smooth_z_local) = sample_isosurface_z(&density, fx, fy, fz) {
             let smooth_z_world = smooth_z_local + sample_offset.z as f32;
             let block_floor = pos.0.z;
-            if smooth_z_world >= block_floor - 0.05 && smooth_z_world - block_floor < 1.0 {
+            // Allow up to 0.2 blocks below block floor for slope residuals
+            // (threshold calibration is exact for flat terrain; slopes may vary slightly).
+            if smooth_z_world >= block_floor - 0.2 && smooth_z_world - block_floor < 1.0 {
                 pos.0.z = smooth_z_world;
             }
         }
