@@ -4,8 +4,13 @@
 # Stage 1: Compile server-cli from source
 FROM rust:slim-bookworm AS builder
 
+# GIT_VERSION passed from deploy script as "commit_hash/commit_timestamp"
+# Bypasses the .git directory requirement in veloren-common build script
+ARG GIT_VERSION="0/0"
+
 ENV VELOREN_USERDATA_STRATEGY=executable \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    VELOREN_GIT_VERSION=${GIT_VERSION}
 
 RUN apt-get update && apt-get install -y \
     binutils \
