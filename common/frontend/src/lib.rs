@@ -1,3 +1,6 @@
+mod bounded_writer;
+pub use bounded_writer::{BoundedMakeWriter, CompressionGuard, Rotation};
+
 #[cfg(not(feature = "tracy"))] use std::fs;
 use std::path::Path;
 
