@@ -1,6 +1,9 @@
 mod bounded_writer;
 pub use bounded_writer::{BoundedMakeWriter, CompressionGuard, Rotation};
 
+mod lifecycle;
+pub use lifecycle::{ErrorDetectorLayer, LogLifecycleManager};
+
 #[cfg(not(feature = "tracy"))] use std::fs;
 use std::path::Path;
 
