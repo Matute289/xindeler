@@ -1,0 +1,51 @@
+# Multi-stage build for VPS deployment (x86_64 Linux)
+# Build: docker build -f server-cli/Dockerfile.vps -t ghcr.io/matute289/veloren/server-cli:master .
+#
+# Stage 1: Compile server-cli from source
+FROM rust:slim-bookworm AS builder
+
+ENV VELOREN_USERDATA_STRATEGY=executable \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+RUN apt-get update && apt-get install -y \
+    binutils \
+    pkg-config \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup toolchain install nightly-2025-09-08 \
+    && rustup default nightly-2025-09-08
+
+WORKDIR /src
+COPY . .
+
+RUN cargo build --release \
+        --no-default-features \
+        --features default-publish \
+        -p veloren-server-cli \
+    && objcopy --compress-debug-sections=zlib \
+        target/release/veloren-server-cli \
+        /tmp/veloren-server-cli
+
+# Stage 2: Minimal runtime image
+FROM debian:stable-slim
+
+LABEL com.centurylinklabs.watchtower.stop-signal="SIGUSR1"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libgcc-s1 \
+        iproute2 \
+        net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tmp/veloren-server-cli /opt/veloren-server-cli
+COPY --from=builder /src/assets/common       /opt/assets/common
+COPY --from=builder /src/assets/server       /opt/assets/server
+COPY --from=builder /src/assets/world        /opt/assets/world
+
+WORKDIR /opt
+ENV RUST_BACKTRACE=full
+ENTRYPOINT ["/opt/veloren-server-cli"]
