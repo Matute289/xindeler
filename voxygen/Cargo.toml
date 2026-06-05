@@ -29,6 +29,7 @@ hot-reloading = ["common/hot-reloading"]
 singleplayer = ["server"]
 simd = ["vek/platform_intrinsics"]
 tracy = ["common-frontend/tracy", "client/tracy", "wgpu-profiler/tracy"]
+logging-verbose = ["common-frontend/logging-verbose"]
 # enables heap profiling with tracy
 tracy-memory = ["tracy"]
 plugins = ["client/plugins", "server/plugins", "anim/plugins", "common/plugins"]
