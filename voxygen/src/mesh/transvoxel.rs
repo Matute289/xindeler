@@ -480,7 +480,7 @@ fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
 /// Until `REGULAR_VERTEX_DATA` is populated (Task 8), this function generates
 /// no triangles for interior cells (case 1–254). The smoke tests for case 0 and
 /// case 255 still pass because those cases are short-circuited.
-pub fn mesh_transvoxel(field: &DensityField) -> Vec<TransvoxelTriangle> {
+pub fn mesh_transvoxel(field: &DensityField, threshold: u8) -> Vec<TransvoxelTriangle> {
     let mut triangles = Vec::new();
     let size = field.size.map(|e| e as i32);
 
@@ -501,7 +501,7 @@ pub fn mesh_transvoxel(field: &DensityField) -> Vec<TransvoxelTriangle> {
                 // Build the 8-bit case index.
                 let mut case_idx: u8 = 0;
                 for (i, &d) in corners.iter().enumerate() {
-                    if d > THRESHOLD {
+                    if d > threshold {
                         case_idx |= 1 << i;
                     }
                 }
@@ -541,7 +541,7 @@ pub fn mesh_transvoxel(field: &DensityField) -> Vec<TransvoxelTriangle> {
                     let t = if (d1 - d0).abs() < 0.001 {
                         0.5
                     } else {
-                        (THRESHOLD as f32 - d0) / (d1 - d0)
+                        (threshold as f32 - d0) / (d1 - d0)
                     };
 
                     let pos = p0 + (p1 - p0) * t;

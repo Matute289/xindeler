@@ -282,7 +282,17 @@ pub fn generate_mesh<'a>(
             TerrainSmoothingMode::Disabled => unreachable!(),
         };
         smooth_density_field(&mut density, smooth_passes);
-        let tris = mesh_transvoxel(&density);
+        // Threshold calibrated so the isosurface lands at the block surface
+        // after N passes of Gaussian smoothing (analytically derived for flat
+        // terrain: the post-smoothed density at the first air block gives the
+        // threshold that places the surface at the solid/air block boundary).
+        let transvoxel_threshold: u8 = match smooth_passes {
+            1 => 64,
+            2 => 94,
+            3 => 101,
+            _ => 127,
+        };
+        let tris = mesh_transvoxel(&density, transvoxel_threshold);
 
         // ----------------------------------------------------------------
         // Build a colour atlas: one texel per (chunk-local x, y) column.
