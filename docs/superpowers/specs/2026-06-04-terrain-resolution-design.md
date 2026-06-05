@@ -375,8 +375,8 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 | Fase | Estado | Notas |
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
-| Fase 2 — Escala de bloques | 🔄 En progreso | Task 7 completo (base_accel, dimensions, server vd, world gen, interaction ranges); solo save migration pendiente |
-| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Task 7 de Fase 2 |
+| Fase 2 — Escala de bloques | ⏸ Pausada | Task 7 casi completo; `dimensions()`/`height()` revertidos (ver nota); save migration pendiente. Pausa hasta completar sistema de logs. |
+| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Fase 2 |
 
 Actualizar esta tabla a medida que avanza la implementación:
 - ⬜ No iniciada
@@ -407,9 +407,9 @@ Todo el pipeline Transvoxel está funcionando en el juego:
 - Transición abrupta entre chunks smooth y greedy en bordes
 - Terreno flat tiene leve textura triangular (cosmético)
 
-### Fase 2 — En progreso 🔄
+### Fase 2 — Pausada ⏸
 
-**HEAD:** `18fb5c97b2` (branch: main)
+**HEAD terrain-hires:** `0dd4c91a2a` (branch: main)
 
 **Commits completados (Task 1-5 del plan):**
 - `59e878f257` — Feature flag + BLOCK_SIZE/HIRES_SCALE en common/Cargo.toml + consts.rs
@@ -424,19 +424,33 @@ source "$HOME/.cargo/env"
 cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
 ```
 
-**Task 7 — Completado (2026-06-05, HEAD: 9881ad3558):**
-- ✅ `base_accel()` todas las especies × HIRES_SCALE (commit 0d7c2a4b64)
-- ✅ `dimensions()` todos los body types × HIRES_SCALE (commit 197ba04045)
-- ✅ server `max_view_distance` × HIRES_SCALE + server/Cargo.toml feature (commit 075ed503be)
-- ✅ World gen: cave.rs, scatter.rs, column.rs, airship_travel.rs × HIRES_SCALE (commits c74b4f3fee + 9881ad3558)
-- ✅ Interaction ranges: MAX_PICKUP_RANGE, MAX_MOUNT_RANGE, etc. × HIRES_SCALE (commit 9881ad3558)
+**Task 7 — Estado final (2026-06-05):**
+- ✅ `base_accel()` todas las especies × HIRES_SCALE (commit `0d7c2a4b64`)
+- ✅ server `max_view_distance` × HIRES_SCALE + server/Cargo.toml feature (commit `075ed503be`)
+- ✅ World gen: cave.rs, scatter.rs, column.rs, airship_travel.rs × HIRES_SCALE (commits `c74b4f3fee` + `9881ad3558`)
+- ✅ Interaction ranges: MAX_PICKUP_RANGE, MAX_MOUNT_RANGE, etc. × HIRES_SCALE (commit `9881ad3558`)
+- ⏪ `dimensions()` y `humanoid.height()` — **REVERTIDOS** (commit `0dd4c91a2a`). Ver nota crítica abajo.
 - ❌ Save migration: coordenadas de bloque en `userdata/` necesitan ×2 al cargar con terrain-hires (pendiente — plan separado)
+
+**⚠️ Nota crítica — Por qué `dimensions()` y `humanoid.height()` NO deben escalarse con HIRES_SCALE:**
+
+Al escalarlos, los personajes y NPCs se veían 2× más grandes que el terreno. La causa raíz:
+
+`dimensions()` en `common/src/comp/body/mod.rs` controla **simultáneamente** el hitbox físico Y la escala visual del modelo 3D. En Veloren, los hitboxes se definen en **unidades de bloque relativas al terreno** — un personaje humanoide mide ~2.6 bloques de alto, y una puerta estándar mide 3 bloques de alto. Esta relación proporcional debe mantenerse igual independientemente del tamaño world-space de un bloque.
+
+Lo que sí debe escalar con HIRES_SCALE: constantes en unidades absolutas (m/s², m/s, metros) como GRAVITY, base_accel, rangos de interacción.  
+Lo que NO debe escalar: proporciones entidad/terreno (bloques de alto de un personaje, radio de colisión en bloques).
+
+`humanoid.height()` en `common/src/comp/body/humanoid.rs` también controla la escala visual del modelo — mismo principio.
 
 **Plan completo:** `docs/superpowers/plans/2026-06-05-fase2-block-scale.md`
 
+**Razón de la pausa:**
+El sistema de logging (actualmente en desarrollo) va a proveer observabilidad completa del estado del juego (telemetría, logs estructurados) que facilitará enormemente el debugging y validación de los cambios de terrain-hires. Se retoma Fase 2 una vez que el sistema de logging esté implementado.
+
 ### Fase 3 — No iniciada ⬜
 
-Puede iniciarse mientras Task 7 de Fase 2 sigue en progreso (son independientes).
+Puede iniciarse en cualquier momento (independiente de Fase 2).
 Ver sección Fase 3 del spec arriba.
 
 ---
@@ -444,18 +458,26 @@ Ver sección Fase 3 del spec arriba.
 ## Prompt de reanudación
 
 ```
-Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md sección "Estado detallado al 2026-06-05".
-Luego: git log --oneline -5 && git status
+Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md, sección "Estado detallado al 2026-06-05".
+Luego: git log --oneline -8 && git status
 
 Estado actual:
-- Fase 1 completa
-- Fase 2: Task 1-5 completos (HEAD 18fb5c97b2), Task 7 pendiente
-- Para probar Fase 2: cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
+- Fase 1: completa ✅
+- Fase 2: pausada ⏸ (HEAD terrain-hires: 0dd4c91a2a)
+  - Task 7 casi completo. dimensions()/humanoid.height() NO escalar (ver nota crítica en spec).
+  - Pendiente: save migration (plan separado)
+- Fase 3: no iniciada ⬜
+- Sistema de logs: en desarrollo (ver docs/superpowers/specs/2026-06-05-logging-system-design.md)
+  Completar logging antes de retomar terrain. Beneficio: telemetría unificada para observar cambios.
 
-Próximos pasos (elegir uno):
-A) Continuar Task 7 de Fase 2 (audit base_accel/hitboxes NPC, world gen detallado)
-B) Arrancar Fase 3 (Normal Maps) — independiente de Task 7
-C) Testear Fase 2 con el flag activo y reportar
+Para probar Fase 2 con logging-verbose activo (una vez que Plan A de logs esté implementado):
+  cargo run --bin veloren-voxygen \
+    --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
 
-No me hagas preguntas — toda la info está en la spec y en los planes linkados.
+Próximos pasos al retomar terrain:
+A) Save migration (coordenadas ×2 al cargar userdata con terrain-hires)
+B) Arrancar Fase 3 (Normal Maps) — independiente y de bajo riesgo
+C) Testear Fase 2 con logging-verbose y revisar telemetría
+
+No hagas preguntas — toda la info está en la spec y en los planes linkados.
 ```
