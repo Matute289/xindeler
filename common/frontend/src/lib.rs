@@ -11,6 +11,8 @@ pub use telemetry_layer::TelemetryLayer;
 
 #[cfg(not(feature = "tracy"))] use std::fs;
 use std::path::Path;
+use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 use termcolor::{ColorChoice, StandardStream};
 use tracing::info;
@@ -20,6 +22,23 @@ use tracing_subscriber::{
 };
 
 const RUST_LOG_ENV: &str = "RUST_LOG";
+
+const CLIENT_INFO_MAX_LINES: u64  = 5_000;
+const CLIENT_ERR_MAX_LINES: u64   = 1_000;
+const SERVER_INFO_MAX_LINES: u64  = 10_000;
+const SERVER_ERR_MAX_LINES: u64   = 1_000;
+
+const CLIENT_INFO_RETENTION: Duration = Duration::from_secs(24 * 3600);
+const CLIENT_ERR_RETENTION: Duration  = Duration::from_secs(7 * 24 * 3600);
+const SERVER_RETENTION: Duration      = Duration::from_secs(30 * 24 * 3600);
+
+/// Holds all log-related guards. Drop order: flush workers before compress thread exits.
+pub struct LogGuards {
+    pub has_errors: Arc<AtomicBool>,
+    pub lifecycle: LogLifecycleManager,
+    _worker_guards: Vec<WorkerGuard>,
+    _compress_guards: Vec<CompressionGuard>,
+}
 
 /// Initialise tracing and logging for the logs_path.
 ///
@@ -184,4 +203,136 @@ where
 
 pub fn init_stdout(log_path_file: Option<(&Path, &str)>) -> Vec<impl Drop + use<>> {
     init(log_path_file, &|| StandardStream::stdout(ColorChoice::Auto))
+}
+
+/// Initialise the split logging system (replaces `init_stdout()` at call sites):
+///  - Terminal output (always)
+///  - `{prefix}_err.log` WARN+ERROR (always, daily rotation, 1k lines)
+///  - `{prefix}_info.log` DEBUG+ (logging-verbose feature only, hourly, 5k/10k lines)
+///  - `{prefix}_telemetry.jsonl` JSON Lines (logging-verbose only, hourly, 20k lines)
+///
+/// `prefix` should be "client" (voxygen) or "server" (server-cli).
+pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
+    use tracing_subscriber::{Layer as _, fmt::layer as fmt_layer};
+
+    let is_server = prefix.starts_with("server");
+
+    // Startup retention cleanup
+    let lifecycle = LogLifecycleManager::new(logs_dir.to_owned());
+    let (info_ret, err_ret) = if is_server {
+        (SERVER_RETENTION, SERVER_RETENTION)
+    } else {
+        (CLIENT_INFO_RETENTION, CLIENT_ERR_RETENTION)
+    };
+    lifecycle.cleanup_on_startup(info_ret, err_ret);
+
+    // Build the shared log-level filter (same directives as the existing init())
+    let filter = build_split_filter();
+
+    // ErrorDetectorLayer — tracks whether any WARN/ERROR was emitted
+    let (error_detector, has_errors) = ErrorDetectorLayer::new();
+
+    // Terminal writer
+    let (non_blocking_term, term_guard) =
+        tracing_appender::non_blocking(StandardStream::stdout(ColorChoice::Auto));
+
+    // Error file sink (always present)
+    let err_max = if is_server { SERVER_ERR_MAX_LINES } else { CLIENT_ERR_MAX_LINES };
+    let (err_writer, err_compress) =
+        BoundedMakeWriter::new(logs_dir, &format!("{prefix}_err"), Rotation::Daily, err_max);
+
+    let mut worker_guards: Vec<WorkerGuard> = vec![term_guard];
+    let mut compress_guards: Vec<CompressionGuard> = vec![err_compress];
+
+    // Optional info sink (logging-verbose only) — Option<L> implements Layer<S>
+    #[cfg(feature = "logging-verbose")]
+    let info_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = {
+        let info_max = if is_server { SERVER_INFO_MAX_LINES } else { CLIENT_INFO_MAX_LINES };
+        let (info_writer, info_compress) = BoundedMakeWriter::new(
+            logs_dir,
+            &format!("{prefix}_info"),
+            Rotation::Hourly,
+            info_max,
+        );
+        compress_guards.push(info_compress);
+        Some(fmt_layer().with_writer(info_writer).with_filter(LevelFilter::DEBUG).boxed())
+    };
+    #[cfg(not(feature = "logging-verbose"))]
+    let info_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = None;
+
+    // Optional telemetry sink (logging-verbose only)
+    #[cfg(feature = "logging-verbose")]
+    let telemetry_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
+        TelemetryLayer::new(logs_dir, prefix).map(|t| t.boxed());
+    #[cfg(not(feature = "logging-verbose"))]
+    let telemetry_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = None;
+
+    // Compose full subscriber and initialise
+    registry()
+        .with(fmt_layer().with_writer(non_blocking_term).with_filter(filter))
+        .with(fmt_layer().with_writer(err_writer).with_filter(LevelFilter::WARN))
+        .with(error_detector)
+        .with(info_layer)
+        .with(telemetry_layer)
+        .init();
+
+    LogGuards {
+        has_errors,
+        lifecycle,
+        _worker_guards: worker_guards,
+        _compress_guards: compress_guards,
+    }
+}
+
+fn build_split_filter() -> EnvFilter {
+    let mut filter = EnvFilter::default().add_directive(LevelFilter::INFO.into());
+    let default_directives = [
+        "dot_vox::parser=warn",
+        "veloren_common::trade=info",
+        "veloren_world::sim=info",
+        "veloren_world::civ=info",
+        "veloren_world::site::economy=info",
+        "veloren_server::events::entity_manipulation=info",
+        "hyper=info",
+        "prometheus_hyper=info",
+        "mio::poll=info",
+        "mio::sys::windows=info",
+        "assets_manager::anycache=info",
+        "polling::epoll=info",
+        "h2=info",
+        "tokio_util=info",
+        "rustls=info",
+        "naga=info",
+        "gfx_backend_vulkan=info",
+        "wgpu_core=info",
+        "wgpu_core::device=warn",
+        "wgpu_core::swap_chain=info",
+        "veloren_network_protocol=info",
+        "quinn_proto::connection=info",
+        "refinery_core::traits::divergent=off",
+        "veloren_server::persistence::character=info",
+        "veloren_server::settings=info",
+        "veloren_query_server=info",
+        "symphonia_format_ogg::demuxer=off",
+        "symphonia_core::probe=off",
+        "wgpu_hal::dx12::device=off",
+    ];
+    for s in default_directives {
+        filter = filter.add_directive(s.parse().unwrap());
+    }
+    match std::env::var(RUST_LOG_ENV) {
+        Ok(env) => {
+            for s in env.split(',') {
+                match s.parse() {
+                    Ok(d) => filter = filter.add_directive(d),
+                    Err(err) => eprintln!("WARN ignoring log directive: `{s}`: {err}"),
+                }
+            }
+        },
+        Err(std::env::VarError::NotUnicode(os_string)) => {
+            eprintln!("WARN ignoring log directives due to non-unicode data: {os_string:?}");
+        },
+        Err(std::env::VarError::NotPresent) => {},
+    }
+    filter
 }
