@@ -111,6 +111,9 @@ pub(super) fn handle_process_trade_action(
                 let parties = entry.get().parties;
                 if entry.get().should_commit() {
                     let result = commit_trade(server.state.ecs(), entry.get());
+                    if result == TradeResult::Completed {
+                        common::telemetry!("trade", result = "completed");
+                    }
                     entry.remove();
                     for party in parties.iter() {
                         if let Some(e) = server.state.ecs().entity_from_uid(*party) {
