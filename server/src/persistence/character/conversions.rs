@@ -22,6 +22,7 @@ use common::{
         item,
         skillset::{self, SkillGroupKind, SkillSet, skills::Skill},
     },
+    consts::HIRES_SCALE,
     resources::Time,
 };
 use core::{convert::TryFrom, num::NonZeroU64};
@@ -292,11 +293,22 @@ pub fn convert_waypoint_from_database_json(
                 position, err
             ))
         })?;
+
+    let saved_in_hires = character_position.hires;
+    let running_hires = cfg!(feature = "terrain-hires");
+    let scale_factor: f32 = match (saved_in_hires, running_hires) {
+        (false, true) => HIRES_SCALE,        // old standard save, now hires → scale up
+        (true, false) => 1.0 / HIRES_SCALE,  // old hires save, now standard → scale down
+        _ => 1.0,                             // same scale, no change
+    };
+
     Ok((
-        character_position
-            .waypoint
-            .map(|pos| Waypoint::new(pos, Time(0.0))),
-        character_position.map_marker.map(MapMarker),
+        character_position.waypoint.map(|pos| {
+            Waypoint::new(pos * scale_factor, Time(0.0))
+        }),
+        character_position.map_marker.map(|pos| {
+            MapMarker(pos.map(|v| (v as f32 * scale_factor) as i32))
+        }),
     ))
 }
 
