@@ -300,18 +300,18 @@ pub fn convert_waypoint_from_database_json(
     // it cannot be used here; instead we use the literal ratio 2.0.
     const HIRES_RATIO: f32 = 2.0;
     let scale_factor: f32 = match (saved_in_hires, running_hires) {
-        (false, true) => HIRES_RATIO,        // old standard save, now hires → scale up
-        (true, false) => 1.0 / HIRES_RATIO,  // old hires save, now standard → scale down
-        _ => 1.0,                             // same scale, no change
+        (false, true) => HIRES_RATIO, // old standard save, now hires → scale up
+        (true, false) => 1.0 / HIRES_RATIO, // old hires save, now standard → scale down
+        _ => 1.0,                     // same scale, no change
     };
 
     Ok((
-        character_position.waypoint.map(|pos| {
-            Waypoint::new(pos * scale_factor, Time(0.0))
-        }),
-        character_position.map_marker.map(|pos| {
-            MapMarker(pos.map(|v| (v as f32 * scale_factor) as i32))
-        }),
+        character_position
+            .waypoint
+            .map(|pos| Waypoint::new(pos * scale_factor, Time(0.0))),
+        character_position
+            .map_marker
+            .map(|pos| MapMarker(pos.map(|v| (v as f32 * scale_factor) as i32))),
     ))
 }
 
@@ -969,8 +969,7 @@ mod waypoint_scale_tests {
     #[test]
     fn old_save_no_change_in_standard_build() {
         let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 100.0).abs() < 0.01);
         assert!((pos.y - 200.0).abs() < 0.01);
@@ -984,10 +983,13 @@ mod waypoint_scale_tests {
     #[test]
     fn hires_save_scaled_down_in_standard_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
-        assert!((pos.x - 100.0).abs() < 0.01, "expected 100.0, got {}", pos.x);
+        assert!(
+            (pos.x - 100.0).abs() < 0.01,
+            "expected 100.0, got {}",
+            pos.x
+        );
         assert!((pos.y - 200.0).abs() < 0.01);
         assert!((pos.z - 50.0).abs() < 0.01);
         let mm = map_marker.unwrap();
@@ -999,10 +1001,13 @@ mod waypoint_scale_tests {
     #[test]
     fn old_save_scaled_up_in_hires_build() {
         let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
-        assert!((pos.x - 200.0).abs() < 0.01, "expected 200.0, got {}", pos.x);
+        assert!(
+            (pos.x - 200.0).abs() < 0.01,
+            "expected 200.0, got {}",
+            pos.x
+        );
         assert!((pos.y - 400.0).abs() < 0.01);
         assert!((pos.z - 100.0).abs() < 0.01);
         let mm = map_marker.unwrap();
@@ -1014,8 +1019,7 @@ mod waypoint_scale_tests {
     #[test]
     fn hires_save_no_change_in_hires_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 200.0).abs() < 0.01);
         assert!((pos.y - 400.0).abs() < 0.01);
