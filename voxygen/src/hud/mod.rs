@@ -3118,7 +3118,10 @@ impl Hud {
         {
             Some(buttons::Event::ToggleSettings) => self.show.toggle_settings(global_state),
             Some(buttons::Event::ToggleSocial) => self.show.toggle_social(),
-            Some(buttons::Event::ToggleMap) => self.show.toggle_map(),
+            Some(buttons::Event::ToggleMap) => {
+                common::telemetry!("ui", widget = "Map", action = "toggle");
+                self.show.toggle_map();
+            },
             Some(buttons::Event::ToggleCrafting) => self.show.toggle_crafting(),
             None => {},
         }
@@ -3270,7 +3273,10 @@ impl Hud {
                         self.show.diary(true);
                         self.show.open_skill_tree(skillgroup);
                     },
-                    skillbar::Event::OpenBag => self.show.bag(!self.show.bag),
+                    skillbar::Event::OpenBag => {
+                        common::telemetry!("ui", widget = "Inventory", action = "toggle");
+                        self.show.bag(!self.show.bag);
+                    },
                 }
             }
         }
@@ -3997,9 +4003,11 @@ impl Hud {
         if self.show.esc_menu {
             match EscMenu::new(&self.imgs, &self.fonts, i18n).set(self.ids.esc_menu, ui_widgets) {
                 Some(esc_menu::Event::OpenSettings(tab)) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Settings");
                     self.show.open_setting_tab(tab);
                 },
                 Some(esc_menu::Event::Close) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Close");
                     self.show.esc_menu = false;
                     self.show.want_grab = true;
                     self.force_ungrab = false;
@@ -4009,14 +4017,19 @@ impl Hud {
                     global_state.unpause();
                 },
                 Some(esc_menu::Event::Logout) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Logout");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
 
                     events.push(Event::Logout);
                 },
-                Some(esc_menu::Event::Quit) => events.push(Event::Quit),
+                Some(esc_menu::Event::Quit) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Quit");
+                    events.push(Event::Quit);
+                },
                 Some(esc_menu::Event::CharacterSelection) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "CharacterSelection");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
