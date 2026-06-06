@@ -146,6 +146,11 @@ impl CharacterLoader {
                             ?result,
                             "Error loading character data for character_id: {}", character_id.0
                         );
+                        common::telemetry!(
+                            "err_ctx",
+                            msg = "char_load_failed",
+                            char_id = character_id.0
+                        );
                     }
                     CharacterScreenResponseKind::CharacterData(Box::new(result))
                 },
