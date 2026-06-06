@@ -314,6 +314,15 @@ fn target_if_attacked(bdata: &mut BehaviorData) -> bool {
                                 .get(attacker)
                                 .map(|pos| pos.0),
                         });
+                        let npc_uid = bdata.agent_data.uid;
+                        let npc_body = bdata.agent_data.body.map(|b| format!("{:?}", b));
+                        common::telemetry!(
+                            "npc",
+                            event = "hostile",
+                            npc = ?npc_uid,
+                            body = ?npc_body,
+                            target = ?bdata.read_data.uids.get(attacker)
+                        );
                     }
 
                     // Remember this attack if we're an RtSim entity
