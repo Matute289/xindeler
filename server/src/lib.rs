@@ -702,6 +702,9 @@ impl Server {
 
         info!("Server version: {}", *common::util::DISPLAY_VERSION);
 
+        common::telemetry!("ss", side = "server", ver = env!("CARGO_PKG_VERSION"));
+        info!("Session start: server version={}", env!("CARGO_PKG_VERSION"));
+
         Ok(this)
     }
 
@@ -1190,6 +1193,23 @@ impl Server {
         }
 
         let end_of_server_tick = Instant::now();
+
+        {
+            let tick_num = self.state.ecs().read_resource::<Tick>().0;
+            let tick_ms = end_of_server_tick
+                .duration_since(before_state_tick)
+                .as_millis() as u64;
+            let entity_count = {
+                use specs::WorldExt;
+                self.state.ecs().entities().join().count() as u32
+            };
+            if tick_num % 50 == 0 {
+                common::telemetry!("tick", ms = tick_ms, entities = entity_count, tick = tick_num);
+            }
+            if tick_ms > 50 {
+                warn!(tick_ms, entity_count, "Slow server tick");
+            }
+        }
 
         // 8) Update Metrics
         run_now::<sys::metrics::Sys>(self.state.ecs());

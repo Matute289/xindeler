@@ -364,6 +364,7 @@ impl<'a> System<'a> for Sys {
                         ));
                         drop(new_players_guard);
                         read_data.player_metrics.players_connected.inc();
+                        common::telemetry!("pd_conn", event = "connect");
 
                         // Tell the client its request was successful.
                         client.send(Ok(()))?;
