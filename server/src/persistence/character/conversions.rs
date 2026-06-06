@@ -306,12 +306,13 @@ pub fn convert_waypoint_from_database_json(
     };
 
     Ok((
-        character_position
-            .waypoint
-            .map(|pos| Waypoint::new(pos * scale_factor, Time(0.0))),
-        character_position
-            .map_marker
-            .map(|pos| MapMarker(pos.map(|v| (v as f32 * scale_factor) as i32))),
+        character_position.waypoint.map(|pos| {
+            Waypoint::new(
+                vek::Vec3::new(pos.x, pos.y, pos.z * scale_factor),
+                Time(0.0),
+            )
+        }),
+        character_position.map_marker.map(MapMarker),
     ))
 }
 
@@ -965,11 +966,13 @@ pub fn convert_recipe_book_from_database_items(
 mod waypoint_scale_tests {
     use super::convert_waypoint_from_database_json;
 
+    // Standard build: old save (no hires field) — no change to any coord
     #[cfg(not(feature = "terrain-hires"))]
     #[test]
     fn old_save_no_change_in_standard_build() {
         let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 100.0).abs() < 0.01);
         assert!((pos.y - 200.0).abs() < 0.01);
@@ -979,47 +982,75 @@ mod waypoint_scale_tests {
         assert_eq!(mm.0.y, 200);
     }
 
+    // Standard build: hires save → only Z halved, X/Y/map_marker unchanged
     #[cfg(not(feature = "terrain-hires"))]
     #[test]
-    fn hires_save_scaled_down_in_standard_build() {
+    fn hires_save_only_z_scaled_down_in_standard_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
-        assert!(
-            (pos.x - 100.0).abs() < 0.01,
-            "expected 100.0, got {}",
-            pos.x
-        );
-        assert!((pos.y - 200.0).abs() < 0.01);
-        assert!((pos.z - 50.0).abs() < 0.01);
-        let mm = map_marker.unwrap();
-        assert_eq!(mm.0.x, 100);
-        assert_eq!(mm.0.y, 200);
-    }
-
-    #[cfg(feature = "terrain-hires")]
-    #[test]
-    fn old_save_scaled_up_in_hires_build() {
-        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
-        let pos = waypoint.unwrap().get_pos();
+        // X and Y are horizontal — unchanged
         assert!(
             (pos.x - 200.0).abs() < 0.01,
-            "expected 200.0, got {}",
+            "X must not change, got {}",
             pos.x
         );
-        assert!((pos.y - 400.0).abs() < 0.01);
-        assert!((pos.z - 100.0).abs() < 0.01);
+        assert!(
+            (pos.y - 400.0).abs() < 0.01,
+            "Y must not change, got {}",
+            pos.y
+        );
+        // Only Z (altitude) is halved
+        assert!(
+            (pos.z - 50.0).abs() < 0.01,
+            "expected Z=50.0, got {}",
+            pos.z
+        );
+        // map_marker is horizontal — unchanged
         let mm = map_marker.unwrap();
-        assert_eq!(mm.0.x, 200);
-        assert_eq!(mm.0.y, 400);
+        assert_eq!(mm.0.x, 200, "map_marker X must not change");
+        assert_eq!(mm.0.y, 400, "map_marker Y must not change");
     }
 
+    // Hires build: old save → only Z doubled, X/Y/map_marker unchanged
+    #[cfg(feature = "terrain-hires")]
+    #[test]
+    fn old_save_only_z_scaled_up_in_hires_build() {
+        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
+        let pos = waypoint.unwrap().get_pos();
+        // X and Y are horizontal — unchanged
+        assert!(
+            (pos.x - 100.0).abs() < 0.01,
+            "X must not change, got {}",
+            pos.x
+        );
+        assert!(
+            (pos.y - 200.0).abs() < 0.01,
+            "Y must not change, got {}",
+            pos.y
+        );
+        // Only Z (altitude) is doubled
+        assert!(
+            (pos.z - 100.0).abs() < 0.01,
+            "expected Z=100.0, got {}",
+            pos.z
+        );
+        // map_marker is horizontal — unchanged
+        let mm = map_marker.unwrap();
+        assert_eq!(mm.0.x, 100, "map_marker X must not change");
+        assert_eq!(mm.0.y, 200, "map_marker Y must not change");
+    }
+
+    // Hires build: hires save — no change to any coord
     #[cfg(feature = "terrain-hires")]
     #[test]
     fn hires_save_no_change_in_hires_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 200.0).abs() < 0.01);
         assert!((pos.y - 400.0).abs() < 0.01);
