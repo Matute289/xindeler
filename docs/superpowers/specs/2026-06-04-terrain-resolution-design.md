@@ -375,8 +375,8 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 | Fase | Estado | Notas |
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
-| Fase 2 — Escala de bloques | ⏸ Pausada | Task 7 casi completo; `dimensions()`/`height()` revertidos (ver nota); save migration pendiente. Pausa hasta completar sistema de logs. |
-| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Fase 2 |
+| Fase 2 — Escala de bloques | 🔄 En progreso | Task 7 completo; save migration pendiente (próximo paso) |
+| Fase 3 — Normal maps | ⬜ No iniciada | Arrancar después de completar Fase 2 |
 
 Actualizar esta tabla a medida que avanza la implementación:
 - ⬜ No iniciada
@@ -386,7 +386,7 @@ Actualizar esta tabla a medida que avanza la implementación:
 
 ---
 
-## Estado detallado al 2026-06-05
+## Estado detallado al 2026-06-06
 
 ### Fase 1 — Completa ✅
 
@@ -407,7 +407,7 @@ Todo el pipeline Transvoxel está funcionando en el juego:
 - Transición abrupta entre chunks smooth y greedy en bordes
 - Terreno flat tiene leve textura triangular (cosmético)
 
-### Fase 2 — Pausada ⏸
+### Fase 2 — En progreso 🔄
 
 **HEAD terrain-hires:** `0dd4c91a2a` (branch: main)
 
@@ -445,12 +445,39 @@ Lo que NO debe escalar: proporciones entidad/terreno (bloques de alto de un pers
 
 **Plan completo:** `docs/superpowers/plans/2026-06-05-fase2-block-scale.md`
 
-**Razón de la pausa:**
-El sistema de logging (actualmente en desarrollo) va a proveer observabilidad completa del estado del juego (telemetría, logs estructurados) que facilitará enormemente el debugging y validación de los cambios de terrain-hires. Se retoma Fase 2 una vez que el sistema de logging esté implementado.
+**Sistema de telemetría — ✅ Operativo (desde 2026-06-06)**
+
+El sistema de logging está completamente implementado y activo. Al probar el juego con terrain-hires:
+- `telemetry!` macro emite eventos JSON Lines en `userdata/voxygen/logs/client_telemetry.jsonl`
+- Eventos cubiertos: session start/end, chunk load/unload, FPS/frame_ms, network connect, UI interactions
+- `TelemetrySystem` ECS snapshots cada 150 ticks: world count, player stats, entity count
+- Bug report activo: `https://veloren.greenmountain.dev/bug-report` — botón "Report Bug" en EscMenu envía los últimos 500 líneas de telemetría + 200 de error log al VPS
+
+Para probar con telemetría activa (logging-verbose escribe el JSON Lines):
+```bash
+cargo run --bin veloren-voxygen \
+  --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
+```
+
+Esto permite observar en tiempo real: FPS con terrain-hires activo, chunks que tardan en cargar, crashes/errores.
+
+**Próximo paso — Save migration:**
+
+### Pruebas visuales — 2026-06-06 (Fase 1 + Fase 2 parcial)
+
+Screenshots en `/Users/mgrinberg/MyVeloren/Screenshots/smooth-enabled-{1,2,3}.png`.
+
+**Observaciones:**
+- ✅ Transvoxel rendering funciona — los facets triangulares son claramente visibles en terreno abierto (screenshot 3)
+- ✅ Terreno de pueblo/villa renderiza con suavizado (screenshots 1 y 2)
+- ✅ Geometría smooth en estructuras: el edificio detrás del personaje en screenshot 1 muestra las caras triangulares características
+- ✅ Suelo plano con ligera textura triangular (limitación conocida, cosmética)
+- ⚠️ Screenshots tomados con build anterior al botón "Report Bug" — el EscMenu tiene 6 botones (el actual tiene 7)
+- ℹ️ Área de agua en screenshot 3 muestra el efecto Transvoxel más pronunciado — las caras anguladas del fluido son llamativas; puede ser candidato a ajuste visual en Fase 3
 
 ### Fase 3 — No iniciada ⬜
 
-Puede iniciarse en cualquier momento (independiente de Fase 2).
+Arrancar después de completar save migration (Fase 2).
 Ver sección Fase 3 del spec arriba.
 
 ---
@@ -458,26 +485,24 @@ Ver sección Fase 3 del spec arriba.
 ## Prompt de reanudación
 
 ```
-Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md, sección "Estado detallado al 2026-06-05".
+Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md, sección "Estado detallado al 2026-06-06".
 Luego: git log --oneline -8 && git status
 
 Estado actual:
 - Fase 1: completa ✅
-- Fase 2: pausada ⏸ (HEAD terrain-hires: 0dd4c91a2a)
-  - Task 7 casi completo. dimensions()/humanoid.height() NO escalar (ver nota crítica en spec).
-  - Pendiente: save migration (plan separado)
-- Fase 3: no iniciada ⬜
-- Sistema de logs: en desarrollo (ver docs/superpowers/specs/2026-06-05-logging-system-design.md)
-  Completar logging antes de retomar terrain. Beneficio: telemetría unificada para observar cambios.
+- Fase 2: en progreso 🔄 (HEAD: 9881ad3558)
+  - Task 7 completo. dimensions()/humanoid.height() NO escalar (ver nota crítica en spec).
+  - Pendiente: save migration — coordenadas de bloque en userdata/ necesitan ×2 al cargar con terrain-hires.
+- Fase 3: no iniciada ⬜ — arrancar después de save migration
+- Sistema de telemetría: ✅ operativo. Para probar con telemetría activa:
+    cargo run --bin veloren-voxygen \
+      --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
+  Logs en: userdata/voxygen/logs/client_telemetry.jsonl
+  Bug report VPS: https://veloren.greenmountain.dev/bug-report
 
-Para probar Fase 2 con logging-verbose activo (una vez que Plan A de logs esté implementado):
-  cargo run --bin veloren-voxygen \
-    --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
-
-Próximos pasos al retomar terrain:
-A) Save migration (coordenadas ×2 al cargar userdata con terrain-hires)
-B) Arrancar Fase 3 (Normal Maps) — independiente y de bajo riesgo
-C) Testear Fase 2 con logging-verbose y revisar telemetría
+Próximo paso concreto:
+→ Implementar save migration (plan separado a crear con writing-plans).
+  Leer primero: docs/superpowers/plans/2026-06-05-fase2-block-scale.md para ver qué falta.
 
 No hagas preguntas — toda la info está en la spec y en los planes linkados.
 ```
