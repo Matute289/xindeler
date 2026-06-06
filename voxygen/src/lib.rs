@@ -12,6 +12,7 @@
 #[macro_use]
 pub mod ui;
 pub mod audio;
+pub mod bug_report;
 pub mod cli;
 pub mod cmd;
 mod credits;
