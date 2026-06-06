@@ -34,7 +34,7 @@ impl<'a> System<'a> for Sys {
 
     fn run(_job: &mut Job<Self>, data: Self::SystemData) {
         let tick = TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if tick % SNAPSHOT_TICKS != 0 {
+        if !tick.is_multiple_of(SNAPSHOT_TICKS) {
             return;
         }
 

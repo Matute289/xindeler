@@ -329,7 +329,7 @@ impl ServerEvent for HealthChangeEvent {
                     let attacker = ev.change.by.map(|b| b.uid());
                     common::telemetry!(
                         "ch",
-                        dst = ?uid.map(|u| *u),
+                        dst = ?uid.copied(),
                         dmg,
                         attacker = ?attacker,
                         hp_after = health.current() as u32

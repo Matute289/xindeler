@@ -292,7 +292,7 @@ fn handle_main_events_cleared(
             use std::sync::atomic::{AtomicU32, Ordering};
             static PERF_COUNTER: AtomicU32 = AtomicU32::new(0);
             let count = PERF_COUNTER.fetch_add(1, Ordering::Relaxed);
-            if count % 30 == 0 {
+            if count.is_multiple_of(30) {
                 let dt = global_state.clock.dt();
                 let frame_ms = dt.as_millis() as u32;
                 let fps = if frame_ms > 0 { 1000 / frame_ms } else { 0 };
