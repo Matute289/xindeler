@@ -268,6 +268,7 @@ pub fn convert_waypoint_to_database_json(
         let charpos = CharacterPosition {
             waypoint: waypoint.map(|w| w.get_pos()),
             map_marker: map_marker.map(|m| m.0),
+            hires: false,
         };
         Some(
             serde_json::to_string(&charpos)

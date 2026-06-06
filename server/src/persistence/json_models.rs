@@ -66,6 +66,8 @@ generic_body_from_impl!(comp::crustacean::Body);
 pub struct CharacterPosition {
     pub waypoint: Option<Vec3<f32>>,
     pub map_marker: Option<Vec2<i32>>,
+    #[serde(default)]
+    pub hires: bool,
 }
 
 pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> String {
