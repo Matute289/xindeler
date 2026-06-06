@@ -324,6 +324,18 @@ impl ServerEvent for HealthChangeEvent {
                     });
                 }
 
+                if ev.change.amount < 0.0 && changed {
+                    let dmg = (-ev.change.amount) as u32;
+                    let attacker = ev.change.by.map(|b| b.uid());
+                    common::telemetry!(
+                        "ch",
+                        dst = ?uid.map(|u| *u),
+                        dmg,
+                        attacker = ?attacker,
+                        hp_after = health.current() as u32
+                    );
+                }
+
                 if !health.is_dead && health.should_die() {
                     if health.death_protection {
                         emitters.emit(DownedEvent { entity: ev.entity });
@@ -1069,6 +1081,12 @@ impl ServerEvent for DestroyEvent {
                     msg: comp::UnresolvedChatMsg::death(kill_source, *uid),
                     from_client: false,
                 });
+                common::telemetry!(
+                    "pd",
+                    uid = ?uid,
+                    cause = ?ev.cause.cause,
+                    by = ?ev.cause.by.map(|b| b.uid())
+                );
             }
 
             let mut exp_awards = Vec::<(Entity, f32, Option<Group>)>::new();
