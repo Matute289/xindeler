@@ -83,6 +83,9 @@ fn main() {
 
     // Init split logging (err always, info+telemetry with logging-verbose feature).
     let log_guards = common_frontend::init_split_logs("client", &logs_dir);
+    let game_version = common::util::DISPLAY_VERSION.as_str();
+    common::telemetry!("ss", side = "client", ver = game_version, platform = std::env::consts::OS);
+    info!(ver = game_version, "Session start");
 
     // Re-run userdata selection so any warnings will be logged
     common_base::userdata_dir();
@@ -264,6 +267,8 @@ fn main() {
     };
 
     run::run(global_state, event_loop).unwrap();
+    common::telemetry!("se", side = "client", reason = "clean");
+    info!("Session end");
     // Clean-exit: delete info/telemetry logs if no errors occurred this session
     log_guards.lifecycle.cleanup_on_exit(&log_guards.has_errors);
 }
