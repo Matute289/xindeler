@@ -41,7 +41,7 @@ fn read_tail(path: &Path, max_lines: usize) -> Vec<String> {
         },
     };
     let reader = io::BufReader::new(file);
-    let lines: Vec<String> = reader.lines().flatten().collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let skip = lines.len().saturating_sub(max_lines);
     lines[skip..].to_vec()
 }
