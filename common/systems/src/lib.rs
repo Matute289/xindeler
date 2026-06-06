@@ -15,6 +15,7 @@ mod pool;
 pub mod projectile;
 mod shockwave;
 mod stats;
+mod telemetry;
 mod tether;
 
 // External
@@ -43,4 +44,5 @@ pub fn add_local_systems(dispatch_builder: &mut DispatcherBuilder) {
     dispatch::<beam::Sys>(dispatch_builder, &[&phys::Sys::sys_name()]);
     dispatch::<pool::Sys>(dispatch_builder, &[&phys::Sys::sys_name()]);
     dispatch::<aura::Sys>(dispatch_builder, &[]);
+    dispatch::<telemetry::Sys>(dispatch_builder, &[]);
 }
