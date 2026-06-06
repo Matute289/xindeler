@@ -4036,6 +4036,7 @@ impl Hud {
 
                     events.push(Event::CharacterSelection)
                 },
+                Some(esc_menu::Event::ReportBug) => {},
                 None => {},
             }
         }
