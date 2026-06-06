@@ -971,8 +971,7 @@ mod waypoint_scale_tests {
     #[test]
     fn old_save_no_change_in_standard_build() {
         let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 100.0).abs() < 0.01);
         assert!((pos.y - 200.0).abs() < 0.01);
@@ -987,8 +986,7 @@ mod waypoint_scale_tests {
     #[test]
     fn hires_save_only_z_scaled_down_in_standard_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         // X and Y are horizontal — unchanged
         assert!(
@@ -1018,8 +1016,7 @@ mod waypoint_scale_tests {
     #[test]
     fn old_save_only_z_scaled_up_in_hires_build() {
         let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         // X and Y are horizontal — unchanged
         assert!(
@@ -1049,8 +1046,7 @@ mod waypoint_scale_tests {
     #[test]
     fn hires_save_no_change_in_hires_build() {
         let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let (waypoint, map_marker) =
-            convert_waypoint_from_database_json(json).expect("must parse");
+        let (waypoint, map_marker) = convert_waypoint_from_database_json(json).expect("must parse");
         let pos = waypoint.unwrap().get_pos();
         assert!((pos.x - 200.0).abs() < 0.01);
         assert!((pos.y - 400.0).abs() < 0.01);
