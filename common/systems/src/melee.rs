@@ -325,6 +325,7 @@ impl<'a> System<'a> for Sys {
                     }
 
                     if is_applied {
+                        common::telemetry!("ch", src = ?uid, dst = ?uid_b, skill = "melee");
                         melee_attack.hit_entities.push(*uid_b);
                     }
                 }

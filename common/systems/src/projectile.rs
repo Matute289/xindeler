@@ -258,6 +258,13 @@ impl<'a> System<'a> for Sys {
                         ori: target.and_then(|target| orientations.get(target)),
                     };
 
+                    common::telemetry!(
+                        "ch",
+                        src = ?projectile.owner,
+                        dst = ?other,
+                        skill = "projectile"
+                    );
+
                     dispatch_hit(
                         projectile_info,
                         projectile_target_info,
