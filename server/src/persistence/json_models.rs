@@ -350,3 +350,24 @@ pub mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod waypoint_migration_tests {
+    use super::CharacterPosition;
+
+    #[test]
+    fn old_save_defaults_hires_to_false() {
+        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
+        let pos: CharacterPosition =
+            serde_json::de::from_str(json).expect("must parse");
+        assert!(!pos.hires, "old saves without hires field must default to false");
+    }
+
+    #[test]
+    fn hires_save_parses_hires_true() {
+        let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
+        let pos: CharacterPosition =
+            serde_json::de::from_str(json).expect("must parse");
+        assert!(pos.hires);
+    }
+}

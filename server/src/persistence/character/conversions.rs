@@ -22,7 +22,6 @@ use common::{
         item,
         skillset::{self, SkillGroupKind, SkillSet, skills::Skill},
     },
-    consts::HIRES_SCALE,
     resources::Time,
 };
 use core::{convert::TryFrom, num::NonZeroU64};
@@ -296,9 +295,13 @@ pub fn convert_waypoint_from_database_json(
 
     let saved_in_hires = character_position.hires;
     let running_hires = cfg!(feature = "terrain-hires");
+    // The hires block scale is always 2× the standard block scale, regardless of
+    // which build we are currently in. HIRES_SCALE is 1.0 in a standard build, so
+    // it cannot be used here; instead we use the literal ratio 2.0.
+    const HIRES_RATIO: f32 = 2.0;
     let scale_factor: f32 = match (saved_in_hires, running_hires) {
-        (false, true) => HIRES_SCALE,        // old standard save, now hires → scale up
-        (true, false) => 1.0 / HIRES_SCALE,  // old hires save, now standard → scale down
+        (false, true) => HIRES_RATIO,        // old standard save, now hires → scale up
+        (true, false) => 1.0 / HIRES_RATIO,  // old hires save, now standard → scale down
         _ => 1.0,                             // same scale, no change
     };
 
@@ -956,4 +959,69 @@ pub fn convert_recipe_book_from_database_items(
     let recipe_book = RecipeBook::recipe_book_from_persistence(unique_groups);
 
     Ok((recipe_book, duplicate_recipes))
+}
+
+#[cfg(test)]
+mod waypoint_scale_tests {
+    use super::convert_waypoint_from_database_json;
+
+    #[cfg(not(feature = "terrain-hires"))]
+    #[test]
+    fn old_save_no_change_in_standard_build() {
+        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
+        let pos = waypoint.unwrap().get_pos();
+        assert!((pos.x - 100.0).abs() < 0.01);
+        assert!((pos.y - 200.0).abs() < 0.01);
+        assert!((pos.z - 50.0).abs() < 0.01);
+        let mm = map_marker.unwrap();
+        assert_eq!(mm.0.x, 100);
+        assert_eq!(mm.0.y, 200);
+    }
+
+    #[cfg(not(feature = "terrain-hires"))]
+    #[test]
+    fn hires_save_scaled_down_in_standard_build() {
+        let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
+        let pos = waypoint.unwrap().get_pos();
+        assert!((pos.x - 100.0).abs() < 0.01, "expected 100.0, got {}", pos.x);
+        assert!((pos.y - 200.0).abs() < 0.01);
+        assert!((pos.z - 50.0).abs() < 0.01);
+        let mm = map_marker.unwrap();
+        assert_eq!(mm.0.x, 100);
+        assert_eq!(mm.0.y, 200);
+    }
+
+    #[cfg(feature = "terrain-hires")]
+    #[test]
+    fn old_save_scaled_up_in_hires_build() {
+        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
+        let pos = waypoint.unwrap().get_pos();
+        assert!((pos.x - 200.0).abs() < 0.01, "expected 200.0, got {}", pos.x);
+        assert!((pos.y - 400.0).abs() < 0.01);
+        assert!((pos.z - 100.0).abs() < 0.01);
+        let mm = map_marker.unwrap();
+        assert_eq!(mm.0.x, 200);
+        assert_eq!(mm.0.y, 400);
+    }
+
+    #[cfg(feature = "terrain-hires")]
+    #[test]
+    fn hires_save_no_change_in_hires_build() {
+        let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
+        let (waypoint, map_marker) =
+            convert_waypoint_from_database_json(json).expect("must parse");
+        let pos = waypoint.unwrap().get_pos();
+        assert!((pos.x - 200.0).abs() < 0.01);
+        assert!((pos.y - 400.0).abs() < 0.01);
+        assert!((pos.z - 100.0).abs() < 0.01);
+        let mm = map_marker.unwrap();
+        assert_eq!(mm.0.x, 200);
+        assert_eq!(mm.0.y, 400);
+    }
 }
