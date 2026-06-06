@@ -144,7 +144,7 @@ use std::{
     cmp::Ordering,
     collections::VecDeque,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tracing::{instrument, trace, warn};
@@ -1301,6 +1301,7 @@ pub struct Hud {
     clear_chat: bool,
     current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
     extra_markers: Vec<map::ExtraMarker>,
+    bug_report_status: Option<Arc<Mutex<Option<crate::bug_report::BugReportResult>>>>,
 }
 
 impl Hud {
@@ -1443,6 +1444,7 @@ impl Hud {
             clear_chat: false,
             current_dialogue: None,
             extra_markers: Vec::new(),
+            bug_report_status: None,
         }
     }
 
@@ -4036,7 +4038,38 @@ impl Hud {
 
                     events.push(Event::CharacterSelection)
                 },
-                Some(esc_menu::Event::ReportBug) => {},
+                Some(esc_menu::Event::ReportBug) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "ReportBug");
+                    if let Some(url) = global_state
+                        .settings
+                        .networking
+                        .bug_report_url
+                        .clone()
+                    {
+                        let status =
+                            Arc::new(Mutex::new(None::<crate::bug_report::BugReportResult>));
+                        let status_clone = Arc::clone(&status);
+                        let logs_dir = common_base::userdata_dir()
+                            .join("voxygen")
+                            .join("logs");
+                        std::thread::spawn(move || {
+                            let result = crate::bug_report::send_bug_report(&url, &logs_dir);
+                            if let Ok(mut guard) = status_clone.lock() {
+                                *guard = Some(result);
+                            }
+                        });
+                        self.bug_report_status = Some(status);
+                        self.new_messages.push_back(
+                            comp::ChatType::CommandInfo
+                                .into_plain_msg("Bug report sending…"),
+                        );
+                    } else {
+                        self.new_messages.push_back(
+                            comp::ChatType::CommandError
+                                .into_plain_msg("No bug report URL configured."),
+                        );
+                    }
+                },
                 None => {},
             }
         }
@@ -5171,6 +5204,29 @@ impl Hud {
         ),
     ) -> Vec<Event> {
         span!(_guard, "maintain", "Hud::maintain");
+
+        // Poll bug report background thread for completion
+        if let Some(status) = self.bug_report_status.take() {
+            let result = status.try_lock().ok().and_then(|mut g| g.take());
+            if let Some(result) = result {
+                let msg = match result {
+                    crate::bug_report::BugReportResult::Sent => {
+                        "Bug report sent successfully.".to_owned()
+                    },
+                    crate::bug_report::BugReportResult::Skipped(reason) => {
+                        format!("Bug report skipped: {reason}")
+                    },
+                    crate::bug_report::BugReportResult::Failed(reason) => {
+                        format!("Bug report failed: {reason}")
+                    },
+                };
+                self.new_message(comp::ChatType::CommandInfo.into_plain_msg(msg));
+                // bug_report_status remains None (already taken)
+            } else {
+                // Result not ready yet — put it back
+                self.bug_report_status = Some(status);
+            }
+        }
 
         // Remove extra map markers that we've wandered a long distance away from
         if let Some(pos) = client.position() {
