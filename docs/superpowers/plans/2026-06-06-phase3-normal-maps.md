@@ -6,21 +6,11 @@
 
 **Architecture:** Block kind is tracked through the density field → transvoxel mesher → GPU vertex. A 8-layer wgpu texture array (one layer per material category) is bound at set 3 of the smooth terrain pipeline. The fragment shader samples it with triplanar projection and blends the result into the geometric normal from Phase 1.
 
-**Tech Stack:** Rust (bytemuck, wgpu, image crate), GLSL 440, veloren common assets system
+**Tech Stack:** Rust (bytemuck, wgpu, image crate), GLSL 440, veloren common assets system. Normal maps are **generated procedurally at startup** using a self-contained value noise implementation — no external assets, no artistic work required. Each material category has distinct noise parameters (frequency, octaves, pattern) that make rock look rocky, grass look grassy, etc. All parameters are Rust constants, tunable by re-running the game.
 
 ---
 
 ## File Map
-
-**Create:**
-- `assets/voxygen/texture/terrain_normals/rock.png` — flat normal map placeholder
-- `assets/voxygen/texture/terrain_normals/grass.png`
-- `assets/voxygen/texture/terrain_normals/sand.png`
-- `assets/voxygen/texture/terrain_normals/snow.png`
-- `assets/voxygen/texture/terrain_normals/earth.png`
-- `assets/voxygen/texture/terrain_normals/wood.png`
-- `assets/voxygen/texture/terrain_normals/ice.png`
-- `assets/voxygen/texture/terrain_normals/leaves.png`
 
 **Modify:**
 - `common/src/terrain/block.rs` — add `normal_map_index()` to `BlockKind`
@@ -463,53 +453,268 @@ git commit -m "feat(phase3): add block_kind u32 to SmoothTerrainVertex, wire fro
 
 ---
 
-## Task 5: Normal map PNG assets
+## Task 5: Procedural normal map generation
 
 **Files:**
-- Create: `assets/voxygen/texture/terrain_normals/{rock,grass,sand,snow,earth,wood,ice,leaves}.png`
+- Modify: `voxygen/src/render/renderer/mod.rs` (add noise infrastructure and material definitions)
 
-- [ ] **Step 1: Generate flat-normal placeholder PNGs**
+All normal maps are generated at runtime by pure Rust code. No external files, no external tools.
 
-A flat normal map pixel in tangent space is (127, 127, 255, 255) — pointing straight up.
-Run this Python script to generate all 8 files:
+**How height → normal works:**
 
-```bash
-python3 - <<'EOF'
-from PIL import Image
-import os
+Given a 256×256 float height field `h[x][y]`, compute the tangent-space normal at each pixel via central differences:
 
-os.makedirs("assets/voxygen/texture/terrain_normals", exist_ok=True)
-names = ["rock","grass","sand","snow","earth","wood","ice","leaves"]
-for name in names:
-    img = Image.new("RGBA", (256, 256), (127, 127, 255, 255))
-    img.save(f"assets/voxygen/texture/terrain_normals/{name}.png")
-    print(f"Created {name}.png")
-EOF
+```
+dh_dx = (h[x+1][y] - h[x-1][y]) / 2.0
+dh_dy = (h[x][y+1] - h[x][y-1]) / 2.0
+normal = normalize(vec3(-dh_dx * strength, -dh_dy * strength, 1.0))
+encoded = (normal * 0.5 + 0.5) * 255   → RGBA bytes (A = height for parallax)
 ```
 
-If Python/Pillow is not available, use ImageMagick:
+**Noise primitive (no external dependency):**
 
-```bash
-mkdir -p assets/voxygen/texture/terrain_normals
-for name in rock grass sand snow earth wood ice leaves; do
-  convert -size 256x256 xc:"rgba(127,127,255,255)" \
-    assets/voxygen/texture/terrain_normals/${name}.png
-done
+```rust
+/// Deterministic hash → [0, 1] float. Used as a simple value noise primitive.
+fn hash_f32(x: i32, y: i32, seed: u32) -> f32 {
+    let h = (x as u32)
+        .wrapping_mul(2246822519)
+        .wrapping_add((y as u32).wrapping_mul(3266489917))
+        .wrapping_add(seed);
+    let h = h ^ (h >> 13);
+    let h = h.wrapping_mul(1274126177);
+    let h = h ^ (h >> 16);
+    (h as f32) / (u32::MAX as f32)
+}
+
+/// Bilinear value noise in [0, 1].
+fn value_noise(x: f64, y: f64, seed: u32) -> f64 {
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let xf = x - x.floor();
+    let yf = y - y.floor();
+    // Smoothstep
+    let u = xf * xf * (3.0 - 2.0 * xf);
+    let v = yf * yf * (3.0 - 2.0 * yf);
+    let a = hash_f32(xi,     yi,     seed) as f64;
+    let b = hash_f32(xi + 1, yi,     seed) as f64;
+    let c = hash_f32(xi,     yi + 1, seed) as f64;
+    let d = hash_f32(xi + 1, yi + 1, seed) as f64;
+    a + u * (b - a) + v * (c - a) + u * v * (a - b - c + d)
+}
+
+/// Fractal Brownian Motion — sum of `octaves` noise layers.
+fn fbm(x: f64, y: f64, octaves: u32, seed: u32) -> f64 {
+    let mut val = 0.0f64;
+    let mut amp = 0.5f64;
+    let mut freq = 1.0f64;
+    for i in 0..octaves {
+        val  += value_noise(x * freq, y * freq, seed.wrapping_add(i * 12345)) * amp;
+        amp  *= 0.5;
+        freq *= 2.0;
+    }
+    val  // range approximately [0, 1]
+}
 ```
 
-- [ ] **Step 2: Verify files exist**
+**Material parameters:**
 
-```bash
-ls -la assets/voxygen/texture/terrain_normals/
+```rust
+struct MaterialNoise {
+    octaves:   u32,
+    frequency: f64,  // base spatial frequency (higher = smaller features)
+    amplitude: f32,  // normal map "bumpiness" — strength of the effect
+    seed:      u32,
+}
+
+// One entry per layer (same order as BlockKind::normal_map_index):
+// 0=rock  1=grass  2=sand  3=snow  4=earth  5=wood  6=ice  7=leaves
+const MATERIAL_NOISE: [MaterialNoise; 8] = [
+    MaterialNoise { octaves: 5, frequency: 4.0,  amplitude: 2.0,  seed: 0xDEAD_BEEF }, // rock
+    MaterialNoise { octaves: 4, frequency: 8.0,  amplitude: 0.8,  seed: 0x0BAD_F00D }, // grass
+    MaterialNoise { octaves: 2, frequency: 3.0,  amplitude: 0.6,  seed: 0xCAFE_BABE }, // sand
+    MaterialNoise { octaves: 3, frequency: 6.0,  amplitude: 0.5,  seed: 0x1337_C0DE }, // snow
+    MaterialNoise { octaves: 4, frequency: 5.0,  amplitude: 1.2,  seed: 0xFEED_FACE }, // earth
+    MaterialNoise { octaves: 3, frequency: 12.0, amplitude: 1.0,  seed: 0xABCD_1234 }, // wood
+    MaterialNoise { octaves: 2, frequency: 2.0,  amplitude: 0.3,  seed: 0x4567_89AB }, // ice
+    MaterialNoise { octaves: 4, frequency: 6.0,  amplitude: 0.9,  seed: 0xBEEF_DEAD }, // leaves
+];
 ```
 
-Expected: 8 PNG files, each around 1–2 KB (flat color compresses well).
+Sand gets a directional ripple warp on top of fbm (simulates wind ripples). Wood gets vertical grain lines.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 1: Write a test for height→normal encoding**
+
+Add to the test section of `voxygen/src/render/renderer/mod.rs` (or a separate `normalmap_gen` module):
+
+```rust
+#[test]
+fn height_to_normal_flat_gives_up_vector() {
+    let h = vec![0.5f32; 256 * 256];
+    let pix = height_to_normal_pixel(0.5, 0.5, 0.5, 0.5, 2.0);
+    // Flat height field → normal = (0, 0, 1) → encoded as (127, 127, 255)
+    assert_eq!(pix[0], 127);  // x ≈ 0
+    assert_eq!(pix[1], 127);  // y ≈ 0
+    assert!(pix[2] > 250);    // z ≈ 1
+}
+```
+
+`height_to_normal_pixel(h_left, h_right, h_down, h_up, strength)` is the helper you'll define in Step 2.
+
+- [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-git add assets/voxygen/texture/terrain_normals/
-git commit -m "feat(phase3): add flat-normal placeholder PNGs for 8 terrain material categories"
+VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-voxygen height_to_normal 2>&1 | tail -5
+```
+
+Expected: `error[E0425]: cannot find function 'height_to_normal_pixel'`
+
+- [ ] **Step 3: Implement the noise and height→normal helpers**
+
+Add to `voxygen/src/render/renderer/mod.rs` (before `load_terrain_normal_map_array`):
+
+```rust
+// ----- Procedural normal map generation (no external crate needed) -----------
+
+fn hash_f32(x: i32, y: i32, seed: u32) -> f32 {
+    let h = (x as u32)
+        .wrapping_mul(2246822519)
+        .wrapping_add((y as u32).wrapping_mul(3266489917))
+        .wrapping_add(seed);
+    let h = h ^ (h >> 13);
+    let h = h.wrapping_mul(1274126177);
+    let h = h ^ (h >> 16);
+    (h as f32) / (u32::MAX as f32)
+}
+
+fn value_noise(x: f64, y: f64, seed: u32) -> f64 {
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let xf = x - x.floor();
+    let yf = y - y.floor();
+    let u = xf * xf * (3.0 - 2.0 * xf);
+    let v = yf * yf * (3.0 - 2.0 * yf);
+    let a = hash_f32(xi,     yi,     seed) as f64;
+    let b = hash_f32(xi + 1, yi,     seed) as f64;
+    let c = hash_f32(xi,     yi + 1, seed) as f64;
+    let d = hash_f32(xi + 1, yi + 1, seed) as f64;
+    a + u * (b - a) + v * (c - a) + u * v * (a - b - c + d)
+}
+
+fn fbm(x: f64, y: f64, octaves: u32, seed: u32) -> f64 {
+    let (mut val, mut amp, mut freq) = (0.0f64, 0.5f64, 1.0f64);
+    for i in 0..octaves {
+        val  += value_noise(x * freq, y * freq, seed.wrapping_add(i * 12345)) * amp;
+        amp  *= 0.5;
+        freq *= 2.0;
+    }
+    val
+}
+
+/// Encode four neighboring height values into a tangent-space normal RGBA pixel.
+/// `h_l/r/d/u` = height at left/right/down/up neighbor (central difference).
+/// `strength` scales the bumpiness.
+pub(super) fn height_to_normal_pixel(h_l: f32, h_r: f32, h_d: f32, h_u: f32, strength: f32) -> [u8; 4] {
+    let dx = (h_r - h_l) * strength;
+    let dy = (h_u - h_d) * strength;
+    let len = (dx * dx + dy * dy + 1.0).sqrt();
+    let nx = (-dx / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    let ny = (-dy / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    let nz = (1.0  / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    [
+        (nx * 255.0) as u8,
+        (ny * 255.0) as u8,
+        (nz * 255.0) as u8,
+        255, // alpha reserved for future parallax height (opaque for now)
+    ]
+}
+
+struct MaterialNoise {
+    octaves:   u32,
+    frequency: f64,
+    amplitude: f32,
+    seed:      u32,
+}
+
+const MATERIAL_NOISE: [MaterialNoise; 8] = [
+    MaterialNoise { octaves: 5, frequency: 4.0,  amplitude: 2.0,  seed: 0xDEAD_BEEF }, // rock
+    MaterialNoise { octaves: 4, frequency: 8.0,  amplitude: 0.8,  seed: 0x0BAD_F00D }, // grass
+    MaterialNoise { octaves: 2, frequency: 3.0,  amplitude: 0.6,  seed: 0xCAFE_BABE }, // sand
+    MaterialNoise { octaves: 3, frequency: 6.0,  amplitude: 0.5,  seed: 0x1337_C0DE }, // snow
+    MaterialNoise { octaves: 4, frequency: 5.0,  amplitude: 1.2,  seed: 0xFEED_FACE }, // earth
+    MaterialNoise { octaves: 3, frequency: 12.0, amplitude: 1.0,  seed: 0xABCD_1234 }, // wood
+    MaterialNoise { octaves: 2, frequency: 2.0,  amplitude: 0.3,  seed: 0x4567_89AB }, // ice
+    MaterialNoise { octaves: 4, frequency: 6.0,  amplitude: 0.9,  seed: 0xBEEF_DEAD }, // leaves
+];
+
+/// Generate one 256×256 RGBA layer of a terrain normal map for a given material.
+/// Returns raw bytes (SIZE*SIZE*4), ready to upload to a wgpu texture layer.
+fn generate_normal_map_layer(m: &MaterialNoise) -> Vec<u8> {
+    const SIZE: usize = 256;
+    let mut heights = vec![0.0f32; SIZE * SIZE];
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let fx = (x as f64 / SIZE as f64) * m.frequency;
+            let fy = (y as f64 / SIZE as f64) * m.frequency;
+
+            // Sand (layer 2, seed 0xCAFE_BABE): add directional ripple warp
+            let h = if m.seed == 0xCAFE_BABE {
+                let warp = value_noise(fx * 0.5, fy * 0.5, m.seed.wrapping_add(9999)) * 0.4;
+                fbm(fx + warp, fy * 0.1, m.octaves, m.seed)
+            // Wood (layer 5, seed 0xABCD_1234): vertical grain lines
+            } else if m.seed == 0xABCD_1234 {
+                let grain = (fx * 3.0 * std::f64::consts::TAU).sin() * 0.5 + 0.5;
+                grain * 0.7 + fbm(fx, fy, m.octaves, m.seed) * 0.3
+            } else {
+                fbm(fx, fy, m.octaves, m.seed)
+            };
+
+            heights[y * SIZE + x] = h as f32;
+        }
+    }
+
+    let mut pixels = vec![0u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let idx = (y * SIZE + x) * 4;
+            let h = |px: i32, py: i32| {
+                let cx = px.rem_euclid(SIZE as i32) as usize;
+                let cy = py.rem_euclid(SIZE as i32) as usize;
+                heights[cy * SIZE + cx]
+            };
+            let pix = height_to_normal_pixel(
+                h(x as i32 - 1, y as i32),
+                h(x as i32 + 1, y as i32),
+                h(x as i32, y as i32 - 1),
+                h(x as i32, y as i32 + 1),
+                m.amplitude,
+            );
+            pixels[idx..idx + 4].copy_from_slice(&pix);
+        }
+    }
+    pixels
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-voxygen height_to_normal 2>&1 | tail -5
+```
+
+Expected: `test result: ok. 1 passed`
+
+- [ ] **Step 5: Compile check**
+
+```bash
+cargo check -p veloren-voxygen 2>&1 | grep "^error" | head -10
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add voxygen/src/render/renderer/mod.rs
+git commit -m "feat(phase3): procedural terrain normal map generation (value noise FBM, no external assets)"
 ```
 
 ---
@@ -519,33 +724,19 @@ git commit -m "feat(phase3): add flat-normal placeholder PNGs for 8 terrain mate
 **Files:**
 - Modify: `voxygen/src/render/renderer/mod.rs`
 
-- [ ] **Step 1: Add helper function to load texture array**
+- [ ] **Step 1: Add `create_terrain_normal_map_array()` using procedural layers**
 
-Add a private function near the top of `voxygen/src/render/renderer/mod.rs` (after the imports):
+Add this function after the `generate_normal_map_layer` function from Task 5:
 
 ```rust
-/// Load 8 terrain normal map PNGs and combine them into a single wgpu texture
-/// array (depth_or_array_layers = 8, format = Rgba8Unorm).
-/// Falls back to a flat normal (127, 127, 255, 255) for any missing PNG.
-fn load_terrain_normal_map_array(
+/// Create the 8-layer wgpu texture array for terrain normal maps.
+/// All layers are generated procedurally — no asset files needed.
+fn create_terrain_normal_map_array(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Texture {
     const LAYER_COUNT: u32 = 8;
     const SIZE: u32 = 256;
-    const FLAT_PIXEL: [u8; 4] = [127, 127, 255, 255];
-    const LAYER_BYTES: usize = (SIZE * SIZE * 4) as usize;
-
-    let layer_names = [
-        "voxygen.texture.terrain_normals.rock",
-        "voxygen.texture.terrain_normals.grass",
-        "voxygen.texture.terrain_normals.sand",
-        "voxygen.texture.terrain_normals.snow",
-        "voxygen.texture.terrain_normals.earth",
-        "voxygen.texture.terrain_normals.wood",
-        "voxygen.texture.terrain_normals.ice",
-        "voxygen.texture.terrain_normals.leaves",
-    ];
 
     let tex_info = wgpu::TextureDescriptor {
         label: Some("terrain_normal_map_array"),
@@ -557,7 +748,7 @@ fn load_terrain_normal_map_array(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm, // not sRGB — normals are linear data
+        format: wgpu::TextureFormat::Rgba8Unorm, // NOT sRGB — normals are linear data
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     };
@@ -579,28 +770,8 @@ fn load_terrain_normal_map_array(
 
     let texture = Texture::new_raw(device, &tex_info, &view_info, &sampler_info);
 
-    // Upload each layer; fall back to flat normal on any load error.
-    for (layer, specifier) in layer_names.iter().enumerate() {
-        let pixel_data: Vec<u8> = match common_assets::AssetExt::load_cloned::<common_assets::Image>(specifier) {
-            Ok(img) => {
-                let rgba = img.0.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                let mut layer_data = vec![0u8; LAYER_BYTES];
-                for y in 0..SIZE.min(h) {
-                    for x in 0..SIZE.min(w) {
-                        let p = rgba.get_pixel(x, y).0;
-                        let idx = ((y * SIZE + x) * 4) as usize;
-                        layer_data[idx..idx + 4].copy_from_slice(&p);
-                    }
-                }
-                layer_data
-            },
-            Err(e) => {
-                tracing::warn!("terrain normal map {specifier} not found ({e}), using flat normal");
-                FLAT_PIXEL.iter().copied().cycle().take(LAYER_BYTES).collect()
-            },
-        };
-
+    for (layer, m) in MATERIAL_NOISE.iter().enumerate() {
+        let pixel_data = generate_normal_map_layer(m);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.tex,
@@ -622,8 +793,6 @@ fn load_terrain_normal_map_array(
 }
 ```
 
-Note: `common_assets::Image` is the asset type that wraps `DynamicImage`. If the project uses a different type, check `common-assets/src/lib.rs` for the correct type name.
-
 - [ ] **Step 2: Add `terrain_normal_maps` field to `Renderer`**
 
 Find the `pub struct Renderer` definition in `voxygen/src/render/renderer/mod.rs` and add the field:
@@ -642,7 +811,7 @@ pub struct Renderer {
 Find where `noise_tex` is created (around line 530) and add right after:
 
 ```rust
-let terrain_normal_maps = load_terrain_normal_map_array(&device, &queue);
+let terrain_normal_maps = create_terrain_normal_map_array(&device, &queue);
 ```
 
 Then add `terrain_normal_maps` to the struct literal that constructs `Renderer`:
@@ -670,13 +839,13 @@ pub fn terrain_normal_maps(&self) -> &Texture { &self.terrain_normal_maps }
 cargo check -p veloren-voxygen 2>&1 | grep "^error" | head -10
 ```
 
-Fix any `common_assets::Image` type mismatches by checking how `noise_tex` loads its image in the existing code and adapting accordingly.
+Expected: no errors.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add voxygen/src/render/renderer/mod.rs
-git commit -m "feat(phase3): load terrain normal map texture array in Renderer"
+git commit -m "feat(phase3): create procedural terrain normal map texture array in Renderer"
 ```
 
 ---
@@ -1189,71 +1358,56 @@ cargo run --bin veloren-voxygen \
   2>&1 | grep -i "error\|warn\|normal" | head -20
 ```
 
-Walk around terrain — you should see subtle surface roughness on rocks, grass, etc. With placeholder flat normals the effect will be zero (flat normals = no perturbation = identical to before). That's expected until real normal map textures are added.
+Walk around terrain — the procedural normals from Task 5 are already distinct per material, so you should immediately see subtle surface roughness variations: rock looks faceted, grass looks soft, sand looks rippled.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add assets/voxygen/shaders/smooth-terrain-frag.glsl
-git commit -m "feat(phase3): triplanar normal mapping in smooth-terrain-frag — flat normals as placeholder"
+git commit -m "feat(phase3): triplanar normal mapping in smooth-terrain-frag"
 ```
 
 ---
 
-## Task 14: Create real normal map textures
+## Task 14: Tune procedural noise parameters
 
 **Files:**
-- Replace: `assets/voxygen/texture/terrain_normals/*.png`
+- Modify: `voxygen/src/render/renderer/mod.rs` (adjust constants in `MATERIAL_NOISE`)
 
-> **Note:** This task requires artistic work. The placeholder flat normals from Task 5 produce no visible effect. This task replaces them with actual height/normal data.
+The `MATERIAL_NOISE` constants in Task 5 are starting points. After seeing the game running (Task 13), tune them by changing constants and restarting — no recompilation of shaders needed, just re-run.
 
-- [ ] **Step 1: Generate normal maps with surface detail**
-
-Use a tool of your choice (Substance Designer, GIMP's Normal Map plugin, or a script).
-Requirements for each PNG:
-- Size: 256×256 pixels, format: RGBA8 (PNG)
-- Red channel: X component of tangent-space normal, encoded as `(n.x * 0.5 + 0.5) * 255`
-- Green channel: Y component
-- Blue channel: Z component (always >= 127 for outward-facing normals)
-- Alpha: height value for future parallax mapping (255 = raised, 0 = recessed)
-
-Reference values for each material:
-- `rock.png`: bumpy surface, irregular cracks and facets
-- `grass.png`: fine blades/waves, gentle bumps
-- `sand.png`: ripple pattern, smooth waves
-- `snow.png`: soft random bumps, crystalline texture
-- `earth.png`: clumped dirt, moderate roughness
-- `wood.png`: grain lines along the Y axis
-- `ice.png`: smooth with occasional crack lines
-- `leaves.png`: overlapping leaf impressions, veins
-
-A quick approach with an open-source tool (Krita with Normal Map filter, or GIMP):
-1. Create a 256×256 grayscale height map for the material
-2. Apply Normal Map filter (`Filters → Generic → Normal Map` in GIMP)
-3. Export as PNG to the correct path
-
-- [ ] **Step 2: Verify visual result in-game**
+- [ ] **Step 1: Run the game and evaluate each material visually**
 
 ```bash
 cargo run --bin veloren-voxygen \
   --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
 ```
 
-Stand near a rock face and look for surface detail on the smooth terrain. The normal maps should show relief (light/shadow variation) even though the actual mesh geometry is unchanged.
+Stand on each terrain type and note if the surface detail feels right:
+- Rock: should look rough and irregular — if too smooth, increase `octaves` or `amplitude`
+- Grass: should feel organic and gentle — if too harsh, reduce `amplitude`
+- Sand: should show ripple/wave pattern — the directional warp in `generate_normal_map_layer` handles this
+- Snow: should feel soft, low bumps — keep `amplitude` low
+- Wood: grain lines should be visible when looking at wooden structures
 
-- [ ] **Step 3: Tune `NORMAL_MAP_STRENGTH`**
+- [ ] **Step 2: Tune `MATERIAL_NOISE` constants**
 
-If the effect is too subtle (not visible) or too harsh (surface looks noisy/metallic), adjust the constant in `smooth-terrain-frag.glsl`:
+Adjust in `voxygen/src/render/renderer/mod.rs`. Reference:
 
-```glsl
-const float NORMAL_MAP_STRENGTH = 0.4; // try 0.2–0.8
-```
+| Parameter | Effect |
+|-----------|--------|
+| `octaves` | More octaves = finer detail layered on top of coarse bumps. 3–5 is typical. |
+| `frequency` | Higher = smaller, tighter features. Lower = larger, smoother shapes. |
+| `amplitude` | Direct multiplier on bumpiness. Doubles the `NORMAL_MAP_STRENGTH` impact. |
 
-- [ ] **Step 4: Commit final normal maps**
+Also tune `NORMAL_MAP_SCALE` and `NORMAL_MAP_STRENGTH` in `smooth-terrain-frag.glsl` if the overall effect is too strong or too weak across all materials.
+
+- [ ] **Step 3: Commit tuned parameters**
 
 ```bash
-git add assets/voxygen/texture/terrain_normals/
-git commit -m "art(phase3): add real normal map textures for 8 terrain material categories"
+git add voxygen/src/render/renderer/mod.rs \
+        assets/voxygen/shaders/smooth-terrain-frag.glsl
+git commit -m "tune(phase3): adjust procedural normal map noise parameters for each material"
 ```
 
 ---
@@ -1265,7 +1419,7 @@ git commit -m "art(phase3): add real normal map textures for 8 terrain material 
 - Modify: `voxygen/src/render/renderer/pipeline_creation.rs` (inject `TERRAIN_SMOOTHING_ULTRA` define)
 - Modify: `assets/voxygen/shaders/smooth-terrain-frag.glsl` (add `#ifdef TERRAIN_SMOOTHING_ULTRA` block)
 
-> **Prerequisite:** Tasks 1–14 complete and normal maps visible in-game.
+> **Prerequisite:** Tasks 1–13 complete and normal maps visible in-game. Task 14 (tuning) can run in parallel.
 
 - [ ] **Step 1: Add `terrain_smoothing` to `PipelineModes`**
 
@@ -1434,6 +1588,6 @@ git commit -m "docs: mark Phase 3 complete in terrain resolution spec"
 
 3. **set 3 binding requirement**: All draw calls using `SmoothTerrainPipeline` MUST bind set 3. If `render_smooth()` calls `draw_smooth_terrain()` without the bind group, wgpu will panic. Task 11 stores the bind group in `Terrain` to guarantee it's always available.
 
-4. **Flat placeholder normals**: With the placeholder PNGs from Task 5, the `detail` vector is always `(0,0,0)` (flat normal = no perturbation) so the fragment shader is pixel-identical to Phase 1. Real textures are required for visible effect (Task 14).
+4. **Procedural normals are immediately visible**: The FBM noise from Task 5 produces distinct non-flat normals for each material from day one. No external assets required. Task 14 is purely about tuning the feel.
 
 5. **Vertex size increase**: `SmoothTerrainVertex` grows from 20 to 24 bytes. For a large chunk (~10k triangles) that's 240 KB vs 200 KB — 20% more GPU vertex buffer memory per smooth chunk. Acceptable.
