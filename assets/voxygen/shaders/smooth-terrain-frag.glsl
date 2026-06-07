@@ -21,8 +21,9 @@
 
 // Inputs from smooth-terrain-vert.glsl
 layout(location = 0) in vec3 f_pos;
-layout(location = 1) flat in uint f_col_light;
+layout(location = 1) in vec4 f_color;       // .rgb = terrain color, .a = ambient occlusion
 layout(location = 2) in vec3 f_norm;
+layout(location = 4) in vec2 f_light_glow;  // .x = baked light [0,1], .y = glow [0,1]
 
 // Normal map texture array — 8 layers, one per terrain material category.
 // Layer indices: 0=rock, 1=grass, 2=sand, 3=snow, 4=earth, 5=wood, 6=ice, 7=leaves
@@ -76,25 +77,11 @@ vec3 triplanar_normal(vec3 world_pos, vec3 geom_norm, float layer, float scale) 
 
 void main() {
     // -----------------------------------------------------------------------
-    // Decode per-vertex color packed by TerrainVertex::make_col_light:
-    //   b0 = (light[4:0] << 3) | (r[3:1])          — bits  7:0  of col_light
-    //   b1 = (glow[4:0]  << 3) | (b[3:1])           — bits 15:8
-    //   b2 = (r[7:4])          | (b[7:4])            — bits 23:16
-    //   b3 = (g[7:1])          | ao                  — bits 31:24
-    uint b0 = f_col_light & 0xFFu;
-    uint b1 = (f_col_light >> 8u)  & 0xFFu;
-    uint b2 = (f_col_light >> 16u) & 0xFFu;
-    uint b3 = (f_col_light >> 24u) & 0xFFu;
-
-    float f_light = float(b0 >> 3u) / 31.0;
-    float f_glow  = float(b1 >> 3u) / 31.0;
-
-    // Reconstruct 7-bit color channels (bit 0 of each component is lost at encode time).
-    float r = float((b2 & 0xF0u) | ((b0 & 0x7u) << 1u)) / 255.0;
-    float g = float(b3 & 0xFEu)                          / 255.0;
-    float b = float(((b2 & 0xFu) << 4u) | ((b1 & 0x7u) << 1u)) / 255.0;
-    vec3 f_col = vec3(r, g, b);
-    float f_ao = float(b3 & 0x1u); // 0.0 = no AO, 1.0 = ambient occlusion
+    // Color/light decoded in the vertex shader and passed as interpolatable floats.
+    float f_light = f_light_glow.x;
+    float f_glow  = f_light_glow.y;
+    vec3  f_col   = f_color.rgb;
+    float f_ao    = f_color.a;
 
     // -----------------------------------------------------------------------
     // Normal — comes directly as a vec3 from the vertex shader, already normalized.
