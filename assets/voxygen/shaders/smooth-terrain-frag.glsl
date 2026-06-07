@@ -100,10 +100,36 @@ void main() {
     // Normal — comes directly as a vec3 from the vertex shader, already normalized.
     vec3 face_norm = normalize(f_norm);
 
+    // Camera direction — needed both for parallax (Ultra) and lighting below.
+    vec3 cam_to_frag = normalize(f_pos - cam_pos.xyz);
+
     // Triplanar normal map perturbation — tiles every 4 world units.
     const float NORMAL_MAP_SCALE    = 1.0 / 4.0;
     const float NORMAL_MAP_STRENGTH = 0.4;
+#ifdef TERRAIN_SMOOTHING_ULTRA
+    // Parallax offset: shift UV by view direction, scaled by height from normal map alpha.
+    const float PARALLAX_SCALE = 0.04;
+    vec2 par_uv = fract(f_pos.xy * NORMAL_MAP_SCALE);
+    float height = textureLod(
+        sampler2DArray(t_terrain_normals, s_terrain_normals),
+        vec3(par_uv, float(f_block_kind)), 0.0
+    ).a;
+    vec2 view_ts = vec2(dot(cam_to_frag, vec3(1, 0, 0)),
+                        dot(cam_to_frag, vec3(0, 1, 0)));
+    vec2 par_offset = view_ts * (height - 0.5) * PARALLAX_SCALE;
+    vec2 par_uv_z = fract((f_pos.xy + par_offset) * NORMAL_MAP_SCALE);
+    vec3 tz_par = textureLod(
+        sampler2DArray(t_terrain_normals, s_terrain_normals),
+        vec3(par_uv_z, float(f_block_kind)), 0.0
+    ).rgb;
+    vec3 n_z_par = tz_par * 2.0 - 1.0;
+    vec3 detail_no_par = triplanar_normal(f_pos, face_norm, float(f_block_kind), NORMAL_MAP_SCALE);
+    vec3 w_abs = pow(abs(face_norm), vec3(4.0));
+    float w_z = w_abs.z / (w_abs.x + w_abs.y + w_abs.z + 0.001);
+    vec3 detail = detail_no_par + (n_z_par - detail_no_par) * w_z;
+#else
     vec3 detail = triplanar_normal(f_pos, face_norm, float(f_block_kind), NORMAL_MAP_SCALE);
+#endif
     vec3 f_norm_n = normalize(face_norm + detail * NORMAL_MAP_STRENGTH);
 
     // Smooth terrain is never underwater / fluid-facing.
@@ -111,7 +137,7 @@ void main() {
 
     // -----------------------------------------------------------------------
     // Camera and lighting setup (identical to terrain-frag.glsl)
-    vec3 cam_to_frag = normalize(f_pos - cam_pos.xyz);
+    // Note: cam_to_frag is declared above (needed for parallax UV offset).
     vec3 view_dir    = -cam_to_frag;
 
     const float n2      = 1.5;

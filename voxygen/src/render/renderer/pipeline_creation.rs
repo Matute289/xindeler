@@ -6,7 +6,7 @@ use crate::render::{
 use super::{
     super::{
         AaMode, BloomMode, CloudMode, ExperimentalShader, FluidMode, LightingMode, PipelineModes,
-        ReflectionMode, RenderError, ShadowMode,
+        ReflectionMode, RenderError, ShadowMode, TerrainSmoothingMode,
         pipelines::{
             blit, bloom, clouds, debug, figure, fluid, lod_object, lod_terrain, particle,
             postprocess, rope, shadow, skybox, smooth_terrain, sprite, terrain, trail, ui,
@@ -251,6 +251,10 @@ impl ShaderModules {
                 "#define EXPERIMENTAL_{}\n",
                 format!("{:?}", shader).to_uppercase()
             );
+        }
+
+        if pipeline_modes.terrain_smoothing == TerrainSmoothingMode::Ultra {
+            constants += "#define TERRAIN_SMOOTHING_ULTRA\n";
         }
 
         let constants = match pipeline_modes.bloom {

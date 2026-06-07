@@ -439,6 +439,8 @@ pub struct RenderMode {
     pub profiler_enabled: bool,
     #[serde(skip)]
     pub enable_naga: bool,
+
+    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl Default for RenderMode {
@@ -460,6 +462,7 @@ impl Default for RenderMode {
             present_mode: PresentMode::default(),
             profiler_enabled: false,
             enable_naga: std::env::var("VELOREN_DISABLE_NAGA_SHADERS").is_err(),
+            terrain_smoothing: TerrainSmoothingMode::default(),
         }
     }
 }
@@ -481,6 +484,7 @@ impl RenderMode {
                 flashing_lights_enabled: self.flashing_lights_enabled,
                 experimental_shaders: self.experimental_shaders,
                 enable_naga: self.enable_naga,
+                terrain_smoothing: self.terrain_smoothing,
             },
             OtherModes {
                 upscale_mode: self.upscale_mode,
@@ -508,6 +512,7 @@ pub struct PipelineModes {
     flashing_lights_enabled: bool,
     experimental_shaders: HashSet<ExperimentalShader>,
     enable_naga: bool,
+    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 /// Other render modes that don't effect pipelines
