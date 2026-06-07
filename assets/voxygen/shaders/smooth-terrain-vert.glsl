@@ -20,9 +20,11 @@
 //   location 0: pos       — vec3 float, chunk-local coords
 //   location 1: norm      — uint, 10-10-10-2 snorm packed normal
 //   location 2: col_light — uint, RGBA+light packed via TerrainVertex::make_col_light
+//   location 3: block_kind — uint, block kind identifier
 layout(location = 0) in vec3 v_pos;
 layout(location = 1) in uint v_norm;
 layout(location = 2) in uint v_col_light;
+layout(location = 3) in uint v_block_kind;
 
 // Locals at set 2 (smooth pipeline has no atlas at set 2, unlike terrain at set 3).
 layout(std140, set = 2, binding = 0) uniform u_locals {
@@ -34,6 +36,7 @@ layout(std140, set = 2, binding = 0) uniform u_locals {
 layout(location = 0) out vec3 f_pos;
 layout(location = 1) flat out uint f_col_light;
 layout(location = 2) out vec3 f_norm;
+layout(location = 3) flat out uint f_block_kind;
 
 void main() {
     // Transform chunk-local float position to world-relative (focus-offset) space.
@@ -49,6 +52,7 @@ void main() {
     f_norm = normalize(vec3(float(nx), float(ny), float(nz)) / 511.0);
 
     f_col_light = v_col_light;
+    f_block_kind = v_block_kind;
 
     gl_Position = all_mat * vec4(f_pos, 1.0);
 }
