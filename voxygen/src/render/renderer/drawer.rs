@@ -1081,9 +1081,13 @@ impl<'pass> FirstPassDrawer<'pass> {
         }
     }
 
-    pub fn draw_smooth_terrain(&mut self) -> SmoothTerrainDrawer<'_, 'pass> {
+    pub fn draw_smooth_terrain<'data: 'pass>(
+        &mut self,
+        normal_maps: &'data smooth_terrain::NormalMapBindGroup,
+    ) -> SmoothTerrainDrawer<'_, 'pass> {
         let mut render_pass = self.render_pass.scope("smooth terrain");
         render_pass.set_pipeline(&self.pipelines.smooth_terrain.pipeline);
+        render_pass.set_bind_group(3, &normal_maps.bind_group, &[]);
         // SmoothTerrainVertex::QUADS_INDEX = None — no index buffer needed
         SmoothTerrainDrawer { render_pass }
     }
