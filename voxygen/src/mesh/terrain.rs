@@ -368,10 +368,11 @@ pub fn generate_mesh<'a>(
             for tri in &tris {
                 let [p0, p1, p2] = tri.positions;
                 let [n0, n1, n2] = tri.normals;
+                let [k0, k1, k2] = tri.kinds;
                 smooth_opaque_mesh.push_tri(Tri::new(
-                    SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0)),
-                    SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1)),
-                    SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2)),
+                    SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0), k0),
+                    SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1), k1),
+                    SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2), k2),
                 ));
             }
 

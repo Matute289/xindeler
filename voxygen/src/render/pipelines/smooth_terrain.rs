@@ -17,9 +17,10 @@ use vek::*;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Zeroable, Pod)]
 pub struct SmoothTerrainVertex {
-    pos: [f32; 3],  // chunk-local float position (12 bytes)
-    norm: u32,      // 10-10-10-2 snorm packed normal (4 bytes)
-    col_light: u32, // RGBA + light packed via TerrainVertex::make_col_light (4 bytes)
+    pos: [f32; 3],   // chunk-local float position (12 bytes)
+    norm: u32,       // 10-10-10-2 snorm packed normal (4 bytes)
+    col_light: u32,  // RGBA + light packed via TerrainVertex::make_col_light (4 bytes)
+    block_kind: u32, // BlockKind as u8, stored as u32 for GPU alignment (4 bytes)
 }
 
 /// Pack a unit normal into 10-10-10-2 snorm representation.
@@ -31,17 +32,18 @@ pub fn pack_norm_10_10_10_2(norm: Vec3<f32>) -> u32 {
 }
 
 impl SmoothTerrainVertex {
-    pub fn new(pos: Vec3<f32>, norm: Vec3<f32>, col_light: u32) -> Self {
+    pub fn new(pos: Vec3<f32>, norm: Vec3<f32>, col_light: u32, block_kind: u8) -> Self {
         Self {
             pos: pos.into_array(),
             norm: pack_norm_10_10_10_2(norm),
             col_light,
+            block_kind: block_kind as u32,
         }
     }
 
     pub fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Uint32];
+        const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32, 2 => Uint32, 3 => Uint32];
         wgpu::VertexBufferLayout {
             array_stride: Self::STRIDE,
             step_mode: wgpu::VertexStepMode::Vertex,
