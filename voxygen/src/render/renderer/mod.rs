@@ -192,6 +192,127 @@ pub struct Renderer {
     max_texture_size: u32,
 }
 
+// ----- Procedural terrain normal map generation --------------------------------
+
+fn hash_f32(x: i32, y: i32, seed: u32) -> f32 {
+    let h = (x as u32)
+        .wrapping_mul(2246822519)
+        .wrapping_add((y as u32).wrapping_mul(3266489917))
+        .wrapping_add(seed);
+    let h = h ^ (h >> 13);
+    let h = h.wrapping_mul(1274126177);
+    let h = h ^ (h >> 16);
+    (h as f32) / (u32::MAX as f32)
+}
+
+fn value_noise(x: f64, y: f64, seed: u32) -> f64 {
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let xf = x - x.floor();
+    let yf = y - y.floor();
+    let u = xf * xf * (3.0 - 2.0 * xf);
+    let v = yf * yf * (3.0 - 2.0 * yf);
+    let a = hash_f32(xi,     yi,     seed) as f64;
+    let b = hash_f32(xi + 1, yi,     seed) as f64;
+    let c = hash_f32(xi,     yi + 1, seed) as f64;
+    let d = hash_f32(xi + 1, yi + 1, seed) as f64;
+    a + u * (b - a) + v * (c - a) + u * v * (a - b - c + d)
+}
+
+fn fbm(x: f64, y: f64, octaves: u32, seed: u32) -> f64 {
+    let (mut val, mut amp, mut freq) = (0.0f64, 0.5f64, 1.0f64);
+    for i in 0..octaves {
+        val  += value_noise(x * freq, y * freq, seed.wrapping_add(i * 12345)) * amp;
+        amp  *= 0.5;
+        freq *= 2.0;
+    }
+    val
+}
+
+pub(super) fn height_to_normal_pixel(h_l: f32, h_r: f32, h_d: f32, h_u: f32, strength: f32) -> [u8; 4] {
+    let dx = (h_r - h_l) * strength;
+    let dy = (h_u - h_d) * strength;
+    let len = (dx * dx + dy * dy + 1.0).sqrt();
+    let nx = (-dx / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    let ny = (-dy / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    let nz = (1.0  / len * 0.5 + 0.5).clamp(0.0, 1.0);
+    [
+        (nx * 255.0) as u8,
+        (ny * 255.0) as u8,
+        (nz * 255.0) as u8,
+        255,
+    ]
+}
+
+struct MaterialNoise {
+    octaves:   u32,
+    frequency: f64,
+    amplitude: f32,
+    seed:      u32,
+}
+
+// One entry per normal map layer (order matches BlockKind::normal_map_index):
+// 0=rock  1=grass  2=sand  3=snow  4=earth  5=wood  6=ice  7=leaves
+const MATERIAL_NOISE: [MaterialNoise; 8] = [
+    MaterialNoise { octaves: 5, frequency: 4.0,  amplitude: 2.0,  seed: 0xDEAD_BEEF }, // rock
+    MaterialNoise { octaves: 4, frequency: 8.0,  amplitude: 0.8,  seed: 0x0BAD_F00D }, // grass
+    MaterialNoise { octaves: 2, frequency: 3.0,  amplitude: 0.6,  seed: 0xCAFE_BABE }, // sand
+    MaterialNoise { octaves: 3, frequency: 6.0,  amplitude: 0.5,  seed: 0x1337_C0DE }, // snow
+    MaterialNoise { octaves: 4, frequency: 5.0,  amplitude: 1.2,  seed: 0xFEED_FACE }, // earth
+    MaterialNoise { octaves: 3, frequency: 12.0, amplitude: 1.0,  seed: 0xABCD_1234 }, // wood
+    MaterialNoise { octaves: 2, frequency: 2.0,  amplitude: 0.3,  seed: 0x4567_89AB }, // ice
+    MaterialNoise { octaves: 4, frequency: 6.0,  amplitude: 0.9,  seed: 0xBEEF_DEAD }, // leaves
+];
+
+/// Generate one 256×256 RGBA normal map layer for a given material.
+/// Returns raw RGBA bytes (256*256*4), ready to upload to a wgpu texture layer.
+fn generate_normal_map_layer(m: &MaterialNoise) -> Vec<u8> {
+    const SIZE: usize = 256;
+    let mut heights = vec![0.0f32; SIZE * SIZE];
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let fx = (x as f64 / SIZE as f64) * m.frequency;
+            let fy = (y as f64 / SIZE as f64) * m.frequency;
+
+            // Sand (seed 0xCAFE_BABE): directional ripple warp
+            let h = if m.seed == 0xCAFE_BABE {
+                let warp = value_noise(fx * 0.5, fy * 0.5, m.seed.wrapping_add(9999)) * 0.4;
+                fbm(fx + warp, fy * 0.1, m.octaves, m.seed)
+            // Wood (seed 0xABCD_1234): vertical grain lines
+            } else if m.seed == 0xABCD_1234 {
+                let grain = (fx * 3.0 * std::f64::consts::TAU).sin() * 0.5 + 0.5;
+                grain * 0.7 + fbm(fx, fy, m.octaves, m.seed) * 0.3
+            } else {
+                fbm(fx, fy, m.octaves, m.seed)
+            };
+
+            heights[y * SIZE + x] = h as f32;
+        }
+    }
+
+    let mut pixels = vec![0u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let idx = (y * SIZE + x) * 4;
+            let h = |px: i32, py: i32| {
+                let cx = px.rem_euclid(SIZE as i32) as usize;
+                let cy = py.rem_euclid(SIZE as i32) as usize;
+                heights[cy * SIZE + cx]
+            };
+            let pix = height_to_normal_pixel(
+                h(x as i32 - 1, y as i32),
+                h(x as i32 + 1, y as i32),
+                h(x as i32, y as i32 - 1),
+                h(x as i32, y as i32 + 1),
+                m.amplitude,
+            );
+            pixels[idx..idx + 4].copy_from_slice(&pix);
+        }
+    }
+    pixels
+}
+
 impl Renderer {
     /// Create a new `Renderer` from a variety of backend-specific components
     /// and the window targets.
@@ -1669,4 +1790,18 @@ pub enum CullingMode {
     /// We only need to render shallow (i.e: in the overlapping region) and deep
     /// elements of the structure
     Underground,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn height_to_normal_flat_gives_up_vector() {
+        // Flat height field → normal = (0, 0, 1) → encoded as ~(127, 127, 255)
+        let pix = height_to_normal_pixel(0.5, 0.5, 0.5, 0.5, 2.0);
+        assert_eq!(pix[0], 127);  // x ≈ 0
+        assert_eq!(pix[1], 127);  // y ≈ 0
+        assert!(pix[2] > 250);    // z ≈ 1
+    }
 }
