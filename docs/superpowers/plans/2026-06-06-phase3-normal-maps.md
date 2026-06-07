@@ -458,7 +458,26 @@ git commit -m "feat(phase3): add block_kind u32 to SmoothTerrainVertex, wire fro
 **Files:**
 - Modify: `voxygen/src/render/renderer/mod.rs` (add noise infrastructure and material definitions)
 
-All normal maps are generated at runtime by pure Rust code. No external files, no external tools.
+All normal maps are generated at runtime. The `noise` crate is already in the workspace (used by world gen); add it to voxygen and use high-quality noise primitives. No external asset files needed.
+
+**Add dependency first:**
+
+In `voxygen/Cargo.toml`, add under `[dependencies]`:
+```toml
+noise = { workspace = true }
+```
+
+**Noise types per material (from the `noise` crate):**
+- Rock: `RidgedMulti<Perlin>` — sharp ridges and crack-like facets
+- Grass: `Billow<Perlin>` — rounded organic bumps
+- Sand: `Fbm<SuperSimplex>` + domain warp — wind ripple pattern
+- Snow: `Fbm<SuperSimplex>` low amplitude — soft crystalline bumps
+- Earth: `Turbulence<Fbm<Perlin>, Perlin>` — clumped irregular soil
+- Wood: `Fbm<Perlin>` with directional grain — visible fiber lines
+- Ice: `Fbm<SuperSimplex>` very low amplitude — near-smooth with faint cracks
+- Leaves: `Billow<SuperSimplex>` — rounded leaf impressions
+
+The self-contained value noise below is the **fallback** if you prefer no new dependency. Prefer the `noise` crate for visual quality.
 
 **How height → normal works:**
 
