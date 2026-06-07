@@ -609,6 +609,7 @@ fn create_ingame_and_shadow_pipelines(
                     &shaders.smooth_terrain_frag,
                     &layouts.global,
                     &layouts.terrain,
+                    &layouts.smooth_terrain_normal_map,
                     pipeline_modes.aa,
                     format,
                 )

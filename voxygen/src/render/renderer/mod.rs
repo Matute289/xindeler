@@ -28,7 +28,7 @@ use super::{
     model::{DynamicModel, Model},
     pipelines::{
         GlobalsBindGroup, GlobalsLayouts, ShadowTexturesBindGroup, blit, bloom, clouds, debug,
-        figure, postprocess, rain_occlusion, rope, shadow, sprite, terrain, ui,
+        figure, postprocess, rain_occlusion, rope, shadow, smooth_terrain, sprite, terrain, ui,
     },
     texture::Texture,
 };
@@ -59,6 +59,7 @@ struct ImmutableLayouts {
     ui: ui::UiLayout,
     premultiply_alpha: ui::PremultiplyAlphaLayout,
     blit: blit::BlitLayout,
+    smooth_terrain_normal_map: smooth_terrain::NormalMapLayout,
 }
 
 /// A type that stores all the layouts associated with this renderer.
@@ -645,6 +646,7 @@ impl Renderer {
             let ui = ui::UiLayout::new(&device);
             let premultiply_alpha = ui::PremultiplyAlphaLayout::new(&device);
             let blit = blit::BlitLayout::new(&device);
+            let smooth_terrain_normal_map = smooth_terrain::NormalMapLayout::new(&device);
 
             let immutable = Arc::new(ImmutableLayouts {
                 global,
@@ -661,6 +663,7 @@ impl Renderer {
                 ui,
                 premultiply_alpha,
                 blit,
+                smooth_terrain_normal_map,
             });
 
             Layouts {
