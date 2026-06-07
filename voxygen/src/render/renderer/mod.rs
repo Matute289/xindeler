@@ -153,6 +153,7 @@ pub struct Renderer {
     locals: Locals,
     views: Views,
     noise_tex: Texture,
+    terrain_normal_maps: Texture,  // 8-layer normal map array for Phase 3
 
     quad_index_buffer_u16: Buffer<u16>,
     quad_index_buffer_u32: Buffer<u32>,
@@ -311,6 +312,71 @@ fn generate_normal_map_layer(m: &MaterialNoise) -> Vec<u8> {
         }
     }
     pixels
+}
+
+/// Create the 8-layer wgpu texture array for terrain normal maps.
+/// All layers are generated procedurally using value noise — no asset files needed.
+fn create_terrain_normal_map_array(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Texture {
+    const LAYER_COUNT: u32 = 8;
+    const SIZE: u32 = 256;
+
+    let tex_info = wgpu::TextureDescriptor {
+        label: Some("terrain_normal_map_array"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: LAYER_COUNT,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm, // NOT sRGB — normals are linear data
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    };
+    let view_info = wgpu::TextureViewDescriptor {
+        label: Some("terrain_normal_map_array_view"),
+        format: Some(wgpu::TextureFormat::Rgba8Unorm),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(LAYER_COUNT),
+        ..Default::default()
+    };
+    let sampler_info = wgpu::SamplerDescriptor {
+        label: Some("terrain_normal_map_sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    };
+
+    let texture = Texture::new_raw(device, &tex_info, &view_info, &sampler_info);
+
+    for (layer, m) in MATERIAL_NOISE.iter().enumerate() {
+        let pixel_data = generate_normal_map_layer(m);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixel_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SIZE * 4),
+                rows_per_image: Some(SIZE),
+            },
+            wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        );
+    }
+
+    texture
 }
 
 impl Renderer {
@@ -656,6 +722,8 @@ impl Renderer {
             Some(AddressMode::Repeat),
         )?;
 
+        let terrain_normal_maps = create_terrain_normal_map_array(&device, &queue);
+
         let clouds_locals =
             Self::create_consts_inner(&device, &queue, &[clouds::Locals::default()]);
         let postprocess_locals =
@@ -733,6 +801,7 @@ impl Renderer {
             sampler,
             depth_sampler,
             noise_tex,
+            terrain_normal_maps,
 
             quad_index_buffer_u16,
             quad_index_buffer_u32,
@@ -768,6 +837,8 @@ impl Renderer {
 
     /// Get the graphics backend being used
     pub fn graphics_backend(&self) -> &str { &self.graphics_backend }
+
+    pub fn terrain_normal_maps(&self) -> &Texture { &self.terrain_normal_maps }
 
     /// Check the status of the intial pipeline creation
     /// Returns `None` if complete
