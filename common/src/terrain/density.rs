@@ -8,7 +8,7 @@ use vek::Vec3;
 /// and the smooth-collision physics extractor.
 pub struct DensityField {
     pub data: Vec<u8>,
-    pub kinds: Vec<u8>, // BlockKind as u8 per voxel, parallel to data; 0 = air/unfilled
+    pub kinds: Vec<u8>, // Normal map layer index (0-7) per voxel; 0 = rock/unfilled
     pub size: Vec3<u32>,
 }
 
@@ -63,9 +63,7 @@ impl DensityField {
             .unwrap_or(0)
     }
 
-    pub fn get_kind_or_default(&self, pos: Vec3<i32>) -> u8 {
-        self.get_kind(pos)
-    }
+    pub fn get_kind_or_default(&self, pos: Vec3<i32>) -> u8 { self.get_kind(pos) }
 }
 
 /// Converts a voxel volume into a `DensityField`.
@@ -91,13 +89,13 @@ where
             for z in 0..size.z as i32 {
                 let pos = Vec3::new(x, y, z);
                 let (val, kind_byte) = match vol.get(offset + pos) {
-                    Ok(block) if block.is_filled() => (255, block.kind() as u8),
+                    Ok(block) if block.is_filled() => (255, block.kind().normal_map_index()),
                     Ok(_) => (0, 0),
                     // Unloaded neighbor: assume solid to prevent false solid→air
                     // transitions at chunk boundaries that would generate spurious
                     // vertical cap triangles (backface-culled → visible as holes).
                     // The chunk re-meshes when the neighbor loads with correct data.
-                    Err(_) => (255, crate::terrain::block::BlockKind::Rock as u8),
+                    Err(_) => (255, 0), // Rock = layer 0
                 };
                 field.set(pos, val);
                 field.set_kind(pos, kind_byte);
@@ -288,7 +286,7 @@ mod tests {
     fn density_field_kind_roundtrip() {
         let mut field = DensityField::new(Vec3::new(4, 4, 4));
         let pos = Vec3::new(2, 1, 3);
-        field.set_kind(pos, 0x10); // Rock
-        assert_eq!(field.get_kind(pos), 0x10);
+        field.set_kind(pos, 1); // Grass layer index
+        assert_eq!(field.get_kind(pos), 1);
     }
 }

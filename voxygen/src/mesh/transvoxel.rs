@@ -433,7 +433,7 @@ pub struct TransvoxelTriangle {
     pub positions: [Vec3<f32>; 3],
     /// Per-vertex surface normals (gradient-based, outward-pointing).
     pub normals: [Vec3<f32>; 3],
-    /// BlockKind as u8 per vertex.
+    /// Normal map layer index (0-7) per vertex.
     pub kinds: [u8; 3],
 }
 
@@ -492,7 +492,7 @@ fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
 
 /// Find the block kind at a fractional density-field position.
 /// Samples the 8 surrounding integer voxels, returns the kind of the most
-/// dense solid voxel among them. Falls back to Rock (0x10) if none are solid.
+/// dense solid voxel among them. Falls back to Rock (layer 0) if none are solid.
 fn kind_at_vertex(field: &DensityField, pos: Vec3<f32>, threshold: u8) -> u8 {
     let base = pos.map(|e| e.floor() as i32);
     let mut best_kind = 0u8;
@@ -512,11 +512,7 @@ fn kind_at_vertex(field: &DensityField, pos: Vec3<f32>, threshold: u8) -> u8 {
             }
         }
     }
-    if best_kind == 0 {
-        0x10 // Rock fallback
-    } else {
-        best_kind
-    }
+    best_kind // 0 = rock (layer 0), which is the correct fallback for no solid voxel found
 }
 
 /// Run the Transvoxel algorithm over `field` and return all generated
@@ -670,22 +666,22 @@ mod tests {
     #[test]
     fn transvoxel_vertex_kind_is_rock_for_rock_chunk() {
         let mut field = DensityField::new(Vec3::new(6, 6, 6));
-        // Fill bottom 3 z-slices as solid Rock (kind = 0x10)
+        // Fill bottom 3 z-slices as solid Rock (layer index 0)
         for x in 0..6i32 {
             for y in 0..6i32 {
                 for z in 0..3i32 {
                     field.set(Vec3::new(x, y, z), 255);
-                    field.set_kind(Vec3::new(x, y, z), 0x10); // Rock
+                    field.set_kind(Vec3::new(x, y, z), 0); // Rock = layer 0
                 }
             }
         }
         smooth_density_field(&mut field, 1);
         let tris = mesh_transvoxel(&field, THRESHOLD);
         assert!(!tris.is_empty(), "expected triangles at solid/air boundary");
-        // All vertices should have Rock kind (0x10) or fallback (also 0x10)
+        // All vertices should be valid layer indices (0-7)
         for tri in &tris {
             for &k in &tri.kinds {
-                assert!(k == 0x10 || k == 0, "unexpected kind {k:#x}");
+                assert!(k < 8, "vertex kind {k} is not a valid normal map layer index (0-7)");
             }
         }
     }
