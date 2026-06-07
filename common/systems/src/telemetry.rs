@@ -1,5 +1,7 @@
-use common::comp::{Body, CharacterState, Energy, Health, Player, Pos, Vel};
-use common::resources::TimeOfDay;
+use common::{
+    comp::{Body, CharacterState, Energy, Health, Player, Pos, Vel},
+    resources::TimeOfDay,
+};
 use common_ecs::{Job, Origin, Phase, System};
 use specs::{Join, Read, ReadStorage, SystemData, shred};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -63,8 +65,13 @@ impl<'a> System<'a> for Sys {
             common::telemetry!(
                 "ps",
                 player = alias,
-                hp, hp_max, en, en_max,
-                px, py, pz,
+                hp,
+                hp_max,
+                en,
+                en_max,
+                px,
+                py,
+                pz,
                 state = state
             );
 

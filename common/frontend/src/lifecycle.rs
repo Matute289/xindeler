@@ -8,8 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::Context;
+use tracing_subscriber::{Layer, layer::Context};
 
 // ── ErrorDetectorLayer ─────────────────────────────────────────────────────
 
@@ -21,7 +20,12 @@ pub struct ErrorDetectorLayer {
 impl ErrorDetectorLayer {
     pub fn new() -> (Self, Arc<AtomicBool>) {
         let flag = Arc::new(AtomicBool::new(false));
-        (Self { has_errors: Arc::clone(&flag) }, flag)
+        (
+            Self {
+                has_errors: Arc::clone(&flag),
+            },
+            flag,
+        )
     }
 }
 
@@ -45,10 +49,14 @@ impl LogLifecycleManager {
     /// Run on process start: delete files older than their retention window.
     pub fn cleanup_on_startup(&self, info_retention: Duration, err_retention: Duration) {
         let now = SystemTime::now();
-        let Ok(entries) = fs::read_dir(&self.logs_dir) else { return };
+        let Ok(entries) = fs::read_dir(&self.logs_dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
-            let Ok(modified) = meta.modified() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
             let age = now.duration_since(modified).unwrap_or_default();
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -71,7 +79,9 @@ impl LogLifecycleManager {
         if has_errors.load(Ordering::Relaxed) {
             return; // errors occurred — keep all logs
         }
-        let Ok(entries) = fs::read_dir(&self.logs_dir) else { return };
+        let Ok(entries) = fs::read_dir(&self.logs_dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();

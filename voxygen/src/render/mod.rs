@@ -35,7 +35,9 @@ pub use self::{
         rain_occlusion::Locals as RainOcclusionLocals,
         shadow::{Locals as ShadowLocals, PointLightMatrix},
         skybox::{Vertex as SkyboxVertex, create_mesh as create_skybox_mesh},
-        smooth_terrain::{NormalMapBindGroup, NormalMapLayout, SmoothTerrainPipeline, SmoothTerrainVertex},
+        smooth_terrain::{
+            NormalMapBindGroup, NormalMapLayout, SmoothTerrainPipeline, SmoothTerrainVertex,
+        },
         sprite::{
             Instance as SpriteInstance, SpriteGlobalsBindGroup, SpriteVerts,
             VERT_PAGE_SIZE as SPRITE_VERT_PAGE_SIZE, Vertex as SpriteVertex,

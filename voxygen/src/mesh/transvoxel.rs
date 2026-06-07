@@ -492,7 +492,8 @@ fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
 
 /// Find the block kind at a fractional density-field position.
 /// Samples the 8 surrounding integer voxels, returns the kind of the most
-/// dense solid voxel among them. Falls back to Rock (layer 0) if none are solid.
+/// dense solid voxel among them. Falls back to Rock (layer 0) if none are
+/// solid.
 fn kind_at_vertex(field: &DensityField, pos: Vec3<f32>, threshold: u8) -> u8 {
     let base = pos.map(|e| e.floor() as i32);
     let mut best_kind = 0u8;
@@ -681,7 +682,10 @@ mod tests {
         // All vertices should be valid layer indices (0-7)
         for tri in &tris {
             for &k in &tri.kinds {
-                assert!(k < 8, "vertex kind {k} is not a valid normal map layer index (0-7)");
+                assert!(
+                    k < 8,
+                    "vertex kind {k} is not a valid normal map layer index (0-7)"
+                );
             }
         }
     }

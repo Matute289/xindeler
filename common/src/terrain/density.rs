@@ -119,7 +119,7 @@ pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
     for _ in 0..passes {
         let snap = DensityField {
             data: snap_data.clone(),
-            kinds: field.kinds.clone(),
+            kinds: Vec::new(), // blur only reads density; kinds are not blurred
             size: field.size,
         };
 

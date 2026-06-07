@@ -5,17 +5,19 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use tracing::{Event, Subscriber};
-use tracing::field::{Field, Visit};
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::Context;
+use tracing::{
+    Event, Subscriber,
+    field::{Field, Visit},
+};
+use tracing_subscriber::{Layer, layer::Context};
 
 pub struct TelemetryLayer {
     writer: Arc<Mutex<BufWriter<File>>>,
 }
 
 impl TelemetryLayer {
-    /// Returns `None` if the file cannot be created (logs a warning, doesn't panic).
+    /// Returns `None` if the file cannot be created (logs a warning, doesn't
+    /// panic).
     pub fn new(logs_dir: &Path, prefix: &str) -> Option<Self> {
         let _ = fs::create_dir_all(logs_dir);
         let bucket = Utc::now().format("%Y-%m-%d_%Hh").to_string();
@@ -57,34 +59,50 @@ struct JsonVisitor {
 }
 
 impl JsonVisitor {
-    fn new() -> Self { Self { fields: String::new() } }
+    fn new() -> Self {
+        Self {
+            fields: String::new(),
+        }
+    }
 }
 
 impl Visit for JsonVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-        self.fields.push_str(&format!(",\"{}\":\"{}\"", field.name(), escaped));
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        self.fields
+            .push_str(&format!(",\"{}\":\"{}\"", field.name(), escaped));
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         let s = format!("{value:?}");
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-        self.fields.push_str(&format!(",\"{}\":\"{}\"", field.name(), escaped));
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        self.fields
+            .push_str(&format!(",\"{}\":\"{}\"", field.name(), escaped));
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.push_str(&format!(",\"{}\":{}", field.name(), value));
+        self.fields
+            .push_str(&format!(",\"{}\":{}", field.name(), value));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.push_str(&format!(",\"{}\":{}", field.name(), value));
+        self.fields
+            .push_str(&format!(",\"{}\":{}", field.name(), value));
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.fields.push_str(&format!(",\"{}\":{:.3}", field.name(), value));
+        self.fields
+            .push_str(&format!(",\"{}\":{:.3}", field.name(), value));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.push_str(&format!(",\"{}\":{}", field.name(), value));
+        self.fields
+            .push_str(&format!(",\"{}\":{}", field.name(), value));
     }
 }
