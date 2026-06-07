@@ -24,6 +24,13 @@ layout(location = 0) in vec3 f_pos;
 layout(location = 1) flat in uint f_col_light;
 layout(location = 2) in vec3 f_norm;
 
+// Normal map texture array — 8 layers, one per terrain material category.
+// Layer indices: 0=rock, 1=grass, 2=sand, 3=snow, 4=earth, 5=wood, 6=ice, 7=leaves
+layout(set = 3, binding = 0) uniform texture2DArray t_terrain_normals;
+layout(set = 3, binding = 1) uniform sampler s_terrain_normals;
+
+layout(location = 3) flat in uint f_block_kind;
+
 // Locals at set 2 (same layout as vert shader)
 layout(std140, set = 2, binding = 0) uniform u_locals {
     mat4 model_mat;
@@ -37,6 +44,35 @@ layout(location = 1) out uvec4 tgt_mat;
 #include <sky.glsl>
 #include <light.glsl>
 #include <lod.glsl>
+
+// Triplanar normal map sampling.
+// Samples the normal map from three orthogonal projections and blends them
+// by the absolute value of the geometric normal components.
+vec3 triplanar_normal(vec3 world_pos, vec3 geom_norm, float layer, float scale) {
+    vec2 uv_x = fract(world_pos.yz * scale);
+    vec2 uv_y = fract(world_pos.xz * scale);
+    vec2 uv_z = fract(world_pos.xy * scale);
+
+    vec3 tx = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_x, layer), 0.0).rgb;
+    vec3 ty = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_y, layer), 0.0).rgb;
+    vec3 tz = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_z, layer), 0.0).rgb;
+
+    // Decode from [0,1] to [-1,1] tangent-space normals
+    vec3 n_x = tx * 2.0 - 1.0;
+    vec3 n_y = ty * 2.0 - 1.0;
+    vec3 n_z = tz * 2.0 - 1.0;
+
+    // Swizzle tangent-space normals to world space per projection
+    n_x = vec3(n_x.z, n_x.y, n_x.x);
+    n_y = vec3(n_y.x, n_y.z, n_y.y);
+    // n_z stays as-is
+
+    // Blend weights from absolute normal components, sharpened with ^4
+    vec3 w = pow(abs(geom_norm), vec3(4.0));
+    w /= (w.x + w.y + w.z + 0.001);
+
+    return n_x * w.x + n_y * w.y + n_z * w.z;
+}
 
 void main() {
     // -----------------------------------------------------------------------
@@ -63,7 +99,12 @@ void main() {
     // -----------------------------------------------------------------------
     // Normal — comes directly as a vec3 from the vertex shader, already normalized.
     vec3 face_norm = normalize(f_norm);
-    vec3 f_norm_n  = face_norm;
+
+    // Triplanar normal map perturbation — tiles every 4 world units.
+    const float NORMAL_MAP_SCALE    = 1.0 / 4.0;
+    const float NORMAL_MAP_STRENGTH = 0.4;
+    vec3 detail = triplanar_normal(f_pos, face_norm, float(f_block_kind), NORMAL_MAP_SCALE);
+    vec3 f_norm_n = normalize(face_norm + detail * NORMAL_MAP_STRENGTH);
 
     // Smooth terrain is never underwater / fluid-facing.
     float fluid_alt  = f_pos.z + 1.0;
