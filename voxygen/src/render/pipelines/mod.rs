@@ -27,7 +27,7 @@ use vek::*;
 
 pub use self::{
     figure::FigureSpriteAtlasData,
-    smooth_terrain::{SmoothTerrainPipeline, SmoothTerrainVertex},
+    smooth_terrain::{NormalMapBindGroup, NormalMapLayout, SmoothTerrainPipeline, SmoothTerrainVertex},
     terrain::TerrainAtlasData,
 };
 

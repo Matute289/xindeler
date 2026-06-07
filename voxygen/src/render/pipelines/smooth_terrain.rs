@@ -1,5 +1,5 @@
 use super::{
-    super::{AaMode, GlobalsLayouts, Vertex as VertexTrait},
+    super::{AaMode, GlobalsLayouts, Texture, Vertex as VertexTrait},
     terrain::TerrainLayout,
 };
 use bytemuck::{Pod, Zeroable};
@@ -69,6 +69,7 @@ impl SmoothTerrainPipeline {
         fs_module: &wgpu::ShaderModule,
         global_layout: &GlobalsLayouts,
         terrain_layout: &TerrainLayout,
+        normal_map_layout: &NormalMapLayout,
         aa_mode: AaMode,
         format: wgpu::TextureFormat,
     ) -> Self {
@@ -81,6 +82,7 @@ impl SmoothTerrainPipeline {
                 &global_layout.globals,         // set 0
                 &global_layout.shadow_textures, // set 1
                 &terrain_layout.locals,         // set 2 (locals only, no atlas)
+                &normal_map_layout.layout,      // set 3
             ],
         });
 
@@ -150,4 +152,57 @@ impl SmoothTerrainPipeline {
             pipeline: render_pipeline,
         }
     }
+}
+
+pub struct NormalMapLayout {
+    pub layout: wgpu::BindGroupLayout,
+}
+
+impl NormalMapLayout {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("smooth_terrain_normal_map_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        Self { layout }
+    }
+
+    pub fn bind(&self, device: &wgpu::Device, texture: &Texture) -> NormalMapBindGroup {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("smooth_terrain_normal_map_bind_group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                },
+            ],
+        });
+        NormalMapBindGroup { bind_group }
+    }
+}
+
+pub struct NormalMapBindGroup {
+    pub bind_group: wgpu::BindGroup,
 }
