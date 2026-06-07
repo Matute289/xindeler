@@ -8,13 +8,16 @@ use vek::Vec3;
 /// and the smooth-collision physics extractor.
 pub struct DensityField {
     pub data: Vec<u8>,
+    pub kinds: Vec<u8>, // BlockKind as u8 per voxel, parallel to data; 0 = air/unfilled
     pub size: Vec3<u32>,
 }
 
 impl DensityField {
     pub fn new(size: Vec3<u32>) -> Self {
+        let n = (size.x * size.y * size.z) as usize;
         Self {
-            data: vec![0u8; (size.x * size.y * size.z) as usize],
+            data: vec![0u8; n],
+            kinds: vec![0u8; n],
             size,
         }
     }
@@ -47,6 +50,22 @@ impl DensityField {
             self.data[i] = val;
         }
     }
+
+    pub fn set_kind(&mut self, pos: Vec3<i32>, kind: u8) {
+        if let Some(i) = self.flat_index(pos) {
+            self.kinds[i] = kind;
+        }
+    }
+
+    pub fn get_kind(&self, pos: Vec3<i32>) -> u8 {
+        self.flat_index(pos)
+            .and_then(|i| self.kinds.get(i).copied())
+            .unwrap_or(0)
+    }
+
+    pub fn get_kind_or_default(&self, pos: Vec3<i32>) -> u8 {
+        self.get_kind(pos)
+    }
 }
 
 /// Converts a voxel volume into a `DensityField`.
@@ -71,16 +90,17 @@ where
         for y in 0..size.y as i32 {
             for z in 0..size.z as i32 {
                 let pos = Vec3::new(x, y, z);
-                let val = match vol.get(offset + pos) {
-                    Ok(block) if block.is_filled() => 255,
-                    Ok(_) => 0,
+                let (val, kind_byte) = match vol.get(offset + pos) {
+                    Ok(block) if block.is_filled() => (255, block.kind() as u8),
+                    Ok(_) => (0, 0),
                     // Unloaded neighbor: assume solid to prevent false solid→air
                     // transitions at chunk boundaries that would generate spurious
                     // vertical cap triangles (backface-culled → visible as holes).
                     // The chunk re-meshes when the neighbor loads with correct data.
-                    Err(_) => 255,
+                    Err(_) => (255, crate::terrain::block::BlockKind::Rock as u8),
                 };
                 field.set(pos, val);
+                field.set_kind(pos, kind_byte);
             }
         }
     }
@@ -101,6 +121,7 @@ pub fn smooth_density_field(field: &mut DensityField, passes: u8) {
     for _ in 0..passes {
         let snap = DensityField {
             data: snap_data.clone(),
+            kinds: field.kinds.clone(),
             size: field.size,
         };
 
@@ -261,5 +282,13 @@ mod tests {
         // Interior stays at max; edges get blended with OOB zeros so may be < 255
         let center = field.get(Vec3::new(1, 1, 1)).unwrap();
         assert_eq!(center, 255);
+    }
+
+    #[test]
+    fn density_field_kind_roundtrip() {
+        let mut field = DensityField::new(Vec3::new(4, 4, 4));
+        let pos = Vec3::new(2, 1, 3);
+        field.set_kind(pos, 0x10); // Rock
+        assert_eq!(field.get_kind(pos), 0x10);
     }
 }
