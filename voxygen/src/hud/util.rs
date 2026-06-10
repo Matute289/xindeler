@@ -30,12 +30,11 @@ pub fn price_desc<'a>(
         .iter()
         .map(|e| prices.values.get(&e.1).cloned().unwrap_or_default() * e.0)
         .sum();
-    let sellprice: f32 = materials
+    let sellprice = materials
         .iter()
-        .map(|e| {
-            prices.values.get(&e.1).cloned().unwrap_or_default() * e.0 * e.1.sell_discount(quality)
-        })
-        .sum();
+        .map(|e| prices.values.get(&e.1).cloned().unwrap_or_default() * e.0)
+        .sum::<f32>()
+        * TradePricing::good_from_itemdef_id(item_definition_id).sell_discount(quality);
 
     let deal_goodness: f32 = materials
         .iter()
@@ -115,6 +114,7 @@ pub fn kind_text<'a>(kind: &ItemKind, i18n: &'a Localization) -> Cow<'a, str> {
         ItemKind::Lantern { .. } => i18n.get_msg("common-kind-lantern"),
         ItemKind::TagExamples { .. } => Cow::Borrowed(""),
         ItemKind::RecipeGroup { .. } => i18n.get_msg("common-kind-recipegroup"),
+        ItemKind::Quest => i18n.get_msg("common-kind-quest"),
     }
 }
 

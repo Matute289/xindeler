@@ -177,7 +177,7 @@ fn main() {
             settings.audio.subtitles,
             // settings.audio.combat_music_enabled,
             false, // We're disabling combat music for now
-            settings.audio.buffer_size,
+            settings.audio.buffer_size.samples,
             settings.audio.sample_rate,
         ),
     };
