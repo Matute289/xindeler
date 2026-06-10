@@ -1,0 +1,115 @@
+<h2>Mejora visual del terreno — 3 enfoques</h2>
+<p class="subtitle">Cada approach tiene un costo y resultado visual diferente. ¿Cuál refleja mejor tu prioridad?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="render-only" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#1a2a1a;padding:16px;font-family:monospace;font-size:12px;color:#7ecf7e;border-radius:6px;min-height:120px;display:flex;flex-direction:column;justify-content:center">
+      <div style="margin-bottom:8px;color:#aaa;">Terreno actual → con marching cubes + normal maps</div>
+      <div style="display:flex;gap:12px;align-items:flex-end">
+        <div style="display:flex;flex-direction:column;gap:2px;align-items:center">
+          <div style="width:40px;height:8px;background:#5a8a5a"></div>
+          <div style="width:48px;height:8px;background:#5a8a5a"></div>
+          <div style="width:56px;height:8px;background:#5a8a5a"></div>
+          <div style="width:64px;height:8px;background:#5a8a5a"></div>
+          <div style="font-size:10px;color:#aaa;margin-top:4px">Blocky</div>
+        </div>
+        <div style="color:#7ecf7e;font-size:20px">→</div>
+        <div style="display:flex;flex-direction:column;gap:0px;align-items:center">
+          <svg width="64" height="40" viewBox="0 0 64 40">
+            <path d="M0 40 Q16 10 32 20 Q48 30 64 5" stroke="#7ecf7e" stroke-width="2.5" fill="none"/>
+          </svg>
+          <div style="font-size:10px;color:#aaa;margin-top:4px">Suavizado</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Solo rendering (más rápido)</h3>
+      <p>Marching cubes + normal maps + micro-detalle en shaders. Los bloques siguen siendo del mismo tamaño pero <strong>el rendering los suaviza</strong>. No toca física, networking, ni world gen.</p>
+      <div class="pros-cons" style="font-size:13px">
+        <div class="pros"><h4>Pros</h4><ul><li>Resultado visual enorme</li><li>2–3 meses</li><li>Sin riesgo en gameplay</li></ul></div>
+        <div class="cons"><h4>Contras</h4><ul><li>Los bloques físicamente siguen siendo grandes</li><li>Colisión no coincide visualmente</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" data-choice="scale-down" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#1a1a2a;padding:16px;font-family:monospace;font-size:12px;color:#7e9ecf;border-radius:6px;min-height:120px;display:flex;flex-direction:column;justify-content:center">
+      <div style="margin-bottom:8px;color:#aaa;">Bloques actuales 0.3m → bloques 0.15m</div>
+      <div style="display:flex;gap:8px;align-items:center;justify-content:center">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+          <div style="width:20px;height:20px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:20px;height:20px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:20px;height:20px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:20px;height:20px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+        </div>
+        <div style="color:#7e9ecf;font-size:18px">→</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1px">
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#3a5a8a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#3a5a8a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#3a5a8a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#3a5a8a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#4a6a9a;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#5a7aaa;border:1px solid #7e9ecf"></div>
+          <div style="width:10px;height:10px;background:#3a5a8a;border:1px solid #7e9ecf"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Bloques más pequeños (más completo)</h3>
+      <p>Reducir el tamaño world-space de cada bloque a la mitad. Más detalle físico real — las cuevas, costas y montañas tienen más fidelidad. Requiere reescalar world gen, física y networking.</p>
+      <div class="pros-cons" style="font-size:13px">
+        <div class="pros"><h4>Pros</h4><ul><li>Detalle físico real</li><li>Colisión coincide con lo visual</li></ul></div>
+        <div class="cons"><h4>Contras</h4><ul><li>5–8 meses, toca todo el engine</li><li>Alto riesgo de regresiones</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" data-choice="combined" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#2a1a2a;padding:16px;font-family:monospace;font-size:12px;color:#cf7ecf;border-radius:6px;min-height:120px;display:flex;flex-direction:column;justify-content:center">
+      <div style="margin-bottom:8px;color:#aaa;">Fases secuenciales: render → escala → detalle</div>
+      <div style="display:flex;gap:6px;align-items:center;font-size:11px">
+        <div style="text-align:center;background:#3a1a3a;padding:6px;border-radius:4px;border:1px solid #cf7ecf">
+          <div style="color:#cf7ecf">Fase 1</div>
+          <div>Marching</div>
+          <div>cubes</div>
+          <div style="color:#aaa;font-size:10px">2–3 meses</div>
+        </div>
+        <div style="color:#cf7ecf">→</div>
+        <div style="text-align:center;background:#3a1a3a;padding:6px;border-radius:4px;border:1px solid #cf7ecf">
+          <div style="color:#cf7ecf">Fase 2</div>
+          <div>Bloques</div>
+          <div>½ tamaño</div>
+          <div style="color:#aaa;font-size:10px">4–6 meses</div>
+        </div>
+        <div style="color:#cf7ecf">→</div>
+        <div style="text-align:center;background:#3a1a3a;padding:6px;border-radius:4px;border:1px solid #cf7ecf">
+          <div style="color:#cf7ecf">Fase 3</div>
+          <div>Normal</div>
+          <div>maps+detail</div>
+          <div style="color:#aaa;font-size:10px">1–2 meses</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — Combinado en fases (recomendado)</h3>
+      <p>Primero el rendering (marching cubes + normal maps), después reducir el tamaño de bloque. Cada fase da resultado jugable. Si la Fase 1 ya satisface, podés parar ahí.</p>
+      <div class="pros-cons" style="font-size:13px">
+        <div class="pros"><h4>Pros</h4><ul><li>Resultado visual temprano</li><li>Podés validar antes de comprometerte</li><li>Máxima calidad al final</li></ul></div>
+        <div class="cons"><h4>Contras</h4><ul><li>7–11 meses en total</li><li>Requiere sostener el proyecto largo plazo</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:16px">Hacé click para seleccionar y respondé en el terminal con tu elección.</p>
