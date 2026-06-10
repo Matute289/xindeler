@@ -21,8 +21,16 @@
 
 // Inputs from smooth-terrain-vert.glsl
 layout(location = 0) in vec3 f_pos;
-layout(location = 1) flat in uint f_col_light;
+layout(location = 1) in vec4 f_color;       // .rgb = terrain color, .a = ambient occlusion
 layout(location = 2) in vec3 f_norm;
+layout(location = 4) in vec2 f_light_glow;  // .x = baked light [0,1], .y = glow [0,1]
+
+// Normal map texture array — 8 layers, one per terrain material category.
+// Layer indices: 0=rock, 1=grass, 2=sand, 3=snow, 4=earth, 5=wood, 6=ice, 7=leaves
+layout(set = 3, binding = 0) uniform texture2DArray t_terrain_normals;
+layout(set = 3, binding = 1) uniform sampler s_terrain_normals;
+
+layout(location = 3) flat in uint f_block_kind;
 
 // Locals at set 2 (same layout as vert shader)
 layout(std140, set = 2, binding = 0) uniform u_locals {
@@ -38,39 +46,85 @@ layout(location = 1) out uvec4 tgt_mat;
 #include <light.glsl>
 #include <lod.glsl>
 
+// Triplanar normal map sampling.
+// Samples the normal map from three orthogonal projections and blends them
+// by the absolute value of the geometric normal components.
+vec3 triplanar_normal(vec3 world_pos, vec3 geom_norm, float layer, float scale) {
+    vec2 uv_x = fract(world_pos.yz * scale);
+    vec2 uv_y = fract(world_pos.xz * scale);
+    vec2 uv_z = fract(world_pos.xy * scale);
+
+    vec3 tx = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_x, layer), 0.0).rgb;
+    vec3 ty = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_y, layer), 0.0).rgb;
+    vec3 tz = textureLod(sampler2DArray(t_terrain_normals, s_terrain_normals), vec3(uv_z, layer), 0.0).rgb;
+
+    // Decode from [0,1] to [-1,1] tangent-space normals
+    vec3 n_x = tx * 2.0 - 1.0;
+    vec3 n_y = ty * 2.0 - 1.0;
+    vec3 n_z = tz * 2.0 - 1.0;
+
+    // Swizzle tangent-space normals to world space per projection
+    n_x = vec3(n_x.z, n_x.y, n_x.x);
+    n_y = vec3(n_y.x, n_y.z, n_y.y);
+    // n_z stays as-is
+
+    // Blend weights from absolute normal components, sharpened with ^4
+    vec3 w = pow(abs(geom_norm), vec3(4.0));
+    w /= (w.x + w.y + w.z + 0.001);
+
+    return n_x * w.x + n_y * w.y + n_z * w.z;
+}
+
 void main() {
     // -----------------------------------------------------------------------
-    // Decode per-vertex color packed by TerrainVertex::make_col_light:
-    //   b0 = (light[4:0] << 3) | (r[3:1])          — bits  7:0  of col_light
-    //   b1 = (glow[4:0]  << 3) | (b[3:1])           — bits 15:8
-    //   b2 = (r[7:4])          | (b[7:4])            — bits 23:16
-    //   b3 = (g[7:1])          | ao                  — bits 31:24
-    uint b0 = f_col_light & 0xFFu;
-    uint b1 = (f_col_light >> 8u)  & 0xFFu;
-    uint b2 = (f_col_light >> 16u) & 0xFFu;
-    uint b3 = (f_col_light >> 24u) & 0xFFu;
-
-    float f_light = float(b0 >> 3u) / 31.0;
-    float f_glow  = float(b1 >> 3u) / 31.0;
-
-    // Reconstruct 7-bit color channels (bit 0 of each component is lost at encode time).
-    float r = float((b2 & 0xF0u) | ((b0 & 0x7u) << 1u)) / 255.0;
-    float g = float(b3 & 0xFEu)                          / 255.0;
-    float b = float(((b2 & 0xFu) << 4u) | ((b1 & 0x7u) << 1u)) / 255.0;
-    vec3 f_col = vec3(r, g, b);
-    float f_ao = float(b3 & 0x1u); // 0.0 = no AO, 1.0 = ambient occlusion
+    // Color/light decoded in the vertex shader and passed as interpolatable floats.
+    float f_light = f_light_glow.x;
+    float f_glow  = f_light_glow.y;
+    vec3  f_col   = f_color.rgb;
+    float f_ao    = f_color.a;
 
     // -----------------------------------------------------------------------
     // Normal — comes directly as a vec3 from the vertex shader, already normalized.
     vec3 face_norm = normalize(f_norm);
-    vec3 f_norm_n  = face_norm;
+
+    // Camera direction — needed both for parallax (Ultra) and lighting below.
+    vec3 cam_to_frag = normalize(f_pos - cam_pos.xyz);
+
+    // Triplanar normal map perturbation — tiles every 4 world units.
+    const float NORMAL_MAP_SCALE    = 1.0 / 4.0;
+    const float NORMAL_MAP_STRENGTH = 0.4;
+#ifdef TERRAIN_SMOOTHING_ULTRA
+    // Parallax offset: shift UV by view direction, scaled by height from normal map alpha.
+    const float PARALLAX_SCALE = 0.04;
+    vec2 par_uv = fract(f_pos.xy * NORMAL_MAP_SCALE);
+    float height = textureLod(
+        sampler2DArray(t_terrain_normals, s_terrain_normals),
+        vec3(par_uv, float(f_block_kind)), 0.0
+    ).a;
+    vec2 view_ts = vec2(dot(cam_to_frag, vec3(1, 0, 0)),
+                        dot(cam_to_frag, vec3(0, 1, 0)));
+    vec2 par_offset = view_ts * (height - 0.5) * PARALLAX_SCALE;
+    vec2 par_uv_z = fract((f_pos.xy + par_offset) * NORMAL_MAP_SCALE);
+    vec3 tz_par = textureLod(
+        sampler2DArray(t_terrain_normals, s_terrain_normals),
+        vec3(par_uv_z, float(f_block_kind)), 0.0
+    ).rgb;
+    vec3 n_z_par = tz_par * 2.0 - 1.0;
+    vec3 detail_no_par = triplanar_normal(f_pos, face_norm, float(f_block_kind), NORMAL_MAP_SCALE);
+    vec3 w_abs = pow(abs(face_norm), vec3(4.0));
+    float w_z = w_abs.z / (w_abs.x + w_abs.y + w_abs.z + 0.001);
+    vec3 detail = detail_no_par + (n_z_par - detail_no_par) * w_z;
+#else
+    vec3 detail = triplanar_normal(f_pos, face_norm, float(f_block_kind), NORMAL_MAP_SCALE);
+#endif
+    vec3 f_norm_n = normalize(face_norm + detail * NORMAL_MAP_STRENGTH);
 
     // Smooth terrain is never underwater / fluid-facing.
     float fluid_alt  = f_pos.z + 1.0;
 
     // -----------------------------------------------------------------------
     // Camera and lighting setup (identical to terrain-frag.glsl)
-    vec3 cam_to_frag = normalize(f_pos - cam_pos.xyz);
+    // Note: cam_to_frag is declared above (needed for parallax UV offset).
     vec3 view_dir    = -cam_to_frag;
 
     const float n2      = 1.5;

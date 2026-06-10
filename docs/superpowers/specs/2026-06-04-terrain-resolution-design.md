@@ -376,7 +376,7 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
 | Fase 2 — Escala de bloques | ✅ Completa | Save migration, bugfixes del code review — HEAD: `7dee7510cf` |
-| Fase 3 — Normal maps | ⬜ No iniciada | PRÓXIMO PASO |
+| Fase 3 — Normal maps | ✅ Completa | Triplanar + parallax Ultra — HEAD: `0eedbd6d69` |
 
 Actualizar esta tabla a medida que avanza la implementación:
 - ⬜ No iniciada

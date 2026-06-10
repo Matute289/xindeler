@@ -103,5 +103,16 @@ perf.*
 ## wgpu with the "trace" feature enabled
 wgpu-trace/
 
+
+# TODO: En produccion sacarlo
 # Visual brainstorming sessions
-.superpowers/
+#.superpowers/
+
+# TODO: En produccion sacarlo
+# Graphify knowledge graph output (local only)
+#graphify-out/
+#.graphify/
+
+# Claude Code runtime artifacts (never commit)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

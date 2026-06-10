@@ -12,10 +12,10 @@ use crate::{
     },
     render::{
         AltIndices, CullingMode, FigureSpriteAtlasData, FirstPassDrawer, FluidVertex, GlobalModel,
-        Instances, LodData, Mesh, Model, RenderError, Renderer, SPRITE_VERT_PAGE_SIZE,
-        SmoothTerrainVertex, SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex,
-        SpriteVerts, TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainSmoothingMode,
-        TerrainVertex,
+        Instances, LodData, Mesh, Model, NormalMapBindGroup, RenderError, Renderer,
+        SPRITE_VERT_PAGE_SIZE, SmoothTerrainVertex, SpriteDrawer, SpriteGlobalsBindGroup,
+        SpriteInstance, SpriteVertex, SpriteVerts, TerrainAtlasData, TerrainLocals,
+        TerrainShadowDrawer, TerrainSmoothingMode, TerrainVertex,
         pipelines::{self, AtlasData, AtlasTextures},
     },
     scene::terrain::sprite::SpriteModelConfig,
@@ -446,6 +446,7 @@ pub struct Terrain<V: RectRasterableVol = TerrainChunk> {
     /// for any particular chunk; look at the `texture` field in
     /// `TerrainChunkData` for that.
     atlas_textures: Arc<AtlasTextures<pipelines::terrain::Locals, TerrainAtlasData>>,
+    normal_map_bind_group: NormalMapBindGroup,
 
     phantom: PhantomData<V>,
 }
@@ -678,6 +679,7 @@ impl<V: RectRasterableVol> Terrain<V> {
                 &sprite_render_context.sprite_verts_buffer,
             ),
             atlas_textures: Arc::new(atlas_textures),
+            normal_map_bind_group: renderer.bind_smooth_terrain_normal_maps(),
             phantom: PhantomData,
         }
     }
@@ -1259,7 +1261,12 @@ impl<V: RectRasterableVol> Terrain<V> {
                             frustum_last_plane_index: 0,
                             alt_indices: mesh.alt_indices,
                         });
-                        common::telemetry!("co", op = "load", cx = response.pos.x, cy = response.pos.y);
+                        common::telemetry!(
+                            "co",
+                            op = "load",
+                            cx = response.pos.x,
+                            cy = response.pos.y
+                        );
                     } else if let Some(chunk) = self.chunks.get_mut(&response.pos) {
                         // There was an update that didn't require a remesh (probably related to
                         // non-glowing sprites) so we just update those.
@@ -1655,7 +1662,7 @@ impl<V: RectRasterableVol> Terrain<V> {
 
     pub fn render_smooth<'a>(&'a self, drawer: &mut FirstPassDrawer<'a>, focus_pos: Vec3<f32>) {
         span!(_guard, "render_smooth", "Terrain::render_smooth");
-        let mut drawer = drawer.draw_smooth_terrain();
+        let mut drawer = drawer.draw_smooth_terrain(&self.normal_map_bind_group);
 
         let focus_chunk = Vec2::from(focus_pos).map2(TerrainChunk::RECT_SIZE, |e: f32, sz| {
             (e as i32).div_euclid(sz as i32)

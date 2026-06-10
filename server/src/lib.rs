@@ -703,7 +703,10 @@ impl Server {
         info!("Server version: {}", *common::util::DISPLAY_VERSION);
 
         common::telemetry!("ss", side = "server", ver = env!("CARGO_PKG_VERSION"));
-        info!("Session start: server version={}", env!("CARGO_PKG_VERSION"));
+        info!(
+            "Session start: server version={}",
+            env!("CARGO_PKG_VERSION")
+        );
 
         Ok(this)
     }
@@ -1204,7 +1207,12 @@ impl Server {
                 self.state.ecs().entities().join().count() as u32
             };
             if tick_num % 50 == 0 {
-                common::telemetry!("tick", ms = tick_ms, entities = entity_count, tick = tick_num);
+                common::telemetry!(
+                    "tick",
+                    ms = tick_ms,
+                    entities = entity_count,
+                    tick = tick_num
+                );
             }
             if tick_ms > 50 {
                 warn!(tick_ms, entity_count, "Slow server tick");

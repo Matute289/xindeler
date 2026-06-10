@@ -37,7 +37,9 @@ pub struct CompressionGuard(Option<thread::JoinHandle<()>>);
 impl Drop for CompressionGuard {
     fn drop(&mut self) {
         // join is best-effort; if the thread panicked, ignore
-        if let Some(h) = self.0.take() { let _ = h.join(); }
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -63,14 +65,16 @@ impl BoundedMakeWriter {
         let bucket = current_bucket(&rotation);
         // Find the highest existing seq for this bucket to avoid overwriting
         let seq = find_next_seq(base_dir, prefix, &bucket);
-        let (path, writer) = open_log_file(base_dir, prefix, &bucket, seq)
-            .unwrap_or_else(|e| {
-                eprintln!("[log] cannot create log file in {}: {e}", base_dir.display());
-                // Fall back to /dev/null equivalent: create a temp file
-                let path = std::env::temp_dir().join(format!("{bucket}_{prefix}_fallback.log"));
-                let file = File::create(&path).expect("cannot create fallback log");
-                (path, BufWriter::new(file))
-            });
+        let (path, writer) = open_log_file(base_dir, prefix, &bucket, seq).unwrap_or_else(|e| {
+            eprintln!(
+                "[log] cannot create log file in {}: {e}",
+                base_dir.display()
+            );
+            // Fall back to /dev/null equivalent: create a temp file
+            let path = std::env::temp_dir().join(format!("{bucket}_{prefix}_fallback.log"));
+            let file = File::create(&path).expect("cannot create fallback log");
+            (path, BufWriter::new(file))
+        });
         let state = Arc::new(Mutex::new(WriterState {
             writer,
             path,
@@ -96,11 +100,16 @@ fn current_bucket(r: &Rotation) -> String {
     let now = Utc::now();
     match r {
         Rotation::Hourly => now.format("%Y-%m-%d_%Hh").to_string(),
-        Rotation::Daily  => now.format("%Y-%m-%d").to_string(),
+        Rotation::Daily => now.format("%Y-%m-%d").to_string(),
     }
 }
 
-fn open_log_file(dir: &Path, prefix: &str, bucket: &str, seq: u32) -> io::Result<(PathBuf, BufWriter<File>)> {
+fn open_log_file(
+    dir: &Path,
+    prefix: &str,
+    bucket: &str,
+    seq: u32,
+) -> io::Result<(PathBuf, BufWriter<File>)> {
     fs::create_dir_all(dir)?;
     let name = if seq == 1 {
         format!("{bucket}_{prefix}.log")
@@ -115,7 +124,9 @@ fn open_log_file(dir: &Path, prefix: &str, bucket: &str, seq: u32) -> io::Result
 /// Scan the directory for existing files matching the current bucket and return
 /// `max_found_seq + 1` so we never overwrite a previous run's logs.
 fn find_next_seq(dir: &Path, prefix: &str, bucket: &str) -> u32 {
-    let Ok(entries) = fs::read_dir(dir) else { return 1 };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 1;
+    };
     let base = format!("{bucket}_{prefix}");
     let mut max_seq = 0u32;
     for entry in entries.flatten() {
@@ -129,9 +140,10 @@ fn find_next_seq(dir: &Path, prefix: &str, bucket: &str) -> u32 {
                 .and_then(|s| s.strip_suffix(".log").or_else(|| s.strip_suffix(".log.gz")));
             if let Some(mid) = stripped
                 && let Some(seq_str) = mid.strip_prefix('.')
-                    && let Ok(n) = seq_str.parse::<u32>() {
-                        max_seq = max_seq.max(n);
-                    }
+                && let Ok(n) = seq_str.parse::<u32>()
+            {
+                max_seq = max_seq.max(n);
+            }
         }
     }
     if max_seq == 0 { 1 } else { max_seq + 1 }
@@ -165,9 +177,7 @@ impl Write for BoundedWriter<'_> {
         Ok(n)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.state.writer.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.state.writer.flush() }
 }
 
 impl Drop for BoundedWriter<'_> {

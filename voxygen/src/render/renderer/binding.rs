@@ -4,7 +4,7 @@ use super::{
     super::{
         pipelines::{
             AtlasTextures, FigureSpriteAtlasData, GlobalModel, GlobalsBindGroup, TerrainAtlasData,
-            debug, figure, lod_terrain, rope, shadow, sprite, terrain, ui,
+            debug, figure, lod_terrain, rope, shadow, smooth_terrain, sprite, terrain, ui,
         },
         texture::Texture,
     },
@@ -127,5 +127,11 @@ impl Renderer {
             &self.layouts.global.figure_sprite_atlas_layout,
             [col_light],
         )
+    }
+
+    pub fn bind_smooth_terrain_normal_maps(&self) -> smooth_terrain::NormalMapBindGroup {
+        self.layouts
+            .smooth_terrain_normal_map
+            .bind(&self.device, &self.terrain_normal_maps)
     }
 }

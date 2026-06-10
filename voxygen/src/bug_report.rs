@@ -1,10 +1,10 @@
+use serde_json;
 use std::{
     fs,
     io::{self, BufRead},
     path::{Path, PathBuf},
 };
 use tracing::{error, info};
-use serde_json;
 
 /// Result returned by send_bug_report — used to update the UI notification.
 #[derive(Debug, Clone)]

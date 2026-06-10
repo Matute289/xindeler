@@ -433,6 +433,8 @@ pub struct TransvoxelTriangle {
     pub positions: [Vec3<f32>; 3],
     /// Per-vertex surface normals (gradient-based, outward-pointing).
     pub normals: [Vec3<f32>; 3],
+    /// Normal map layer index (0-7) per vertex.
+    pub kinds: [u8; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +489,32 @@ fn density_gradient(field: &DensityField, pos: Vec3<f32>) -> Vec3<f32> {
 // ---------------------------------------------------------------------------
 // Main meshing function
 // ---------------------------------------------------------------------------
+
+/// Find the block kind at a fractional density-field position.
+/// Samples the 8 surrounding integer voxels, returns the kind of the most
+/// dense solid voxel among them. Falls back to Rock (layer 0) if none are
+/// solid.
+fn kind_at_vertex(field: &DensityField, pos: Vec3<f32>, threshold: u8) -> u8 {
+    let base = pos.map(|e| e.floor() as i32);
+    let mut best_kind = 0u8;
+    let mut best_density = 0u8;
+    for dz in 0..=1i32 {
+        for dy in 0..=1i32 {
+            for dx in 0..=1i32 {
+                let p = base + Vec3::new(dx, dy, dz);
+                let d = field.get_or_zero(p);
+                if d > threshold && d > best_density {
+                    best_density = d;
+                    let k = field.get_kind_or_default(p);
+                    if k != 0 {
+                        best_kind = k;
+                    }
+                }
+            }
+        }
+    }
+    best_kind // 0 = rock (layer 0), which is the correct fallback for no solid voxel found
+}
 
 /// Run the Transvoxel algorithm over `field` and return all generated
 /// triangles.
@@ -577,9 +605,16 @@ pub fn mesh_transvoxel(field: &DensityField, threshold: u8) -> Vec<TransvoxelTri
                     // Flip winding order for complement (majority-solid) cases.
                     let (i0, i2) = if flip_normal { (i2, i0) } else { (i0, i2) };
 
+                    let vtx_kinds: [u8; 3] = [
+                        kind_at_vertex(field, vtx_pos[i0], threshold),
+                        kind_at_vertex(field, vtx_pos[i1], threshold),
+                        kind_at_vertex(field, vtx_pos[i2], threshold),
+                    ];
+
                     triangles.push(TransvoxelTriangle {
                         positions: [vtx_pos[i0], vtx_pos[i1], vtx_pos[i2]],
                         normals: [vtx_norm[i0], vtx_norm[i1], vtx_norm[i2]],
+                        kinds: vtx_kinds,
                     });
                 }
             }
@@ -627,5 +662,31 @@ mod tests {
             !tris.is_empty(),
             "expected triangles at the solid/air boundary"
         );
+    }
+
+    #[test]
+    fn transvoxel_vertex_kind_is_rock_for_rock_chunk() {
+        let mut field = DensityField::new(Vec3::new(6, 6, 6));
+        // Fill bottom 3 z-slices as solid Rock (layer index 0)
+        for x in 0..6i32 {
+            for y in 0..6i32 {
+                for z in 0..3i32 {
+                    field.set(Vec3::new(x, y, z), 255);
+                    field.set_kind(Vec3::new(x, y, z), 0); // Rock = layer 0
+                }
+            }
+        }
+        smooth_density_field(&mut field, 1);
+        let tris = mesh_transvoxel(&field, THRESHOLD);
+        assert!(!tris.is_empty(), "expected triangles at solid/air boundary");
+        // All vertices should be valid layer indices (0-7)
+        for tri in &tris {
+            for &k in &tri.kinds {
+                assert!(
+                    k < 8,
+                    "vertex kind {k} is not a valid normal map layer index (0-7)"
+                );
+            }
+        }
     }
 }
