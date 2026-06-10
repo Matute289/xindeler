@@ -90,7 +90,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use vek::*;
 
 pub const MAX_SELECTABLE_VIEW_DISTANCE: u32 = 65;
@@ -611,6 +611,8 @@ impl Client {
         init_stage_update(ClientInitStage::WatingForServerVersion);
         register_stream.send(client_type)?;
         let server_info: ServerInfo = register_stream.recv().await?;
+        common::telemetry!("net", event = "connect", server_name = server_info.name.as_str());
+        info!(server_name = server_info.name.as_str(), "Connected to server");
         if server_info.git_hash != *common::util::GIT_HASH
             || server_info.git_timestamp != *common::util::GIT_TIMESTAMP
         {
@@ -2623,10 +2625,14 @@ impl Client {
     ) -> Result<(), Error> {
         prof_span!("handle_server_msg");
         match msg {
-            ServerGeneral::Disconnect(reason) => match reason {
-                DisconnectReason::Shutdown => return Err(Error::ServerShutdown),
-                DisconnectReason::Kicked(reason) => return Err(Error::Kicked(reason)),
-                DisconnectReason::Banned(info) => return Err(Error::Banned(info)),
+            ServerGeneral::Disconnect(reason) => {
+                common::telemetry!("net", event = "disconnect", reason = ?reason);
+                warn!(reason = ?reason, "Disconnected from server");
+                match reason {
+                    DisconnectReason::Shutdown => return Err(Error::ServerShutdown),
+                    DisconnectReason::Kicked(reason) => return Err(Error::Kicked(reason)),
+                    DisconnectReason::Banned(info) => return Err(Error::Banned(info)),
+                }
             },
             ServerGeneral::PlayerListUpdate(PlayerListUpdate::Init(list)) => {
                 self.player_list = list

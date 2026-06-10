@@ -375,8 +375,8 @@ smooth-terrain-vert.glsl → smooth-terrain-frag.glsl → frame buffer
 | Fase | Estado | Notas |
 |---|---|---|
 | Fase 1 — Transvoxel + colisión | ✅ Completa | Pipeline, shaders, física, threshold calibrado, triángulos, normales — funcional |
-| Fase 2 — Escala de bloques | 🔄 En progreso | Task 7 completo (base_accel, dimensions, server vd, world gen, interaction ranges); solo save migration pendiente |
-| Fase 3 — Normal maps | ⬜ No iniciada | Puede iniciarse en paralelo a Task 7 de Fase 2 |
+| Fase 2 — Escala de bloques | ✅ Completa | Save migration, bugfixes del code review — HEAD: `7dee7510cf` |
+| Fase 3 — Normal maps | ⬜ No iniciada | PRÓXIMO PASO |
 
 Actualizar esta tabla a medida que avanza la implementación:
 - ⬜ No iniciada
@@ -386,7 +386,7 @@ Actualizar esta tabla a medida que avanza la implementación:
 
 ---
 
-## Estado detallado al 2026-06-05
+## Estado detallado al 2026-06-06
 
 ### Fase 1 — Completa ✅
 
@@ -407,55 +407,83 @@ Todo el pipeline Transvoxel está funcionando en el juego:
 - Transición abrupta entre chunks smooth y greedy en bordes
 - Terreno flat tiene leve textura triangular (cosmético)
 
-### Fase 2 — En progreso 🔄
+### Fase 2 — Completa ✅
 
-**HEAD:** `18fb5c97b2` (branch: main)
+**HEAD:** `7dee7510cf` (branch: main, pusheado 2026-06-06)
 
-**Commits completados (Task 1-5 del plan):**
-- `59e878f257` — Feature flag + BLOCK_SIZE/HIRES_SCALE en common/Cargo.toml + consts.rs
-- `0630fa36c0` — GRAVITY y MOVEMENT_THRESHOLD_VEL × HIRES_SCALE
-- `6aab42dec3` — Humanoid collider height/width × HIRES_SCALE
-- `994d2b8cb0` — World gen sea_level + mountain_scale × HIRES_SCALE
-- `18fb5c97b2` — terrain_view_distance todos los presets × HIRES_SCALE
+**Qué escala con HIRES_SCALE:**
+- GRAVITY, MOVEMENT_THRESHOLD_VEL, base_accel() para todas las especies
+- sea_level, mountain_scale del world gen
+- cave/scatter/column/airship heights
+- Constantes de rango: MAX_PICKUP_RANGE, MAX_MOUNT_RANGE, etc.
+- Save migration: solo eje Z (altitud) del waypoint × HIRES_RATIO=2.0; map_marker y X/Y sin cambio
 
-**Cómo activar y probar:**
+**Lo que NO escala (decisiones de diseño):**
+- `dimensions()` y `humanoid.height()` — controlan hitbox Y escala visual simultáneamente
+- `terrain_view_distance` presets — los chunks no encogieron horizontalmente (RECT_SIZE sin cambios)
+- Coordenadas X/Y del waypoint — el layout horizontal del mundo no cambia entre modos
+
+**Para activar:**
 ```bash
-source "$HOME/.cargo/env"
-cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
+cargo run --bin veloren-voxygen \
+  --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
 ```
 
-**Task 7 — Completado (2026-06-05, HEAD: 9881ad3558):**
-- ✅ `base_accel()` todas las especies × HIRES_SCALE (commit 0d7c2a4b64)
-- ✅ `dimensions()` todos los body types × HIRES_SCALE (commit 197ba04045)
-- ✅ server `max_view_distance` × HIRES_SCALE + server/Cargo.toml feature (commit 075ed503be)
-- ✅ World gen: cave.rs, scatter.rs, column.rs, airship_travel.rs × HIRES_SCALE (commits c74b4f3fee + 9881ad3558)
-- ✅ Interaction ranges: MAX_PICKUP_RANGE, MAX_MOUNT_RANGE, etc. × HIRES_SCALE (commit 9881ad3558)
-- ❌ Save migration: coordenadas de bloque en `userdata/` necesitan ×2 al cargar con terrain-hires (pendiente — plan separado)
+**⚠️ Nota crítica — `dimensions()` y `humanoid.height()` NO escalar:**
+Controlan hitbox Y escala visual simultáneamente. Proporciones entidad/terreno en bloques deben mantenerse iguales.
 
-**Plan completo:** `docs/superpowers/plans/2026-06-05-fase2-block-scale.md`
+**Issues arquitecturales conocidas (code review 2026-06-06):** Ver tabla al final de esta sección.
+
+### Pruebas visuales — 2026-06-06
+
+Screenshots en `/Users/mgrinberg/MyVeloren/Screenshots/smooth-enabled-{1,2,3}.png`.
+- ✅ Transvoxel rendering funciona — facets visibles en terreno abierto y pueblo
+- ✅ Suelo plano con ligera textura triangular (limitación cosmética conocida)
+- ℹ️ Área de agua muestra Transvoxel pronunciado — candidato a ajuste en Fase 3
+
+### Issues arquitecturales pendientes (post code review)
+
+| ID | Issue | Criticidad |
+|----|-------|-----------|
+| H1 | Physics floor threshold 127 ≠ visual threshold (64/94/101) → jugador flota/hunde | HIGH |
+| H2 | Smooth physics solo cliente → desync servidor / rubber-banding | HIGH |
+| H3 | Agua/lava no renderiza en chunks smooth (`fluid_mesh` siempre vacío) | HIGH |
+| M7 | `phys_smooth.rs` dead code (497 líneas, LUT duplicado) | MEDIUM |
+| M9 | Alloc por tick en physics hot path cuando smooth activo | MEDIUM |
+| M10 | Atlas de color truncado a 32×32 → colores corruptos en meshes anchos | MEDIUM |
+| M11 | Iluminación stub en chunks smooth | MEDIUM |
+
+Plan de bugfixes: `docs/superpowers/plans/2026-06-06-terrain-hires-bugfixes.md`
 
 ### Fase 3 — No iniciada ⬜
 
-Puede iniciarse mientras Task 7 de Fase 2 sigue en progreso (son independientes).
-Ver sección Fase 3 del spec arriba.
+PRÓXIMO PASO. Ver sección Fase 3 del spec arriba.
 
 ---
 
 ## Prompt de reanudación
 
 ```
-Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md sección "Estado detallado al 2026-06-05".
-Luego: git log --oneline -5 && git status
+Lee docs/superpowers/specs/2026-06-04-terrain-resolution-design.md, sección "Estado detallado al 2026-06-06".
+Luego: git log --oneline -8 && git status
 
-Estado actual:
-- Fase 1 completa
-- Fase 2: Task 1-5 completos (HEAD 18fb5c97b2), Task 7 pendiente
-- Para probar Fase 2: cargo run --bin veloren-voxygen --features veloren-voxygen/terrain-hires
+Estado actual (2026-06-06):
+- Fase 1: completa ✅
+- Fase 2: completa ✅ (HEAD: 7dee7510cf)
+  - Save migration implementada: solo eje Z del waypoint escala, X/Y y map_marker sin cambio.
+  - Bugfixes: view_distance presets revertidos (chunks no encogieron horizontalmente), BLOCK_SIZE eliminado.
+  - Issues arquitecturales pendientes: H1 (physics threshold), H2 (server desync), H3 (agua), M7-M11.
+- Fase 3: no iniciada ⬜ — PRÓXIMO PASO
+- Sistema de telemetría: ✅ operativo.
+    cargo run --bin veloren-voxygen \
+      --features "veloren-voxygen/terrain-hires,veloren-voxygen/logging-verbose"
+  Logs en: userdata/voxygen/logs/client_telemetry.jsonl
+  Bug report VPS: https://veloren.greenmountain.dev/bug-report
 
-Próximos pasos (elegir uno):
-A) Continuar Task 7 de Fase 2 (audit base_accel/hitboxes NPC, world gen detallado)
-B) Arrancar Fase 3 (Normal Maps) — independiente de Task 7
-C) Testear Fase 2 con el flag activo y reportar
+Próximo paso concreto:
+→ Arrancar Fase 3 (Normal maps + micro-detalle). Usar superpowers:writing-plans para crear el plan.
+  Leer primero la sección Fase 3 del spec.
+  Issues H1-H3 pueden hacerse antes de Fase 3 si el usuario lo prioriza.
 
-No me hagas preguntas — toda la info está en la spec y en los planes linkados.
+No hagas preguntas — toda la info está en la spec y en los planes linkados.
 ```

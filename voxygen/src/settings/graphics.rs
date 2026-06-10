@@ -2,7 +2,7 @@ use crate::{
     render::{RenderMode, TerrainSmoothingMode},
     window::{FullScreenSettings, WindowSettings},
 };
-use common::{ViewDistances, consts::HIRES_SCALE};
+use common::ViewDistances;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -56,7 +56,7 @@ pub struct GraphicsSettings {
 impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
-            terrain_view_distance: (10.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 10,
             entity_view_distance: client::MAX_SELECTABLE_VIEW_DISTANCE,
             lod_distance: 200,
             sprite_render_distance: 100,
@@ -82,7 +82,7 @@ impl GraphicsSettings {
     pub fn into_minimal(self) -> Self {
         use crate::render::*;
         Self {
-            terrain_view_distance: (4.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 4,
             entity_view_distance: 4,
             lod_distance: 0,
             sprite_render_distance: 80,
@@ -109,7 +109,7 @@ impl GraphicsSettings {
     pub fn into_low(self) -> Self {
         use crate::render::*;
         Self {
-            terrain_view_distance: (7.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 7,
             entity_view_distance: 7,
             lod_distance: 75,
             sprite_render_distance: 125,
@@ -136,7 +136,7 @@ impl GraphicsSettings {
     pub fn into_medium(self) -> Self {
         use crate::render::*;
         Self {
-            terrain_view_distance: (10.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 10,
             entity_view_distance: 10,
             lod_distance: 150,
             sprite_render_distance: 250,
@@ -166,7 +166,7 @@ impl GraphicsSettings {
     pub fn into_high(self) -> Self {
         use crate::render::*;
         Self {
-            terrain_view_distance: (16.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 16,
             entity_view_distance: 16,
             lod_distance: 200,
             sprite_render_distance: 350,
@@ -196,7 +196,7 @@ impl GraphicsSettings {
     pub fn into_ultra(self) -> Self {
         use crate::render::*;
         Self {
-            terrain_view_distance: (16.0 * HIRES_SCALE) as u32,
+            terrain_view_distance: 16,
             entity_view_distance: 16,
             lod_distance: 450,
             sprite_render_distance: 800,

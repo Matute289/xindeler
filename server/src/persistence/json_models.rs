@@ -66,6 +66,8 @@ generic_body_from_impl!(comp::crustacean::Body);
 pub struct CharacterPosition {
     pub waypoint: Option<Vec3<f32>>,
     pub map_marker: Option<Vec2<i32>>,
+    #[serde(default)]
+    pub hires: bool,
 }
 
 pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> String {
@@ -346,5 +348,27 @@ pub mod tests {
             "Default value should always load to ensure that changes to item properties is always \
              forward compatible with migration V50.",
         );
+    }
+}
+
+#[cfg(test)]
+mod waypoint_migration_tests {
+    use super::CharacterPosition;
+
+    #[test]
+    fn old_save_defaults_hires_to_false() {
+        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
+        let pos: CharacterPosition = serde_json::de::from_str(json).expect("must parse");
+        assert!(
+            !pos.hires,
+            "old saves without hires field must default to false"
+        );
+    }
+
+    #[test]
+    fn hires_save_parses_hires_true() {
+        let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
+        let pos: CharacterPosition = serde_json::de::from_str(json).expect("must parse");
+        assert!(pos.hires);
     }
 }

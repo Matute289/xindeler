@@ -337,6 +337,11 @@ impl ServerEvent for InventoryManipEvent {
                                     &data.msm,
                                 );
                             }
+                            {
+                                use common::comp::inventory::item::ItemDesc;
+                                let item_id = format!("{:?}", item_msg.item_definition_id());
+                                common::telemetry!("inv", op = "pickup", item = item_id);
+                            }
                             InventoryUpdateEvent::Collected(item_msg)
                         },
                     };

@@ -17,6 +17,7 @@ widget_ids! {
         menu_button_4,
         menu_button_5,
         menu_button_6,
+        menu_button_7,
     }
 }
 
@@ -48,6 +49,7 @@ pub struct State {
 pub enum Event {
     OpenSettings(SettingsTab),
     CharacterSelection,
+    ReportBug,
     Logout,
     Quit,
     Close,
@@ -71,7 +73,7 @@ impl Widget for EscMenu<'_> {
         let widget::UpdateArgs { state, ui, .. } = args;
 
         Image::new(self.imgs.esc_frame)
-            .w_h(240.0, 380.0)
+            .w_h(240.0, 440.0)
             .color(Some(Color::Rgba(1.0, 1.0, 1.0, 0.9)))
             .middle_of(ui.window)
             .set(state.ids.esc_bg, ui);
@@ -146,9 +148,25 @@ impl Widget for EscMenu<'_> {
         {
             return Some(Event::CharacterSelection);
         };
-        // Logout
+        // Report Bug
         if Button::image(self.imgs.button)
             .mid_bottom_with_margin_on(state.ids.menu_button_4, -65.0)
+            .w_h(210.0, 50.0)
+            .hover_image(self.imgs.button_hover)
+            .press_image(self.imgs.button_press)
+            .label("Report Bug")
+            .label_y(conrod_core::position::Relative::Scalar(3.0))
+            .label_color(TEXT_COLOR)
+            .label_font_size(self.fonts.cyri.scale(20))
+            .label_font_id(self.fonts.cyri.conrod_id)
+            .set(state.ids.menu_button_7, ui)
+            .was_clicked()
+        {
+            return Some(Event::ReportBug);
+        };
+        // Logout
+        if Button::image(self.imgs.button)
+            .mid_bottom_with_margin_on(state.ids.menu_button_7, -55.0)
             .w_h(210.0, 50.0)
             .hover_image(self.imgs.button_hover)
             .press_image(self.imgs.button_press)

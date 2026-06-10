@@ -144,7 +144,7 @@ use std::{
     cmp::Ordering,
     collections::VecDeque,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tracing::{instrument, trace, warn};
@@ -1301,6 +1301,7 @@ pub struct Hud {
     clear_chat: bool,
     current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
     extra_markers: Vec<map::ExtraMarker>,
+    bug_report_status: Option<Arc<Mutex<Option<crate::bug_report::BugReportResult>>>>,
 }
 
 impl Hud {
@@ -1443,6 +1444,7 @@ impl Hud {
             clear_chat: false,
             current_dialogue: None,
             extra_markers: Vec::new(),
+            bug_report_status: None,
         }
     }
 
@@ -3118,7 +3120,10 @@ impl Hud {
         {
             Some(buttons::Event::ToggleSettings) => self.show.toggle_settings(global_state),
             Some(buttons::Event::ToggleSocial) => self.show.toggle_social(),
-            Some(buttons::Event::ToggleMap) => self.show.toggle_map(),
+            Some(buttons::Event::ToggleMap) => {
+                common::telemetry!("ui", widget = "Map", action = "toggle");
+                self.show.toggle_map();
+            },
             Some(buttons::Event::ToggleCrafting) => self.show.toggle_crafting(),
             None => {},
         }
@@ -3270,7 +3275,10 @@ impl Hud {
                         self.show.diary(true);
                         self.show.open_skill_tree(skillgroup);
                     },
-                    skillbar::Event::OpenBag => self.show.bag(!self.show.bag),
+                    skillbar::Event::OpenBag => {
+                        common::telemetry!("ui", widget = "Inventory", action = "toggle");
+                        self.show.bag(!self.show.bag);
+                    },
                 }
             }
         }
@@ -3997,9 +4005,11 @@ impl Hud {
         if self.show.esc_menu {
             match EscMenu::new(&self.imgs, &self.fonts, i18n).set(self.ids.esc_menu, ui_widgets) {
                 Some(esc_menu::Event::OpenSettings(tab)) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Settings");
                     self.show.open_setting_tab(tab);
                 },
                 Some(esc_menu::Event::Close) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Close");
                     self.show.esc_menu = false;
                     self.show.want_grab = true;
                     self.force_ungrab = false;
@@ -4009,19 +4019,56 @@ impl Hud {
                     global_state.unpause();
                 },
                 Some(esc_menu::Event::Logout) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Logout");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
 
                     events.push(Event::Logout);
                 },
-                Some(esc_menu::Event::Quit) => events.push(Event::Quit),
+                Some(esc_menu::Event::Quit) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "Quit");
+                    events.push(Event::Quit);
+                },
                 Some(esc_menu::Event::CharacterSelection) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "CharacterSelection");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
 
                     events.push(Event::CharacterSelection)
+                },
+                Some(esc_menu::Event::ReportBug) => {
+                    common::telemetry!("ui", widget = "EscMenu", btn = "ReportBug");
+                    if let Some(url) = global_state
+                        .settings
+                        .networking
+                        .bug_report_url
+                        .clone()
+                    {
+                        let status =
+                            Arc::new(Mutex::new(None::<crate::bug_report::BugReportResult>));
+                        let status_clone = Arc::clone(&status);
+                        let logs_dir = common_base::userdata_dir()
+                            .join("voxygen")
+                            .join("logs");
+                        std::thread::spawn(move || {
+                            let result = crate::bug_report::send_bug_report(&url, &logs_dir);
+                            if let Ok(mut guard) = status_clone.lock() {
+                                *guard = Some(result);
+                            }
+                        });
+                        self.bug_report_status = Some(status);
+                        self.new_messages.push_back(
+                            comp::ChatType::CommandInfo
+                                .into_plain_msg("Bug report sending…"),
+                        );
+                    } else {
+                        self.new_messages.push_back(
+                            comp::ChatType::CommandError
+                                .into_plain_msg("No bug report URL configured."),
+                        );
+                    }
                 },
                 None => {},
             }
@@ -5157,6 +5204,29 @@ impl Hud {
         ),
     ) -> Vec<Event> {
         span!(_guard, "maintain", "Hud::maintain");
+
+        // Poll bug report background thread for completion
+        if let Some(status) = self.bug_report_status.take() {
+            let result = status.try_lock().ok().and_then(|mut g| g.take());
+            if let Some(result) = result {
+                let msg = match result {
+                    crate::bug_report::BugReportResult::Sent => {
+                        "Bug report sent successfully.".to_owned()
+                    },
+                    crate::bug_report::BugReportResult::Skipped(reason) => {
+                        format!("Bug report skipped: {reason}")
+                    },
+                    crate::bug_report::BugReportResult::Failed(reason) => {
+                        format!("Bug report failed: {reason}")
+                    },
+                };
+                self.new_message(comp::ChatType::CommandInfo.into_plain_msg(msg));
+                // bug_report_status remains None (already taken)
+            } else {
+                // Result not ready yet — put it back
+                self.bug_report_status = Some(status);
+            }
+        }
 
         // Remove extra map markers that we've wandered a long distance away from
         if let Some(pos) = client.position() {

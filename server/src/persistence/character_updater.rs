@@ -134,6 +134,7 @@ impl CharacterUpdater {
                                     "Error during character batch update, disconnecting all \
                                      clients to avoid loss of data integrity."
                                 );
+                                common::telemetry!("err_ctx", msg = "char_batch_update_failed");
                                 disconnect_all_clients_requested_clone
                                     .store(true, Ordering::Relaxed);
                             };

@@ -226,7 +226,7 @@ impl Default for Settings {
             max_players: 100,
             day_length: DAY_LENGTH_DEFAULT,
             map_file: None,
-            max_view_distance: Some((65.0 * common::consts::HIRES_SCALE) as u32),
+            max_view_distance: Some(65),
             max_player_group_size: 6,
             calendar_mode: CalendarMode::Auto,
             client_timeout: Duration::from_secs(40),

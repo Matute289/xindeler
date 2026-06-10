@@ -224,6 +224,7 @@ pub fn handle_client_disconnect(
             .clients_disconnected
             .with_label_values(&[get_reason_str(&reason)])
             .inc();
+        common::telemetry!("pd_conn", event = "disconnect", reason = ?reason);
 
         if let Some(player) = server
             .state()
