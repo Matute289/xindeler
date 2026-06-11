@@ -7,7 +7,7 @@ pub use lifecycle::{ErrorDetectorLayer, LogLifecycleManager};
 #[cfg(feature = "logging-verbose")]
 mod telemetry_layer;
 #[cfg(feature = "logging-verbose")]
-pub use telemetry_layer::TelemetryLayer;
+pub use telemetry_layer::{TelemetryFlushHandle, TelemetryLayer};
 
 #[cfg(not(feature = "tracy"))] use std::fs;
 use std::{
@@ -43,6 +43,17 @@ pub struct LogGuards {
     pub lifecycle: LogLifecycleManager,
     _worker_guards: Vec<WorkerGuard>,
     _compress_guards: Vec<CompressionGuard>,
+    #[cfg(feature = "logging-verbose")]
+    telemetry_flush: Option<TelemetryFlushHandle>,
+}
+
+impl Drop for LogGuards {
+    fn drop(&mut self) {
+        #[cfg(feature = "logging-verbose")]
+        if let Some(h) = &self.telemetry_flush {
+            h.flush();
+        }
+    }
 }
 
 /// Initialise tracing and logging for the logs_path.
@@ -285,8 +296,16 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
 
     // Optional telemetry sink (logging-verbose only)
     #[cfg(feature = "logging-verbose")]
-    let telemetry_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-        TelemetryLayer::new(logs_dir, prefix).map(|t| t.boxed());
+    let (telemetry_layer, telemetry_flush): (
+        Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>>,
+        Option<TelemetryFlushHandle>,
+    ) = match TelemetryLayer::new(logs_dir, prefix) {
+        Some(t) => {
+            let h = t.flush_handle();
+            (Some(t.boxed()), Some(h))
+        },
+        None => (None, None),
+    };
     #[cfg(not(feature = "logging-verbose"))]
     let telemetry_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = None;
 
@@ -312,6 +331,8 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
         lifecycle,
         _worker_guards: worker_guards,
         _compress_guards: compress_guards,
+        #[cfg(feature = "logging-verbose")]
+        telemetry_flush,
     }
 }
 

@@ -1,7 +1,4 @@
-use common::{
-    terrain::TerrainGrid,
-    vol::SampleVol,
-};
+use common::{terrain::TerrainGrid, vol::SampleVol};
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::{hint::black_box, sync::Arc};
 use vek::*;
