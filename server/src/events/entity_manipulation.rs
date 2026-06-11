@@ -555,6 +555,12 @@ fn handle_exp_gain(
             uid: *uid,
             new_level: level_after,
         });
+        common::telemetry!(
+            "lvl",
+            event = "character_level_up",
+            uid = ?uid,
+            new_level = level_after
+        );
     }
     outcomes_emitter.emit(Outcome::ExpChange {
         uid: *uid,
