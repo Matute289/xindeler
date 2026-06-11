@@ -2285,6 +2285,17 @@ mod tests {
     }
 
     #[test]
+    fn test_draugr_blade_requirements_load() {
+        let item = Item::new_from_asset_expect("common.items.testing.test_draugr_blade");
+        let requirements = item.requirements().expect("test item declares requirements");
+        assert_eq!(requirements.min_level, Some(10));
+        assert_eq!(
+            requirements.races,
+            Some(vec![crate::comp::body::humanoid::Species::Draugr])
+        );
+    }
+
+    #[test]
     fn item_requirements_ron_roundtrip() {
         // Every RON under assets/common/items deserializes through RawItemDef.
         let with_requirements = r#"
