@@ -35,7 +35,10 @@ use common::{
 use comp::LightEmitter;
 
 use crate::client::Client;
-use common::comp::{Alignment, CollectFailedReason, Group, InventoryUpdateEvent, pet::is_tameable};
+use common::comp::{
+    Alignment, ChatType, CollectFailedReason, Content, Group, InventoryUpdateEvent,
+    pet::is_tameable,
+};
 use common_net::msg::ServerGeneral;
 
 use super::{ServerEvent, entity_manipulation::emit_effect_events, event_dispatch};
@@ -59,6 +62,29 @@ pub fn swap_lantern(
 
 pub fn snuff_lantern(storage: &mut WriteStorage<LightEmitter>, entity: EcsEntity) {
     storage.remove(entity);
+}
+
+/// Equip gates only apply to entities that have both a `SkillSet` and a
+/// `Body` (players). NPC loadouts are built by `LoadoutBuilder` and never
+/// pass through `InventoryManip`, so they bypass this by design.
+fn entity_meets_item_requirements(
+    item: &comp::Item,
+    skill_set: Option<&comp::SkillSet>,
+    body: Option<&comp::Body>,
+) -> bool {
+    match (skill_set, body) {
+        (Some(skill_set), Some(body)) => item.meets_requirements(skill_set, body),
+        _ => true,
+    }
+}
+
+fn notify_requirements_not_met(clients: &ReadStorage<'_, Client>, entity: EcsEntity) {
+    if let Some(client) = clients.get(entity) {
+        client.send_fallible(ServerGeneral::server_msg(
+            ChatType::CommandError,
+            Content::localized("hud-bag-requirements_not_met"),
+        ));
+    }
 }
 
 event_emitters! {
@@ -110,6 +136,7 @@ pub struct InventoryManipData<'a> {
     players: ReadStorage<'a, comp::Player>,
     groups: ReadStorage<'a, comp::Group>,
     stats: ReadStorage<'a, comp::Stats>,
+    skill_sets: ReadStorage<'a, comp::SkillSet>,
     clients: ReadStorage<'a, Client>,
     orientations: ReadStorage<'a, comp::Ori>,
     agents: ReadStorage<'a, comp::Agent>,
@@ -548,30 +575,48 @@ impl ServerEvent for InventoryManipEvent {
                                     (is_equippable, lantern_info)
                                 });
                             if is_equippable {
-                                if let Some(lantern_info) = lantern_info {
-                                    swap_lantern(&mut data.light_emitters, entity, lantern_info);
-                                }
-                                if let Some(pos) = data.positions.get(entity)
-                                    && let Ok(Some(unloaded_items)) = inventory.equip(
-                                        slot,
-                                        *data.time,
-                                        &data.ability_map,
-                                        &data.msm,
-                                    )
-                                {
-                                    dropped_items.extend(unloaded_items.into_iter().map(|item| {
-                                        (
-                                            *pos,
-                                            data.orientations
-                                                .get(entity)
-                                                .copied()
-                                                .unwrap_or_default(),
-                                            PickupItem::new(item, *data.program_time, true),
-                                            *uid,
+                                let requirements_ok =
+                                    inventory.get(slot).is_none_or(|item| {
+                                        entity_meets_item_requirements(
+                                            item,
+                                            data.skill_sets.get(entity),
+                                            data.bodies.get(entity),
                                         )
-                                    }));
+                                    });
+                                if !requirements_ok {
+                                    notify_requirements_not_met(&data.clients, entity);
+                                    None
+                                } else {
+                                    if let Some(lantern_info) = lantern_info {
+                                        swap_lantern(
+                                            &mut data.light_emitters,
+                                            entity,
+                                            lantern_info,
+                                        );
+                                    }
+                                    if let Some(pos) = data.positions.get(entity)
+                                        && let Ok(Some(unloaded_items)) = inventory.equip(
+                                            slot,
+                                            *data.time,
+                                            &data.ability_map,
+                                            &data.msm,
+                                        )
+                                    {
+                                        dropped_items
+                                            .extend(unloaded_items.into_iter().map(|item| {
+                                                (
+                                                    *pos,
+                                                    data.orientations
+                                                        .get(entity)
+                                                        .copied()
+                                                        .unwrap_or_default(),
+                                                    PickupItem::new(item, *data.program_time, true),
+                                                    *uid,
+                                                )
+                                            }));
+                                    }
+                                    Some(InventoryUpdateEvent::Used)
                                 }
-                                Some(InventoryUpdateEvent::Used)
                             } else if let Some(item) =
                                 inventory.take(slot, &data.ability_map, &data.msm)
                             {
@@ -810,6 +855,24 @@ impl ServerEvent for InventoryManipEvent {
                         _ => None,
                     } {
                         swap_lantern(&mut data.light_emitters, entity, lantern_info);
+                    }
+
+                    // Equip gate: reject when either side of the swap would
+                    // mount a gated item into a loadout slot.
+                    let violates_requirements =
+                        [(a, b), (b, a)].into_iter().any(|(src, dst)| {
+                            matches!(dst, Slot::Equip(_))
+                                && inventory.get_slot(src).is_some_and(|item| {
+                                    !entity_meets_item_requirements(
+                                        item,
+                                        data.skill_sets.get(entity),
+                                        data.bodies.get(entity),
+                                    )
+                                })
+                        });
+                    if violates_requirements {
+                        notify_requirements_not_met(&data.clients, entity);
+                        continue;
                     }
 
                     if let Some(pos) = data.positions.get(entity) {
