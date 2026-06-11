@@ -9,7 +9,7 @@ pub use tool::{AbilityMap, AbilitySet, AbilitySpec, Hands, Tool, ToolKind};
 
 use crate::{
     assets::{self, Asset, AssetCache, AssetExt, BoxedError, Error, Ron, SharedString},
-    comp::inventory::InvSlot,
+    comp::{body::humanoid, inventory::InvSlot},
     effect::Effect,
     lottery::LootSpec,
     recipe::RecipeInput,
@@ -782,6 +782,46 @@ impl ItemDefinitionId<'_> {
     }
 }
 
+/// Optional gates restricting who may *equip* an item. Declared per item in
+/// RON; an absent field (or any `None` sub-field) means unrestricted. Pickup,
+/// carrying, trading, and NPC loadouts (`LoadoutBuilder`) are never gated.
+/// See docs/superpowers/specs/2026-06-10-equipment-restrictions-design.md.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ItemRequirements {
+    /// Minimum derived character level (see `SkillSet::character_level`).
+    pub min_level: Option<u16>,
+    /// Whitelist of humanoid species that may equip this item.
+    pub races: Option<Vec<humanoid::Species>>,
+}
+
+/// A single requirement the equipping entity fails. Feeds both the server
+/// rejection and the client tooltip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnmetRequirement {
+    Level { needed: u16 },
+    Race,
+}
+
+impl ItemRequirements {
+    /// Requirements unmet at the given character level/species. `species` is
+    /// `None` for non-humanoid bodies, which therefore fail any race gate.
+    pub fn unmet(&self, level: u16, species: Option<humanoid::Species>) -> Vec<UnmetRequirement> {
+        let mut unmet = Vec::new();
+        if let Some(needed) = self.min_level
+            && level < needed
+        {
+            unmet.push(UnmetRequirement::Level { needed });
+        }
+        if let Some(races) = &self.races
+            && !species.is_some_and(|s| races.contains(&s))
+        {
+            unmet.push(UnmetRequirement::Race);
+        }
+        unmet
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemDef {
     #[serde(default)]
@@ -799,6 +839,10 @@ pub struct ItemDef {
     /// Used to specify a custom ability set for a weapon. Leave None (or don't
     /// include field in ItemDef) to use default ability set for weapon kind.
     pub ability_spec: Option<AbilitySpec>,
+    /// Equip gates (min level / race whitelist; class in Phase B).
+    /// None = unrestricted.
+    #[serde(default)]
+    pub requirements: Option<ItemRequirements>,
 }
 
 impl PartialEq for ItemDef {
@@ -907,6 +951,7 @@ impl ItemDef {
             tags,
             slots,
             ability_spec: None,
+            requirements: None,
         }
     }
 
@@ -921,6 +966,7 @@ impl ItemDef {
             tags: vec![],
             slots: 0,
             ability_spec: None,
+            requirements: None,
         }
     }
 }
@@ -962,6 +1008,7 @@ impl Asset for ItemDef {
             tags,
             slots,
             ability_spec,
+            requirements,
         } = cache.load::<Ron<_>>(specifier)?.cloned().into_inner();
 
         // Some commands like /give_item provide the asset specifier separated with \
@@ -979,6 +1026,7 @@ impl Asset for ItemDef {
             tags,
             slots,
             ability_spec,
+            requirements,
         })
     }
 }
@@ -994,6 +1042,8 @@ struct RawItemDef {
     #[serde(default)]
     slots: u16,
     ability_spec: Option<AbilitySpec>,
+    #[serde(default)]
+    requirements: Option<ItemRequirements>,
 }
 
 #[derive(Debug)]
@@ -2196,6 +2246,73 @@ mod tests {
         if !errs.is_empty() {
             panic!("item i18n manifest misses translation-id for following items {errs:#?}")
         }
+    }
+
+    #[test]
+    fn item_requirements_ron_roundtrip() {
+        // Every RON under assets/common/items deserializes through RawItemDef.
+        let with_requirements = r#"
+            ItemDef(
+                legacy_name: "Test Blade",
+                legacy_description: "",
+                kind: Tool((
+                    kind: Sword,
+                    hands: Two,
+                    stats: (
+                        equip_time_secs: 0.25,
+                        power: 1.0,
+                        effect_power: 1.0,
+                        speed: 1.0,
+                        range: 1.0,
+                        energy_efficiency: 1.0,
+                        buff_strength: 1.0,
+                    ),
+                )),
+                quality: Low,
+                tags: [],
+                ability_spec: None,
+                requirements: Some((
+                    min_level: Some(10),
+                    races: Some([Draugr]),
+                )),
+            )
+        "#;
+        let raw: RawItemDef =
+            ron::de::from_str(with_requirements).expect("requirements field must parse");
+        let requirements = raw.requirements.expect("requirements present");
+        assert_eq!(requirements.min_level, Some(10));
+        assert_eq!(
+            requirements.races,
+            Some(vec![crate::comp::body::humanoid::Species::Draugr])
+        );
+
+        // Absent field must keep deserializing (backward compatibility with
+        // the ~thousands of existing item RONs).
+        let without_requirements = r#"
+            ItemDef(
+                legacy_name: "Test Blade",
+                legacy_description: "",
+                kind: Tool((
+                    kind: Sword,
+                    hands: Two,
+                    stats: (
+                        equip_time_secs: 0.25,
+                        power: 1.0,
+                        effect_power: 1.0,
+                        speed: 1.0,
+                        range: 1.0,
+                        energy_efficiency: 1.0,
+                        buff_strength: 1.0,
+                    ),
+                )),
+                quality: Low,
+                tags: [],
+                ability_spec: None,
+            )
+        "#;
+        let raw: RawItemDef =
+            ron::de::from_str(without_requirements).expect("absent field must parse");
+        assert_eq!(raw.requirements, None);
     }
 
     #[test]
