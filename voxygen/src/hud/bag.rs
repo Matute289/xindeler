@@ -464,8 +464,7 @@ impl<'a> InventoryScroller<'a> {
                     .as_ref()
                     .is_some_and(|item| !item.meets_requirements(skill_set, body))
             {
-                slot_widget =
-                    slot_widget.with_background_color(Color::Rgba(0.45, 0.45, 0.45, 1.0));
+                slot_widget = slot_widget.with_background_color(Color::Rgba(0.45, 0.45, 0.45, 1.0));
             }
 
             if let Some(item) = item {

@@ -575,14 +575,13 @@ impl ServerEvent for InventoryManipEvent {
                                     (is_equippable, lantern_info)
                                 });
                             if is_equippable {
-                                let requirements_ok =
-                                    inventory.get(slot).is_none_or(|item| {
-                                        entity_meets_item_requirements(
-                                            item,
-                                            data.skill_sets.get(entity),
-                                            data.bodies.get(entity),
-                                        )
-                                    });
+                                let requirements_ok = inventory.get(slot).is_none_or(|item| {
+                                    entity_meets_item_requirements(
+                                        item,
+                                        data.skill_sets.get(entity),
+                                        data.bodies.get(entity),
+                                    )
+                                });
                                 if !requirements_ok {
                                     notify_requirements_not_met(&data.clients, entity);
                                     None
@@ -602,8 +601,8 @@ impl ServerEvent for InventoryManipEvent {
                                             &data.msm,
                                         )
                                     {
-                                        dropped_items
-                                            .extend(unloaded_items.into_iter().map(|item| {
+                                        dropped_items.extend(unloaded_items.into_iter().map(
+                                            |item| {
                                                 (
                                                     *pos,
                                                     data.orientations
@@ -613,7 +612,8 @@ impl ServerEvent for InventoryManipEvent {
                                                     PickupItem::new(item, *data.program_time, true),
                                                     *uid,
                                                 )
-                                            }));
+                                            },
+                                        ));
                                     }
                                     Some(InventoryUpdateEvent::Used)
                                 }
@@ -859,17 +859,16 @@ impl ServerEvent for InventoryManipEvent {
 
                     // Equip gate: reject when either side of the swap would
                     // mount a gated item into a loadout slot.
-                    let violates_requirements =
-                        [(a, b), (b, a)].into_iter().any(|(src, dst)| {
-                            matches!(dst, Slot::Equip(_))
-                                && inventory.get_slot(src).is_some_and(|item| {
-                                    !entity_meets_item_requirements(
-                                        item,
-                                        data.skill_sets.get(entity),
-                                        data.bodies.get(entity),
-                                    )
-                                })
-                        });
+                    let violates_requirements = [(a, b), (b, a)].into_iter().any(|(src, dst)| {
+                        matches!(dst, Slot::Equip(_))
+                            && inventory.get_slot(src).is_some_and(|item| {
+                                !entity_meets_item_requirements(
+                                    item,
+                                    data.skill_sets.get(entity),
+                                    data.bodies.get(entity),
+                                )
+                            })
+                    });
                     if violates_requirements {
                         notify_requirements_not_met(&data.clients, entity);
                         continue;

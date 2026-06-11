@@ -2287,7 +2287,9 @@ mod tests {
     #[test]
     fn test_draugr_blade_requirements_load() {
         let item = Item::new_from_asset_expect("common.items.testing.test_draugr_blade");
-        let requirements = item.requirements().expect("test item declares requirements");
+        let requirements = item
+            .requirements()
+            .expect("test item declares requirements");
         assert_eq!(requirements.min_level, Some(10));
         assert_eq!(
             requirements.races,
@@ -2382,13 +2384,12 @@ mod tests {
         }
 
         fn gated_test_item(requirements: Option<ItemRequirements>) -> Item {
-            let mut item_def = ItemDef::create_test_itemdef_from_kind(ItemKind::Armor(
-                armor::Armor::test_armor(
+            let mut item_def =
+                ItemDef::create_test_itemdef_from_kind(ItemKind::Armor(armor::Armor::test_armor(
                     armor::ArmorKind::Chest,
                     armor::Protection::Normal(0.0),
                     armor::Protection::Normal(0.0),
-                ),
-            ));
+                )));
             item_def.requirements = requirements;
             Item::new_from_item_base(
                 ItemBase::Simple(Arc::new(item_def)),
@@ -2438,7 +2439,8 @@ mod tests {
         assert!(!both.meets_requirements(&skill_set_at_level(9), &draugr));
         assert!(!both.meets_requirements(&skill_set_at_level(10), &human));
         assert_eq!(
-            both.unmet_requirements(&skill_set_at_level(9), &human).len(),
+            both.unmet_requirements(&skill_set_at_level(9), &human)
+                .len(),
             2
         );
     }
