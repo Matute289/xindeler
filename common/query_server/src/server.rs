@@ -87,18 +87,21 @@ impl QueryServer {
                 },
             };
 
-            let mut new_metrics = Metrics {
-                received_packets: 1,
-                ..Default::default()
-            };
-
             let raw_msg_buf = &buf[..len];
             let msg_buf = if Self::validate_datagram(raw_msg_buf) {
                 // Require 2 extra bytes for version (currently unused)
                 &raw_msg_buf[2..(raw_msg_buf.len() - VELOREN_HEADER.len())]
             } else {
-                new_metrics.dropped_packets += 1;
+                if let Ok(mut metrics) = metrics.lock() {
+                    metrics.received_packets += 1;
+                    metrics.dropped_packets += 1;
+                }
                 continue;
+            };
+
+            let mut new_metrics = Metrics {
+                received_packets: 1,
+                ..Default::default()
             };
 
             self.process_datagram(msg_buf, remote_addr, secrets, &mut new_metrics, &socket)

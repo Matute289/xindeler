@@ -28,7 +28,7 @@ fn find_latest(dir: &Path, contains: &str) -> Option<PathBuf> {
             Some((modified, e.path()))
         })
         .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
     candidates.into_iter().next().map(|(_, p)| p)
 }
 

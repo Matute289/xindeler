@@ -283,7 +283,7 @@ impl Renderer {
             ?supported_limits.max_texture_dimension_2d,
             "selected graphics device"
         );
-        let graphics_backend = format!("{:?}", &info.backend);
+        let graphics_backend = format!("{:?}", info.backend);
 
         let required_limits = wgpu::Limits {
             max_texture_dimension_1d: 0,
@@ -342,7 +342,7 @@ impl Renderer {
             error!("{}", &error);
             panic!(
                 "wgpu error (handling all wgpu errors as fatal):\n{:?}\n{:?}",
-                &error, &info,
+                error, info,
             );
         }));
 
@@ -1389,23 +1389,23 @@ impl Renderer {
                         create_quad_index_buffer_u16(&self.device, vert_length);
                 }
             },
-            Some(wgpu::IndexFormat::Uint32) => {
+            Some(wgpu::IndexFormat::Uint32)
                 // Make sure the global quad index buffer is large enough
-                if self.quad_index_buffer_u32.len() < quad_index_length {
-                    // Make sure we aren't over the max
-                    if vert_length > u32::MAX as usize {
-                        panic!(
-                            "More than u32::MAX({}) verts({}) for type({}) using an index buffer!",
-                            u32::MAX,
-                            vert_length,
-                            core::any::type_name::<V>()
-                        );
-                    }
-                    self.quad_index_buffer_u32 =
-                        create_quad_index_buffer_u32(&self.device, vert_length);
+                if self.quad_index_buffer_u32.len() < quad_index_length =>
+            {
+                // Make sure we aren't over the max
+                if vert_length > u32::MAX as usize {
+                    panic!(
+                        "More than u32::MAX({}) verts({}) for type({}) using an index buffer!",
+                        u32::MAX,
+                        vert_length,
+                        core::any::type_name::<V>()
+                    );
                 }
+                self.quad_index_buffer_u32 =
+                    create_quad_index_buffer_u32(&self.device, vert_length);
             },
-            None => {},
+            Some(wgpu::IndexFormat::Uint32) | None => {},
         }
     }
 
