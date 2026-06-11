@@ -33,7 +33,9 @@ pub const SUNLIGHT: u8 = 24;
 pub const SUNLIGHT_INV: f32 = 1.0 / SUNLIGHT as f32;
 pub const MAX_LIGHT_DIST: i32 = SUNLIGHT as i32;
 
-fn calc_light<
+/// Public for criterion benches (`voxygen/benches/light_benchmark.rs`); not
+/// intended as API — call through `generate_mesh`.
+pub fn calc_light<
     V: RectRasterableVol<Vox = Block> + ReadVol + Debug,
     L: Iterator<Item = (Vec3<i32>, u8)>,
 >(
