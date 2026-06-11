@@ -39,10 +39,17 @@ Nine workstreams, each with its own design spec:
 | 6a | PROJECT AURORA — social simulation layer | [project-aurora-design](2026-06-10-project-aurora-design.md) | XL | 4–7 mo |
 | 6b | PROJECT ORACLE — world director AI | [project-oracle-design](2026-06-10-project-oracle-design.md) | XL | 4–7 mo |
 
-Implementation plans live in `docs/superpowers/plans/`. The first executable plan is
-[2026-06-10-character-levels.md](../plans/2026-06-10-character-levels.md). Each subsequent
-milestone gets its own plan authored just-in-time (designs drift; code-level plans written
-months ahead rot).
+Implementation plans live in `docs/superpowers/plans/` — **all 10 are authored** (M1
+character-levels executed and merged 2026-06-10; the remaining nine dated 2026-06-11:
+character-levels-m2, equipment-restrictions, classes-races, magic-abilities,
+world-difficulty-zones, lore-cosmology, engine-improvements, project-aurora,
+project-oracle). AURORA/ORACLE phases 3–8 are contract-based: every task re-verifies its
+code anchors (grep gates) before implementing, since code-level detail written months
+ahead rots.
+
+The execution backlog is the **[master task board](../tasks/00-task-board.md)**: 134
+tasks across 9 task files with per-task model routing (haiku/sonnet/opus/fable), file
+lists, asset/download notes, dependencies, and acceptance commands.
 
 ## Dependency graph
 
