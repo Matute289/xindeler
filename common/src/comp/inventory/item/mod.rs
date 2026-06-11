@@ -9,7 +9,7 @@ pub use tool::{AbilityMap, AbilitySet, AbilitySpec, Hands, Tool, ToolKind};
 
 use crate::{
     assets::{self, Asset, AssetCache, AssetExt, BoxedError, Error, Ron, SharedString},
-    comp::{body::humanoid, inventory::InvSlot},
+    comp::{Body, body::humanoid, inventory::InvSlot, skillset::SkillSet},
     effect::Effect,
     lottery::LootSpec,
     recipe::RecipeInput,
@@ -1487,6 +1487,31 @@ impl Item {
         }
     }
 
+    /// Equip gates declared on this item's definition. Modular (crafted)
+    /// weapons carry no gates.
+    pub fn requirements(&self) -> Option<&ItemRequirements> {
+        match &self.item_base {
+            ItemBase::Simple(item_def) => item_def.requirements.as_ref(),
+            ItemBase::Modular(_) => None,
+        }
+    }
+
+    /// Requirements this entity fails for equipping this item. Shared by
+    /// server enforcement and the client tooltip so they always agree.
+    pub fn unmet_requirements(&self, skill_set: &SkillSet, body: &Body) -> Vec<UnmetRequirement> {
+        self.requirements().map_or_else(Vec::new, |requirements| {
+            let species = match body {
+                Body::Humanoid(humanoid_body) => Some(humanoid_body.species),
+                _ => None,
+            };
+            requirements.unmet(skill_set.character_level(), species)
+        })
+    }
+
+    pub fn meets_requirements(&self, skill_set: &SkillSet, body: &Body) -> bool {
+        self.unmet_requirements(skill_set, body).is_empty()
+    }
+
     // TODO: Maybe try to make slice again instead of vec? Could also try to make an
     // iterator?
     pub fn tags(&self) -> Vec<ItemTag> {
@@ -1834,6 +1859,7 @@ pub trait ItemDesc {
     fn has_durability(&self) -> bool;
     fn durability_lost(&self) -> Option<u32>;
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier;
+    fn requirements(&self) -> Option<&ItemRequirements>;
 
     fn tool_info(&self) -> Option<ToolKind> {
         if let ItemKind::Tool(tool) = &*self.kind() {
@@ -1938,6 +1964,8 @@ impl ItemDesc for Item {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier {
         self.stats_durability_multiplier()
     }
+
+    fn requirements(&self) -> Option<&ItemRequirements> { Item::requirements(self) }
 }
 
 impl ItemDesc for FrontendItem {
@@ -1969,6 +1997,8 @@ impl ItemDesc for FrontendItem {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier {
         self.0.stats_durability_multiplier()
     }
+
+    fn requirements(&self) -> Option<&ItemRequirements> { self.0.requirements() }
 }
 
 impl ItemDesc for ItemDef {
@@ -2002,6 +2032,8 @@ impl ItemDesc for ItemDef {
     fn durability_lost(&self) -> Option<u32> { None }
 
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier { DurabilityMultiplier(1.0) }
+
+    fn requirements(&self) -> Option<&ItemRequirements> { self.requirements.as_ref() }
 }
 
 impl ItemDesc for PickupItem {
@@ -2035,6 +2067,8 @@ impl ItemDesc for PickupItem {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier {
         self.item().stats_durability_multiplier()
     }
+
+    fn requirements(&self) -> Option<&ItemRequirements> { self.item().requirements() }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2084,6 +2118,8 @@ impl<T: ItemDesc + ?Sized> ItemDesc for &T {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier {
         (*self).stats_durability_multiplier()
     }
+
+    fn requirements(&self) -> Option<&ItemRequirements> { (*self).requirements() }
 }
 
 /// Returns all item asset specifiers
@@ -2313,6 +2349,87 @@ mod tests {
         let raw: RawItemDef =
             ron::de::from_str(without_requirements).expect("absent field must parse");
         assert_eq!(raw.requirements, None);
+    }
+
+    #[test]
+    fn meets_requirements_matrix() {
+        use crate::comp::{
+            Body,
+            body::humanoid,
+            skillset::{SkillGroupKind, SkillSet, total_exp_for_level},
+        };
+
+        fn body_of(species: humanoid::Species) -> Body {
+            Body::Humanoid(humanoid::Body::random_with(&mut rand::rng(), &species))
+        }
+
+        fn skill_set_at_level(level: u16) -> SkillSet {
+            let mut skill_set = SkillSet::default();
+            skill_set.add_experience(SkillGroupKind::General, total_exp_for_level(level));
+            assert_eq!(skill_set.character_level(), level);
+            skill_set
+        }
+
+        fn gated_test_item(requirements: Option<ItemRequirements>) -> Item {
+            let mut item_def = ItemDef::create_test_itemdef_from_kind(ItemKind::Armor(
+                armor::Armor::test_armor(
+                    armor::ArmorKind::Chest,
+                    armor::Protection::Normal(0.0),
+                    armor::Protection::Normal(0.0),
+                ),
+            ));
+            item_def.requirements = requirements;
+            Item::new_from_item_base(
+                ItemBase::Simple(Arc::new(item_def)),
+                Vec::new(),
+                &AbilityMap::load().read(),
+                &MaterialStatManifest::load().read(),
+            )
+        }
+
+        let draugr = body_of(humanoid::Species::Draugr);
+        let human = body_of(humanoid::Species::Human);
+
+        // No requirements -> everyone passes.
+        let open = gated_test_item(None);
+        assert!(open.meets_requirements(&skill_set_at_level(1), &human));
+
+        // Empty requirements block -> everyone passes.
+        let empty = gated_test_item(Some(ItemRequirements::default()));
+        assert!(empty.meets_requirements(&skill_set_at_level(1), &human));
+
+        // Level gate alone, boundary inclusive (level == min_level passes).
+        let lvl10 = gated_test_item(Some(ItemRequirements {
+            min_level: Some(10),
+            races: None,
+        }));
+        assert!(!lvl10.meets_requirements(&skill_set_at_level(9), &human));
+        assert!(lvl10.meets_requirements(&skill_set_at_level(10), &human));
+        assert_eq!(
+            lvl10.unmet_requirements(&skill_set_at_level(9), &human),
+            vec![UnmetRequirement::Level { needed: 10 }]
+        );
+
+        // Race gate alone.
+        let draugr_only = gated_test_item(Some(ItemRequirements {
+            min_level: None,
+            races: Some(vec![humanoid::Species::Draugr]),
+        }));
+        assert!(draugr_only.meets_requirements(&skill_set_at_level(1), &draugr));
+        assert!(!draugr_only.meets_requirements(&skill_set_at_level(1), &human));
+
+        // Combined gates: both must hold.
+        let both = gated_test_item(Some(ItemRequirements {
+            min_level: Some(10),
+            races: Some(vec![humanoid::Species::Draugr]),
+        }));
+        assert!(both.meets_requirements(&skill_set_at_level(10), &draugr));
+        assert!(!both.meets_requirements(&skill_set_at_level(9), &draugr));
+        assert!(!both.meets_requirements(&skill_set_at_level(10), &human));
+        assert_eq!(
+            both.unmet_requirements(&skill_set_at_level(9), &human).len(),
+            2
+        );
     }
 
     #[test]
