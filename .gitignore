@@ -116,3 +116,7 @@ graphify-out/
 # Claude Code runtime artifacts (never commit)
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+
+# Design docs live in private repo Matute289/xindeler-design (nested git repo)
+docs/superpowers/
+docs/lore/
