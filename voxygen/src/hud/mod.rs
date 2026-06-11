@@ -2448,6 +2448,7 @@ impl Hud {
 
                         let info = display_overhead_info.then(|| overhead::Info {
                             name: Some(i18n.get_content(&stats.name)),
+                            level: Some(skill_set.character_level()),
                             health,
                             buffs: Some(buffs),
                             energy,
