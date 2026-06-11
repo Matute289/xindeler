@@ -258,7 +258,7 @@
 
 - **Model:** opus — serde save-compat field on `PortalData` (existing portals must deserialize unchanged).
 - **Depends on:** decision to start Phase 4 (after Phase-3 playtests); no T1–T14 code dependency.
-- **Branch / commit:** new branch off `development` when scheduled (plan does not assign one — propose `feature/multiplane-p4`); commit message TBD at execution.
+- **Branch / commit:** new branch off `development` when scheduled (plan does not assign one — propose `feature/multiplane-p4`); commit message assigned at fable re-planning gate.
 - **Files:**
   - Create: none
   - Modify: `common/src/rtsim.rs` (or adjacent shared module — `PlaneId(pub u16)`, `Default` = plane 0), `common/src/comp/misc.rs` (`PortalData` gains `target_plane: Option<PlaneId>` with `#[serde(default)]`)
@@ -273,7 +273,7 @@
 
 - **Model:** opus — new `SiteKind` + plot module + civ placement + rtsim nav exclusion; deep worldgen/spawn-pipeline work.
 - **Depends on:** WDZ-P4.1; WDZ-T7 (`with_level` machinery for hardcoded difficulty 9–10 interiors).
-- **Branch / commit:** Phase-4 branch; commit message TBD at execution.
+- **Branch / commit:** Phase-4 branch; commit message assigned at fable re-planning gate.
 - **Files:**
   - Create: `world/src/site/plot/pocket_plane.rs` (structured like `gnarling.rs`: `generate`, `render_inner`, `apply_supplement`)
   - Modify: `world/src/site/mod.rs` (`SiteKind` variant + `meta()`), `world/src/civ/mod.rs` (reserved margin-band placement), `rtsim/src/rule/npc_ai/mod.rs` (exclude band from nav)
@@ -288,7 +288,7 @@
 
 - **Model:** opus — persistence migration (`plane` column), rtsim data relocation, despawn/respawn round-trip; maximal save-corruption surface.
 - **Depends on:** WDZ-P4.1, WDZ-P4.2.
-- **Branch / commit:** Phase-4 branch; commit message TBD at execution.
+- **Branch / commit:** Phase-4 branch; commit message assigned at fable re-planning gate.
 - **Files:**
   - Create: `server/src/plane_transfer.rs` (behind a `multiplane-prototype` cargo feature), migration under `server/src/persistence/migrations/`
   - Modify: `server/Cargo.toml` (feature), `server/src/rtsim/mod.rs` area (rtsim data path → `data/rtsim/plane_{id}/`)
