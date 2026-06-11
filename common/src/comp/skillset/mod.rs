@@ -15,6 +15,25 @@ pub mod skills;
 
 #[cfg(test)] mod test;
 
+/// Maximum character level (WoW/Diablo-style derived level — see
+/// docs/superpowers/specs/2026-06-10-character-levels-design.md).
+pub const MAX_CHARACTER_LEVEL: u16 = 60;
+/// Cumulative XP required for level L is LEVEL_XP_BASE * (L - 1)^2.
+pub const LEVEL_XP_BASE: u32 = 250;
+
+/// Character level for a given lifetime (earned) XP total. Level 1 at 0 XP,
+/// capped at MAX_CHARACTER_LEVEL. Inverse of [`total_exp_for_level`].
+pub fn level_from_total_exp(total_exp: u32) -> u16 {
+    let raw = ((total_exp / LEVEL_XP_BASE) as f64).sqrt() as u16 + 1;
+    raw.min(MAX_CHARACTER_LEVEL)
+}
+
+/// Cumulative lifetime XP at which the given level is reached.
+pub fn total_exp_for_level(level: u16) -> u32 {
+    let l = u32::from(level.clamp(1, MAX_CHARACTER_LEVEL)) - 1;
+    LEVEL_XP_BASE.saturating_mul(l).saturating_mul(l)
+}
+
 pub struct SkillGroupDef {
     pub skills: BTreeSet<Skill>,
     pub total_skill_point_cost: u16,
@@ -597,4 +616,42 @@ pub enum SkillsPersistenceError {
 pub enum SkillPrerequisite {
     All(HashMap<Skill, u16>),
     Any(HashMap<Skill, u16>),
+}
+
+#[cfg(test)]
+mod character_level_tests {
+    use super::*;
+
+    #[test]
+    fn level_curve_boundaries() {
+        assert_eq!(level_from_total_exp(0), 1);
+        assert_eq!(level_from_total_exp(LEVEL_XP_BASE - 1), 1);
+        assert_eq!(level_from_total_exp(LEVEL_XP_BASE), 2);
+        assert_eq!(level_from_total_exp(u32::MAX), MAX_CHARACTER_LEVEL);
+    }
+
+    #[test]
+    fn level_curve_is_monotonic() {
+        let mut last = 0;
+        for xp in (0..2_000_000u32).step_by(1000) {
+            let level = level_from_total_exp(xp);
+            assert!(level >= last, "level decreased at xp={xp}");
+            last = level;
+        }
+    }
+
+    #[test]
+    fn total_exp_for_level_inverts_level_from_total_exp() {
+        for level in 1..=MAX_CHARACTER_LEVEL {
+            let xp = total_exp_for_level(level);
+            assert_eq!(
+                level_from_total_exp(xp),
+                level,
+                "level_from_total_exp(total_exp_for_level({level})) mismatch"
+            );
+            if xp > 0 {
+                assert_eq!(level_from_total_exp(xp - 1), level - 1);
+            }
+        }
+    }
 }
