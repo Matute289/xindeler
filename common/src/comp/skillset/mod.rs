@@ -387,9 +387,7 @@ impl SkillSet {
 
     /// Derived character level (1..=MAX_CHARACTER_LEVEL). Not persisted —
     /// always computed from lifetime XP so it can never desync.
-    pub fn character_level(&self) -> u16 {
-        level_from_total_exp(self.total_earned_exp())
-    }
+    pub fn character_level(&self) -> u16 { level_from_total_exp(self.total_earned_exp()) }
 
     /// Gets the available experience for a particular skill group
     pub fn available_experience(&self, skill_group: SkillGroupKind) -> u32 {

@@ -84,7 +84,12 @@ fn main() {
     // Init split logging (err always, info+telemetry with logging-verbose feature).
     let log_guards = common_frontend::init_split_logs("client", &logs_dir);
     let game_version = common::util::DISPLAY_VERSION.as_str();
-    common::telemetry!("ss", side = "client", ver = game_version, platform = std::env::consts::OS);
+    common::telemetry!(
+        "ss",
+        side = "client",
+        ver = game_version,
+        platform = std::env::consts::OS
+    );
     info!(ver = game_version, "Session start");
 
     // Re-run userdata selection so any warnings will be logged
@@ -111,15 +116,12 @@ fn main() {
     let is_first_run = Settings::is_new_install(&config_dir);
     let mut settings = Settings::load(&config_dir);
     if is_first_run {
-        let instance =
-            Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+        let instance = Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let adapters = instance.enumerate_adapters(Backends::default());
         // Prefer a discrete GPU; fall back to whatever is available
-        let best = adapters
-            .into_iter()
-            .max_by_key(|a| {
-                matches!(a.get_info().device_type, wgpu::DeviceType::DiscreteGpu) as u8
-            });
+        let best = adapters.into_iter().max_by_key(|a| {
+            matches!(a.get_info().device_type, wgpu::DeviceType::DiscreteGpu) as u8
+        });
         if let Some(adapter) = best {
             settings.graphics =
                 veloren_voxygen::settings::GraphicsSettings::auto_detect(&adapter.get_info());

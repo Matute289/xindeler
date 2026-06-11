@@ -1250,7 +1250,12 @@ impl<V: RectRasterableVol> Terrain<V> {
                             frustum_last_plane_index: 0,
                             alt_indices: mesh.alt_indices,
                         });
-                        common::telemetry!("co", op = "load", cx = response.pos.x, cy = response.pos.y);
+                        common::telemetry!(
+                            "co",
+                            op = "load",
+                            cx = response.pos.x,
+                            cy = response.pos.y
+                        );
                     } else if let Some(chunk) = self.chunks.get_mut(&response.pos) {
                         // There was an update that didn't require a remesh (probably related to
                         // non-glowing sprites) so we just update those.

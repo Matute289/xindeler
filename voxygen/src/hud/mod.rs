@@ -4041,18 +4041,11 @@ impl Hud {
                 },
                 Some(esc_menu::Event::ReportBug) => {
                     common::telemetry!("ui", widget = "EscMenu", btn = "ReportBug");
-                    if let Some(url) = global_state
-                        .settings
-                        .networking
-                        .bug_report_url
-                        .clone()
-                    {
+                    if let Some(url) = global_state.settings.networking.bug_report_url.clone() {
                         let status =
                             Arc::new(Mutex::new(None::<crate::bug_report::BugReportResult>));
                         let status_clone = Arc::clone(&status);
-                        let logs_dir = common_base::userdata_dir()
-                            .join("voxygen")
-                            .join("logs");
+                        let logs_dir = common_base::userdata_dir().join("voxygen").join("logs");
                         std::thread::spawn(move || {
                             let result = crate::bug_report::send_bug_report(&url, &logs_dir);
                             if let Ok(mut guard) = status_clone.lock() {
@@ -4061,8 +4054,7 @@ impl Hud {
                         });
                         self.bug_report_status = Some(status);
                         self.new_messages.push_back(
-                            comp::ChatType::CommandInfo
-                                .into_plain_msg("Bug report sending…"),
+                            comp::ChatType::CommandInfo.into_plain_msg("Bug report sending…"),
                         );
                     } else {
                         self.new_messages.push_back(

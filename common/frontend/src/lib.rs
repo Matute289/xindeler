@@ -10,9 +10,11 @@ mod telemetry_layer;
 pub use telemetry_layer::TelemetryLayer;
 
 #[cfg(not(feature = "tracy"))] use std::fs;
-use std::path::Path;
-use std::sync::{Arc, atomic::AtomicBool};
-use std::time::Duration;
+use std::{
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use termcolor::{ColorChoice, StandardStream};
 use tracing::info;
@@ -24,17 +26,18 @@ use tracing_subscriber::{
 const RUST_LOG_ENV: &str = "RUST_LOG";
 
 #[cfg(feature = "logging-verbose")]
-const CLIENT_INFO_MAX_LINES: u64  = 5_000;
-const CLIENT_ERR_MAX_LINES: u64   = 1_000;
+const CLIENT_INFO_MAX_LINES: u64 = 5_000;
+const CLIENT_ERR_MAX_LINES: u64 = 1_000;
 #[cfg(feature = "logging-verbose")]
-const SERVER_INFO_MAX_LINES: u64  = 10_000;
-const SERVER_ERR_MAX_LINES: u64   = 1_000;
+const SERVER_INFO_MAX_LINES: u64 = 10_000;
+const SERVER_ERR_MAX_LINES: u64 = 1_000;
 
 const CLIENT_INFO_RETENTION: Duration = Duration::from_secs(24 * 3600);
-const CLIENT_ERR_RETENTION: Duration  = Duration::from_secs(7 * 24 * 3600);
-const SERVER_RETENTION: Duration      = Duration::from_secs(30 * 24 * 3600);
+const CLIENT_ERR_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+const SERVER_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// Holds all log-related guards. Drop order: flush workers before compress thread exits.
+/// Holds all log-related guards. Drop order: flush workers before compress
+/// thread exits.
 pub struct LogGuards {
     pub has_errors: Arc<AtomicBool>,
     pub lifecycle: LogLifecycleManager,
@@ -207,11 +210,14 @@ pub fn init_stdout(log_path_file: Option<(&Path, &str)>) -> Vec<impl Drop + use<
     init(log_path_file, &|| StandardStream::stdout(ColorChoice::Auto))
 }
 
-/// Initialise the split logging system (replaces `init_stdout()` at call sites):
+/// Initialise the split logging system (replaces `init_stdout()` at call
+/// sites):
 ///  - Terminal output (always)
 ///  - `{prefix}_err.log` WARN+ERROR (always, daily rotation, 1k lines)
-///  - `{prefix}_info.log` DEBUG+ (logging-verbose feature only, hourly, 5k/10k lines)
-///  - `{prefix}_telemetry.jsonl` JSON Lines (logging-verbose only, hourly, 20k lines)
+///  - `{prefix}_info.log` DEBUG+ (logging-verbose feature only, hourly, 5k/10k
+///    lines)
+///  - `{prefix}_telemetry.jsonl` JSON Lines (logging-verbose only, hourly, 20k
+///    lines)
 ///
 /// `prefix` should be "client" (voxygen) or "server" (server-cli).
 pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
@@ -239,7 +245,11 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
         tracing_appender::non_blocking(StandardStream::stdout(ColorChoice::Auto));
 
     // Error file sink (always present)
-    let err_max = if is_server { SERVER_ERR_MAX_LINES } else { CLIENT_ERR_MAX_LINES };
+    let err_max = if is_server {
+        SERVER_ERR_MAX_LINES
+    } else {
+        CLIENT_ERR_MAX_LINES
+    };
     let (err_writer, err_compress) =
         BoundedMakeWriter::new(logs_dir, &format!("{prefix}_err"), Rotation::Daily, err_max);
 
@@ -251,7 +261,11 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
     // Optional info sink (logging-verbose only) — Option<L> implements Layer<S>
     #[cfg(feature = "logging-verbose")]
     let info_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = {
-        let info_max = if is_server { SERVER_INFO_MAX_LINES } else { CLIENT_INFO_MAX_LINES };
+        let info_max = if is_server {
+            SERVER_INFO_MAX_LINES
+        } else {
+            CLIENT_INFO_MAX_LINES
+        };
         let (info_writer, info_compress) = BoundedMakeWriter::new(
             logs_dir,
             &format!("{prefix}_info"),
@@ -259,7 +273,12 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
             info_max,
         );
         compress_guards.push(info_compress);
-        Some(fmt_layer().with_writer(info_writer).with_filter(LevelFilter::DEBUG).boxed())
+        Some(
+            fmt_layer()
+                .with_writer(info_writer)
+                .with_filter(LevelFilter::DEBUG)
+                .boxed(),
+        )
     };
     #[cfg(not(feature = "logging-verbose"))]
     let info_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = None;
@@ -273,8 +292,16 @@ pub fn init_split_logs(prefix: &str, logs_dir: &Path) -> LogGuards {
 
     // Compose full subscriber and initialise
     registry()
-        .with(fmt_layer().with_writer(non_blocking_term).with_filter(filter))
-        .with(fmt_layer().with_writer(err_writer).with_filter(LevelFilter::WARN))
+        .with(
+            fmt_layer()
+                .with_writer(non_blocking_term)
+                .with_filter(filter),
+        )
+        .with(
+            fmt_layer()
+                .with_writer(err_writer)
+                .with_filter(LevelFilter::WARN),
+        )
         .with(error_detector)
         .with(info_layer)
         .with(telemetry_layer)

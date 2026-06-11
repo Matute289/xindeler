@@ -803,8 +803,8 @@ impl BParticipant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::assert_matches::assert_matches;
     use network_protocol::{ProtocolMetricCache, ProtocolMetrics};
+    use std::assert_matches;
     use tokio::{
         runtime::Runtime,
         sync::{mpsc, oneshot},

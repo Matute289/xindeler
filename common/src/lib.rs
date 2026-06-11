@@ -13,11 +13,13 @@ pub use common_assets as assets;
 pub use uuid;
 
 /// Emit a structured telemetry event captured by TelemetryLayer (JSON Lines).
-/// Only active when the `logging-verbose` feature is enabled in the entry-point crate.
-/// In release builds this compiles to a no-op trace event with no overhead.
+/// Only active when the `logging-verbose` feature is enabled in the entry-point
+/// crate. In release builds this compiles to a no-op trace event with no
+/// overhead.
 ///
 /// Usage: `telemetry!("ch", attacker = ?uid, damage = dmg, ...)`
-/// The first argument is the event type code (see veloren-telemetry skill for schema).
+/// The first argument is the event type code (see veloren-telemetry skill for
+/// schema).
 #[macro_export]
 macro_rules! telemetry {
     ($t:expr, $($field:tt)*) => {
