@@ -1,5 +1,7 @@
 hud-show_tips = Show Tips
 hud-quests = Quests
+hud-level_up_msg = Level up! You reached level { $level }.
+
 hud-you_died = You Died
 hud-waypoint_saved = Waypoint Saved
 hud-sp_arrow_txt = SP

@@ -269,6 +269,7 @@ When you need a complete picture, run steps 2–9 in sequence and synthesize:
 | `trade` | Trade event (server) | `player`, `npc`, `result`, `items_given`, `items_received` |
 | `site` | Site event (server) | `event`, `site`, `pos` |
 | `tick` | Server tick (50 ticks) | `ms`, `systems{}`, `entities` |
+| `lvl` | Character level-up (server) | `event`, `uid`, `new_level` |
 
 ## Common Analysis Patterns
 

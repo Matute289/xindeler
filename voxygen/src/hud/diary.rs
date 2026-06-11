@@ -1222,6 +1222,9 @@ impl Widget for Diary<'_> {
                     // Stat values
                     let value = match stat {
                         CharacterStat::Name => name,
+                        CharacterStat::Level => {
+                            format!("{}", self.skill_set.character_level())
+                        },
                         CharacterStat::BattleMode => match battle_mode {
                             BattleMode::PvP => "PvP".to_string(),
                             BattleMode::PvE => "PvE".to_string(),
@@ -3187,11 +3190,12 @@ impl<'a> SkillStrings<'a> {
 }
 
 /// The number of variants of the [`CharacterStat`] enum.
-const STAT_COUNT: usize = 15;
+const STAT_COUNT: usize = 16;
 
 #[derive(EnumIter)]
 enum CharacterStat {
     Name,
+    Level,
     BattleMode,
     Waypoint,
     Hitpoints,
@@ -3214,6 +3218,7 @@ impl CharacterStat {
 
         match self {
             Name => i18n.get_msg("character_window-character_name"),
+            Level => i18n.get_msg("character_window-character_level"),
             BattleMode => i18n.get_msg("hud-battle-mode"),
             Waypoint => i18n.get_msg("hud-waypoint"),
             Hitpoints => i18n.get_msg("hud-bag-health"),
