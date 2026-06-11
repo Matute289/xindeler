@@ -375,6 +375,22 @@ impl SkillSet {
         }
     }
 
+    /// Lifetime XP earned across all skill groups. Drives the derived
+    /// character level; relies on `earned_exp` being monotonically
+    /// non-decreasing and persisted per skill group.
+    pub fn total_earned_exp(&self) -> u32 {
+        self.skill_groups
+            .values()
+            .map(|sg| sg.earned_exp)
+            .fold(0, u32::saturating_add)
+    }
+
+    /// Derived character level (1..=MAX_CHARACTER_LEVEL). Not persisted —
+    /// always computed from lifetime XP so it can never desync.
+    pub fn character_level(&self) -> u16 {
+        level_from_total_exp(self.total_earned_exp())
+    }
+
     /// Gets the available experience for a particular skill group
     pub fn available_experience(&self, skill_group: SkillGroupKind) -> u32 {
         self.skill_group(skill_group)
@@ -638,6 +654,22 @@ mod character_level_tests {
             assert!(level >= last, "level decreased at xp={xp}");
             last = level;
         }
+    }
+
+    #[test]
+    fn default_skillset_is_level_one() {
+        let skill_set = SkillSet::default();
+        assert_eq!(skill_set.total_earned_exp(), 0);
+        assert_eq!(skill_set.character_level(), 1);
+    }
+
+    #[test]
+    fn earning_exp_raises_character_level() {
+        let mut skill_set = SkillSet::default();
+        // General pool exists on default skillsets
+        skill_set.add_experience(SkillGroupKind::General, LEVEL_XP_BASE);
+        assert_eq!(skill_set.total_earned_exp(), LEVEL_XP_BASE);
+        assert_eq!(skill_set.character_level(), 2);
     }
 
     #[test]
