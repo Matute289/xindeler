@@ -42,7 +42,7 @@ use i18n::Localization;
 use std::borrow::Cow;
 
 use crate::hud::slots::SlotKind;
-use specs::Entity as EcsEntity;
+use specs::{Entity as EcsEntity, WorldExt};
 use std::{borrow::Borrow, sync::Arc};
 use vek::{Vec2, approx::AbsDiffEq};
 
@@ -408,6 +408,15 @@ impl<'a> InventoryScroller<'a> {
                 )
             });
         }
+        // Local player's context for equipment-requirement gray-out. Gates are
+        // always evaluated against the viewer, even when inspecting someone
+        // else's inventory.
+        let ecs = self.client.state().ecs();
+        let player_entity = self.client.entity();
+        let skill_sets = ecs.read_storage::<SkillSet>();
+        let bodies = ecs.read_storage::<Body>();
+        let requirement_ctx = skill_sets.get(player_entity).zip(bodies.get(player_entity));
+
         for (pos, item) in items.into_iter() {
             if self.details_mode && !self.is_us && item.is_none() {
                 continue;
@@ -447,6 +456,16 @@ impl<'a> InventoryScroller<'a> {
             // Highlight in red slots that are overflow
             if matches!(pos, Slot::Overflow(_)) {
                 slot_widget = slot_widget.with_background_color(Color::Rgba(1.0, 0.0, 0.0, 1.0));
+            }
+
+            // Gray out items the player can't equip due to requirements
+            if let Some((skill_set, body)) = requirement_ctx
+                && item
+                    .as_ref()
+                    .is_some_and(|item| !item.meets_requirements(skill_set, body))
+            {
+                slot_widget =
+                    slot_widget.with_background_color(Color::Rgba(0.45, 0.45, 0.45, 1.0));
             }
 
             if let Some(item) = item {
