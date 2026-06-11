@@ -5415,6 +5415,20 @@ impl Hud {
                     });
                 }
             },
+            Outcome::CharacterLevelUp { uid, new_level } => {
+                let ecs = client.state().ecs();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+
+                if uids.get(me).is_some_and(|me| *me == *uid) {
+                    self.new_messages.push_back(comp::ChatType::Meta.into_msg(
+                        Content::localized_with_args("hud-level_up_msg", [(
+                            "level",
+                            u64::from(*new_level),
+                        )]),
+                    ));
+                }
+            },
             Outcome::ComboChange { uid, combo } => {
                 let ecs = client.state().ecs();
                 let uids = ecs.read_storage::<Uid>();
