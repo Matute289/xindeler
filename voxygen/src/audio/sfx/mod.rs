@@ -156,6 +156,7 @@ pub enum SfxEvent {
     PickaxeBreakBlock,
     SceptreBeam,
     SkillPointGain,
+    CharacterLevelUp,
     ArrowHit,
     ArrowMiss,
     ArrowShot,
@@ -779,6 +780,14 @@ impl SfxMgr {
                     && uid == client_uid
                 {
                     let sfx_trigger_item = triggers.0.get_key_value(&SfxEvent::SkillPointGain);
+                    audio.emit_ui_sfx(sfx_trigger_item, Some(0.4), Some(UiChannelTag::LevelUp));
+                }
+            },
+            Outcome::CharacterLevelUp { uid, .. } => {
+                if let Some(client_uid) = uids.get(client.entity())
+                    && uid == client_uid
+                {
+                    let sfx_trigger_item = triggers.0.get_key_value(&SfxEvent::CharacterLevelUp);
                     audio.emit_ui_sfx(sfx_trigger_item, Some(0.4), Some(UiChannelTag::LevelUp));
                 }
             },

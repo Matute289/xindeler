@@ -1,68 +1,119 @@
 <!-- SPDX-SnippetBegin -->
 <!-- SPDX-SnippetCopyrightText: 2025 Hrom -->
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
-# ![Veloren logo on a screenshot](https://s3.eu-central-2.wasabisys.com/veloren-blog/cdn/common/2025-06-29_Hrom_bestest-banner.webp)
+# ![Xindeler banner](https://cdn.xindeler.greenmountain.dev/images/xindeler-banner.webp)
 <!-- SPDX-SnippetEnd -->
 
-## Welcome to Veloren!
+## Welcome to Xindeler!
 
-Veloren is an action-adventure RPG game set in a vast fantasy world. It is inspired by other games such as Cube World, The Legend of Zelda: Breath of the Wild, Dwarf Fortress and Minecraft.
+Xindeler is an open-source MMORPG built in Rust, originally forked from Veloren and evolving into its own persistent online world focused on exploration, combat, crafting and magic.
 
-Veloren is in active development and enjoys a flourishing player community.
+Inspired by classic sandbox RPGs and living virtual worlds, Xindeler aims to provide a rich multiplayer experience where players shape the future of the world through their actions, discoveries, and interactions.
 
-## Useful links
+Xindeler is in active development.
 
-[Sign up](https://veloren.net/account) -
-Create an account to play on most Veloren multiplayer servers.
+## Useful Links
 
-<details>
-  <summary>Click here for more details about authentication</summary>
-  The official authentication server uses TLS encryption extensively.
-  It also employs salted hashing to ensure your login credentials are stored securely.
-  Additionally, the server neither tracks any metrics nor uses data for any purpose other than providing the authentication service.
-</details>
+### Account Management
 
-[The wiki](https://wiki.veloren.net) -
-Information repository about the game made by and for players.
+[Sign Up](https://auth.xindeler.greenmountain.dev)
 
-[The book](https://book.veloren.net) -
-Supplementary information useful both for players and contributors.
+Create an account to access Xindeler services and future multiplayer features.
 
-### Official social media and websites
+### Community Wiki
 
-[![Website](https://img.shields.io/badge/Website-000?style=for-the-badge&logo=internetarchive&logoColor=white)](https://veloren.net)
-<br>
-[![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/r/Veloren)
-<br>
-[![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/veloren)
+[Wiki](https://wiki.xindeler.greenmountain.dev)
 
-## Get Veloren
+Community-driven information repository about the world, mechanics, lore, crafting, creatures, and gameplay systems.
 
-We provide builds for Windows, macOS and Linux.
-The game can be downloaded on our website:
+### Documentation
 
-<https://veloren.net/download>
+[Documentation](https://docs.xindeler.greenmountain.dev)
 
-Due to rapid game development, stable versions become outdated fast
-and might be **incompatible with the public server**.
+Technical and gameplay documentation for players, contributors, developers, and server administrators.
 
-It is recommended to use [Airshipper](https://book.veloren.net/players/airshipper.html),
-the official game launcher, to keep your game up-to-date easily.
+### Downloads
 
-If you prefer to compile the game yourself, follow the instructions
-in our [book](https://book.veloren.net/contributors/introduction.html).
+[Downloads](https://downloads.xindeler.greenmountain.dev)
+
+Official game downloads and launcher distribution.
+
+## Official Services
+
+| Service        | URL                                          |
+| -------------- | -------------------------------------------- |
+| Website        | https://xindeler.greenmountain.dev           |
+| Authentication | https://auth.xindeler.greenmountain.dev      |
+| Wiki           | https://wiki.xindeler.greenmountain.dev      |
+| Documentation  | https://docs.xindeler.greenmountain.dev      |
+| Downloads      | https://downloads.xindeler.greenmountain.dev |
+| CDN            | https://cdn.xindeler.greenmountain.dev       |
+
+## Getting Xindeler
+
+Official builds for Windows, macOS and Linux will be available through the Downloads portal.
+
+Due to active development, builds may change frequently and compatibility between versions is not guaranteed.
+
+It is recommended to use Airshipper, the current launcher solution inherited from the Veloren ecosystem, to simplify updates and installation. Future launcher solutions may be introduced as the project evolves.
+
+If you prefer to compile the game yourself, please refer to the project documentation.
+
+## Contributing
+
+Xindeler welcomes contributions from developers, artists, writers, translators, content creators, and community members.
+
+Areas of contribution include:
+
+* Gameplay systems
+* Multiplayer infrastructure
+* AI-driven NPC systems
+* World generation
+* Quests and narrative content
+* Art and animations
+* Sound and music
+* Documentation
+* Localization
+
+Please consult the documentation site for contribution guidelines and development setup instructions.
+
+## Roadmap
+
+Planned features include:
+
+* Persistent MMORPG infrastructure
+* Expanded crafting systems
+* Magic and spellcasting systems
+* AI-powered NPC interactions
+* Dynamic quest generation
+* Living settlements and factions
+* Enhanced multiplayer experiences
+* Expanded world-building and lore
 
 ## FAQ
 
-### **Q:** How is this game licensed?
+### Q: Is Xindeler free to play?
 
-**A:** **It is free to play, modify and distribute. Forever.**
-Since it is a community project, we decided to license it under the **[GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0-standalone.html)**,
-which means it will always stay free and open source.
+**A:** Yes. Xindeler is free to play and open source.
 
-### **Q:** What platforms are supported?
+### Q: Is Xindeler open source?
 
-**A:** Veloren can run on Windows, macOS and Linux on a great range of CPU architectures.
-However, the x86_64 architecture is the main focus in development.
-Official builds for the ARM64 architecture are also provided for macOS and Linux.
-It is likely possible to compile the game on other platforms as well.
+**A:** Yes. Xindeler is developed as an open-source project and welcomes community contributions.
+
+### Q: What platforms are supported?
+
+**A:** Xindeler targets Windows, macOS and Linux systems. Additional platforms may be supported in the future.
+
+### Q: Is Xindeler related to Veloren?
+
+**A:** Xindeler originated as a fork of the Veloren project and continues to build upon that foundation while pursuing its own vision, systems, infrastructure, and gameplay direction.
+
+## License
+
+Xindeler remains an open-source project. Refer to the repository license files for detailed licensing information.
+
+## Status
+
+🚧 Active Development
+
+The project is currently undergoing infrastructure migration, rebranding, and feature expansion as part of its evolution from its original Veloren-based foundation into a standalone MMORPG platform.

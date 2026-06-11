@@ -1697,6 +1697,13 @@
         threshold: 0.2,
         subtitle: "subtitle-skill_point",
     ),
+    CharacterLevelUp: (
+        files: [
+            "voxygen.audio.sfx.character.level_up_sound_-_shorter_wind_up",
+        ],
+        threshold: 0.2,
+        subtitle: "subtitle-character_level_up",
+    ),
     SceptreBeam: (
         files: [
                 "voxygen.audio.sfx.abilities.sceptre_channeling",

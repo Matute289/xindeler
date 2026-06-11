@@ -109,6 +109,7 @@ subtitle-arrow_shot = Arrow released
 subtitle-arrow_miss = Arrow miss
 subtitle-arrow_hit = Arrow hit
 subtitle-skill_point = Skill Point gained
+subtitle-character_level_up = Level up
 subtitle-sceptre_beam = Sceptre beam
 subtitle-flame_thrower = Flame thrower
 subtitle-break_block = Block destroyed
