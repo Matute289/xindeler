@@ -70,6 +70,7 @@ widget_ids! {
 
 pub struct Info<'a> {
     pub name: Option<String>,
+    pub level: Option<u16>,
     pub health: Option<&'a Health>,
     pub buffs: Option<&'a Buffs>,
     pub energy: Option<&'a Energy>,
@@ -160,6 +161,7 @@ impl Widget for Overhead<'_> {
         const MANA_BAR_Y: f64 = MANA_BAR_HEIGHT / 2.0;
         if let Some(Info {
             ref name,
+            level,
             health,
             buffs,
             energy,
@@ -168,6 +170,10 @@ impl Widget for Overhead<'_> {
             stance,
         }) = self.info
         {
+            let display_name = match level {
+                Some(level) => format!("{} [{}]", name.as_deref().unwrap_or(""), level),
+                None => name.as_deref().unwrap_or("").to_string(),
+            };
             // Used to set healthbar colours based on hp_percentage
             let hp_percentage = health.map_or(100.0, |h| {
                 f64::from(h.current() / h.base_max().max(h.maximum()) * 100.0)
@@ -276,7 +282,7 @@ impl Widget for Overhead<'_> {
                     });
             }
             // Name
-            Text::new(name.as_deref().unwrap_or(""))
+            Text::new(&display_name)
                 //Text::new(&format!("{} [{:?}]", name, combat_rating)) // <- Uncomment to debug combat ratings
                 .font_id(self.fonts.cyri.conrod_id)
                 .font_size(font_size)
@@ -284,7 +290,7 @@ impl Widget for Overhead<'_> {
                 .x_y(-1.0, name_y)
                 .parent(id)
                 .set(state.ids.name_bg, ui);
-            Text::new(name.as_deref().unwrap_or(""))
+            Text::new(&display_name)
                 //Text::new(&format!("{} [{:?}]", name, combat_rating)) // <- Uncomment to debug combat ratings
                 .font_id(self.fonts.cyri.conrod_id)
                 .font_size(font_size)

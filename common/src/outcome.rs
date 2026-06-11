@@ -63,6 +63,10 @@ pub enum Outcome {
         skill_tree: SkillGroupKind,
         total_points: u16,
     },
+    CharacterLevelUp {
+        uid: Uid,
+        new_level: u16,
+    },
     ComboChange {
         uid: Uid,
         combo: u32,
@@ -263,6 +267,7 @@ impl Outcome {
             | Outcome::ComboChange { .. }
             | Outcome::Lightning { .. }
             | Outcome::SkillPointGain { .. }
+            | Outcome::CharacterLevelUp { .. }
             | Outcome::HeadLost { .. } => None,
         }
     }

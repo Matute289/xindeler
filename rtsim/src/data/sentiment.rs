@@ -5,7 +5,7 @@ use common::{
 use hashbrown::HashMap;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BinaryHeap;
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 // Factions have a larger 'social memory' than individual NPCs and so we allow
 // them to have more sentiments
@@ -97,7 +97,8 @@ impl Sentiments {
                 // For each sentiment, calculate how valuable it is for us to remember.
                 // For now, we just use the absolute value of the sentiment but later on we might want to favour
                 // sentiments toward factions and other 'larger' groups over, say, sentiments toward players/other NPCs
-                .map(|(tgt, sentiment)| (sentiment.positivity.unsigned_abs(), *tgt))
+                // (`Reverse` turns the max-heap into a min-heap so that draining yields the least valuable first)
+                .map(|(tgt, sentiment)| (Reverse(sentiment.positivity.unsigned_abs()), *tgt))
                 .collect::<BinaryHeap<_>>();
 
             // Remove the superfluous sentiments
@@ -212,5 +213,51 @@ impl Sentiment {
         } else {
             self.value() <= val
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_forgets_weakest_sentiments_first() {
+        let mut sentiments = Sentiments::default();
+        for (id, positivity) in [(1, 5), (2, -120), (3, 60), (4, -10), (5, 100)] {
+            sentiments
+                .map
+                .insert(Target::Character(CharacterId(id)), Sentiment { positivity });
+        }
+
+        sentiments.cleanup(3);
+
+        assert_eq!(sentiments.map.len(), 3);
+        // The two weakest sentiments (|5| and |-10|) should be forgotten first
+        assert!(
+            !sentiments
+                .map
+                .contains_key(&Target::Character(CharacterId(1)))
+        );
+        assert!(
+            !sentiments
+                .map
+                .contains_key(&Target::Character(CharacterId(4)))
+        );
+        // The stronger sentiments should be retained
+        assert!(
+            sentiments
+                .map
+                .contains_key(&Target::Character(CharacterId(2)))
+        );
+        assert!(
+            sentiments
+                .map
+                .contains_key(&Target::Character(CharacterId(3)))
+        );
+        assert!(
+            sentiments
+                .map
+                .contains_key(&Target::Character(CharacterId(5)))
+        );
     }
 }

@@ -15,6 +15,25 @@ pub mod skills;
 
 #[cfg(test)] mod test;
 
+/// Maximum character level (WoW/Diablo-style derived level — see
+/// docs/superpowers/specs/2026-06-10-character-levels-design.md).
+pub const MAX_CHARACTER_LEVEL: u16 = 60;
+/// Cumulative XP required for level L is LEVEL_XP_BASE * (L - 1)^2.
+pub const LEVEL_XP_BASE: u32 = 250;
+
+/// Character level for a given lifetime (earned) XP total. Level 1 at 0 XP,
+/// capped at MAX_CHARACTER_LEVEL. Inverse of [`total_exp_for_level`].
+pub fn level_from_total_exp(total_exp: u32) -> u16 {
+    let raw = ((total_exp / LEVEL_XP_BASE) as f64).sqrt() as u16 + 1;
+    raw.min(MAX_CHARACTER_LEVEL)
+}
+
+/// Cumulative lifetime XP at which the given level is reached.
+pub fn total_exp_for_level(level: u16) -> u32 {
+    let l = u32::from(level.clamp(1, MAX_CHARACTER_LEVEL)) - 1;
+    LEVEL_XP_BASE.saturating_mul(l).saturating_mul(l)
+}
+
 pub struct SkillGroupDef {
     pub skills: BTreeSet<Skill>,
     pub total_skill_point_cost: u16,
@@ -356,6 +375,20 @@ impl SkillSet {
         }
     }
 
+    /// Lifetime XP earned across all skill groups. Drives the derived
+    /// character level; relies on `earned_exp` being monotonically
+    /// non-decreasing and persisted per skill group.
+    pub fn total_earned_exp(&self) -> u32 {
+        self.skill_groups
+            .values()
+            .map(|sg| sg.earned_exp)
+            .fold(0, u32::saturating_add)
+    }
+
+    /// Derived character level (1..=MAX_CHARACTER_LEVEL). Not persisted —
+    /// always computed from lifetime XP so it can never desync.
+    pub fn character_level(&self) -> u16 { level_from_total_exp(self.total_earned_exp()) }
+
     /// Gets the available experience for a particular skill group
     pub fn available_experience(&self, skill_group: SkillGroupKind) -> u32 {
         self.skill_group(skill_group)
@@ -597,4 +630,58 @@ pub enum SkillsPersistenceError {
 pub enum SkillPrerequisite {
     All(HashMap<Skill, u16>),
     Any(HashMap<Skill, u16>),
+}
+
+#[cfg(test)]
+mod character_level_tests {
+    use super::*;
+
+    #[test]
+    fn level_curve_boundaries() {
+        assert_eq!(level_from_total_exp(0), 1);
+        assert_eq!(level_from_total_exp(LEVEL_XP_BASE - 1), 1);
+        assert_eq!(level_from_total_exp(LEVEL_XP_BASE), 2);
+        assert_eq!(level_from_total_exp(u32::MAX), MAX_CHARACTER_LEVEL);
+    }
+
+    #[test]
+    fn level_curve_is_monotonic() {
+        let mut last = 0;
+        for xp in (0..2_000_000u32).step_by(1000) {
+            let level = level_from_total_exp(xp);
+            assert!(level >= last, "level decreased at xp={xp}");
+            last = level;
+        }
+    }
+
+    #[test]
+    fn default_skillset_is_level_one() {
+        let skill_set = SkillSet::default();
+        assert_eq!(skill_set.total_earned_exp(), 0);
+        assert_eq!(skill_set.character_level(), 1);
+    }
+
+    #[test]
+    fn earning_exp_raises_character_level() {
+        let mut skill_set = SkillSet::default();
+        // General pool exists on default skillsets
+        skill_set.add_experience(SkillGroupKind::General, LEVEL_XP_BASE);
+        assert_eq!(skill_set.total_earned_exp(), LEVEL_XP_BASE);
+        assert_eq!(skill_set.character_level(), 2);
+    }
+
+    #[test]
+    fn total_exp_for_level_inverts_level_from_total_exp() {
+        for level in 1..=MAX_CHARACTER_LEVEL {
+            let xp = total_exp_for_level(level);
+            assert_eq!(
+                level_from_total_exp(xp),
+                level,
+                "level_from_total_exp(total_exp_for_level({level})) mismatch"
+            );
+            if xp > 0 {
+                assert_eq!(level_from_total_exp(xp - 1), level - 1);
+            }
+        }
+    }
 }

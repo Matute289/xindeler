@@ -674,6 +674,7 @@ impl ParticleMgr {
             | Outcome::Beam { .. }
             | Outcome::ExpChange { .. }
             | Outcome::SkillPointGain { .. }
+            | Outcome::CharacterLevelUp { .. }
             | Outcome::ComboChange { .. }
             | Outcome::HealthChange { .. }
             | Outcome::PoiseChange { .. }

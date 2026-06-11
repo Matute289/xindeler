@@ -537,6 +537,7 @@ fn handle_exp_gain(
     add_tool_from_slot(EquipSlot::InactiveMainhand);
     add_tool_from_slot(EquipSlot::InactiveOffhand);
     let num_pools = xp_pools.len() as f32;
+    let level_before = skill_set.character_level();
     for pool in xp_pools.iter() {
         if let Some(level_outcome) =
             skill_set.add_experience(*pool, (exp_reward / num_pools).ceil() as u32)
@@ -547,6 +548,13 @@ fn handle_exp_gain(
                 total_points: level_outcome,
             });
         }
+    }
+    let level_after = skill_set.character_level();
+    if level_after > level_before {
+        outcomes_emitter.emit(Outcome::CharacterLevelUp {
+            uid: *uid,
+            new_level: level_after,
+        });
     }
     outcomes_emitter.emit(Outcome::ExpChange {
         uid: *uid,
