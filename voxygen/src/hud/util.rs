@@ -3,6 +3,7 @@ use common::{
     comp::{
         BuffData, BuffKind,
         body::humanoid::Species,
+        class::ClassKind,
         inventory::trade_pricing::TradePricing,
         item::{
             Effects, Item, ItemDefinitionId, ItemDesc, ItemI18n, ItemKind, MaterialKind,
@@ -79,6 +80,7 @@ pub fn item_text<'a, I: ItemDesc + ?Sized>(
 /// e.g. spectators) renders everything as met.
 pub fn requirements_text(
     item: &dyn ItemDesc,
+    class: Option<ClassKind>,
     viewer: Option<(u16, Option<Species>)>,
     i18n: &Localization,
 ) -> (Vec<String>, Vec<String>) {
@@ -89,7 +91,7 @@ pub fn requirements_text(
     // Reuse the shared predicate so the tooltip can never disagree with the
     // server's enforcement.
     let unmet_kinds = viewer
-        .map(|(level, species)| requirements.unmet(level, species))
+        .map(|(level, species)| requirements.unmet(class, level, species))
         .unwrap_or_default();
 
     if let Some(needed) = requirements.min_level {

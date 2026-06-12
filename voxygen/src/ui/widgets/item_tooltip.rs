@@ -8,7 +8,7 @@ use crate::hud::{
 use client::Client;
 use common::{
     comp::{
-        Body, Energy, Inventory, SkillSet,
+        Body, CharacterClass, Energy, Inventory, SkillSet,
         item::{
             Item, ItemDesc, ItemI18n, ItemKind, ItemTag, MaterialStatManifest, Quality,
             armor::Protection, item_key::ItemKey, modular::ModularComponent,
@@ -1267,8 +1267,8 @@ impl Widget for ItemTooltip<'_> {
                 .set(state.ids.desc, ui);
         }
 
-        // Equipment requirements (level/race gates)
-        let viewer = {
+        // Equipment requirements (level/race/class gates)
+        let (viewer, viewer_class) = {
             let ecs = self.client.state().ecs();
             let entity = self.info.viewpoint_entity;
             let level = ecs
@@ -1279,9 +1279,13 @@ impl Widget for ItemTooltip<'_> {
                 .read_storage::<Body>()
                 .get(entity)
                 .and_then(|body| match_some!(*body, Body::Humanoid(b) => b.species));
-            level.map(|level| (level, species))
+            let class = ecs
+                .read_storage::<CharacterClass>()
+                .get(entity)
+                .map(|c| c.0);
+            (level.map(|level| (level, species)), class)
         };
-        let (req_met, req_unmet) = util::requirements_text(item, viewer, i18n);
+        let (req_met, req_unmet) = util::requirements_text(item, viewer_class, viewer, i18n);
         let req_anchor = if !desc.is_empty() {
             state.ids.desc
         } else if stats_count > 0 {
@@ -1432,7 +1436,9 @@ impl Widget for ItemTooltip<'_> {
 
         // Equipment requirements
         let req_line_count = self.item.requirements().map_or(0, |r| {
-            r.min_level.is_some() as usize + r.races.is_some() as usize
+            r.classes.is_some() as usize
+                + r.min_level.is_some() as usize
+                + r.races.is_some() as usize
         });
         let req_h = if req_line_count > 0 {
             widget::Text::new("placeholder")
