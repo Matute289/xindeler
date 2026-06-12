@@ -1078,6 +1078,7 @@ pub fn update(
     char_waypoint: Option<comp::Waypoint>,
     active_abilities: comp::ability::ActiveAbilities,
     map_marker: Option<comp::MapMarker>,
+    character_class: comp::CharacterClass,
     transaction: &mut Transaction,
 ) -> Result<(), PersistenceError> {
     // Run pet persistence
@@ -1218,12 +1219,17 @@ pub fn update(
     let mut stmt = transaction.prepare_cached(
         "
         UPDATE  character
-        SET     waypoint = ?1
-        WHERE   character_id = ?2
+        SET     waypoint = ?1,
+                class = ?2
+        WHERE   character_id = ?3
     ",
     )?;
 
-    let waypoint_count = stmt.execute([&db_waypoint as &dyn ToSql, &char_id.0])?;
+    let waypoint_count = stmt.execute([
+        &db_waypoint as &dyn ToSql,
+        &convert_class_to_database(character_class),
+        &char_id.0,
+    ])?;
 
     if waypoint_count != 1 {
         return Err(PersistenceError::OtherError(format!(
