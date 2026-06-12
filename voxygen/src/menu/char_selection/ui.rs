@@ -1219,65 +1219,54 @@ impl Controls {
                         cleric_class_button,
                         rogue_class_button,
                     ] = class_buttons;
+                    // Selection is signalled ONLY by text color: every state
+                    // shares the same button images, so the geometry never
+                    // changes and the 2x2 grid stays stable under the cursor
+                    // (selected-style image swaps caused reflow + misclicks).
+                    let class_button_style = |selected: bool| {
+                        if selected {
+                            style::button::Style::new(imgs.button)
+                                .hover_image(imgs.button_hover)
+                                .press_image(imgs.button_press)
+                                .text_color(Color::from_rgb(0.93, 0.78, 0.28))
+                        } else {
+                            button_style
+                        }
+                    };
+                    // 2 per row: new classes extend downward, never sideways.
                     let class_section = Column::with_children(vec![
-                        Text::new(i18n.get_msg("char_selection-class").into_owned())
-                            .size(fonts.cyri.scale(18))
-                            .into(),
                         Row::with_children(vec![
                             neat_button(
                                 warrior_class_button,
                                 i18n.get_msg("char_selection-class_warrior").into_owned(),
                                 FILL_FRAC_ONE,
-                                if *class == ClassKind::Warrior {
-                                    style::button::Style::new(imgs.icon_border_pressed)
-                                        .hover_image(imgs.icon_border_mo)
-                                        .press_image(imgs.icon_border_press)
-                                        .text_color(TEXT_COLOR)
-                                } else {
-                                    button_style
-                                },
+                                class_button_style(*class == ClassKind::Warrior),
                                 Some(Message::Class(ClassKind::Warrior)),
                             ),
                             neat_button(
                                 mage_class_button,
                                 i18n.get_msg("char_selection-class_mage").into_owned(),
                                 FILL_FRAC_ONE,
-                                if *class == ClassKind::Mage {
-                                    style::button::Style::new(imgs.icon_border_pressed)
-                                        .hover_image(imgs.icon_border_mo)
-                                        .press_image(imgs.icon_border_press)
-                                        .text_color(TEXT_COLOR)
-                                } else {
-                                    button_style
-                                },
+                                class_button_style(*class == ClassKind::Mage),
                                 Some(Message::Class(ClassKind::Mage)),
                             ),
+                        ])
+                        .height(Length::Units(26))
+                        .spacing(2)
+                        .into(),
+                        Row::with_children(vec![
                             neat_button(
                                 cleric_class_button,
                                 i18n.get_msg("char_selection-class_cleric").into_owned(),
                                 FILL_FRAC_ONE,
-                                if *class == ClassKind::Cleric {
-                                    style::button::Style::new(imgs.icon_border_pressed)
-                                        .hover_image(imgs.icon_border_mo)
-                                        .press_image(imgs.icon_border_press)
-                                        .text_color(TEXT_COLOR)
-                                } else {
-                                    button_style
-                                },
+                                class_button_style(*class == ClassKind::Cleric),
                                 Some(Message::Class(ClassKind::Cleric)),
                             ),
                             neat_button(
                                 rogue_class_button,
                                 i18n.get_msg("char_selection-class_rogue").into_owned(),
                                 FILL_FRAC_ONE,
-                                if *class == ClassKind::Rogue {
-                                    style::button::Style::new(imgs.icon_border_pressed)
-                                        .hover_image(imgs.icon_border_mo)
-                                        .press_image(imgs.icon_border_press)
-                                        .text_color(TEXT_COLOR)
-                                } else {
-                                    button_style
-                                },
+                                class_button_style(*class == ClassKind::Rogue),
                                 Some(Message::Class(ClassKind::Rogue)),
                             ),
                         ])
@@ -1286,7 +1275,7 @@ impl Controls {
                         .into(),
                     ])
                     .align_items(Align::Center)
-                    .spacing(4);
+                    .spacing(2);
 
                     // Tool buttons gated by the current class's whitelist.
                     // A button with no on_press is visually present but non-interactive.
@@ -1636,9 +1625,15 @@ impl Controls {
                             .size(fonts.cyri.scale(26))
                             .into();
                     match step {
+                        // Sex and race get their own labelled sections with
+                        // breathing room so it's clear which group is which.
                         CreationStep::Body => vec![
-                            step_title,
+                            Text::new(i18n.get_msg("char_selection-sex").into_owned())
+                                .size(fonts.cyri.scale(18))
+                                .into(),
                             body_type.into(),
+                            Space::new(Length::Fill, Length::Units(12)).into(),
+                            step_title,
                             species.into(),
                             rand_character.into(),
                         ],
