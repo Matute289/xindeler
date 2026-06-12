@@ -687,3 +687,25 @@ mod character_level_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod class_tree_tests {
+    use super::*;
+
+    #[test]
+    fn class_skill_groups_have_defs_and_stable_hashes() {
+        for class in ClassKind::PLAYABLE {
+            let group = SkillGroupKind::Class(class);
+            assert!(
+                SKILL_GROUP_DEFS.contains_key(&group),
+                "missing manifest entry: {group:?}"
+            );
+            assert!(
+                SKILL_GROUP_HASHES.contains_key(&group),
+                "missing hash: {group:?}"
+            );
+            // v1 stub trees are empty: no purchasable skills yet
+            assert_eq!(group.total_skill_point_cost(), 0);
+        }
+    }
+}

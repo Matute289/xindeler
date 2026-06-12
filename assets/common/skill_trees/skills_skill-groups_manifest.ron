@@ -129,4 +129,8 @@
         Pick(OreGain),
         Pick(GemGain),
     ],
+    Class(Warrior): [],
+    Class(Mage): [],
+    Class(Cleric): [],
+    Class(Rogue): [],
 }
