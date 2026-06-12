@@ -27,7 +27,7 @@ use common::{
     assets::AssetExt,
     combat::{Damage, combat_rating, perception_dist_multiplier_from_stealth},
     comp::{
-        Body, Energy, Health, Inventory, Poise, SkillSet, Stats,
+        Body, CharacterClass, Energy, Health, Inventory, Poise, SkillSet, Stats,
         inventory::{InventorySortOrder, slot::Slot},
         item::{ItemDef, ItemDesc, ItemI18n, MaterialStatManifest, Quality},
     },
@@ -415,6 +415,8 @@ impl<'a> InventoryScroller<'a> {
         let player_entity = self.client.entity();
         let skill_sets = ecs.read_storage::<SkillSet>();
         let bodies = ecs.read_storage::<Body>();
+        let character_classes = ecs.read_storage::<CharacterClass>();
+        let player_class = character_classes.get(player_entity).map(|c| c.0);
         let requirement_ctx = skill_sets.get(player_entity).zip(bodies.get(player_entity));
 
         for (pos, item) in items.into_iter() {
@@ -460,9 +462,9 @@ impl<'a> InventoryScroller<'a> {
 
             // Gray out items the player can't equip due to requirements
             if let Some((skill_set, body)) = requirement_ctx
-                && item
-                    .as_ref()
-                    .is_some_and(|item| !item.meets_requirements(skill_set, body))
+                && item.as_ref().is_some_and(|item| {
+                    !item.meets_requirements_with_class(player_class, skill_set, body)
+                })
             {
                 slot_widget = slot_widget.with_background_color(Color::Rgba(0.45, 0.45, 0.45, 1.0));
             }

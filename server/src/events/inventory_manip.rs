@@ -69,11 +69,12 @@ pub fn snuff_lantern(storage: &mut WriteStorage<LightEmitter>, entity: EcsEntity
 /// pass through `InventoryManip`, so they bypass this by design.
 fn entity_meets_item_requirements(
     item: &comp::Item,
+    class: Option<comp::class::ClassKind>,
     skill_set: Option<&comp::SkillSet>,
     body: Option<&comp::Body>,
 ) -> bool {
     match (skill_set, body) {
-        (Some(skill_set), Some(body)) => item.meets_requirements(skill_set, body),
+        (Some(skill_set), Some(body)) => item.meets_requirements_with_class(class, skill_set, body),
         _ => true,
     }
 }
@@ -137,6 +138,7 @@ pub struct InventoryManipData<'a> {
     groups: ReadStorage<'a, comp::Group>,
     stats: ReadStorage<'a, comp::Stats>,
     skill_sets: ReadStorage<'a, comp::SkillSet>,
+    character_classes: ReadStorage<'a, comp::CharacterClass>,
     clients: ReadStorage<'a, Client>,
     orientations: ReadStorage<'a, comp::Ori>,
     agents: ReadStorage<'a, comp::Agent>,
@@ -575,9 +577,11 @@ impl ServerEvent for InventoryManipEvent {
                                     (is_equippable, lantern_info)
                                 });
                             if is_equippable {
+                                let class = data.character_classes.get(entity).map(|c| c.0);
                                 let requirements_ok = inventory.get(slot).is_none_or(|item| {
                                     entity_meets_item_requirements(
                                         item,
+                                        class,
                                         data.skill_sets.get(entity),
                                         data.bodies.get(entity),
                                     )
@@ -859,11 +863,13 @@ impl ServerEvent for InventoryManipEvent {
 
                     // Equip gate: reject when either side of the swap would
                     // mount a gated item into a loadout slot.
+                    let swap_class = data.character_classes.get(entity).map(|c| c.0);
                     let violates_requirements = [(a, b), (b, a)].into_iter().any(|(src, dst)| {
                         matches!(dst, Slot::Equip(_))
                             && inventory.get_slot(src).is_some_and(|item| {
                                 !entity_meets_item_requirements(
                                     item,
+                                    swap_class,
                                     data.skill_sets.get(entity),
                                     data.bodies.get(entity),
                                 )

@@ -3,6 +3,7 @@ use common::{
     comp::{
         BuffData, BuffKind,
         body::humanoid::Species,
+        class::ClassKind,
         inventory::trade_pricing::TradePricing,
         item::{
             Effects, Item, ItemDefinitionId, ItemDesc, ItemI18n, ItemKind, MaterialKind,
@@ -79,6 +80,7 @@ pub fn item_text<'a, I: ItemDesc + ?Sized>(
 /// e.g. spectators) renders everything as met.
 pub fn requirements_text(
     item: &dyn ItemDesc,
+    class: Option<ClassKind>,
     viewer: Option<(u16, Option<Species>)>,
     i18n: &Localization,
 ) -> (Vec<String>, Vec<String>) {
@@ -89,9 +91,26 @@ pub fn requirements_text(
     // Reuse the shared predicate so the tooltip can never disagree with the
     // server's enforcement.
     let unmet_kinds = viewer
-        .map(|(level, species)| requirements.unmet(level, species))
+        .map(|(level, species)| requirements.unmet(class, level, species))
         .unwrap_or_default();
 
+    if let Some(classes) = &requirements.classes {
+        let names = classes
+            .iter()
+            .map(|c| i18n.get_msg(class_i18n_key(*c)).into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line = i18n
+            .get_msg_ctx("hud-bag-requirement_class", &fluent_args! {
+                "classes" => names,
+            })
+            .into_owned();
+        if unmet_kinds.contains(&UnmetRequirement::Class) {
+            unmet.push(line);
+        } else {
+            met.push(line);
+        }
+    }
     if let Some(needed) = requirements.min_level {
         let line = i18n
             .get_msg_ctx("hud-bag-requirement_level", &fluent_args! {
@@ -135,6 +154,16 @@ fn species_i18n_key(species: Species) -> &'static str {
         Species::Human => "common-species-human",
         Species::Orc => "common-species-orc",
         Species::Draugr => "common-species-draugr",
+    }
+}
+
+fn class_i18n_key(class: ClassKind) -> &'static str {
+    match class {
+        ClassKind::Adventurer => "common-class-adventurer",
+        ClassKind::Warrior => "common-class-warrior",
+        ClassKind::Mage => "common-class-mage",
+        ClassKind::Cleric => "common-class-cleric",
+        ClassKind::Rogue => "common-class-rogue",
     }
 }
 

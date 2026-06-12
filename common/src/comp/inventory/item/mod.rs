@@ -789,6 +789,8 @@ impl ItemDefinitionId<'_> {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ItemRequirements {
+    /// Whitelist of classes that may equip this item. None = any class.
+    pub classes: Option<Vec<crate::comp::class::ClassKind>>,
     /// Minimum derived character level (see `SkillSet::character_level`).
     pub min_level: Option<u16>,
     /// Whitelist of humanoid species that may equip this item.
@@ -799,15 +801,29 @@ pub struct ItemRequirements {
 /// rejection and the client tooltip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnmetRequirement {
+    Class,
     Level { needed: u16 },
     Race,
 }
 
 impl ItemRequirements {
-    /// Requirements unmet at the given character level/species. `species` is
-    /// `None` for non-humanoid bodies, which therefore fail any race gate.
-    pub fn unmet(&self, level: u16, species: Option<humanoid::Species>) -> Vec<UnmetRequirement> {
+    /// Requirements unmet for the given class/level/species combination.
+    /// `class` is `None` for entities without a `CharacterClass` component
+    /// (NPCs, spectators), which therefore fail any class gate.
+    /// `species` is `None` for non-humanoid bodies, which therefore fail any
+    /// race gate.
+    pub fn unmet(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        level: u16,
+        species: Option<humanoid::Species>,
+    ) -> Vec<UnmetRequirement> {
         let mut unmet = Vec::new();
+        if let Some(classes) = &self.classes
+            && !class.is_some_and(|c| classes.contains(&c))
+        {
+            unmet.push(UnmetRequirement::Class);
+        }
         if let Some(needed) = self.min_level
             && level < needed
         {
@@ -1498,18 +1514,30 @@ impl Item {
 
     /// Requirements this entity fails for equipping this item. Shared by
     /// server enforcement and the client tooltip so they always agree.
-    pub fn unmet_requirements(&self, skill_set: &SkillSet, body: &Body) -> Vec<UnmetRequirement> {
+    /// `class` comes from `CharacterClass`; pass `None` for NPCs/spectators.
+    pub fn unmet_requirements_with_class(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        skill_set: &SkillSet,
+        body: &Body,
+    ) -> Vec<UnmetRequirement> {
         self.requirements().map_or_else(Vec::new, |requirements| {
             let species = match body {
                 Body::Humanoid(humanoid_body) => Some(humanoid_body.species),
                 _ => None,
             };
-            requirements.unmet(skill_set.character_level(), species)
+            requirements.unmet(class, skill_set.character_level(), species)
         })
     }
 
-    pub fn meets_requirements(&self, skill_set: &SkillSet, body: &Body) -> bool {
-        self.unmet_requirements(skill_set, body).is_empty()
+    pub fn meets_requirements_with_class(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        skill_set: &SkillSet,
+        body: &Body,
+    ) -> bool {
+        self.unmet_requirements_with_class(class, skill_set, body)
+            .is_empty()
     }
 
     // TODO: Maybe try to make slice again instead of vec? Could also try to make an
@@ -2321,6 +2349,7 @@ mod tests {
                 tags: [],
                 ability_spec: None,
                 requirements: Some((
+                    classes: None,
                     min_level: Some(10),
                     races: Some([Draugr]),
                 )),
@@ -2404,45 +2433,68 @@ mod tests {
 
         // No requirements -> everyone passes.
         let open = gated_test_item(None);
-        assert!(open.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(open.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
+
+        use crate::comp::class::ClassKind;
 
         // Empty requirements block -> everyone passes.
         let empty = gated_test_item(Some(ItemRequirements::default()));
-        assert!(empty.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(empty.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
 
         // Level gate alone, boundary inclusive (level == min_level passes).
         let lvl10 = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: Some(10),
             races: None,
         }));
-        assert!(!lvl10.meets_requirements(&skill_set_at_level(9), &human));
-        assert!(lvl10.meets_requirements(&skill_set_at_level(10), &human));
+        assert!(!lvl10.meets_requirements_with_class(None, &skill_set_at_level(9), &human));
+        assert!(lvl10.meets_requirements_with_class(None, &skill_set_at_level(10), &human));
         assert_eq!(
-            lvl10.unmet_requirements(&skill_set_at_level(9), &human),
+            lvl10.unmet_requirements_with_class(None, &skill_set_at_level(9), &human),
             vec![UnmetRequirement::Level { needed: 10 }]
         );
 
         // Race gate alone.
         let draugr_only = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: None,
             races: Some(vec![humanoid::Species::Draugr]),
         }));
-        assert!(draugr_only.meets_requirements(&skill_set_at_level(1), &draugr));
-        assert!(!draugr_only.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(draugr_only.meets_requirements_with_class(None, &skill_set_at_level(1), &draugr));
+        assert!(!draugr_only.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
 
         // Combined gates: both must hold.
         let both = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: Some(10),
             races: Some(vec![humanoid::Species::Draugr]),
         }));
-        assert!(both.meets_requirements(&skill_set_at_level(10), &draugr));
-        assert!(!both.meets_requirements(&skill_set_at_level(9), &draugr));
-        assert!(!both.meets_requirements(&skill_set_at_level(10), &human));
+        assert!(both.meets_requirements_with_class(None, &skill_set_at_level(10), &draugr));
+        assert!(!both.meets_requirements_with_class(None, &skill_set_at_level(9), &draugr));
+        assert!(!both.meets_requirements_with_class(None, &skill_set_at_level(10), &human));
         assert_eq!(
-            both.unmet_requirements(&skill_set_at_level(9), &human)
+            both.unmet_requirements_with_class(None, &skill_set_at_level(9), &human)
                 .len(),
             2
         );
+
+        // Class gate alone. Adventurer (legacy) is never listed on items, so
+        // class-gated items exclude legacy characters until /set_class.
+        let cleric_only = gated_test_item(Some(ItemRequirements {
+            classes: Some(vec![ClassKind::Cleric]),
+            min_level: None,
+            races: None,
+        }));
+        assert!(!cleric_only.meets_requirements_with_class(
+            Some(ClassKind::Adventurer),
+            &skill_set_at_level(1),
+            &human,
+        ));
+        assert!(cleric_only.meets_requirements_with_class(
+            Some(ClassKind::Cleric),
+            &skill_set_at_level(1),
+            &human,
+        ));
     }
 
     #[test]
