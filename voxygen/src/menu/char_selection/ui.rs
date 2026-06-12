@@ -25,7 +25,7 @@ use client::{Client, ServerInfo};
 use common::{
     LoadoutBuilder,
     character::{CharacterId, CharacterItem, MAX_CHARACTERS_PER_PLAYER, MAX_NAME_LENGTH},
-    comp::{self, Inventory, Item, humanoid, inventory::slot::EquipSlot},
+    comp::{self, Inventory, Item, class::ClassKind, humanoid, inventory::slot::EquipSlot},
     map::Marker,
     resources::Time,
     terrain::TerrainChunkSize,
@@ -150,6 +150,7 @@ pub enum Event {
         body: comp::Body,
         hardcore: bool,
         start_site: Option<SiteId>,
+        class: ClassKind,
     },
     EditCharacter {
         alias: String,
@@ -183,6 +184,7 @@ enum Mode {
         inventory: Box<Inventory>,
         mainhand: Option<&'static str>,
         offhand: Option<&'static str>,
+        class: ClassKind,
 
         body_type_buttons: [button::State; 2],
         species_buttons: [button::State; 6],
@@ -242,6 +244,7 @@ impl Mode {
             inventory,
             mainhand,
             offhand,
+            class: ClassKind::Warrior,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             tool_buttons: Default::default(),
@@ -273,6 +276,7 @@ impl Mode {
             inventory: Box::new(inventory.clone()),
             mainhand: None,
             offhand: None,
+            class: ClassKind::Adventurer,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             tool_buttons: Default::default(),
@@ -961,6 +965,8 @@ impl Controls {
                 inventory: _,
                 mainhand,
                 offhand: _,
+                // Class picker UI is a later task (CLS-9); not rendered yet.
+                class: _,
                 left_scroll,
                 right_scroll,
                 body_type_buttons,
@@ -1854,6 +1860,7 @@ impl Controls {
                     hardcore_enabled,
                     mainhand,
                     offhand,
+                    class,
                     start_site_idx,
                     ..
                 } = &self.mode
@@ -1864,6 +1871,7 @@ impl Controls {
                         offhand: offhand.map(String::from),
                         body: comp::Body::Humanoid(*body),
                         hardcore: *hardcore_enabled,
+                        class: *class,
                         start_site: self
                             .possible_starting_sites
                             .get(start_site_idx.unwrap_or_default())

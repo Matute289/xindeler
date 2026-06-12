@@ -157,6 +157,8 @@ fn run_client(
             body(),
             false,
             None,
+            // Non-interactive bot; class is irrelevant, pick a valid playable one.
+            comp::class::ClassKind::Warrior,
         );
 
         client.load_character_list();

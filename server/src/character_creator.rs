@@ -2,8 +2,8 @@ use crate::persistence::{PersistedComponents, character_updater::CharacterUpdate
 use common::{
     character::CharacterId,
     comp::{
-        BASE_ABILITY_LIMIT, Body, Content, Inventory, Item, SkillSet, Stats, Waypoint,
-        inventory::loadout_builder::LoadoutBuilder,
+        BASE_ABILITY_LIMIT, Body, CharacterClass, Content, Inventory, Item, SkillSet, Stats,
+        Waypoint, class::ClassKind, inventory::loadout_builder::LoadoutBuilder,
     },
 };
 use specs::{Entity, WriteExpect};
@@ -25,6 +25,7 @@ const VALID_STARTER_ITEMS: &[[Option<&str>; 2]] = &[
 pub enum CreationError {
     InvalidWeapon,
     InvalidBody,
+    InvalidClass,
 }
 
 pub fn create_character(
@@ -34,6 +35,7 @@ pub fn create_character(
     character_mainhand: Option<String>,
     character_offhand: Option<String>,
     body: Body,
+    character_class: ClassKind,
     hardcore: bool,
     character_updater: &mut WriteExpect<'_, CharacterUpdater>,
     waypoint: Option<Waypoint>,
@@ -44,6 +46,9 @@ pub fn create_character(
     // throughout the messages involved
     if !matches!(body, Body::Humanoid(_)) {
         return Err(CreationError::InvalidBody);
+    }
+    if !character_class.is_playable() {
+        return Err(CreationError::InvalidClass);
     }
     if !VALID_STARTER_ITEMS.contains(&[character_mainhand.as_deref(), character_offhand.as_deref()])
     {
@@ -77,7 +82,7 @@ pub fn create_character(
     character_updater.create_character(entity, player_uuid, character_alias, PersistedComponents {
         body,
         hardcore: hardcore.then_some(common::comp::Hardcore),
-        character_class: common::comp::CharacterClass::default(),
+        character_class: CharacterClass(character_class),
         stats,
         skill_set,
         inventory,
@@ -123,6 +128,10 @@ impl core::fmt::Display for CreationError {
             CreationError::InvalidBody => write!(
                 f,
                 "Invalid Body.\nServer and client might be partially incompatible"
+            ),
+            CreationError::InvalidClass => write!(
+                f,
+                "Invalid class.\nServer and client might be partially incompatible."
             ),
         }
     }
