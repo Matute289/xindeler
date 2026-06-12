@@ -147,6 +147,7 @@ impl<'a> System<'a> for Sys {
                 | CharacterState::Throw(_)
                 | CharacterState::Shockwave(_)
                 | CharacterState::Explosion(_)
+                | CharacterState::GroundAoe(_)
                 | CharacterState::BasicBeam(_)
                 | CharacterState::BasicAura(_)
                 | CharacterState::Blink(_)

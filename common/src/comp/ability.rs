@@ -824,6 +824,7 @@ impl From<&CharacterState> for CharacterAbilityType {
             | CharacterState::Throw(_)
             | CharacterState::LeapExplosionShockwave(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::LeapRanged(_)
             | CharacterState::Simple(_) => Self::Other,
         }
@@ -1173,6 +1174,28 @@ pub enum CharacterAbility {
         #[serde(default)]
         meta: AbilityMeta,
     },
+    GroundAoe {
+        energy_cost: f32,
+        buildup_duration: f32,
+        /// Telegraph time between target lock and the strike
+        delay: f32,
+        recover_duration: f32,
+        max_range: f32,
+        radius: f32,
+        min_falloff: f32,
+        damage: f32,
+        poise: f32,
+        knockback: Knockback,
+        #[serde(default)]
+        dodgeable: Dodgeable,
+        #[serde(default)]
+        reagent: Option<Reagent>,
+        /// If true the caster cannot move during the telegraph
+        #[serde(default)]
+        rooted_cast: bool,
+        #[serde(default)]
+        meta: AbilityMeta,
+    },
     BasicBeam {
         buildup_duration: f32,
         recover_duration: f32,
@@ -1518,6 +1541,9 @@ impl CharacterAbility {
                         && update.energy.try_change_by(-*energy_cost).is_ok()
                 },
                 CharacterAbility::Explosion { energy_cost, .. } => {
+                    update.energy.try_change_by(-*energy_cost).is_ok()
+                },
+                CharacterAbility::GroundAoe { energy_cost, .. } => {
                     update.energy.try_change_by(-*energy_cost).is_ok()
                 },
                 CharacterAbility::DiveMelee {
@@ -1989,6 +2015,31 @@ impl CharacterAbility {
                 knockback.strength *= stats.effect_power;
                 *radius *= stats.range;
             },
+            GroundAoe {
+                ref mut energy_cost,
+                ref mut buildup_duration,
+                delay: _,
+                ref mut recover_duration,
+                ref mut max_range,
+                ref mut radius,
+                min_falloff: _,
+                ref mut damage,
+                poise: ref mut poise_damage,
+                ref mut knockback,
+                dodgeable: _,
+                reagent: _,
+                rooted_cast: _,
+                meta: _,
+            } => {
+                *energy_cost /= stats.energy_efficiency;
+                *buildup_duration /= stats.speed;
+                *recover_duration /= stats.speed;
+                *damage *= stats.power;
+                *poise_damage *= stats.effect_power;
+                knockback.strength *= stats.effect_power;
+                *radius *= stats.range;
+                *max_range *= stats.range;
+            },
             BasicBeam {
                 ref mut buildup_duration,
                 ref mut recover_duration,
@@ -2310,6 +2361,7 @@ impl CharacterAbility {
             | Throw { energy_cost, .. }
             | Shockwave { energy_cost, .. }
             | Explosion { energy_cost, .. }
+            | GroundAoe { energy_cost, .. }
             | BasicAura { energy_cost, .. }
             | BasicBlock { energy_cost, .. }
             | SelfBuff { energy_cost, .. }
@@ -2382,6 +2434,7 @@ impl CharacterAbility {
             | LeapMelee { .. }
             | LeapShockwave { .. }
             | Explosion { .. }
+            | GroundAoe { .. }
             | ChargedMelee { .. }
             | ChargedRanged { .. }
             | Throw { .. }
@@ -2420,6 +2473,7 @@ impl CharacterAbility {
             | Throw { meta, .. }
             | Shockwave { meta, .. }
             | Explosion { meta, .. }
+            | GroundAoe { meta, .. }
             | BasicAura { meta, .. }
             | BasicBlock { meta, .. }
             | SelfBuff { meta, .. }
@@ -3191,6 +3245,41 @@ impl TryFrom<(&CharacterAbility, AbilityInfo, &JoinData<'_>)> for CharacterState
                 movement_modifier: movement_modifier.buildup,
                 ori_modifier: ori_modifier.buildup,
             }),
+            CharacterAbility::GroundAoe {
+                energy_cost: _,
+                buildup_duration,
+                delay,
+                recover_duration,
+                max_range,
+                radius,
+                min_falloff,
+                damage,
+                poise,
+                knockback,
+                dodgeable,
+                reagent,
+                rooted_cast,
+                meta: _,
+            } => CharacterState::GroundAoe(ground_aoe::Data {
+                static_data: ground_aoe::StaticData {
+                    buildup_duration: Duration::from_secs_f32(*buildup_duration),
+                    delay: Duration::from_secs_f32(*delay),
+                    recover_duration: Duration::from_secs_f32(*recover_duration),
+                    max_range: *max_range,
+                    radius: *radius,
+                    min_falloff: *min_falloff,
+                    damage: *damage,
+                    poise: *poise,
+                    knockback: *knockback,
+                    dodgeable: *dodgeable,
+                    reagent: *reagent,
+                    rooted_cast: *rooted_cast,
+                    ability_info,
+                },
+                timer: Duration::default(),
+                stage_section: StageSection::Buildup,
+                target_pos: None,
+            }),
             CharacterAbility::BasicBeam {
                 buildup_duration,
                 recover_duration,
@@ -3874,5 +3963,24 @@ mod ability_cooldown_tests {
         cds.set("b", Time(100.0), 5.0);
         assert_eq!(cds.0.len(), 1);
         assert!(cds.ready_at("b").is_some());
+    }
+}
+
+#[cfg(test)]
+mod ground_aoe_tests {
+    // JoinData is impractical to construct in isolation; behaviour is covered
+    // by the deserialization test below and the in-game check. Here we pin
+    // the RON contract.
+    use crate::{assets::AssetExt, comp::CharacterAbility};
+
+    #[test]
+    fn shatterburst_deserializes_as_ground_aoe() {
+        let ability = crate::assets::Ron::<CharacterAbility>::load_expect(
+            "common.abilities.spells.ruin.shatterburst",
+        )
+        .read()
+        .0
+        .clone();
+        assert!(matches!(ability, CharacterAbility::GroundAoe { .. }));
     }
 }
