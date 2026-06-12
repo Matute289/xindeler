@@ -1,5 +1,11 @@
-// Keep in mind that this should be safe defaults for new character
+// Rogue starting outfit: full rawhide leathers (set protection 18 + stealth,
+// Low quality) — leather look with the class-appropriate stealth bonus.
 #![enable(implicit_some)]
 (
-    chest: Item("common.items.armor.misc.chest.worker_green_0"),
+    chest: Item("common.items.armor.hide.rawhide.chest"),
+    legs: Item("common.items.armor.hide.rawhide.pants"),
+    belt: Item("common.items.armor.hide.rawhide.belt"),
+    feet: Item("common.items.armor.hide.rawhide.foot"),
+    gloves: Item("common.items.armor.hide.rawhide.hand"),
+    shoulders: Item("common.items.armor.hide.rawhide.shoulder"),
 )
