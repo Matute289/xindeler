@@ -145,21 +145,13 @@ pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
 /// Unlike the skill-group converter this never panics: unknown strings fall
 /// back to Adventurer with a warning so a DB downgrade never bricks a save.
 pub fn db_string_to_class(class_string: &str) -> comp::class::ClassKind {
-    use comp::class::ClassKind::*;
-    match class_string {
-        "Adventurer" => Adventurer,
-        "Warrior" => Warrior,
-        "Mage" => Mage,
-        "Cleric" => Cleric,
-        "Rogue" => Rogue,
-        unknown => {
-            tracing::warn!(
-                ?unknown,
-                "Unknown class in database, defaulting to Adventurer"
-            );
-            Adventurer
-        },
-    }
+    comp::class::ClassKind::ALL
+        .into_iter()
+        .find(|class| class_to_db_string(*class) == class_string)
+        .unwrap_or_else(|| {
+            tracing::warn!(unknown = ?class_string, "Unknown class in database, defaulting to Adventurer");
+            comp::class::ClassKind::Adventurer
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -423,13 +415,7 @@ pub mod tests {
     #[test]
     fn class_db_string_round_trips_and_tolerates_unknown() {
         use common::comp::class::ClassKind;
-        for class in [
-            ClassKind::Adventurer,
-            ClassKind::Warrior,
-            ClassKind::Mage,
-            ClassKind::Cleric,
-            ClassKind::Rogue,
-        ] {
+        for class in ClassKind::ALL {
             assert_eq!(
                 super::db_string_to_class(&super::class_to_db_string(class)),
                 class

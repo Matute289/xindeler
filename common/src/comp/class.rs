@@ -25,6 +25,16 @@ pub enum ClassKind {
 }
 
 impl ClassKind {
+    /// Every variant, including Adventurer. Single source of truth for
+    /// enumeration — persistence round-trips and tests iterate this, so a
+    /// new variant added here cannot silently fall out of any converter.
+    pub const ALL: [ClassKind; 5] = [
+        ClassKind::Adventurer,
+        ClassKind::Warrior,
+        ClassKind::Mage,
+        ClassKind::Cleric,
+        ClassKind::Rogue,
+    ];
     /// Classes selectable at character creation (excludes Adventurer).
     pub const PLAYABLE: [ClassKind; 4] = [
         ClassKind::Warrior,
@@ -128,6 +138,15 @@ pub fn apply_racial_traits(stats: &mut Stats, species: Species) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playable_is_all_minus_adventurer() {
+        assert_eq!(ClassKind::ALL.len(), ClassKind::PLAYABLE.len() + 1);
+        for class in ClassKind::PLAYABLE {
+            assert!(ClassKind::ALL.contains(&class));
+        }
+        assert!(ClassKind::ALL.contains(&ClassKind::Adventurer));
+    }
 
     #[test]
     fn default_class_is_adventurer() {
