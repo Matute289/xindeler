@@ -112,6 +112,10 @@ harness = false
 name = "loot_benchmark"
 harness = false
 
+[[bench]]
+name = "spatial_grid_benchmark"
+harness = false
+
 [[bin]]
 name = "csv_export"
 required-features = ["bin_csv"]
