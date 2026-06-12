@@ -1687,6 +1687,11 @@ pub trait Structure {
             let lock = LIB.lock().unwrap();
             let lib = &lock.as_ref().unwrap().lib;
 
+            // SAFETY: `Self::UPDATE_FN` names a plot-render symbol exported
+            // with `#[unsafe(export_name)]` by this same crate's `be-dyn-lib`
+            // build (`veloren-world` dylib), compiled from this workspace by
+            // the hot-reload watcher; the symbol's type signature here matches
+            // that exported fn item exactly.
             let update_fn: common_dynlib::Symbol<fn(&Self, &Site, &Land, &Painter)> = unsafe {
                 //let start = std::time::Instant::now();
                 // Overhead of 0.5-5 us (could use hashmap to mitigate if this is an issue)

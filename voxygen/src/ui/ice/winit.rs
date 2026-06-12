@@ -13,6 +13,10 @@ pub struct Clipboard {
 impl Clipboard {
     /// Creates a new [`Clipboard`] for the given window.
     pub fn connect(window: &winit::window::Window) -> Clipboard {
+        // SAFETY: `connect` captures the window's raw display/window handle;
+        // the handle outlives the clipboard connection because this
+        // `Clipboard` is owned by the window's UI state and dropped with it
+        // (upstream iced_winit pattern).
         #[expect(unsafe_code)]
         let connection = unsafe { window_clipboard::Clipboard::connect(window) }.ok();
 

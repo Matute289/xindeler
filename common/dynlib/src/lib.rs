@@ -71,6 +71,13 @@ impl LoadedLib {
         let lib_path = LoadedLib::determine_path(dyn_package, reload_count);
 
         // Try to load the library.
+        // SAFETY: `Library::new` runs the dylib's load-time initializers.
+        // The path comes from `LoadedLib::determine_path`, which only ever
+        // points at an artifact this same workspace just compiled (dev-only
+        // hot-reload flow) — never an untrusted path. Layout soundness of
+        // symbols later fetched from `lib` relies on host and dylib being
+        // built by the same rustc, which the hot-reload watcher guarantees
+        // by rebuilding on the same toolchain.
         let lib = match unsafe { Library::new(lib_path.clone()) } {
             Ok(lib) => lib,
             Err(e) => panic!(
