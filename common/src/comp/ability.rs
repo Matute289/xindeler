@@ -3983,4 +3983,14 @@ mod ground_aoe_tests {
         .clone();
         assert!(matches!(ability, CharacterAbility::GroundAoe { .. }));
     }
+
+    #[test]
+    fn cc_spells_deserialize() {
+        for id in [
+            "common.abilities.spells.hollow.dread_whisper",
+            "common.abilities.spells.gravesong.censure",
+        ] {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
 }
