@@ -68,7 +68,10 @@ const STARTER_SCEPTRE: &str = "common.items.weapons.sceptre.starter_sceptre";
 /// the server-side whitelist in server/src/character_creator.rs.
 fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<&'static str>) {
     match class {
-        ClassKind::Adventurer | ClassKind::Warrior => (Some(STARTER_SWORD), None),
+        // Adventurer can't be picked at creation; no starter weapons (matches
+        // the server's empty whitelist).
+        ClassKind::Adventurer => (None, None),
+        ClassKind::Warrior => (Some(STARTER_SWORD), None),
         ClassKind::Mage => (Some(STARTER_STAFF), None),
         ClassKind::Cleric => (Some(STARTER_SCEPTRE), None),
         ClassKind::Rogue => (Some(STARTER_SWORDS), Some(STARTER_SWORDS)),
