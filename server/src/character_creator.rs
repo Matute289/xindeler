@@ -155,6 +155,26 @@ pub fn edit_character(
     Ok(())
 }
 
+// Error handling
+impl core::fmt::Display for CreationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CreationError::InvalidWeapon => write!(
+                f,
+                "Invalid weapon.\nServer and client might be partially incompatible."
+            ),
+            CreationError::InvalidBody => write!(
+                f,
+                "Invalid Body.\nServer and client might be partially incompatible"
+            ),
+            CreationError::InvalidClass => write!(
+                f,
+                "Invalid class.\nServer and client might be partially incompatible."
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,26 +203,6 @@ mod tests {
                 None,
             );
             Item::new_from_asset_expect(class_kit_item(class));
-        }
-    }
-}
-
-// Error handling
-impl core::fmt::Display for CreationError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            CreationError::InvalidWeapon => write!(
-                f,
-                "Invalid weapon.\nServer and client might be partially incompatible."
-            ),
-            CreationError::InvalidBody => write!(
-                f,
-                "Invalid Body.\nServer and client might be partially incompatible"
-            ),
-            CreationError::InvalidClass => write!(
-                f,
-                "Invalid class.\nServer and client might be partially incompatible."
-            ),
         }
     }
 }
