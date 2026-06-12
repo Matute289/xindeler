@@ -82,6 +82,19 @@ In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates
 - `simd` — Enables SIMD optimizations in server-cli.
 - `bin_*` — Various utility binaries (CSV export, graph generation, bot, asset migration).
 
+## Documentation & Git Policy
+
+**Where docs live — two repos, one working tree:**
+- Design docs (specs, plans, task boards) live in `docs/superpowers/`, which is a **separate, private git repo** (`Matute289/xindeler-design`) nested inside this one and gitignored here. Commit and push design docs from inside `docs/superpowers/` — never into this (public) repo.
+  - Specs → `docs/superpowers/specs/`, implementation plans → `docs/superpowers/plans/`, task boards → `docs/superpowers/tasks/` (index: `00-task-board.md`).
+- `docs/lore/` is gitignored here and is currently NOT under any version control — do not assume it is backed up.
+- `.superpowers/` (brainstorm scratch) and `graphify-out/` are local-only and gitignored; never commit them anywhere. Brainstorm conclusions belong as a spec/plan in `docs/superpowers/`.
+- The `gitlab` remote is the fetch-only upstream (push disabled); never push to it.
+
+**Branch protection (public repo `Matute289/xindeler`):**
+- `main` and `development` are protected: no direct pushes (admins included), no force-pushes, no deletion. All changes land via PR with 1 approval.
+- AI agents must NEVER merge or approve PRs, push to `main`/`development`, or touch branch-protection settings. Workflow: branch off `development` → commit → push branch → open PR with base `development` → stop and report. Only Matias reviews and merges.
+
 ## Build Profiles
 
 Custom profiles in the workspace `Cargo.toml`:

@@ -104,9 +104,8 @@ perf.*
 wgpu-trace/
 
 
-# TODO: En produccion sacarlo
-# Visual brainstorming sessions
-#.superpowers/
+# Visual brainstorming sessions (local scratch, design content — never commit)
+.superpowers/
 
 # TODO: En produccion sacarlo
 # Graphify knowledge graph output (local only)
