@@ -217,12 +217,56 @@ enum Mode {
         rand_name_button: button::State,
         prev_starting_site_button: button::State,
         next_starting_site_button: button::State,
+        wizard_back_button: button::State,
+        wizard_next_button: button::State,
+        /// Current step of the creation wizard. Unused in edit mode.
+        step: CreationStep,
         /// `character_id.is_some()` can be used to determine if we're in edit
         /// mode as opposed to create mode.
         // TODO: Something less janky? Express the problem domain better!
         character_id: Option<CharacterId>,
         start_site_idx: Option<usize>,
     },
+}
+
+/// Sequential steps of the character-creation wizard (creation mode only).
+/// Edit mode ignores this and renders a single combined screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreationStep {
+    Body,
+    Appearance,
+    Class,
+    Finish,
+}
+
+impl CreationStep {
+    fn next(self) -> Self {
+        match self {
+            CreationStep::Body => CreationStep::Appearance,
+            CreationStep::Appearance => CreationStep::Class,
+            CreationStep::Class => CreationStep::Finish,
+            CreationStep::Finish => CreationStep::Finish,
+        }
+    }
+
+    fn back(self) -> Self {
+        match self {
+            CreationStep::Body => CreationStep::Body,
+            CreationStep::Appearance => CreationStep::Body,
+            CreationStep::Class => CreationStep::Appearance,
+            CreationStep::Finish => CreationStep::Class,
+        }
+    }
+
+    /// 1-based index for the progress label.
+    fn index(self) -> u8 {
+        match self {
+            CreationStep::Body => 1,
+            CreationStep::Appearance => 2,
+            CreationStep::Class => 3,
+            CreationStep::Finish => 4,
+        }
+    }
 }
 
 impl Mode {
@@ -277,6 +321,9 @@ impl Mode {
             rand_name_button: Default::default(),
             prev_starting_site_button: Default::default(),
             next_starting_site_button: Default::default(),
+            wizard_back_button: Default::default(),
+            wizard_next_button: Default::default(),
+            step: CreationStep::Body,
             character_id: None,
             start_site_idx: None,
         }
@@ -310,6 +357,10 @@ impl Mode {
             rand_name_button: Default::default(),
             prev_starting_site_button: Default::default(),
             next_starting_site_button: Default::default(),
+            wizard_back_button: Default::default(),
+            wizard_next_button: Default::default(),
+            // Unused in edit mode (single combined screen).
+            step: CreationStep::Body,
             character_id: Some(character_id),
             start_site_idx: None,
         }
@@ -379,6 +430,8 @@ enum Message {
     StartingSite(usize),
     PrevStartingSite,
     NextStartingSite,
+    WizardNext,
+    WizardBack,
     // Workaround for widgets that require a message but we don't want them to actually do
     // anything
     DoNothing,
@@ -1001,9 +1054,15 @@ impl Controls {
                 rand_name_button,
                 prev_starting_site_button,
                 next_starting_site_button,
+                wizard_back_button,
+                wizard_next_button,
+                step,
                 character_id,
                 start_site_idx,
             } => {
+                // Copy the step out so the later `match` doesn't keep `step`
+                // borrowed while we build widgets from the other fields.
+                let step = *step;
                 let unselected_style = style::button::Style::new(imgs.icon_border)
                     .hover_image(imgs.icon_border_mo)
                     .press_image(imgs.icon_border_press);
@@ -1222,7 +1281,8 @@ impl Controls {
                                 Some(Message::Class(ClassKind::Rogue)),
                             ),
                         ])
-                        .spacing(1)
+                        .height(Length::Units(26))
+                        .spacing(2)
                         .into(),
                     ])
                     .align_items(Align::Center)
@@ -1257,13 +1317,9 @@ impl Controls {
                             )
                         };
 
-                    // Per-class allowed weapon check helpers.
-                    let warrior_weapons =
-                        matches!(*class, ClassKind::Adventurer | ClassKind::Warrior);
-                    let mage_weapons = matches!(*class, ClassKind::Mage);
-                    let cleric_weapons = matches!(*class, ClassKind::Cleric);
-                    let rogue_weapons = matches!(*class, ClassKind::Rogue);
-
+                    // Weapon picker for step 3: render ONLY the weapons valid for
+                    // the currently selected class. Every button gets a real
+                    // `on_press` (no disabled/placeholder buttons).
                     let [
                         sword_button,
                         swords_button,
@@ -1272,84 +1328,83 @@ impl Controls {
                         bow_button,
                         staff_button,
                     ] = tool_buttons;
-                    let tool = Column::with_children(vec![
-                        Row::with_children(vec![
-                            icon_button_tooltip_opt(
-                                sword_button,
-                                *mainhand == Some(STARTER_SWORD),
-                                warrior_weapons
-                                    .then_some(Message::Tool((Some(STARTER_SWORD), None))),
-                                imgs.sword,
-                                "common-weapons-greatsword",
-                            )
+                    let tool = match *class {
+                        ClassKind::Warrior | ClassKind::Adventurer => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    sword_button,
+                                    *mainhand == Some(STARTER_SWORD),
+                                    Some(Message::Tool((Some(STARTER_SWORD), None))),
+                                    imgs.sword,
+                                    "common-weapons-greatsword",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    hammer_button,
+                                    *mainhand == Some(STARTER_HAMMER),
+                                    Some(Message::Tool((Some(STARTER_HAMMER), None))),
+                                    imgs.hammer,
+                                    "common-weapons-hammer",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    axe_button,
+                                    *mainhand == Some(STARTER_AXE),
+                                    Some(Message::Tool((Some(STARTER_AXE), None))),
+                                    imgs.axe,
+                                    "common-weapons-axe",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
                             .into(),
-                            icon_button_tooltip_opt(
-                                hammer_button,
-                                *mainhand == Some(STARTER_HAMMER),
-                                warrior_weapons
-                                    .then_some(Message::Tool((Some(STARTER_HAMMER), None))),
-                                imgs.hammer,
-                                "common-weapons-hammer",
-                            )
-                            .into(),
-                            icon_button_tooltip_opt(
-                                axe_button,
-                                *mainhand == Some(STARTER_AXE),
-                                warrior_weapons.then_some(Message::Tool((Some(STARTER_AXE), None))),
-                                imgs.axe,
-                                "common-weapons-axe",
-                            )
-                            .into(),
-                        ])
-                        .spacing(1)
-                        .into(),
-                        Row::with_children(vec![
-                            icon_button_tooltip_opt(
-                                swords_button,
-                                *mainhand == Some(STARTER_SWORDS),
-                                rogue_weapons.then_some(Message::Tool((
-                                    Some(STARTER_SWORDS),
-                                    Some(STARTER_SWORDS),
-                                ))),
-                                imgs.swords,
-                                "common-weapons-shortswords",
-                            )
-                            .into(),
-                            icon_button_tooltip_opt(
-                                bow_button,
-                                *mainhand == Some(STARTER_BOW),
-                                rogue_weapons.then_some(Message::Tool((Some(STARTER_BOW), None))),
-                                imgs.bow,
-                                "common-weapons-bow",
-                            )
-                            .into(),
+                        ]),
+                        ClassKind::Mage => Column::with_children(vec![
                             icon_button_tooltip_opt(
                                 staff_button,
-                                *mainhand == Some(STARTER_STAFF)
-                                    || *mainhand == Some(STARTER_SCEPTRE),
-                                if mage_weapons {
-                                    Some(Message::Tool((Some(STARTER_STAFF), None)))
-                                } else if cleric_weapons {
-                                    Some(Message::Tool((Some(STARTER_SCEPTRE), None)))
-                                } else {
-                                    None
-                                },
-                                if cleric_weapons {
-                                    imgs.sceptre
-                                } else {
-                                    imgs.staff
-                                },
-                                if cleric_weapons {
-                                    "common-weapons-sceptre"
-                                } else {
-                                    "common-weapons-staff"
-                                },
+                                *mainhand == Some(STARTER_STAFF),
+                                Some(Message::Tool((Some(STARTER_STAFF), None))),
+                                imgs.staff,
+                                "common-weapons-staff",
                             )
                             .into(),
-                        ])
-                        .spacing(1)
-                        .into(),
-                    ])
+                        ]),
+                        ClassKind::Cleric => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                staff_button,
+                                *mainhand == Some(STARTER_SCEPTRE),
+                                Some(Message::Tool((Some(STARTER_SCEPTRE), None))),
+                                imgs.sceptre,
+                                "common-weapons-sceptre",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Rogue => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    swords_button,
+                                    *mainhand == Some(STARTER_SWORDS),
+                                    Some(Message::Tool((
+                                        Some(STARTER_SWORDS),
+                                        Some(STARTER_SWORDS),
+                                    ))),
+                                    imgs.swords,
+                                    "common-weapons-shortswords",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    bow_button,
+                                    *mainhand == Some(STARTER_BOW),
+                                    Some(Message::Tool((Some(STARTER_BOW), None))),
+                                    imgs.bow,
+                                    "common-weapons-bow",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
+                            .into(),
+                        ]),
+                    }
                     .spacing(1);
 
                     (tool, species, body_type, class_section)
@@ -1556,17 +1611,51 @@ impl Controls {
                     tooltip::text(&tooltip_text, tooltip_style)
                 });
 
-                let left_column_content = vec![
-                    body_type.into(),
-                    class_section.into(),
-                    tool.into(),
-                    species.into(),
-                    slider_options.into(),
-                    hardcore_checkbox.into(),
-                    rand_character.into(),
-                ];
+                let left_column_content: Vec<Element<Message>> = if character_id.is_some() {
+                    // Edit mode keeps the single combined screen.
+                    vec![
+                        body_type.into(),
+                        class_section.into(),
+                        tool.into(),
+                        species.into(),
+                        slider_options.into(),
+                        hardcore_checkbox.into(),
+                        rand_character.into(),
+                    ]
+                } else {
+                    // Creation mode: the wizard renders one step at a time. The
+                    // title for the current step replaces the per-section titles.
+                    let step_title_key = match step {
+                        CreationStep::Body => "char_selection-step_body",
+                        CreationStep::Appearance => "char_selection-step_appearance",
+                        CreationStep::Class => "char_selection-step_class",
+                        CreationStep::Finish => "char_selection-step_finish",
+                    };
+                    let step_title: Element<Message> =
+                        Text::new(i18n.get_msg(step_title_key).into_owned())
+                            .size(fonts.cyri.scale(26))
+                            .into();
+                    match step {
+                        CreationStep::Body => vec![
+                            step_title,
+                            body_type.into(),
+                            species.into(),
+                            rand_character.into(),
+                        ],
+                        CreationStep::Appearance => {
+                            vec![step_title, slider_options.into(), rand_character.into()]
+                        },
+                        CreationStep::Class => {
+                            vec![step_title, class_section.into(), tool.into()]
+                        },
+                        CreationStep::Finish => vec![step_title, hardcore_checkbox.into()],
+                    }
+                };
 
-                let right_column_content = if character_id.is_none() {
+                // The start-zone map panel renders only on the Finish step (and
+                // never in edit mode).
+                let show_map = character_id.is_none() && step == CreationStep::Finish;
+                let right_column_content = if show_map {
                     let map_sz = Vec2::new(500, 500);
                     let map_img = Image::new(self.map_img)
                         .height(Length::Units(map_sz.x))
@@ -1742,7 +1831,9 @@ impl Controls {
                     // .max_width(360)
                     // .width(Length::Fill)
                     .height(Length::Fill);
-                    if character_id.is_none() {
+                    // Only the Finish step (in creation mode) shows the framed map
+                    // panel; everything else keeps the right column empty/bare.
+                    if show_map {
                         Column::with_children(vec![
                             Container::new(column)
                                 .style(style::container::Style::color(Rgba::from_translucent(
@@ -1868,6 +1959,24 @@ impl Controls {
                     create
                 };
 
+                // In creation mode the Crear button only appears on the final
+                // step; otherwise the wizard's "Next" advances the step. In edit
+                // mode the Confirm button is always shown.
+                let show_create = character_id.is_some() || step == CreationStep::Finish;
+                let create_cell: Element<Message> = if show_create {
+                    Container::new(create)
+                        .width(Length::Fill)
+                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
+                        .align_x(Align::End)
+                        .into()
+                } else {
+                    // Reserve the slot so the name input stays centred.
+                    Container::new(Space::new(Length::Fill, Length::Shrink))
+                        .width(Length::Fill)
+                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
+                        .into()
+                };
+
                 let bottom = Row::with_children(vec![
                     Container::new(back)
                         .width(Length::Fill)
@@ -1877,15 +1986,70 @@ impl Controls {
                         .width(Length::Fill)
                         .center_x()
                         .into(),
-                    Container::new(create)
-                        .width(Length::Fill)
-                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
-                        .align_x(Align::End)
-                        .into(),
+                    create_cell,
                 ])
                 .align_items(Align::End);
 
-                Column::with_children(vec![top.into(), bottom.into()])
+                // Wizard navigation bar (creation mode only).
+                let nav_bar: Option<Element<Message>> = if character_id.is_none() {
+                    let prev = neat_button(
+                        wizard_back_button,
+                        i18n.get_msg("char_selection-wizard_back").into_owned(),
+                        FILL_FRAC_ONE,
+                        button_style,
+                        // Disabled on the first step.
+                        (step != CreationStep::Body).then_some(Message::WizardBack),
+                    );
+                    let progress: Element<Message> = Text::new(
+                        i18n.get_msg_ctx("char_selection-wizard_step", &i18n::fluent_args! {
+                            "step" => step.index(),
+                        })
+                        .into_owned(),
+                    )
+                    .size(fonts.cyri.scale(20))
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .into();
+                    // The "Next" slot becomes empty on the final step (the Crear
+                    // button takes over in the bottom row).
+                    let next_cell: Element<Message> = if step == CreationStep::Finish {
+                        Space::new(Length::Fill, Length::Shrink).into()
+                    } else {
+                        neat_button(
+                            wizard_next_button,
+                            i18n.get_msg("char_selection-wizard_next").into_owned(),
+                            FILL_FRAC_ONE,
+                            button_style,
+                            Some(Message::WizardNext),
+                        )
+                    };
+                    Some(
+                        Row::with_children(vec![
+                            Container::new(prev).width(Length::Fill).center_x().into(),
+                            Container::new(progress)
+                                .width(Length::Fill)
+                                .center_x()
+                                .into(),
+                            Container::new(next_cell)
+                                .width(Length::Fill)
+                                .center_x()
+                                .into(),
+                        ])
+                        .height(Length::Units(28))
+                        .align_items(Align::Center)
+                        .padding(5)
+                        .into(),
+                    )
+                } else {
+                    None
+                };
+
+                let mut bottom_children: Vec<Element<Message>> = vec![top.into()];
+                if let Some(nav_bar) = nav_bar {
+                    bottom_children.push(nav_bar);
+                }
+                bottom_children.push(bottom.into());
+
+                Column::with_children(bottom_children)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(5)
@@ -2215,6 +2379,16 @@ impl Controls {
                             + 1)
                             % self.possible_starting_sites.len(),
                     );
+                }
+            },
+            Message::WizardNext => {
+                if let Mode::CreateOrEdit { step, .. } = &mut self.mode {
+                    *step = step.next();
+                }
+            },
+            Message::WizardBack => {
+                if let Mode::CreateOrEdit { step, .. } = &mut self.mode {
+                    *step = step.back();
                 }
             },
         }
