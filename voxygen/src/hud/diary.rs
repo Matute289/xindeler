@@ -2956,6 +2956,7 @@ fn unlock_skill_strings(group: SkillGroupKind) -> SkillStrings<'static> {
             SkillStrings::plain("hud-skill-unlck_sceptre_title", "hud-skill-unlck_sceptre")
         },
         SkillGroupKind::General
+        | SkillGroupKind::Class(_)
         | SkillGroupKind::Weapon(
             ToolKind::Dagger
             | ToolKind::Shield

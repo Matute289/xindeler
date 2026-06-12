@@ -69,7 +69,7 @@ pub struct CharacterPosition {
 }
 
 pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> String {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     let skill_group_string = match skill_group {
         General => "General",
         Weapon(ToolKind::Sword) => "Weapon Sword",
@@ -79,6 +79,16 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Weapon(ToolKind::Staff) => "Weapon Staff",
         Weapon(ToolKind::Sceptre) => "Weapon Sceptre",
         Weapon(ToolKind::Pick) => "Weapon Pick",
+        Class(ClassKind::Warrior) => "Class Warrior",
+        Class(ClassKind::Mage) => "Class Mage",
+        Class(ClassKind::Cleric) => "Class Cleric",
+        Class(ClassKind::Rogue) => "Class Rogue",
+        // Adventurer has no class tree; a Class(Adventurer) group reaching
+        // persistence is a bug, consistent with the unsupported-weapon arm.
+        Class(ClassKind::Adventurer) => panic!(
+            "Tried to add unsupported skill group to database: {:?}",
+            skill_group
+        ),
         Weapon(ToolKind::Dagger)
         | Weapon(ToolKind::Shield)
         | Weapon(ToolKind::Spear)
@@ -98,7 +108,7 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
 }
 
 pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::SkillGroupKind {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     match skill_group_string {
         "General" => General,
         "Weapon Sword" => Weapon(ToolKind::Sword),
@@ -108,6 +118,10 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Weapon Staff" => Weapon(ToolKind::Staff),
         "Weapon Sceptre" => Weapon(ToolKind::Sceptre),
         "Weapon Pick" => Weapon(ToolKind::Pick),
+        "Class Warrior" => Class(ClassKind::Warrior),
+        "Class Mage" => Class(ClassKind::Mage),
+        "Class Cleric" => Class(ClassKind::Cleric),
+        "Class Rogue" => Class(ClassKind::Rogue),
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
@@ -346,5 +360,31 @@ pub mod tests {
             "Default value should always load to ensure that changes to item properties is always \
              forward compatible with migration V50.",
         );
+    }
+
+    #[test]
+    fn skill_group_db_string_round_trips() {
+        use common::comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind};
+        let kinds = [
+            SkillGroupKind::General,
+            SkillGroupKind::Weapon(ToolKind::Sword),
+            SkillGroupKind::Weapon(ToolKind::Axe),
+            SkillGroupKind::Weapon(ToolKind::Hammer),
+            SkillGroupKind::Weapon(ToolKind::Bow),
+            SkillGroupKind::Weapon(ToolKind::Staff),
+            SkillGroupKind::Weapon(ToolKind::Sceptre),
+            SkillGroupKind::Weapon(ToolKind::Pick),
+            SkillGroupKind::Class(ClassKind::Warrior),
+            SkillGroupKind::Class(ClassKind::Mage),
+            SkillGroupKind::Class(ClassKind::Cleric),
+            SkillGroupKind::Class(ClassKind::Rogue),
+        ];
+        for kind in kinds {
+            assert_eq!(
+                super::db_string_to_skill_group(&super::skill_group_to_db_string(kind)),
+                kind,
+                "round trip failed for {kind:?}"
+            );
+        }
     }
 }

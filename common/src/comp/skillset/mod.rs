@@ -1,6 +1,6 @@
 use crate::{
     assets::{AssetExt, Ron},
-    comp::{item::tool::ToolKind, skills::Skill},
+    comp::{class::ClassKind, item::tool::ToolKind, skills::Skill},
 };
 use core::borrow::{Borrow, BorrowMut};
 use hashbrown::HashMap;
@@ -108,6 +108,7 @@ lazy_static! {
 pub enum SkillGroupKind {
     General,
     Weapon(ToolKind),
+    Class(ClassKind),
 }
 
 impl SkillGroupKind {
@@ -117,7 +118,8 @@ impl SkillGroupKind {
     pub fn skill_point_cost(self, level: u16) -> u32 {
         use std::f32::consts::E;
         match self {
-            Self::Weapon(ToolKind::Sword | ToolKind::Axe | ToolKind::Hammer | ToolKind::Bow) => {
+            Self::Weapon(ToolKind::Sword | ToolKind::Axe | ToolKind::Hammer | ToolKind::Bow)
+            | Self::Class(_) => {
                 let level = level as f32;
                 ((400.0 * (level / (level + 20.0)).powi(2) + 5.0 * E.powf(0.025 * level))
                     .min(u32::MAX as f32) as u32)
