@@ -334,9 +334,9 @@ impl SkillSet {
             && self.skill_group_accessible_if_exists(skill_group_kind)
     }
 
-    ///  Unlocks a skill group for a player. It starts with 0 exp and 0 skill
-    ///  points.
-    fn unlock_skill_group(&mut self, skill_group_kind: SkillGroupKind) {
+    /// Unlocks a skill group directly. Used by character creation and
+    /// /set_class; players unlock weapon groups via Skill::UnlockGroup instead.
+    pub fn unlock_skill_group(&mut self, skill_group_kind: SkillGroupKind) {
         if !self.skill_groups.contains_key(&skill_group_kind) {
             self.skill_groups
                 .insert(skill_group_kind, SkillGroup::new(skill_group_kind));

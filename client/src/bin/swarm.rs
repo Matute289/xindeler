@@ -157,7 +157,8 @@ fn run_client(
             body(),
             false,
             None,
-            // Non-interactive bot; class is irrelevant, pick a valid playable one.
+            // Bots use Warrior; keep in sync with valid_starter_items(Warrior) — the
+            // sword/axe/hammer starter whitelist gates this weapon choice.
             comp::class::ClassKind::Warrior,
         );
 
