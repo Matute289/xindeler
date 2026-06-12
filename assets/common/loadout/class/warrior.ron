@@ -1,5 +1,10 @@
-// Keep in mind that this should be safe defaults for new character
+// Warrior starting outfit: partial bronze mail (chest/legs/belt/feet ≈ 25 of
+// the 45 full-set protection) — armored look without outclassing the other
+// starter kits (cloth=10, rawhide=18). Applied over loadout defaults.
 #![enable(implicit_some)]
 (
-    chest: Item("common.items.armor.misc.chest.worker_red_0"),
+    chest: Item("common.items.armor.mail.bronze.chest"),
+    legs: Item("common.items.armor.mail.bronze.pants"),
+    belt: Item("common.items.armor.mail.bronze.belt"),
+    feet: Item("common.items.armor.mail.bronze.foot"),
 )

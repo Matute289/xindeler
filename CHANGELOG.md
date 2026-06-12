@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Items can now require a minimum character level or race (and class, once classes land) to equip; gated items are grayed out in the bag with requirements shown in the tooltip.
 - Characters now choose a class (Warrior, Mage, Cleric or Rogue) at creation, with class starting kits and a class skill pool. Legacy characters load as Adventurer and pick once via /set_class.
 - Species now grant small racial passives (e.g. Orc +3% damage, Elf +3% move speed).
+- Character creation is now a 4-step wizard (sex/race, appearance, class, hardcore + start zone) with the name always visible; each class shows only its valid starter weapons.
+- Classes now start with themed outfits: bronze mail (Warrior), purple linen robes (Mage), blue vestments (Cleric) and rawhide leathers with a stealth bonus (Rogue).
 - Translators can now use fragment-based templates for modular weapons.
 - Airship captains can now be asked where they're currently heading, and where they're heading after reaching the current destination.
 - Courier, fetch, and messenger quests that can be started by talking to various civilized NPC's that can afford to pay you to get the job done.
