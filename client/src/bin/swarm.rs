@@ -122,8 +122,11 @@ fn run_client(
             &mut None,
             &username,
             "",
-            |_| false,
-            |_| {},
+            None,                      // locale
+            |_| false,                 // auth_trusted
+            &|_| {},                   // init_stage_update
+            |_| {},                    // add_foreign_systems
+            std::path::PathBuf::new(), // config_dir
             ClientType::Game,
         )) {
             Err(e) => tracing::warn!(?e, "Client {} disconnected", index),

@@ -1217,7 +1217,12 @@ impl AgentData<'_> {
 
             let attack_fn: common_dynlib::Symbol<
                 fn(&Self, &mut Agent, &mut Controller, &TargetData, &ReadData),
-            > = unsafe { lib.get(ATTACK_FN) }.unwrap_or_else(|e| {
+            > = // SAFETY: `ATTACK_FN` names the `attack_inner` symbol exported
+                // with `#[unsafe(export_name)]` by this same crate's
+                // `be-dyn-lib` build (`veloren-server-agent` dylib), compiled
+                // from this workspace by the hot-reload watcher; the symbol's
+                // type signature here matches that exported fn item exactly.
+                unsafe { lib.get(ATTACK_FN) }.unwrap_or_else(|e| {
                 panic!(
                     "Trying to use: {} but had error: {:?}",
                     CStr::from_bytes_with_nul(ATTACK_FN)

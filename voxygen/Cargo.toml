@@ -171,6 +171,10 @@ rayon = { workspace = true }
 harness = false
 name = "meshing_benchmark"
 
+[[bench]]
+harness = false
+name = "light_benchmark"
+
 [[bin]]
 name = "img_export"
 required-features = []

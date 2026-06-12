@@ -33,7 +33,9 @@ pub const SUNLIGHT: u8 = 24;
 pub const SUNLIGHT_INV: f32 = 1.0 / SUNLIGHT as f32;
 pub const MAX_LIGHT_DIST: i32 = SUNLIGHT as i32;
 
-fn calc_light<
+/// Public for criterion benches (`voxygen/benches/light_benchmark.rs`); not
+/// intended as API — call through `generate_mesh`.
+pub fn calc_light<
     V: RectRasterableVol<Vox = Block> + ReadVol + Debug,
     L: Iterator<Item = (Vec3<i32>, u8)>,
 >(
@@ -53,161 +55,172 @@ fn calc_light<
         max: bounds.max + Vec3::new(SUNLIGHT as i32, SUNLIGHT as i32, 1),
     };
 
-    let mut vol_cached = vol.cached();
-
-    let mut light_map = vec![UNKNOWN; outer.size().product() as usize];
-    let lm_idx = {
-        let (w, h, _) = outer.clone().size().into_tuple();
-        move |x, y, z| (w * h * z + h * x + y) as usize
-    };
-    // Light propagation queue
-    let mut prop_que = lit_blocks
-        .map(|(pos, light)| {
-            let rpos = pos - outer.min;
-            light_map[lm_idx(rpos.x, rpos.y, rpos.z)] = light.min(SUNLIGHT); // Brightest light
-            (rpos.x as u8, rpos.y as u8, rpos.z as u16)
-        })
-        .collect::<VecDeque<_>>();
-    // Start sun rays
-    if is_sunlight {
-        for x in 0..outer.size().w {
-            for y in 0..outer.size().h {
-                let mut light = SUNLIGHT as f32;
-                for z in (0..outer.size().d).rev() {
-                    let (min_light, attenuation) = vol_cached
-                        .get(outer.min + Vec3::new(x, y, z))
-                        .map_or((0, 0.0), |b| b.get_max_sunlight());
-
-                    if light > min_light as f32 {
-                        light = (light - attenuation).max(min_light as f32);
-                    }
-
-                    light_map[lm_idx(x, y, z)] = light.floor() as u8;
-
-                    if light <= 0.0 {
-                        break;
-                    } else {
-                        prop_que.push_back((x as u8, y as u8, z as u16));
-                    }
-                }
-            }
-        }
-    }
-
-    // Determines light propagation
-    let propagate = |src: u8,
-                     dest: &mut u8,
-                     pos: Vec3<i32>,
-                     prop_que: &mut VecDeque<_>,
-                     vol: &mut CachedVolGrid2d<V>| {
-        if *dest != OPAQUE {
-            if *dest == UNKNOWN {
-                if vol.get(outer.min + pos).ok().is_some_and(|b| b.is_fluid()) {
-                    *dest = src.saturating_sub(1);
-                    // Can't propagate further
-                    if *dest > 1 {
-                        prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
-                    }
-                } else {
-                    *dest = OPAQUE;
-                }
-            } else if *dest < src.saturating_sub(1) {
-                *dest = src - 1;
-                // Can't propagate further
-                if *dest > 1 {
-                    prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
-                }
-            }
-        }
-    };
-
-    // Propagate light
-    while let Some(pos) = prop_que.pop_front() {
-        let pos = Vec3::new(pos.0 as i32, pos.1 as i32, pos.2 as i32);
-        let light = light_map[lm_idx(pos.x, pos.y, pos.z)];
-
-        // Up
-        // Bounds checking
-        if pos.z + 1 < outer.size().d {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y, pos.z + 1)).unwrap(),
-                Vec3::new(pos.x, pos.y, pos.z + 1),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        // Down
-        if pos.z > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y, pos.z - 1)).unwrap(),
-                Vec3::new(pos.x, pos.y, pos.z - 1),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        // The XY directions
-        if pos.y + 1 < outer.size().h {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y + 1, pos.z)).unwrap(),
-                Vec3::new(pos.x, pos.y + 1, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.y > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y - 1, pos.z)).unwrap(),
-                Vec3::new(pos.x, pos.y - 1, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.x + 1 < outer.size().w {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x + 1, pos.y, pos.z)).unwrap(),
-                Vec3::new(pos.x + 1, pos.y, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.x > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x - 1, pos.y, pos.z)).unwrap(),
-                Vec3::new(pos.x - 1, pos.y, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-    }
-
+    // Hoisted: used in both the early-out closure and the full BFS path.
     let min_bounds = Aabb {
         min: bounds.min - 1,
         max: bounds.max + 1,
     };
-
-    // Minimise light map to reduce duplication. We can now discard light info
-    // for blocks outside of the chunk borders.
-    let mut light_map2 = vec![UNKNOWN; min_bounds.size().product() as usize];
     let lm_idx2 = {
         let (w, h, _) = min_bounds.clone().size().into_tuple();
         move |x, y, z| (w * h * z + h * x + y) as usize
     };
-    for z in 0..min_bounds.size().d {
-        for x in 0..min_bounds.size().w {
-            for y in 0..min_bounds.size().h {
-                let off = min_bounds.min - outer.min;
-                light_map2[lm_idx2(x, y, z)] = light_map[lm_idx(x + off.x, y + off.y, z + off.z)];
+
+    // Early-out: a non-sunlight pass with no seed blocks can never light
+    // anything — every cell would stay UNKNOWN, which the closure maps to
+    // 0.0, exactly what an empty light map yields via
+    // `.get(..) == None → default_light (== 0) → 0.0`. Bit-identical output;
+    // skips both full-volume allocations, the BFS, and the minimization copy.
+    let mut lit_blocks = lit_blocks.peekable();
+    let light_map2 = if !is_sunlight && default_light == 0 && lit_blocks.peek().is_none() {
+        Vec::new()
+    } else {
+        let mut vol_cached = vol.cached();
+
+        let mut light_map = vec![UNKNOWN; outer.size().product() as usize];
+        let lm_idx = {
+            let (w, h, _) = outer.clone().size().into_tuple();
+            move |x, y, z| (w * h * z + h * x + y) as usize
+        };
+        // Light propagation queue
+        let mut prop_que = lit_blocks
+            .map(|(pos, light)| {
+                let rpos = pos - outer.min;
+                light_map[lm_idx(rpos.x, rpos.y, rpos.z)] = light.min(SUNLIGHT); // Brightest light
+                (rpos.x as u8, rpos.y as u8, rpos.z as u16)
+            })
+            .collect::<VecDeque<_>>();
+        // Start sun rays
+        if is_sunlight {
+            for x in 0..outer.size().w {
+                for y in 0..outer.size().h {
+                    let mut light = SUNLIGHT as f32;
+                    for z in (0..outer.size().d).rev() {
+                        let (min_light, attenuation) = vol_cached
+                            .get(outer.min + Vec3::new(x, y, z))
+                            .map_or((0, 0.0), |b| b.get_max_sunlight());
+
+                        if light > min_light as f32 {
+                            light = (light - attenuation).max(min_light as f32);
+                        }
+
+                        light_map[lm_idx(x, y, z)] = light.floor() as u8;
+
+                        if light <= 0.0 {
+                            break;
+                        } else {
+                            prop_que.push_back((x as u8, y as u8, z as u16));
+                        }
+                    }
+                }
             }
         }
-    }
 
-    drop(light_map);
+        // Determines light propagation
+        let propagate = |src: u8,
+                         dest: &mut u8,
+                         pos: Vec3<i32>,
+                         prop_que: &mut VecDeque<_>,
+                         vol: &mut CachedVolGrid2d<V>| {
+            if *dest != OPAQUE {
+                if *dest == UNKNOWN {
+                    if vol.get(outer.min + pos).ok().is_some_and(|b| b.is_fluid()) {
+                        *dest = src.saturating_sub(1);
+                        // Can't propagate further
+                        if *dest > 1 {
+                            prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
+                        }
+                    } else {
+                        *dest = OPAQUE;
+                    }
+                } else if *dest < src.saturating_sub(1) {
+                    *dest = src - 1;
+                    // Can't propagate further
+                    if *dest > 1 {
+                        prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
+                    }
+                }
+            }
+        };
+
+        // Propagate light
+        while let Some(pos) = prop_que.pop_front() {
+            let pos = Vec3::new(pos.0 as i32, pos.1 as i32, pos.2 as i32);
+            let light = light_map[lm_idx(pos.x, pos.y, pos.z)];
+
+            // Up
+            // Bounds checking
+            if pos.z + 1 < outer.size().d {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y, pos.z + 1)).unwrap(),
+                    Vec3::new(pos.x, pos.y, pos.z + 1),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            // Down
+            if pos.z > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y, pos.z - 1)).unwrap(),
+                    Vec3::new(pos.x, pos.y, pos.z - 1),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            // The XY directions
+            if pos.y + 1 < outer.size().h {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y + 1, pos.z)).unwrap(),
+                    Vec3::new(pos.x, pos.y + 1, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.y > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y - 1, pos.z)).unwrap(),
+                    Vec3::new(pos.x, pos.y - 1, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.x + 1 < outer.size().w {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x + 1, pos.y, pos.z)).unwrap(),
+                    Vec3::new(pos.x + 1, pos.y, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.x > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x - 1, pos.y, pos.z)).unwrap(),
+                    Vec3::new(pos.x - 1, pos.y, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+        }
+
+        // Minimise light map to reduce duplication. We can now discard light info
+        // for blocks outside of the chunk borders.
+        let mut light_map2 = vec![UNKNOWN; min_bounds.size().product() as usize];
+        for z in 0..min_bounds.size().d {
+            for x in 0..min_bounds.size().w {
+                for y in 0..min_bounds.size().h {
+                    let off = min_bounds.min - outer.min;
+                    light_map2[lm_idx2(x, y, z)] =
+                        light_map[lm_idx(x + off.x, y + off.y, z + off.z)];
+                }
+            }
+        }
+        light_map2
+    };
 
     move |wpos| {
         let pos = wpos - min_bounds.min;
