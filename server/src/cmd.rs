@@ -5976,7 +5976,10 @@ fn build_buff(
             | BuffKind::Chilled
             | BuffKind::ArdentHunter
             | BuffKind::ArdentHunted
-            | BuffKind::SepticShot => {
+            | BuffKind::SepticShot
+            | BuffKind::Terrified
+            | BuffKind::Charmed
+            | BuffKind::Hollowtouched => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {

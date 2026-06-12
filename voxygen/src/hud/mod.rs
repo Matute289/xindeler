@@ -5654,6 +5654,10 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::OffBalance => imgs.debuff_offbalance_0,
         BuffKind::Chilled => imgs.debuff_chilled,
         BuffKind::ArdentHunted => imgs.debuff_ardenthunted,
+        // TODO(magic-v1 polish): dedicated icons
+        BuffKind::Terrified => imgs.debuff_rooted_0,
+        BuffKind::Charmed => imgs.debuff_amnesia_0,
+        BuffKind::Hollowtouched => imgs.debuff_cursed_0,
     }
 }
 
