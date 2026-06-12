@@ -41,6 +41,10 @@ fn class_kit_item(class: ClassKind) -> &'static str {
     }
 }
 
+// Upstream names the variants InvalidWeapon/InvalidBody; keeping the prefix
+// for the added InvalidClass minimizes the upstream-merge surface (renaming
+// would touch every call site). Three same-prefix variants trip the lint.
+#[expect(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum CreationError {
     InvalidWeapon,
