@@ -400,6 +400,13 @@ pub(super) fn persist_entity(state: &mut State, entity: EcsEntity) -> EcsEntity 
                         })
                         .collect();
 
+                    let character_class = state
+                        .ecs()
+                        .read_storage::<comp::CharacterClass>()
+                        .get(entity)
+                        .copied()
+                        .unwrap_or_default();
+
                     character_updater.add_pending_logout_update((
                         char_id,
                         skill_set.clone(),
@@ -408,6 +415,7 @@ pub(super) fn persist_entity(state: &mut State, entity: EcsEntity) -> EcsEntity 
                         waypoint,
                         active_abilities.clone(),
                         map_marker,
+                        character_class,
                     ));
                 }
             },

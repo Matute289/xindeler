@@ -1,0 +1,5 @@
+// Keep in mind that this should be safe defaults for new character
+#![enable(implicit_some)]
+(
+    chest: Item("common.items.armor.misc.chest.worker_red_0"),
+)

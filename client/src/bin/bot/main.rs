@@ -195,6 +195,9 @@ impl BotClient {
                 body.into(),
                 false,
                 None,
+                // Bots use Warrior; keep in sync with valid_starter_items(Warrior) — the
+                // sword/axe/hammer starter whitelist gates this weapon choice.
+                comp::class::ClassKind::Warrior,
             );
             client.load_character_list();
         }

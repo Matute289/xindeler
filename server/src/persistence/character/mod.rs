@@ -14,7 +14,8 @@ use crate::{
         character::conversions::{
             convert_active_abilities_from_database, convert_active_abilities_to_database,
             convert_body_from_database, convert_body_to_database_json,
-            convert_character_from_database, convert_hardcore_from_database,
+            convert_character_from_database, convert_class_from_database,
+            convert_class_to_database, convert_hardcore_from_database,
             convert_hardcore_to_database, convert_inventory_from_database_items,
             convert_items_to_database_items, convert_loadout_from_database_items,
             convert_recipe_book_from_database_items, convert_skill_groups_to_database,
@@ -146,6 +147,7 @@ pub fn load_character_data(
                 c.alias,
                 c.waypoint,
                 c.hardcore,
+                c.class,
                 b.variant,
                 b.body_data
         FROM    character c
@@ -163,12 +165,13 @@ pub fn load_character_data(
                 alias: row.get(1)?,
                 waypoint: row.get(2)?,
                 hardcore: row.get(3)?,
+                class: row.get(4)?,
             };
 
             let body_data = Body {
                 body_id: row.get(0)?,
-                variant: row.get(4)?,
-                body_data: row.get(5)?,
+                variant: row.get(5)?,
+                body_data: row.get(6)?,
             };
 
             Ok((body_data, character_data))
@@ -293,6 +296,7 @@ pub fn load_character_data(
         PersistedComponents {
             body,
             hardcore,
+            character_class: convert_class_from_database(&character_data.class),
             stats: convert_stats_from_database(character_data.alias, body),
             skill_set,
             inventory: convert_inventory_from_database_items(
@@ -328,7 +332,8 @@ pub fn load_character_list(player_uuid_: &str, connection: &Connection) -> Chara
             SELECT  character_id,
                     alias,
                     waypoint,
-                    hardcore
+                    hardcore,
+                    class
             FROM    character
             WHERE   player_uuid = ?1
             ORDER BY character_id",
@@ -342,6 +347,7 @@ pub fn load_character_list(player_uuid_: &str, connection: &Connection) -> Chara
                 player_uuid: player_uuid_.to_owned(),
                 waypoint: row.get(2)?,
                 hardcore: row.get(3)?,
+                class: row.get(4)?,
             })
         })?
         .map(|x| x.unwrap())
@@ -418,6 +424,7 @@ pub fn create_character(
     let PersistedComponents {
         body,
         hardcore,
+        character_class,
         stats: _,
         skill_set,
         inventory,
@@ -526,8 +533,9 @@ pub fn create_character(
                                player_uuid,
                                alias,
                                waypoint,
-                               hardcore)
-        VALUES (?1, ?2, ?3, ?4, ?5)",
+                               hardcore,
+                               class)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
 
     stmt.execute([
@@ -536,6 +544,7 @@ pub fn create_character(
         &character_alias,
         &convert_waypoint_to_database_json(waypoint, map_marker),
         &convert_hardcore_to_database(hardcore),
+        &convert_class_to_database(character_class),
     ])?;
     drop(stmt);
 
@@ -1069,6 +1078,7 @@ pub fn update(
     char_waypoint: Option<comp::Waypoint>,
     active_abilities: comp::ability::ActiveAbilities,
     map_marker: Option<comp::MapMarker>,
+    character_class: comp::CharacterClass,
     transaction: &mut Transaction,
 ) -> Result<(), PersistenceError> {
     // Run pet persistence
@@ -1209,12 +1219,17 @@ pub fn update(
     let mut stmt = transaction.prepare_cached(
         "
         UPDATE  character
-        SET     waypoint = ?1
-        WHERE   character_id = ?2
+        SET     waypoint = ?1,
+                class = ?2
+        WHERE   character_id = ?3
     ",
     )?;
 
-    let waypoint_count = stmt.execute([&db_waypoint as &dyn ToSql, &char_id.0])?;
+    let waypoint_count = stmt.execute([
+        &db_waypoint as &dyn ToSql,
+        &convert_class_to_database(character_class),
+        &char_id.0,
+    ])?;
 
     if waypoint_count != 1 {
         return Err(PersistenceError::OtherError(format!(

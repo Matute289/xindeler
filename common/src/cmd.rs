@@ -443,6 +443,7 @@ pub enum ServerChatCommand {
     Scale,
     ServerPhysics,
     SetBodyType,
+    SetClass,
     SetMotd,
     SetWaypoint,
     Ship,
@@ -914,6 +915,20 @@ impl ServerChatCommand {
                 Content::localized("command-server_physics-desc"),
                 Some(Moderator),
             ),
+            ServerChatCommand::SetClass => cmd(
+                vec![Enum(
+                    "class",
+                    vec![
+                        "warrior".to_owned(),
+                        "mage".to_owned(),
+                        "cleric".to_owned(),
+                        "rogue".to_owned(),
+                    ],
+                    Required,
+                )],
+                Content::localized("command-set_class-desc"),
+                None,
+            ),
             ServerChatCommand::SetMotd => cmd(
                 vec![Any("locale", Optional), Message(Optional)],
                 Content::localized("command-set_motd-desc"),
@@ -1229,6 +1244,7 @@ impl ServerChatCommand {
             ServerChatCommand::Safezone => "safezone",
             ServerChatCommand::Say => "say",
             ServerChatCommand::ServerPhysics => "server_physics",
+            ServerChatCommand::SetClass => "set_class",
             ServerChatCommand::SetMotd => "set_motd",
             ServerChatCommand::SetBodyType => "set_body_type",
             ServerChatCommand::Ship => "ship",

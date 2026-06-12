@@ -80,13 +80,14 @@ pub fn handle_loaded_character_data(server: &mut Server, ev: UpdateCharacterData
     let loaded_components = PersistedComponents {
         body: ev.components.0,
         hardcore: ev.components.1,
-        stats: ev.components.2,
-        skill_set: ev.components.3,
-        inventory: ev.components.4,
-        waypoint: ev.components.5,
-        pets: ev.components.6,
-        active_abilities: ev.components.7,
-        map_marker: ev.components.8,
+        character_class: ev.components.2,
+        stats: ev.components.3,
+        skill_set: ev.components.4,
+        inventory: ev.components.5,
+        waypoint: ev.components.6,
+        pets: ev.components.7,
+        active_abilities: ev.components.8,
+        map_marker: ev.components.9,
     };
     if let Some(marker) = loaded_components.map_marker {
         server.notify_client(

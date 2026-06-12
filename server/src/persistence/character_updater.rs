@@ -29,6 +29,7 @@ pub type CharacterUpdateData = (
     Option<comp::Waypoint>,
     comp::ability::ActiveAbilities,
     Option<comp::MapMarker>,
+    comp::CharacterClass,
 );
 
 pub type PetPersistenceData = (comp::Pet, comp::Body, comp::Stats);
@@ -431,6 +432,7 @@ fn execute_batch_update(
             waypoint,
             active_abilities,
             map_marker,
+            character_class,
         )) => super::character::update(
             character_id,
             stats,
@@ -439,6 +441,7 @@ fn execute_batch_update(
             waypoint,
             active_abilities,
             map_marker,
+            character_class,
             &mut transaction,
         ),
         DatabaseActionKind::DeleteCharacter {

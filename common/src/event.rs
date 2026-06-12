@@ -232,6 +232,7 @@ pub struct UpdateCharacterDataEvent {
     pub components: (
         comp::Body,
         Option<comp::Hardcore>,
+        comp::CharacterClass,
         comp::Stats,
         comp::SkillSet,
         comp::Inventory,

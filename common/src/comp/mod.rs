@@ -9,6 +9,7 @@ pub mod body;
 pub mod buff;
 pub mod character_state;
 pub mod chat;
+pub mod class;
 pub mod combo;
 pub mod compass;
 pub mod controller;
@@ -68,6 +69,7 @@ pub use self::{
     chat::{
         ChatMode, ChatMsg, ChatType, Faction, SpeechBubble, SpeechBubbleType, UnresolvedChatMsg,
     },
+    class::{CharacterClass, ClassKind},
     combo::Combo,
     controller::{
         ControlAction, ControlEvent, Controller, ControllerInputs, GroupManip, InputAttr,

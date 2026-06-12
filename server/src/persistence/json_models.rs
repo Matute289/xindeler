@@ -69,7 +69,7 @@ pub struct CharacterPosition {
 }
 
 pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> String {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     let skill_group_string = match skill_group {
         General => "General",
         Weapon(ToolKind::Sword) => "Weapon Sword",
@@ -79,6 +79,16 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Weapon(ToolKind::Staff) => "Weapon Staff",
         Weapon(ToolKind::Sceptre) => "Weapon Sceptre",
         Weapon(ToolKind::Pick) => "Weapon Pick",
+        Class(ClassKind::Warrior) => "Class Warrior",
+        Class(ClassKind::Mage) => "Class Mage",
+        Class(ClassKind::Cleric) => "Class Cleric",
+        Class(ClassKind::Rogue) => "Class Rogue",
+        // Adventurer has no class tree; a Class(Adventurer) group reaching
+        // persistence is a bug, consistent with the unsupported-weapon arm.
+        Class(ClassKind::Adventurer) => panic!(
+            "Tried to add unsupported skill group to database: {:?}",
+            skill_group
+        ),
         Weapon(ToolKind::Dagger)
         | Weapon(ToolKind::Shield)
         | Weapon(ToolKind::Spear)
@@ -98,7 +108,7 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
 }
 
 pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::SkillGroupKind {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     match skill_group_string {
         "General" => General,
         "Weapon Sword" => Weapon(ToolKind::Sword),
@@ -108,12 +118,40 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Weapon Staff" => Weapon(ToolKind::Staff),
         "Weapon Sceptre" => Weapon(ToolKind::Sceptre),
         "Weapon Pick" => Weapon(ToolKind::Pick),
+        "Class Warrior" => Class(ClassKind::Warrior),
+        "Class Mage" => Class(ClassKind::Mage),
+        "Class Cleric" => Class(ClassKind::Cleric),
+        "Class Rogue" => Class(ClassKind::Rogue),
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
             skill_group_string
         ),
     }
+}
+
+pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
+    use comp::class::ClassKind::*;
+    match class {
+        Adventurer => "Adventurer",
+        Warrior => "Warrior",
+        Mage => "Mage",
+        Cleric => "Cleric",
+        Rogue => "Rogue",
+    }
+    .to_string()
+}
+
+/// Unlike the skill-group converter this never panics: unknown strings fall
+/// back to Adventurer with a warning so a DB downgrade never bricks a save.
+pub fn db_string_to_class(class_string: &str) -> comp::class::ClassKind {
+    comp::class::ClassKind::ALL
+        .into_iter()
+        .find(|class| class_to_db_string(*class) == class_string)
+        .unwrap_or_else(|| {
+            tracing::warn!(unknown = ?class_string, "Unknown class in database, defaulting to Adventurer");
+            comp::class::ClassKind::Adventurer
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -345,6 +383,48 @@ pub mod tests {
         let _ = serde_json::de::from_str::<DatabaseItemProperties>(DEFAULT_ITEM_PROPERTIES).expect(
             "Default value should always load to ensure that changes to item properties is always \
              forward compatible with migration V50.",
+        );
+    }
+
+    #[test]
+    fn skill_group_db_string_round_trips() {
+        use common::comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind};
+        let kinds = [
+            SkillGroupKind::General,
+            SkillGroupKind::Weapon(ToolKind::Sword),
+            SkillGroupKind::Weapon(ToolKind::Axe),
+            SkillGroupKind::Weapon(ToolKind::Hammer),
+            SkillGroupKind::Weapon(ToolKind::Bow),
+            SkillGroupKind::Weapon(ToolKind::Staff),
+            SkillGroupKind::Weapon(ToolKind::Sceptre),
+            SkillGroupKind::Weapon(ToolKind::Pick),
+            SkillGroupKind::Class(ClassKind::Warrior),
+            SkillGroupKind::Class(ClassKind::Mage),
+            SkillGroupKind::Class(ClassKind::Cleric),
+            SkillGroupKind::Class(ClassKind::Rogue),
+        ];
+        for kind in kinds {
+            assert_eq!(
+                super::db_string_to_skill_group(&super::skill_group_to_db_string(kind)),
+                kind,
+                "round trip failed for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn class_db_string_round_trips_and_tolerates_unknown() {
+        use common::comp::class::ClassKind;
+        for class in ClassKind::ALL {
+            assert_eq!(
+                super::db_string_to_class(&super::class_to_db_string(class)),
+                class
+            );
+        }
+        // A downgrade/foreign DB must never brick the server (spec §4)
+        assert_eq!(
+            super::db_string_to_class("Necromancer"),
+            ClassKind::Adventurer
         );
     }
 }

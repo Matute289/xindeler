@@ -28,6 +28,7 @@ command-buff-desc = Cast a buff on player
 command-build-desc = Toggles build mode on and off
 command-ban-desc = Ban a player with a given username, for a given duration (if provided). Pass true for overwrite to alter an existing ban.
 command-ban-ip-desc = Ban a player with a given username, for a given duration (if provided). Unlike the normal ban this also additionally bans the IP-address associated with this user. Pass true for overwrite to alter an existing ban.
+command-set_class-desc = One-time class pick for legacy characters: warrior, mage, cleric or rogue
 command-battlemode-desc = Set your battle mode to:
   + pvp (player vs player)
   + pve (player vs environment).

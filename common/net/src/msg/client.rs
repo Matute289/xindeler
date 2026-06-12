@@ -82,6 +82,7 @@ pub enum ClientGeneral {
         // Character will be deleted upon death if true
         hardcore: bool,
         start_site: Option<SiteId>,
+        class: comp::class::ClassKind,
     },
     DeleteCharacter(CharacterId),
     EditCharacter {

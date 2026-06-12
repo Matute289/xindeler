@@ -1098,6 +1098,7 @@ impl Server {
                                     let PersistedComponents {
                                         body,
                                         hardcore,
+                                        character_class,
                                         stats,
                                         skill_set,
                                         inventory,
@@ -1109,6 +1110,7 @@ impl Server {
                                     let character_data = (
                                         body,
                                         hardcore,
+                                        character_class,
                                         stats,
                                         skill_set,
                                         inventory,

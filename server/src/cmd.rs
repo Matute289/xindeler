@@ -209,6 +209,7 @@ fn do_command(
         ServerChatCommand::Say => handle_say,
         ServerChatCommand::ServerPhysics => handle_server_physics,
         ServerChatCommand::SetBodyType => handle_set_body_type,
+        ServerChatCommand::SetClass => handle_set_class,
         ServerChatCommand::SetMotd => handle_set_motd,
         ServerChatCommand::SetWaypoint => handle_set_waypoint,
         ServerChatCommand::Ship => handle_spawn_ship,
@@ -5627,6 +5628,55 @@ fn handle_battlemode_force(
                 "battlemode",
                 format!("{mode:?}"),
             )]),
+        ),
+    );
+    Ok(())
+}
+
+fn handle_set_class(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::class::{CharacterClass, ClassKind};
+
+    let class_arg = parse_cmd_args!(args, String).ok_or_else(|| action.help_content())?;
+    let class = ClassKind::from_keyword(class_arg.to_lowercase().as_str()).ok_or_else(|| {
+        Content::Plain(format!(
+            "Unknown class '{class_arg}'. Options: warrior, mage, cleric, rogue."
+        ))
+    })?;
+
+    {
+        let mut classes = server.state.ecs_mut().write_storage::<CharacterClass>();
+        let current = classes.get(target).copied().unwrap_or_default();
+        if current.0 != ClassKind::Adventurer {
+            return Err(Content::Plain(format!(
+                "Class is already {:?}; /set_class is a one-time pick for legacy characters.",
+                current.0
+            )));
+        }
+        let _ = classes.insert(target, CharacterClass(class));
+    }
+
+    // Unlock the class skill tree on the live skill set; both the component
+    // and the skill group persist via the autosave path.
+    if let Some(mut skill_set) = server
+        .state
+        .ecs_mut()
+        .write_storage::<comp::SkillSet>()
+        .get_mut(target)
+    {
+        skill_set.unlock_skill_group(common::comp::skillset::SkillGroupKind::Class(class));
+    }
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!("Class set to {class:?}.")),
         ),
     );
     Ok(())
