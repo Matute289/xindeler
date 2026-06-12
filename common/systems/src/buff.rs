@@ -148,6 +148,9 @@ impl<'a> System<'a> for Sys {
         }
 
         let mut rng = rand::rng();
+        // Racial passives manifest: one cache access per system run (hot-reloads
+        // between runs); per-entity asset-cache hits are banned in tick paths.
+        let racial_traits = common::comp::class::racial_traits_manifest();
         let buff_join = (
             &read_data.entities,
             &read_data.buffs,
@@ -511,6 +514,17 @@ impl<'a> System<'a> for Sys {
 
             // Call to reset stats to base values
             stat.reset_temp_modifiers();
+
+            // Racial passives re-apply each tick right after the reset so
+            // they stack with buffs and need no persistence (spec §6).
+            if let Body::Humanoid(humanoid_body) = *body {
+                racial_traits
+                    .0
+                    .get(&humanoid_body.species)
+                    .copied()
+                    .unwrap_or_default()
+                    .apply(&mut stat);
+            }
 
             let mut body_override = None;
 
