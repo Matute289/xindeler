@@ -8,7 +8,8 @@ use crate::{
             item::{
                 ItemDefinitionIdOwned, ItemKind, Tool,
                 tool::{
-                    AbilityContext, AbilityItem, AbilityKind, ContextualIndex, Stats, ToolKind,
+                    AbilityContext, AbilityItem, AbilityKind, AbilityMap, AbilitySpec,
+                    ContextualIndex, Stats, ToolKind,
                 },
             },
             slot::EquipSlot,
@@ -104,6 +105,20 @@ impl AbilityCooldowns {
 }
 
 impl Component for AbilityCooldowns {
+    type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
+}
+
+/// Ability-set keys (manifest `Custom(...)` entries) granted to a character
+/// independent of equipment: racial innates and class signature abilities
+/// (magic-abilities spec §3 Path B). Indexed by `AuxiliaryAbility::Innate(i)`.
+/// Each key's set `primary` is the granted ability; the key itself doubles as
+/// the frontend ability id (icon/i18n key), like Contextualized pseudo_ids.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AbilityPool {
+    pub abilities: Vec<String>,
+}
+
+impl Component for AbilityPool {
     type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
 }
 
@@ -228,6 +243,8 @@ impl ActiveAbilities {
         char_state: Option<&CharacterState>,
         context: &AbilityContext,
         stats: Option<&comp::Stats>,
+        ability_pool: Option<&AbilityPool>,
+        ability_map: &AbilityMap,
         // bool is from_offhand
     ) -> Option<(CharacterAbility, bool, SpecifiedAbility)> {
         let ability = self.get_ability(input, inv, Some(skill_set), stats);
@@ -304,6 +321,20 @@ impl ActiveAbilities {
             Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand, false),
             Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand, true),
             Ability::GliderAux(_) => inst_ability(EquipSlot::Glider, false),
+            Ability::InnateAux(index) => ability_pool
+                .and_then(|pool| pool.abilities.get(index))
+                .and_then(|key| {
+                    ability_map
+                        .get_ability_set(&AbilitySpec::Custom(key.clone()))
+                        .and_then(|set| set.primary(Some(skill_set), context))
+                        .map(|(item, i)| {
+                            (
+                                item.ability.clone().adjusted_by_skills(skill_set, None),
+                                false,
+                                spec_ability(i),
+                            )
+                        })
+                }),
             Ability::Empty => None,
             Ability::SpeciesMovement => matches!(body, Some(Body::Humanoid(_)))
                 .then(|| CharacterAbility::default_roll(char_state))
@@ -345,6 +376,7 @@ impl ActiveAbilities {
     pub fn all_available_abilities(
         inv: Option<&Inventory>,
         skill_set: Option<&SkillSet>,
+        ability_pool: Option<&AbilityPool>,
     ) -> Vec<AuxiliaryAbility> {
         let mut ability_buff = vec![];
         // Check if uses combo of two "equal" weapons
@@ -377,6 +409,13 @@ impl ActiveAbilities {
         Self::iter_available_abilities_on(inv, skill_set, EquipSlot::Glider)
             .map(AuxiliaryAbility::Glider)
             .for_each(|a| ability_buff.push(a));
+
+        // Push innate (class/racial) abilities
+        if let Some(pool) = ability_pool {
+            (0..pool.abilities.len())
+                .map(AuxiliaryAbility::Innate)
+                .for_each(|a| ability_buff.push(a));
+        }
 
         ability_buff
     }
@@ -421,6 +460,7 @@ pub enum Ability {
     MainWeaponAux(usize),
     OffWeaponAux(usize),
     GliderAux(usize),
+    InnateAux(usize),
     Empty,
     /* For future use
      * ArmorAbility(usize), */
@@ -437,9 +477,10 @@ impl Ability {
             Self::ToolPrimary => AbilityInput::Primary,
             Self::ToolSecondary => AbilityInput::Secondary,
             Self::SpeciesMovement => AbilityInput::Movement,
-            Self::GliderAux(idx) | Self::OffWeaponAux(idx) | Self::MainWeaponAux(idx) => {
-                AbilityInput::Auxiliary(*idx)
-            },
+            Self::GliderAux(idx)
+            | Self::OffWeaponAux(idx)
+            | Self::MainWeaponAux(idx)
+            | Self::InnateAux(idx) => AbilityInput::Auxiliary(*idx),
             Self::Empty => return None,
         };
 
@@ -451,6 +492,7 @@ impl Ability {
         char_state: Option<&CharacterState>,
         inv: Option<&'a Inventory>,
         skill_set: Option<&'a SkillSet>,
+        ability_pool: Option<&'a AbilityPool>,
         context: &AbilityContext,
     ) -> Option<&'a str> {
         let ability_set = |equip_slot| {
@@ -507,6 +549,9 @@ impl Ability {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
             AbilitySource::Weapons => match self {
@@ -521,6 +566,9 @@ impl Ability {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
         }
@@ -534,7 +582,7 @@ impl Ability {
             | Ability::GliderAux(_)
             | Ability::OffWeaponAux(_)
             | Ability::ToolGuard => true,
-            Ability::SpeciesMovement | Ability::Empty => false,
+            Ability::InnateAux(_) | Ability::SpeciesMovement | Ability::Empty => false,
         }
     }
 }
@@ -565,6 +613,7 @@ impl SpecifiedAbility {
         self,
         char_state: Option<&CharacterState>,
         inv: Option<&'a Inventory>,
+        ability_pool: Option<&'a AbilityPool>,
     ) -> Option<&'a str> {
         let ability_set = |equip_slot| {
             inv.and_then(|inv| inv.equipped(equip_slot))
@@ -609,6 +658,9 @@ impl SpecifiedAbility {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
             AbilitySource::Weapons => match self.ability {
@@ -620,6 +672,9 @@ impl SpecifiedAbility {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
         }
@@ -676,6 +731,7 @@ pub enum AuxiliaryAbility {
     MainWeapon(usize),
     OffWeapon(usize),
     Glider(usize),
+    Innate(usize),
     Empty,
 }
 
@@ -685,6 +741,7 @@ impl From<AuxiliaryAbility> for Ability {
             AuxiliaryAbility::MainWeapon(i) => Ability::MainWeaponAux(i),
             AuxiliaryAbility::OffWeapon(i) => Ability::OffWeaponAux(i),
             AuxiliaryAbility::Glider(i) => Ability::GliderAux(i),
+            AuxiliaryAbility::Innate(i) => Ability::InnateAux(i),
             AuxiliaryAbility::Empty => Ability::Empty,
         }
     }

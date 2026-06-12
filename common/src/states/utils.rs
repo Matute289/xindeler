@@ -1459,6 +1459,8 @@ fn handle_ability(
                     Some(data.character),
                     &context,
                     Some(data.stats),
+                    data.ability_pool,
+                    data.ability_map,
                 )
             })
             .map(|(mut a, f, s)| {
@@ -1500,8 +1502,11 @@ fn handle_ability(
                 update.character = character_state;
 
                 if let Some(cooldown_secs) = ability_meta.cooldown
-                    && let Some(id) =
-                        spec_ability_copy.ability_id(Some(data.character), data.inventory)
+                    && let Some(id) = spec_ability_copy.ability_id(
+                        Some(data.character),
+                        data.inventory,
+                        data.ability_pool,
+                    )
                 {
                     output_events.emit_server(SetAbilityCooldownEvent {
                         entity: data.entity,
@@ -1577,7 +1582,7 @@ fn cooldown_ready(
 ) -> bool {
     ability.ability_meta().cooldown.is_none_or(|_| {
         (*spec_ability)
-            .ability_id(Some(data.character), data.inventory)
+            .ability_id(Some(data.character), data.inventory, data.ability_pool)
             .is_none_or(|id| {
                 data.ability_cooldowns
                     .is_none_or(|cds| cds.is_ready(id, *data.time))

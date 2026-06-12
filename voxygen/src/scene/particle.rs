@@ -1170,10 +1170,10 @@ impl ParticleMgr {
         state: &CharacterState,
         inventory: Option<&Inventory>,
     ) {
-        let Some(ability_id) = state
-            .ability_info()
-            .and_then(|info| info.ability.map(|a| a.ability_id(Some(state), inventory)))
-        else {
+        let Some(ability_id) = state.ability_info().and_then(|info| {
+            info.ability
+                .map(|a| a.ability_id(Some(state), inventory, None))
+        }) else {
             return;
         };
 

@@ -2690,6 +2690,8 @@ impl AgentData<'_> {
                     Some(self.char_state),
                     &context,
                     self.stats,
+                    None,
+                    &read_data.ability_map,
                 )
                 .map_or(Default::default(), |a| a.0)
         };

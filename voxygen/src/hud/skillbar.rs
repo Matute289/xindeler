@@ -27,13 +27,13 @@ use i18n::Localization;
 use client::{self, Client};
 use common::{
     comp::{
-        self, Ability, ActiveAbilities, Body, CharacterState, Combo, Energy, Hardcore, Health,
-        Inventory, Poise, PoiseState, SkillSet, Stats,
+        self, Ability, AbilityPool, ActiveAbilities, Body, CharacterState, Combo, Energy, Hardcore,
+        Health, Inventory, Poise, PoiseState, SkillSet, Stats,
         ability::{AbilityInput, Stance},
         is_downed,
         item::{
             ItemDesc, ItemI18n, MaterialStatManifest,
-            tool::{AbilityContext, ToolKind},
+            tool::{AbilityContext, AbilityMap, ToolKind},
         },
         skillset::SkillGroupKind,
     },
@@ -280,6 +280,7 @@ pub struct Skillbar<'a> {
     poise: &'a Poise,
     skillset: &'a SkillSet,
     active_abilities: Option<&'a ActiveAbilities>,
+    ability_pool: Option<&'a AbilityPool>,
     body: &'a Body,
     hotbar: &'a hotbar::State,
     tooltip_manager: &'a mut TooltipManager,
@@ -291,6 +292,7 @@ pub struct Skillbar<'a> {
     #[conrod(common_builder)]
     common: widget::CommonBuilder,
     msm: &'a MaterialStatManifest,
+    ability_map: &'a AbilityMap,
     rbm: &'a RecipeBookManifest,
     combo_floater: Option<ComboFloater>,
     context: &'a AbilityContext,
@@ -316,6 +318,7 @@ impl<'a> Skillbar<'a> {
         poise: &'a Poise,
         skillset: &'a SkillSet,
         active_abilities: Option<&'a ActiveAbilities>,
+        ability_pool: Option<&'a AbilityPool>,
         body: &'a Body,
         pulse: f32,
         hotbar: &'a hotbar::State,
@@ -325,6 +328,7 @@ impl<'a> Skillbar<'a> {
         localized_strings: &'a Localization,
         item_i18n: &'a ItemI18n,
         msm: &'a MaterialStatManifest,
+        ability_map: &'a AbilityMap,
         rbm: &'a RecipeBookManifest,
         combo_floater: Option<ComboFloater>,
         context: &'a AbilityContext,
@@ -347,6 +351,7 @@ impl<'a> Skillbar<'a> {
             poise,
             skillset,
             active_abilities,
+            ability_pool,
             body,
             common: widget::CommonBuilder::default(),
             pulse,
@@ -357,6 +362,7 @@ impl<'a> Skillbar<'a> {
             localized_strings,
             item_i18n,
             msm,
+            ability_map,
             rbm,
             combo_floater,
             context,
@@ -1012,12 +1018,14 @@ impl<'a> Skillbar<'a> {
             self.energy,
             self.skillset,
             self.active_abilities,
+            self.ability_pool,
             self.body,
             self.context,
             self.combo,
             self.char_state,
             self.stance,
             self.stats,
+            self.ability_map,
         );
 
         let image_source = (self.item_imgs, self.imgs);
@@ -1102,7 +1110,7 @@ impl<'a> Skillbar<'a> {
 
         // Helper
         let tooltip_text = |slot| {
-            let (hotbar, inventory, _, skill_set, active_abilities, _, contexts, ..) =
+            let (hotbar, inventory, _, skill_set, active_abilities, ability_pool, _, contexts, ..) =
                 content_source;
             hotbar.get(slot).and_then(|content| match content {
                 hotbar::SlotContents::Inventory(i, _) => inventory.get_by_hash(i).map(|item| {
@@ -1120,6 +1128,7 @@ impl<'a> Skillbar<'a> {
                                     self.char_state,
                                     Some(inventory),
                                     Some(skill_set),
+                                    ability_pool,
                                     contexts,
                                 )
                             })
@@ -1264,6 +1273,7 @@ impl<'a> Skillbar<'a> {
                 self.char_state,
                 Some(self.inventory),
                 Some(self.skillset),
+                self.ability_pool,
                 self.context,
             )
         });
@@ -1295,6 +1305,7 @@ impl<'a> Skillbar<'a> {
                 self.char_state,
                 Some(self.inventory),
                 Some(self.skillset),
+                self.ability_pool,
                 self.context,
             )
         });
@@ -1319,6 +1330,8 @@ impl<'a> Skillbar<'a> {
                         self.char_state,
                         self.context,
                         self.stats,
+                        self.ability_pool,
+                        self.ability_map,
                     )
                 })
                 .is_some_and(|(a, _, _)| {

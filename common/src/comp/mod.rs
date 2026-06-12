@@ -44,7 +44,7 @@ pub mod visual;
 // Reexports
 pub use self::{
     ability::{
-        Ability, AbilityCooldowns, AbilityInput, ActiveAbilities, BASE_ABILITY_LIMIT,
+        Ability, AbilityCooldowns, AbilityInput, AbilityPool, ActiveAbilities, BASE_ABILITY_LIMIT,
         CharacterAbility, CharacterAbilityType, SpellSchool, Stance,
     },
     admin::{Admin, AdminRole},
