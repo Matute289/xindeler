@@ -1132,14 +1132,14 @@ fn change_chat_mode(
                 | ServerChatCommand::Say
                 | ServerChatCommand::Faction
                 | ServerChatCommand::Region
-                | ServerChatCommand::World => {
-                    // Only remove the command if there is no message
-                    if args.is_empty() {
-                        // We found a match to a command so clear the input
-                        // message
-                        state.update(|s| s.input.message.clear());
-                        events.push(Event::SendCommand(name.to_owned(), args))
-                    }
+                // Only remove the command if there is no message
+                | ServerChatCommand::World
+                    if args.is_empty() =>
+                {
+                    // We found a match to a command so clear the input
+                    // message
+                    state.update(|s| s.input.message.clear());
+                    events.push(Event::SendCommand(name.to_owned(), args))
                 },
                 // TODO: Add support for Whispers (might need to adjust widget
                 // for this.)

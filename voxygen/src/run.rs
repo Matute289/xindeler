@@ -295,7 +295,7 @@ fn handle_main_events_cleared(
             if count.is_multiple_of(30) {
                 let dt = global_state.clock.dt();
                 let frame_ms = dt.as_millis() as u32;
-                let fps = if frame_ms > 0 { 1000 / frame_ms } else { 0 };
+                let fps = 1000u32.checked_div(frame_ms).unwrap_or(0);
                 common::telemetry!("perf", fps, frame_ms);
                 if frame_ms > 33 {
                     tracing::debug!(fps, frame_ms, "Low FPS frame");

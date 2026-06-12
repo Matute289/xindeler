@@ -3065,7 +3065,7 @@ impl Hud {
                         continue;
                     }
                     let timings_text =
-                        &format!("{:16}{:.3} ms", &format!("{label}:"), timing.2 * 1000.0,);
+                        &format!("{:16}{:.3} ms", format!("{label}:"), timing.2 * 1000.0,);
                     let timings_widget = Text::new(timings_text)
                         .color(TEXT_COLOR)
                         .down(V_PAD)

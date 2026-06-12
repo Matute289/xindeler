@@ -10,6 +10,9 @@
             "common.items.testing.test_boots",
         ): "common-items-testing-test_boots",
         Simple(
+            "common.items.testing.test_draugr_blade",
+        ): "common-items-testing-test_draugr_blade",
+        Simple(
             "common.items.npc_armor.pants.leather_blue",
         ): "common-items-npc_armor-pants-leather_blue",
         Simple(

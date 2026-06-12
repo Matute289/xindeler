@@ -210,9 +210,9 @@ impl Widget for Group<'_> {
                 .unwrap_or_else(|| format!("Npc<{}>", uid)),
         };
 
-        let open_invite = self.client.invite().and_then(|invite| {
-            // Don't show invite if it comes from a muted player
-            if self
+        // Don't show invite if it comes from a muted player
+        let open_invite = self.client.invite().filter(|invite| {
+            !self
                 .client
                 .player_list()
                 .get(&invite.0)
@@ -222,11 +222,6 @@ impl Widget for Group<'_> {
                         .mutelist
                         .contains_key(&player.uuid)
                 })
-            {
-                None
-            } else {
-                Some(invite)
-            }
         });
 
         let my_uid = self.client.uid();
@@ -853,7 +848,7 @@ impl Widget for Group<'_> {
                 .press_image(self.imgs.button_press)
                 .label(&format!(
                     "[{}] {}",
-                    &accept_key,
+                    accept_key,
                     self.localized_strings.get_msg("common-accept")
                 ))
                 .label_color(TEXT_COLOR)
@@ -878,7 +873,7 @@ impl Widget for Group<'_> {
                 .press_image(self.imgs.button_press)
                 .label(&format!(
                     "[{}] {}",
-                    &decline_key,
+                    decline_key,
                     self.localized_strings.get_msg("common-decline")
                 ))
                 .label_color(TEXT_COLOR)

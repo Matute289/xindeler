@@ -2,10 +2,11 @@ use super::img_ids;
 use common::{
     comp::{
         BuffData, BuffKind,
+        body::humanoid::Species,
         inventory::trade_pricing::TradePricing,
         item::{
             Effects, Item, ItemDefinitionId, ItemDesc, ItemI18n, ItemKind, MaterialKind,
-            MaterialStatManifest, Quality,
+            MaterialStatManifest, Quality, UnmetRequirement,
             armor::{Armor, ArmorKind, Protection},
             tool::{Hands, Tool, ToolKind},
         },
@@ -71,6 +72,70 @@ pub fn item_text<'a, I: ItemDesc + ?Sized>(
     let (title, desc) = item.i18n(i18n_spec);
 
     (i18n.get_content(&title), i18n.get_content(&desc))
+}
+
+/// Requirement lines for an item tooltip, split into (met, unmet) for the
+/// given viewer `(character_level, species)`. `viewer: None` (no SkillSet,
+/// e.g. spectators) renders everything as met.
+pub fn requirements_text(
+    item: &dyn ItemDesc,
+    viewer: Option<(u16, Option<Species>)>,
+    i18n: &Localization,
+) -> (Vec<String>, Vec<String>) {
+    let (mut met, mut unmet) = (Vec::new(), Vec::new());
+    let Some(requirements) = item.requirements() else {
+        return (met, unmet);
+    };
+    // Reuse the shared predicate so the tooltip can never disagree with the
+    // server's enforcement.
+    let unmet_kinds = viewer
+        .map(|(level, species)| requirements.unmet(level, species))
+        .unwrap_or_default();
+
+    if let Some(needed) = requirements.min_level {
+        let line = i18n
+            .get_msg_ctx("hud-bag-requirement_level", &fluent_args! {
+                "level" => u32::from(needed),
+            })
+            .into_owned();
+        if unmet_kinds
+            .iter()
+            .any(|u| matches!(u, UnmetRequirement::Level { .. }))
+        {
+            unmet.push(line);
+        } else {
+            met.push(line);
+        }
+    }
+    if let Some(races) = &requirements.races {
+        let names = races
+            .iter()
+            .map(|species| i18n.get_msg(species_i18n_key(*species)).into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line = i18n
+            .get_msg_ctx("hud-bag-requirement_race", &fluent_args! {
+                "races" => names,
+            })
+            .into_owned();
+        if unmet_kinds.contains(&UnmetRequirement::Race) {
+            unmet.push(line);
+        } else {
+            met.push(line);
+        }
+    }
+    (met, unmet)
+}
+
+fn species_i18n_key(species: Species) -> &'static str {
+    match species {
+        Species::Danari => "common-species-danari",
+        Species::Dwarf => "common-species-dwarf",
+        Species::Elf => "common-species-elf",
+        Species::Human => "common-species-human",
+        Species::Orc => "common-species-orc",
+        Species::Draugr => "common-species-draugr",
+    }
 }
 
 pub fn describe<'a, I: ItemDesc + ?Sized>(

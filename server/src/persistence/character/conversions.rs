@@ -446,7 +446,7 @@ pub fn convert_inventory_from_database_items(
                 PersistenceError::ConversionError(format!(
                     "Invalid item stack size for stackable={}: {}",
                     item.is_stackable(),
-                    &db_item.stack_size
+                    db_item.stack_size
                 ))
             })?)
             .map_err(|_| {
@@ -461,7 +461,7 @@ pub fn convert_inventory_from_database_items(
             serde_json::from_str::<InvSlotId>(s).map_err(|_| {
                 PersistenceError::ConversionError(format!(
                     "Failed to parse item position: {:?}",
-                    &db_item.position
+                    db_item.position
                 ))
             })
         };
@@ -566,11 +566,11 @@ pub fn convert_loadout_from_database_items(
         let convert_error = |err| match err {
             LoadoutError::InvalidPersistenceKey => PersistenceError::ConversionError(format!(
                 "Invalid persistence key: {}",
-                &db_item.position
+                db_item.position
             )),
             LoadoutError::NoParentAtSlot => PersistenceError::ConversionError(format!(
                 "No parent item at slot: {}",
-                &db_item.position
+                db_item.position
             )),
         };
 
@@ -633,7 +633,7 @@ pub fn convert_overflow_items_from_database_items(
                 PersistenceError::ConversionError(format!(
                     "Invalid item stack size for stackable={}: {}",
                     item.is_stackable(),
-                    &db_item.stack_size
+                    db_item.stack_size
                 ))
             })?)
             .map_err(|_| {

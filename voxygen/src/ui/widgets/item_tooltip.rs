@@ -8,7 +8,7 @@ use crate::hud::{
 use client::Client;
 use common::{
     comp::{
-        Energy, Inventory,
+        Body, Energy, Inventory, SkillSet,
         item::{
             Item, ItemDesc, ItemI18n, ItemKind, ItemTag, MaterialStatManifest, Quality,
             armor::Protection, item_key::ItemKey, modular::ModularComponent,
@@ -25,6 +25,7 @@ use conrod_core::{
 };
 use i18n::Localization;
 use lazy_static::lazy_static;
+use specs::WorldExt;
 use std::{
     borrow::Borrow,
     time::{Duration, Instant},
@@ -322,6 +323,8 @@ widget_ids! {
         quantity,
         subtitle,
         desc,
+        requirements_met,
+        requirements_unmet,
         prices_buy,
         prices_sell,
         tooltip_hints,
@@ -750,29 +753,26 @@ impl Widget for ItemTooltip<'_> {
                     };
 
                     if diff.power.abs() > f32::EPSILON {
-                        let text = format!("{} {:.1}", &power_diff.0, &diff.power * 10.0);
+                        let text = format!("{} {:.1}", power_diff.0, &diff.power * 10.0);
                         diff_text(text, power_diff.1, 0)
                     }
                     if diff.speed.abs() > f32::EPSILON {
-                        let text = format!("{} {:+.0}", &speed_diff.0, &diff.speed * 100.0);
+                        let text = format!("{} {:+.0}", speed_diff.0, &diff.speed * 100.0);
                         diff_text(text, speed_diff.1, 1)
                     }
                     if diff.effect_power.abs() > f32::EPSILON {
-                        let text = format!(
-                            "{} {:+.0}",
-                            &effect_power_diff.0,
-                            &diff.effect_power * 100.0
-                        );
+                        let text =
+                            format!("{} {:+.0}", effect_power_diff.0, &diff.effect_power * 100.0);
                         diff_text(text, effect_power_diff.1, 2)
                     }
                     if diff.range.abs() > f32::EPSILON {
-                        let text = format!("{} {:.1}%", &range_diff.0, &diff.range * 100.0);
+                        let text = format!("{} {:.1}%", range_diff.0, &diff.range * 100.0);
                         diff_text(text, range_diff.1, 3)
                     }
                     if diff.energy_efficiency.abs() > f32::EPSILON {
                         let text = format!(
                             "{} {:.1}%",
-                            &energy_efficiency_diff.0,
+                            energy_efficiency_diff.0,
                             &diff.energy_efficiency * 100.0
                         );
                         diff_text(text, energy_efficiency_diff.1, 4)
@@ -780,7 +780,7 @@ impl Widget for ItemTooltip<'_> {
                     if diff.buff_strength.abs() > f32::EPSILON {
                         let text = format!(
                             "{} {:.1}%",
-                            &buff_strength_diff.0,
+                            buff_strength_diff.0,
                             &diff.buff_strength * 100.0
                         );
                         diff_text(text, buff_strength_diff.1, 5)
@@ -788,7 +788,7 @@ impl Widget for ItemTooltip<'_> {
                     if tool_durability != equipped_durability && item.has_durability() {
                         let text = format!(
                             "{} {}",
-                            &durability_diff.0,
+                            durability_diff.0,
                             tool_durability as i32 - equipped_durability as i32
                         );
                         diff_text(text, durability_diff.1, 6)
@@ -977,8 +977,7 @@ impl Widget for ItemTooltip<'_> {
                     if let Some(p_diff) = diff.protection
                         && p_diff != Protection::Normal(0.0)
                     {
-                        let text =
-                            format!("{} {}", &protection_diff.0, util::protec2string(p_diff));
+                        let text = format!("{} {}", protection_diff.0, util::protec2string(p_diff));
                         diff_text(text, protection_diff.1, index);
                     }
                     index += armor_stats.protection.is_some() as usize;
@@ -987,7 +986,7 @@ impl Widget for ItemTooltip<'_> {
                         && p_r_diff != Protection::Normal(0.0)
                     {
                         let text =
-                            format!("{} {}", &poise_res_diff.0, util::protec2string(p_r_diff));
+                            format!("{} {}", poise_res_diff.0, util::protec2string(p_r_diff));
                         diff_text(text, poise_res_diff.1, index);
                     }
                     index += armor_stats.poise_resilience.is_some() as usize;
@@ -995,7 +994,7 @@ impl Widget for ItemTooltip<'_> {
                     if let Some(e_m_diff) = diff.energy_max
                         && e_m_diff.abs() > Energy::ENERGY_EPSILON
                     {
-                        let text = format!("{} {:.1}", &energy_max_diff.0, e_m_diff);
+                        let text = format!("{} {:.1}", energy_max_diff.0, e_m_diff);
                         diff_text(text, energy_max_diff.1, index);
                     }
                     index += armor_stats.energy_max.is_some() as usize;
@@ -1003,7 +1002,7 @@ impl Widget for ItemTooltip<'_> {
                     if let Some(e_r_diff) = diff.energy_reward
                         && e_r_diff.abs() > Energy::ENERGY_EPSILON
                     {
-                        let text = format!("{} {:.1}", &energy_reward_diff.0, e_r_diff * 100.0);
+                        let text = format!("{} {:.1}", energy_reward_diff.0, e_r_diff * 100.0);
                         diff_text(text, energy_reward_diff.1, index);
                     }
                     index += armor_stats.energy_reward.is_some() as usize;
@@ -1011,7 +1010,7 @@ impl Widget for ItemTooltip<'_> {
                     if let Some(p_p_diff) = diff.precision_power
                         && p_p_diff != 0.0_f32
                     {
-                        let text = format!("{} {:.3}", &precision_power_diff.0, p_p_diff);
+                        let text = format!("{} {:.3}", precision_power_diff.0, p_p_diff);
                         diff_text(text, precision_power_diff.1, index);
                     }
                     index += armor_stats.precision_power.is_some() as usize;
@@ -1019,7 +1018,7 @@ impl Widget for ItemTooltip<'_> {
                     if let Some(s_diff) = diff.stealth
                         && s_diff != 0.0_f32
                     {
-                        let text = format!("{} {:.3}", &stealth_diff.0, s_diff);
+                        let text = format!("{} {:.3}", stealth_diff.0, s_diff);
                         diff_text(text, stealth_diff.1, index);
                     }
                     index += armor_stats.stealth.is_some() as usize;
@@ -1027,7 +1026,7 @@ impl Widget for ItemTooltip<'_> {
                     if armor_durability != equipped_durability && item.has_durability() {
                         let diff = armor_durability.unwrap_or(Item::MAX_DURABILITY) as i32
                             - equipped_durability.unwrap_or(Item::MAX_DURABILITY) as i32;
-                        let text = format!("{} {}", &durability_diff.0, diff);
+                        let text = format!("{} {}", durability_diff.0, diff);
                         diff_text(text, durability_diff.1, index);
                     }
                 }
@@ -1250,7 +1249,7 @@ impl Widget for ItemTooltip<'_> {
 
         // Description
         if !desc.is_empty() {
-            widget::Text::new(&format!("\"{}\"", &desc))
+            widget::Text::new(&format!("\"{}\"", desc))
                 .x_align_to(state.ids.item_frame, conrod_core::position::Align::Start)
                 .graphics_for(id)
                 .parent(id)
@@ -1268,6 +1267,53 @@ impl Widget for ItemTooltip<'_> {
                 .set(state.ids.desc, ui);
         }
 
+        // Equipment requirements (level/race gates)
+        let viewer = {
+            let ecs = self.client.state().ecs();
+            let entity = self.info.viewpoint_entity;
+            let level = ecs
+                .read_storage::<SkillSet>()
+                .get(entity)
+                .map(|skill_set| skill_set.character_level());
+            let species = ecs
+                .read_storage::<Body>()
+                .get(entity)
+                .and_then(|body| match_some!(*body, Body::Humanoid(b) => b.species));
+            level.map(|level| (level, species))
+        };
+        let (req_met, req_unmet) = util::requirements_text(item, viewer, i18n);
+        let req_anchor = if !desc.is_empty() {
+            state.ids.desc
+        } else if stats_count > 0 {
+            state.ids.stats[state.ids.stats.len() - 1]
+        } else {
+            state.ids.item_frame
+        };
+        let mut last_req_id = None;
+        if !req_met.is_empty() {
+            widget::Text::new(&req_met.join("\n"))
+                .x_align_to(state.ids.item_frame, conrod_core::position::Align::Start)
+                .graphics_for(id)
+                .parent(id)
+                .with_style(self.style.desc)
+                .color(conrod_core::color::GREY)
+                .down_from(req_anchor, V_PAD)
+                .w(text_w)
+                .set(state.ids.requirements_met, ui);
+            last_req_id = Some(state.ids.requirements_met);
+        }
+        if !req_unmet.is_empty() {
+            widget::Text::new(&req_unmet.join("\n"))
+                .x_align_to(state.ids.item_frame, conrod_core::position::Align::Start)
+                .graphics_for(id)
+                .parent(id)
+                .with_style(self.style.desc)
+                .color(Color::Rgba(1.0, 0.0, 0.0, 1.0))
+                .down_from(last_req_id.unwrap_or(req_anchor), V_PAD_STATS)
+                .w(text_w)
+                .set(state.ids.requirements_unmet, ui);
+        }
+
         // Price display
         if let Some((buy, sell, factor)) =
             util::price_desc(self.prices, item.item_definition_id(), item.quality(), i18n)
@@ -1279,7 +1325,11 @@ impl Widget for ItemTooltip<'_> {
                 .with_style(self.style.desc)
                 .color(Color::Rgba(factor, 1.0 - factor, 0.00, 1.0))
                 .down_from(
-                    if !desc.is_empty() {
+                    if !req_unmet.is_empty() {
+                        state.ids.requirements_unmet
+                    } else if !req_met.is_empty() {
+                        state.ids.requirements_met
+                    } else if !desc.is_empty() {
                         state.ids.desc
                     } else if stats_count > 0 {
                         state.ids.stats[state.ids.stats.len() - 1]
@@ -1348,7 +1398,7 @@ impl Widget for ItemTooltip<'_> {
 
         // Description
         let desc_h: f64 = if !desc.is_empty() {
-            widget::Text::new(&format!("\"{}\"", &desc))
+            widget::Text::new(&format!("\"{}\"", desc))
                 .with_style(self.style.desc)
                 .w(text_w)
                 .get_h(ui)
@@ -1380,8 +1430,23 @@ impl Widget for ItemTooltip<'_> {
             0.0
         };
 
+        // Equipment requirements
+        let req_line_count = self.item.requirements().map_or(0, |r| {
+            r.min_level.is_some() as usize + r.races.is_some() as usize
+        });
+        let req_h = if req_line_count > 0 {
+            widget::Text::new("placeholder")
+                .with_style(self.style.desc)
+                .get_h(ui)
+                .unwrap_or(0.0)
+                * req_line_count as f64
+                + V_PAD
+        } else {
+            0.0
+        };
+
         // extra padding to fit frame top padding
-        let height = frame_h + stat_h + desc_h + price_h + V_PAD + 5.0;
+        let height = frame_h + stat_h + desc_h + req_h + price_h + V_PAD + 5.0;
         Dimension::Absolute(height)
     }
 }
