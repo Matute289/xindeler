@@ -449,4 +449,22 @@ pub mod tests {
             ClassKind::Adventurer
         );
     }
+
+    #[test]
+    fn innate_aux_ability_round_trips() {
+        use common::comp::ability::AuxiliaryAbility;
+        for ability in [
+            AuxiliaryAbility::Innate(0),
+            AuxiliaryAbility::Innate(3),
+            AuxiliaryAbility::MainWeapon(1),
+            AuxiliaryAbility::Empty,
+        ] {
+            let s = super::aux_ability_to_string(ability);
+            assert_eq!(super::aux_ability_from_string(&s), ability);
+        }
+        assert_eq!(
+            super::aux_ability_to_string(AuxiliaryAbility::Innate(3)),
+            "Innate:index:3"
+        );
+    }
 }
