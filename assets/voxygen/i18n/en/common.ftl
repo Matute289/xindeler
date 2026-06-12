@@ -67,6 +67,13 @@ common-species-elf = Elf
 common-species-draugr = Draugr
 common-species-danari = Danari
 
+## Classes
+common-class-warrior = Warrior
+common-class-mage = Mage
+common-class-cleric = Cleric
+common-class-rogue = Rogue
+common-class-adventurer = Adventurer
+
 ## Tools
 common-weapons-axe = Axe
 common-weapons-dagger = Dagger
