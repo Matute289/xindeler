@@ -70,4 +70,4 @@ spec before writing Rust — most D&D-style effects are already expressible.
 - Server authority on all effects; FX are client-side only.
 - New BuffKinds need: variant, stacking/decay rules, icon asset, i18n string (`.ftl`).
 - Balance numbers from `game-balance-designer` tables; spell names/flavor from
-  `lore-writer` (canon check against `docs/lore/`).
+  `lore-writer` (canon check against `docs/superpowers/lore/`).
