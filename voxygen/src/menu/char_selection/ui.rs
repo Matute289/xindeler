@@ -62,6 +62,18 @@ const STARTER_AXE: &str = "common.items.weapons.axe.starter_axe";
 const STARTER_STAFF: &str = "common.items.weapons.staff.starter_staff";
 const STARTER_SWORD: &str = "common.items.weapons.sword.starter";
 const STARTER_SWORDS: &str = "common.items.weapons.sword_1h.starter";
+const STARTER_SCEPTRE: &str = "common.items.weapons.sceptre.starter_sceptre";
+
+/// Default starter weapon shown when a class is picked; must be a member of
+/// the server-side whitelist in server/src/character_creator.rs.
+fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<&'static str>) {
+    match class {
+        ClassKind::Adventurer | ClassKind::Warrior => (Some(STARTER_SWORD), None),
+        ClassKind::Mage => (Some(STARTER_STAFF), None),
+        ClassKind::Cleric => (Some(STARTER_SCEPTRE), None),
+        ClassKind::Rogue => (Some(STARTER_SWORDS), Some(STARTER_SWORDS)),
+    }
+}
 
 // TODO: what does this comment mean?
 // // Use in future MR to make this a starter weapon
@@ -98,6 +110,7 @@ image_ids_ice! {
         hammer: "voxygen.element.weapons.hammer",
         bow: "voxygen.element.weapons.bow",
         staff: "voxygen.element.weapons.staff",
+        sceptre: "voxygen.element.weapons.sceptre",
 
         // Hardcore icon
         hardcore: "voxygen.element.ui.map.icons.dif_map_icon",
@@ -188,6 +201,7 @@ enum Mode {
 
         body_type_buttons: [button::State; 2],
         species_buttons: [button::State; 6],
+        class_buttons: [button::State; 4],
         tool_buttons: [button::State; 6],
         sliders: Sliders,
         hardcore_enabled: bool,
@@ -247,6 +261,7 @@ impl Mode {
             class: ClassKind::Warrior,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
+            class_buttons: Default::default(),
             tool_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
@@ -279,6 +294,7 @@ impl Mode {
             class: ClassKind::Adventurer,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
+            class_buttons: Default::default(),
             tool_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
@@ -342,6 +358,7 @@ enum Message {
     Name(String),
     BodyType(humanoid::BodyType),
     Species(humanoid::Species),
+    Class(ClassKind),
     Tool((Option<&'static str>, Option<&'static str>)),
     RandomizeCharacter,
     HardcoreEnabled(bool),
@@ -965,12 +982,12 @@ impl Controls {
                 inventory: _,
                 mainhand,
                 offhand: _,
-                // Class picker UI is a later task (CLS-9); not rendered yet.
-                class: _,
+                class,
                 left_scroll,
                 right_scroll,
                 body_type_buttons,
                 species_buttons,
+                class_buttons,
                 tool_buttons,
                 sliders,
                 hardcore_enabled,
@@ -1018,8 +1035,8 @@ impl Controls {
                 };
 
                 // TODO: tooltips
-                let (tool, species, body_type) = if character_id.is_some() {
-                    (Column::new(), Column::new(), Row::new())
+                let (tool, species, body_type, class_section) = if character_id.is_some() {
+                    (Column::new(), Column::new(), Row::new(), Column::new())
                 } else {
                     let (body_m_ico, body_f_ico) = match body.species {
                         humanoid::Species::Human => (imgs.human_m, imgs.human_f),
@@ -1133,6 +1150,117 @@ impl Controls {
                         .into(),
                     ])
                     .spacing(1);
+                    // Class picker: four text buttons, one per playable class.
+                    let [
+                        warrior_class_button,
+                        mage_class_button,
+                        cleric_class_button,
+                        rogue_class_button,
+                    ] = class_buttons;
+                    let class_section = Column::with_children(vec![
+                        Text::new(i18n.get_msg("char_selection-class").into_owned())
+                            .size(fonts.cyri.scale(18))
+                            .into(),
+                        Row::with_children(vec![
+                            neat_button(
+                                warrior_class_button,
+                                i18n.get_msg("char_selection-class_warrior").into_owned(),
+                                FILL_FRAC_ONE,
+                                if *class == ClassKind::Warrior {
+                                    style::button::Style::new(imgs.icon_border_pressed)
+                                        .hover_image(imgs.icon_border_mo)
+                                        .press_image(imgs.icon_border_press)
+                                        .text_color(TEXT_COLOR)
+                                } else {
+                                    button_style
+                                },
+                                Some(Message::Class(ClassKind::Warrior)),
+                            ),
+                            neat_button(
+                                mage_class_button,
+                                i18n.get_msg("char_selection-class_mage").into_owned(),
+                                FILL_FRAC_ONE,
+                                if *class == ClassKind::Mage {
+                                    style::button::Style::new(imgs.icon_border_pressed)
+                                        .hover_image(imgs.icon_border_mo)
+                                        .press_image(imgs.icon_border_press)
+                                        .text_color(TEXT_COLOR)
+                                } else {
+                                    button_style
+                                },
+                                Some(Message::Class(ClassKind::Mage)),
+                            ),
+                            neat_button(
+                                cleric_class_button,
+                                i18n.get_msg("char_selection-class_cleric").into_owned(),
+                                FILL_FRAC_ONE,
+                                if *class == ClassKind::Cleric {
+                                    style::button::Style::new(imgs.icon_border_pressed)
+                                        .hover_image(imgs.icon_border_mo)
+                                        .press_image(imgs.icon_border_press)
+                                        .text_color(TEXT_COLOR)
+                                } else {
+                                    button_style
+                                },
+                                Some(Message::Class(ClassKind::Cleric)),
+                            ),
+                            neat_button(
+                                rogue_class_button,
+                                i18n.get_msg("char_selection-class_rogue").into_owned(),
+                                FILL_FRAC_ONE,
+                                if *class == ClassKind::Rogue {
+                                    style::button::Style::new(imgs.icon_border_pressed)
+                                        .hover_image(imgs.icon_border_mo)
+                                        .press_image(imgs.icon_border_press)
+                                        .text_color(TEXT_COLOR)
+                                } else {
+                                    button_style
+                                },
+                                Some(Message::Class(ClassKind::Rogue)),
+                            ),
+                        ])
+                        .spacing(1)
+                        .into(),
+                    ])
+                    .align_items(Align::Center)
+                    .spacing(4);
+
+                    // Tool buttons gated by the current class's whitelist.
+                    // A button with no on_press is visually present but non-interactive.
+                    let icon_button_opt = |button, selected, msg: Option<Message>, img| {
+                        let btn = Button::<_, IcedRenderer>::new(
+                            button,
+                            Space::new(Length::Units(60), Length::Units(60)),
+                        )
+                        .style(if selected {
+                            selected_style
+                        } else {
+                            unselected_style
+                        });
+                        let btn = match msg {
+                            Some(m) => btn.on_press(m),
+                            None => btn,
+                        };
+                        Container::new(btn).style(style::container::Style::image(img))
+                    };
+                    let icon_button_tooltip_opt =
+                        |button, selected, msg: Option<Message>, img, tooltip_i18n_key| {
+                            icon_button_opt(button, selected, msg, img).with_tooltip(
+                                tooltip_manager,
+                                move || {
+                                    let tooltip_text = i18n.get_msg(tooltip_i18n_key);
+                                    tooltip::text(&tooltip_text, tooltip_style)
+                                },
+                            )
+                        };
+
+                    // Per-class allowed weapon check helpers.
+                    let warrior_weapons =
+                        matches!(*class, ClassKind::Adventurer | ClassKind::Warrior);
+                    let mage_weapons = matches!(*class, ClassKind::Mage);
+                    let cleric_weapons = matches!(*class, ClassKind::Cleric);
+                    let rogue_weapons = matches!(*class, ClassKind::Rogue);
+
                     let [
                         sword_button,
                         swords_button,
@@ -1143,26 +1271,28 @@ impl Controls {
                     ] = tool_buttons;
                     let tool = Column::with_children(vec![
                         Row::with_children(vec![
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 sword_button,
                                 *mainhand == Some(STARTER_SWORD),
-                                Message::Tool((Some(STARTER_SWORD), None)),
+                                warrior_weapons
+                                    .then_some(Message::Tool((Some(STARTER_SWORD), None))),
                                 imgs.sword,
                                 "common-weapons-greatsword",
                             )
                             .into(),
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 hammer_button,
                                 *mainhand == Some(STARTER_HAMMER),
-                                Message::Tool((Some(STARTER_HAMMER), None)),
+                                warrior_weapons
+                                    .then_some(Message::Tool((Some(STARTER_HAMMER), None))),
                                 imgs.hammer,
                                 "common-weapons-hammer",
                             )
                             .into(),
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 axe_button,
                                 *mainhand == Some(STARTER_AXE),
-                                Message::Tool((Some(STARTER_AXE), None)),
+                                warrior_weapons.then_some(Message::Tool((Some(STARTER_AXE), None))),
                                 imgs.axe,
                                 "common-weapons-axe",
                             )
@@ -1171,28 +1301,46 @@ impl Controls {
                         .spacing(1)
                         .into(),
                         Row::with_children(vec![
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 swords_button,
                                 *mainhand == Some(STARTER_SWORDS),
-                                Message::Tool((Some(STARTER_SWORDS), Some(STARTER_SWORDS))),
+                                rogue_weapons.then_some(Message::Tool((
+                                    Some(STARTER_SWORDS),
+                                    Some(STARTER_SWORDS),
+                                ))),
                                 imgs.swords,
                                 "common-weapons-shortswords",
                             )
                             .into(),
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 bow_button,
                                 *mainhand == Some(STARTER_BOW),
-                                Message::Tool((Some(STARTER_BOW), None)),
+                                rogue_weapons.then_some(Message::Tool((Some(STARTER_BOW), None))),
                                 imgs.bow,
                                 "common-weapons-bow",
                             )
                             .into(),
-                            icon_button_tooltip(
+                            icon_button_tooltip_opt(
                                 staff_button,
-                                *mainhand == Some(STARTER_STAFF),
-                                Message::Tool((Some(STARTER_STAFF), None)),
-                                imgs.staff,
-                                "common-weapons-staff",
+                                *mainhand == Some(STARTER_STAFF)
+                                    || *mainhand == Some(STARTER_SCEPTRE),
+                                if mage_weapons {
+                                    Some(Message::Tool((Some(STARTER_STAFF), None)))
+                                } else if cleric_weapons {
+                                    Some(Message::Tool((Some(STARTER_SCEPTRE), None)))
+                                } else {
+                                    None
+                                },
+                                if cleric_weapons {
+                                    imgs.sceptre
+                                } else {
+                                    imgs.staff
+                                },
+                                if cleric_weapons {
+                                    "common-weapons-sceptre"
+                                } else {
+                                    "common-weapons-staff"
+                                },
                             )
                             .into(),
                         ])
@@ -1201,7 +1349,7 @@ impl Controls {
                     ])
                     .spacing(1);
 
-                    (tool, species, body_type)
+                    (tool, species, body_type, class_section)
                 };
 
                 const SLIDER_TEXT_SIZE: u16 = 20;
@@ -1407,6 +1555,7 @@ impl Controls {
 
                 let left_column_content = vec![
                     body_type.into(),
+                    class_section.into(),
                     tool.into(),
                     species.into(),
                     slider_options.into(),
@@ -1905,6 +2054,35 @@ impl Controls {
                 if let Mode::CreateOrEdit { body, .. } = &mut self.mode {
                     body.species = value;
                     body.validate();
+                }
+            },
+            Message::Class(value) => {
+                if let Mode::CreateOrEdit {
+                    class,
+                    mainhand,
+                    offhand,
+                    inventory,
+                    ..
+                } = &mut self.mode
+                {
+                    *class = value;
+                    let (new_mainhand, new_offhand) = default_starter_for_class(value);
+                    *mainhand = new_mainhand;
+                    *offhand = new_offhand;
+                    inventory.replace_loadout_item(
+                        EquipSlot::ActiveMainhand,
+                        mainhand.map(Item::new_from_asset_expect),
+                        // Voxygen is not authoritative on inventory so we don't care if fake time
+                        // is supplied
+                        Time(0.0),
+                    );
+                    inventory.replace_loadout_item(
+                        EquipSlot::ActiveOffhand,
+                        offhand.map(Item::new_from_asset_expect),
+                        // Voxygen is not authoritative on inventory so we don't care if fake time
+                        // is supplied
+                        Time(0.0),
+                    );
                 }
             },
             Message::Tool(value) => {
