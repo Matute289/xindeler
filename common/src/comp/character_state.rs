@@ -58,6 +58,7 @@ event_emitters! {
         regrow_head: event::RegrowHeadEvent,
         create_aura_entity: event::CreateAuraEntityEvent,
         help_downed: event::HelpDownedEvent,
+        set_ability_cooldown: event::SetAbilityCooldownEvent,
     }
 }
 

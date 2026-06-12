@@ -5,9 +5,10 @@ use specs::{
 
 use common::{
     comp::{
-        self, ActiveAbilities, Beam, Body, CharacterActivity, CharacterState, Combo, Controller,
-        Density, Energy, Health, Inventory, InventoryManip, Mass, Melee, Ori, PhysicsState, Poise,
-        Pos, PreviousPhysCache, Scale, SkillSet, Stance, StateUpdate, Stats, Vel,
+        self, AbilityCooldowns, ActiveAbilities, Beam, Body, CharacterActivity, CharacterState,
+        Combo, Controller, Density, Energy, Health, Inventory, InventoryManip, Mass, Melee, Ori,
+        PhysicsState, Poise, Pos, PreviousPhysCache, Scale, SkillSet, Stance, StateUpdate, Stats,
+        Vel,
         character_state::{CharacterStateEvents, OutputEvents},
         inventory::item::{MaterialStatManifest, tool::AbilityMap},
     },
@@ -47,6 +48,7 @@ pub struct ReadData<'a> {
     stats: ReadStorage<'a, Stats>,
     skill_sets: ReadStorage<'a, SkillSet>,
     active_abilities: ReadStorage<'a, ActiveAbilities>,
+    ability_cooldowns: ReadStorage<'a, AbilityCooldowns>,
     msm: ReadExpect<'a, MaterialStatManifest>,
     ability_map: ReadExpect<'a, AbilityMap>,
     combos: ReadStorage<'a, Combo>,
@@ -129,6 +131,7 @@ impl<'a> System<'a> for Sys {
                 &read_data.stats,
                 &read_data.skill_sets,
                 read_data.active_abilities.maybe(),
+                read_data.ability_cooldowns.maybe(),
                 read_data.is_riders.maybe(),
             ),
             read_data.combos.maybe(),
@@ -150,7 +153,16 @@ impl<'a> System<'a> for Sys {
                 controller,
                 health,
                 heads,
-                (body, physics, scale, stat, skill_set, active_abilities, is_rider),
+                (
+                    body,
+                    physics,
+                    scale,
+                    stat,
+                    skill_set,
+                    active_abilities,
+                    ability_cooldowns,
+                    is_rider,
+                ),
                 combo,
             ) = comps;
             // Being dead overrides all other states
@@ -219,6 +231,7 @@ impl<'a> System<'a> for Sys {
                 stat,
                 skill_set,
                 active_abilities,
+                ability_cooldowns,
                 combo,
                 alignment: read_data.alignments.get(entity),
                 terrain: &read_data.terrain,

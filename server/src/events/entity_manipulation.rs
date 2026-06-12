@@ -46,8 +46,9 @@ use common::{
         EntityAttackedHookEvent, EventBus, ExplosionEvent, HealthChangeEvent, HelpDownedEvent,
         KillEvent, KnockbackEvent, LandOnGroundEvent, MakeAdminEvent, ParryHookEvent,
         PermanentChange, PoiseChangeEvent, RegrowHeadEvent, RemoveLightEmitterEvent, RespawnEvent,
-        ShootEvent, SoundEvent, StartInteractionEvent, StartTeleportingEvent, TeleportToEvent,
-        TeleportToPositionEvent, TransformEvent, UpdateMapMarkerEvent,
+        SetAbilityCooldownEvent, ShootEvent, SoundEvent, StartInteractionEvent,
+        StartTeleportingEvent, TeleportToEvent, TeleportToPositionEvent, TransformEvent,
+        UpdateMapMarkerEvent,
     },
     event_emitters,
     explosion::{ColorPreset, TerrainReplacementPreset},
@@ -100,6 +101,7 @@ pub(super) fn register_event_systems(builder: &mut DispatcherBuilder) {
     event_dispatch::<ComboChangeEvent>(builder, &[]);
     event_dispatch::<ParryHookEvent>(builder, &[]);
     event_dispatch::<TeleportToEvent>(builder, &[]);
+    event_dispatch::<SetAbilityCooldownEvent>(builder, &[]);
     event_dispatch::<EntityAttackedHookEvent>(builder, &[]);
     event_dispatch::<ChangeAbilityEvent>(builder, &[]);
     event_dispatch::<UpdateMapMarkerEvent>(builder, &[]);
@@ -2770,6 +2772,21 @@ impl ServerEvent for TeleportToEvent {
                 force_updates
                     .get_mut(ev.entity)
                     .map(|force_update| force_update.update());
+            }
+        }
+    }
+}
+
+impl ServerEvent for SetAbilityCooldownEvent {
+    type SystemData<'a> = (Read<'a, Time>, WriteStorage<'a, comp::AbilityCooldowns>);
+
+    fn handle(
+        events: impl ExactSizeIterator<Item = Self>,
+        (time, mut ability_cooldowns): Self::SystemData<'_>,
+    ) {
+        for ev in events {
+            if let Some(mut cooldowns) = ability_cooldowns.get_mut(ev.entity) {
+                cooldowns.set(&ev.ability_id, *time, ev.cooldown_secs);
             }
         }
     }
