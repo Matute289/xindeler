@@ -1257,12 +1257,12 @@ impl AgentData<'_> {
             self.flee(agent, controller, read_data, tgt_data.pos);
             return;
         }
-        if let Some(target_uid) = tgt_data.uid {
-            if self.is_charmed_by(target_uid, read_data) {
-                // Stand down: charmed entities refuse to engage the charmer.
-                agent.target = None;
-                return;
-            }
+        if let Some(target_uid) = tgt_data.uid
+            && self.is_charmed_by(target_uid, read_data)
+        {
+            // Stand down: charmed entities refuse to engage the charmer.
+            agent.target = None;
+            return;
         }
 
         let tool_tactic = |tool_kind| match tool_kind {

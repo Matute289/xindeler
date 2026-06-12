@@ -113,6 +113,13 @@ impl Component for AbilityCooldowns {
 /// (magic-abilities spec §3 Path B). Indexed by `AuxiliaryAbility::Innate(i)`.
 /// Each key's set `primary` is the granted ability; the key itself doubles as
 /// the frontend ability id (icon/i18n key), like Contextualized pseudo_ids.
+///
+/// ORDERING CONTRACT (review M1): persisted hotbar slots store
+/// `Innate:index:N` positions into this Vec, so its order must be STABLE and
+/// append-only for a given character: producers must emit class abilities
+/// first (spec order), then racial innates, never reordering existing
+/// entries. Revisit key-based persistence before the pool producer ships
+/// (magic plan Phase 4) if this contract proves too fragile.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AbilityPool {
     pub abilities: Vec<String>,

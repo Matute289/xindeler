@@ -10,6 +10,8 @@ use crate::{
         behavior::{CharacterBehavior, JoinData},
         utils::*,
     },
+    terrain::Block,
+    vol::ReadVol,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -81,10 +83,20 @@ impl CharacterBehavior for Data {
                     } else {
                         aim
                     };
+                    // LoS guard (review M2): pull the strike point back to the
+                    // first terrain hit so casts can't land through walls.
+                    let eye = data.pos.0
+                        + Vec3::unit_z() * data.body.eye_height(data.scale.map_or(1.0, |s| s.0));
+                    let ray = data.terrain.ray(eye, clamped).until(Block::is_solid).cast();
+                    let target = if ray.0 < (clamped - eye).magnitude() {
+                        eye + (clamped - eye).try_normalized().unwrap_or_default() * ray.0
+                    } else {
+                        clamped
+                    };
                     update.character = CharacterState::GroundAoe(Data {
                         timer: Duration::default(),
                         stage_section: StageSection::Action,
-                        target_pos: Some(clamped),
+                        target_pos: Some(target),
                         ..*self
                     });
                 }
