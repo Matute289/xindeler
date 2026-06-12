@@ -62,3 +62,6 @@ hud-bag-split_swap_slots_drop_items = { $slot_deficit ->
     [1] This will result in dropping 1 item on the ground. Are you sure?
     *[other] This will result in dropping { $slot_deficit } items on the ground. Are you sure?
 }
+hud-bag-requirements_not_met = You don't meet the requirements to equip this item.
+hud-bag-requirement_level = Requires Level { $level }
+hud-bag-requirement_race = Requires Race: { $races }
