@@ -77,6 +77,7 @@ pub fn create_character(
     character_updater.create_character(entity, player_uuid, character_alias, PersistedComponents {
         body,
         hardcore: hardcore.then_some(common::comp::Hardcore),
+        character_class: common::comp::CharacterClass::default(),
         stats,
         skill_set,
         inventory,

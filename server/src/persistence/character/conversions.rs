@@ -782,6 +782,14 @@ pub fn convert_hardcore_to_database(hardcore: Option<Hardcore>) -> i64 {
     if hardcore.is_some() { 1 } else { 0 }
 }
 
+pub fn convert_class_from_database(class: &str) -> common::comp::CharacterClass {
+    common::comp::CharacterClass(json_models::db_string_to_class(class))
+}
+
+pub fn convert_class_to_database(class: common::comp::CharacterClass) -> String {
+    json_models::class_to_db_string(class.0)
+}
+
 /// NOTE: This does *not* return an error on failure, since we can partially
 /// recover from some failures.  Instead, it returns the error in the second
 /// return value; make sure to handle it if present!

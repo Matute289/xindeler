@@ -130,6 +130,38 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
     }
 }
 
+pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
+    use comp::class::ClassKind::*;
+    match class {
+        Adventurer => "Adventurer",
+        Warrior => "Warrior",
+        Mage => "Mage",
+        Cleric => "Cleric",
+        Rogue => "Rogue",
+    }
+    .to_string()
+}
+
+/// Unlike the skill-group converter this never panics: unknown strings fall
+/// back to Adventurer with a warning so a DB downgrade never bricks a save.
+pub fn db_string_to_class(class_string: &str) -> comp::class::ClassKind {
+    use comp::class::ClassKind::*;
+    match class_string {
+        "Adventurer" => Adventurer,
+        "Warrior" => Warrior,
+        "Mage" => Mage,
+        "Cleric" => Cleric,
+        "Rogue" => Rogue,
+        unknown => {
+            tracing::warn!(
+                ?unknown,
+                "Unknown class in database, defaulting to Adventurer"
+            );
+            Adventurer
+        },
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct DatabaseAbilitySet {
     mainhand: String,
@@ -386,5 +418,27 @@ pub mod tests {
                 "round trip failed for {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn class_db_string_round_trips_and_tolerates_unknown() {
+        use common::comp::class::ClassKind;
+        for class in [
+            ClassKind::Adventurer,
+            ClassKind::Warrior,
+            ClassKind::Mage,
+            ClassKind::Cleric,
+            ClassKind::Rogue,
+        ] {
+            assert_eq!(
+                super::db_string_to_class(&super::class_to_db_string(class)),
+                class
+            );
+        }
+        // A downgrade/foreign DB must never brick the server (spec §4)
+        assert_eq!(
+            super::db_string_to_class("Necromancer"),
+            ClassKind::Adventurer
+        );
     }
 }
