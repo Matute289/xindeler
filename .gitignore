@@ -118,4 +118,6 @@ graphify-out/
 
 # Design docs live in private repo Matute289/xindeler-design (nested git repo)
 docs/superpowers/
+# legacy lore path — guard against accidental public commits; canonical home is
+# docs/superpowers/lore/ (private design repo)
 docs/lore/
