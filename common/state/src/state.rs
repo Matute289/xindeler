@@ -246,6 +246,7 @@ impl State {
         ecs.register::<comp::Stats>();
         ecs.register::<comp::SkillSet>();
         ecs.register::<comp::ActiveAbilities>();
+        ecs.register::<comp::AbilityCooldowns>();
         ecs.register::<comp::Buffs>();
         ecs.register::<comp::Auras>();
         ecs.register::<comp::EnteredAuras>();

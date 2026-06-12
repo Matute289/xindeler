@@ -746,6 +746,7 @@ impl StateExt for State {
             self.write_component_ignore_entity_dead(entity, stats);
             self.write_component_ignore_entity_dead(entity, character_class);
             self.write_component_ignore_entity_dead(entity, active_abilities);
+            self.write_component_ignore_entity_dead(entity, comp::AbilityCooldowns::default());
             self.write_component_ignore_entity_dead(entity, skill_set);
             self.write_component_ignore_entity_dead(entity, inventory);
             self.write_component_ignore_entity_dead(

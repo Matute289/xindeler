@@ -23,7 +23,7 @@ use crate::{
     },
     explosion::{ColorPreset, TerrainReplacementPreset},
     match_some,
-    resources::Secs,
+    resources::{Secs, Time},
     states::{
         behavior::JoinData,
         sprite_summon::SpriteSummonAnchor,
@@ -75,6 +75,36 @@ impl Default for ActiveAbilities {
             auxiliary_sets: HashMap::new(),
         }
     }
+}
+
+/// Per-ability cooldowns, keyed by ability id (the RON asset path, or the
+/// pool key for innate abilities). Stores the absolute game `Time` at which
+/// the ability is ready again; expired entries are pruned opportunistically
+/// on `set`, so no tick system is needed (magic-abilities spec §8). Not
+/// persisted across logout (accepted v1 exploit surface, spec Open Q #3).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AbilityCooldowns(pub HashMap<String, Time>);
+
+impl AbilityCooldowns {
+    pub fn is_ready(&self, ability_id: &str, now: Time) -> bool {
+        self.0
+            .get(ability_id)
+            .is_none_or(|ready_at| now.0 >= ready_at.0)
+    }
+
+    pub fn ready_at(&self, ability_id: &str) -> Option<Time> { self.0.get(ability_id).copied() }
+
+    pub fn set(&mut self, ability_id: &str, now: Time, cooldown_secs: f32) {
+        self.0.retain(|_, ready_at| ready_at.0 > now.0);
+        self.0.insert(
+            ability_id.to_string(),
+            Time(now.0 + f64::from(cooldown_secs)),
+        );
+    }
+}
+
+impl Component for AbilityCooldowns {
+    type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
 }
 
 // make it pub, for UI stuff, if you want
@@ -3522,6 +3552,22 @@ impl TryFrom<(&CharacterAbility, AbilityInfo, &JoinData<'_>)> for CharacterState
     }
 }
 
+/// Spell school taxonomy (magic-abilities spec §1). Working names; the
+/// lore-cosmology spec owns final names. Carried in `AbilityMeta` for UI
+/// grouping, class gating, and future resistances.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpellSchool {
+    Ruin,
+    Wardcraft,
+    Threshold,
+    Flux,
+    Dawnfire,
+    Gravesong,
+    Verdance,
+    Pactbinding,
+    Hollow,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AbilityMeta {
@@ -3538,6 +3584,12 @@ pub struct AbilityMeta {
     pub contextual_stats: Option<StatAdj>,
     /// If provided, multiplies the precision power from armor for this ability
     pub precision_power_mult: Option<f32>,
+    /// School this ability belongs to, if it is a spell.
+    #[serde(default)]
+    pub school: Option<SpellSchool>,
+    /// Per-ability cooldown in seconds, gated in `handle_ability`.
+    #[serde(default)]
+    pub cooldown: Option<f32>,
 }
 
 impl StatAdj {
@@ -3734,4 +3786,36 @@ pub enum AbilityInitEvent {
 
 impl Component for Stance {
     type Storage = DerefFlaggedStorage<Self, specs::VecStorage<Self>>;
+}
+
+#[cfg(test)]
+mod ability_cooldown_tests {
+    use super::*;
+    use crate::resources::Time;
+
+    #[test]
+    fn fresh_component_is_ready() {
+        let cds = AbilityCooldowns::default();
+        assert!(cds.is_ready("common.abilities.spells.ruin.shatterburst", Time(0.0)));
+    }
+
+    #[test]
+    fn set_blocks_until_ready_time() {
+        let mut cds = AbilityCooldowns::default();
+        cds.set("a", Time(10.0), 30.0);
+        assert!(!cds.is_ready("a", Time(10.0)));
+        assert!(!cds.is_ready("a", Time(39.9)));
+        assert!(cds.is_ready("a", Time(40.0)));
+        assert!(cds.is_ready("b", Time(10.0)));
+    }
+
+    #[test]
+    fn set_prunes_expired_entries() {
+        let mut cds = AbilityCooldowns::default();
+        cds.set("a", Time(0.0), 5.0);
+        // "a" became ready at t=5; setting "b" at t=100 prunes it
+        cds.set("b", Time(100.0), 5.0);
+        assert_eq!(cds.0.len(), 1);
+        assert!(cds.ready_at("b").is_some());
+    }
 }
