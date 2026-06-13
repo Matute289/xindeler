@@ -520,6 +520,9 @@ fn tool_kind<'a>(tool: &Tool, i18n: &'a Localization) -> Cow<'a, str> {
         ToolKind::Dagger => i18n.get_msg("common-weapons-dagger"),
         ToolKind::Staff => i18n.get_msg("common-weapons-staff"),
         ToolKind::Sceptre => i18n.get_msg("common-weapons-sceptre"),
+        ToolKind::Tome => i18n.get_msg("common-weapons-tome"),
+        ToolKind::HolySymbol => i18n.get_msg("common-weapons-holy_symbol"),
+        ToolKind::Focus => i18n.get_msg("common-weapons-focus"),
         ToolKind::Shield => i18n.get_msg("common-weapons-shield"),
         ToolKind::Spear => i18n.get_msg("common-weapons-spear"),
         ToolKind::Blowgun => i18n.get_msg("common-weapons-blowgun"),
@@ -781,6 +784,10 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         "common.abilities.bow.death_volley" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_shot" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_heavy_shot" => imgs.bow_death_volley,
+        // Spells (cantrips) — TODO(magic-v2 polish): dedicated spell icons
+        "common.abilities.spells.arcane.cinderbolt" => imgs.fireball,
+        "common.abilities.spells.divine.dawnmote" => imgs.fireball,
+        "common.abilities.spells.primal.thornspit" => imgs.fireball,
         // Staff
         "common.abilities.staff.firebomb" => imgs.fireball,
         "common.abilities.staff.flamethrower" => imgs.flamethrower,

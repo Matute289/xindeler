@@ -2977,7 +2977,10 @@ fn unlock_skill_strings(group: SkillGroupKind) -> SkillStrings<'static> {
             | ToolKind::Pick
             | ToolKind::Shovel
             | ToolKind::Natural
-            | ToolKind::Empty,
+            | ToolKind::Empty
+            | ToolKind::Tome
+            | ToolKind::HolySymbol
+            | ToolKind::Focus,
         ) => {
             tracing::warn!("Requesting title for unlocking unexpected skill group");
             SkillStrings::Empty

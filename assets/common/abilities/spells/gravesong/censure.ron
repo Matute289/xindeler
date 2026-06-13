@@ -22,8 +22,5 @@ BasicRanged(
     projectile_body: Object(BoltFire),
     projectile_speed: 70.0,
     num_projectiles: Value(1),
-    meta: (
-        cooldown: Some(18.0),
-        school: Some(Gravesong),
-    ),
+    meta: (cooldown: Some(18.0), school: Some(Enchantment), source: Some(Divine)),
 )

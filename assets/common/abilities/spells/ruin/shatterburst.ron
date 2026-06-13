@@ -12,5 +12,5 @@ GroundAoe(
     dodgeable: Roll,
     reagent: Some(Red),
     rooted_cast: false,
-    meta: (cooldown: Some(20.0), school: Some(Ruin)),
+    meta: (cooldown: Some(20.0), school: Some(Evocation), source: Some(Arcane)),
 )

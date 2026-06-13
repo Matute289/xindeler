@@ -29,6 +29,7 @@ BasicRanged(
             duration: Some(60.0),
         )),
         cooldown: Some(25.0),
-        school: Some(Hollow),
+        school: Some(Necromancy),
+        source: Some(Arcane),
     ),
 )

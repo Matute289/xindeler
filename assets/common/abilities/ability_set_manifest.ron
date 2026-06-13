@@ -309,6 +309,21 @@
             Simple(Some(Sceptre(UnlockAura)), "common.abilities.sceptre.wardingaura"),
         ],
     )),
+    Tool(Tome): AbilitySet((
+        primary: Simple(None, "common.abilities.spells.arcane.cinderbolt"),
+        secondary: Simple(None, "common.abilities.spells.ruin.shatterburst"),
+        abilities: [],
+    )),
+    Tool(HolySymbol): AbilitySet((
+        primary: Simple(None, "common.abilities.spells.divine.dawnmote"),
+        secondary: Simple(None, "common.abilities.spells.gravesong.censure"),
+        abilities: [],
+    )),
+    Tool(Focus): AbilitySet((
+        primary: Simple(None, "common.abilities.spells.primal.thornspit"),
+        secondary: Simple(None, "common.abilities.spells.hollow.dread_whisper"),
+        abilities: [],
+    )),
     Custom("Husk"): AbilitySet((
         primary: Simple(None, "common.abilities.custom.husk.singlestrike"),
         secondary: Simple(None, "common.abilities.custom.husk.triplestrike"),

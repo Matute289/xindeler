@@ -3705,20 +3705,41 @@ impl TryFrom<(&CharacterAbility, AbilityInfo, &JoinData<'_>)> for CharacterState
     }
 }
 
-/// Spell school taxonomy (magic-abilities spec §1). Working names; the
-/// lore-cosmology spec owns final names. Carried in `AbilityMeta` for UI
-/// grouping, class gating, and future resistances.
+/// What FORM a spell's effect takes (magic-system-v2 spec §1.2). Asset-only
+/// metadata: drives UI grouping, class gating, future resistances. `None` for
+/// abilities outside the school grid (Ki disciplines, raw psionic talents).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SpellSchool {
-    Ruin,
-    Wardcraft,
-    Threshold,
-    Flux,
-    Dawnfire,
-    Gravesong,
-    Verdance,
-    Pactbinding,
-    Hollow,
+pub enum School {
+    Abjuration,
+    Conjuration,
+    Divination,
+    Enchantment,
+    Evocation,
+    Illusion,
+    Necromancy,
+    Transmutation,
+    /// Time / gravity / mass / fate (our Dunamancy-analog; Prism-shard
+    /// powered).
+    Axiomancy,
+    /// Blood-fuelled, self-corrupting magic (forbidden practice).
+    Hemomancy,
+}
+
+/// Where a spell's energy COMES FROM (magic-system-v2 spec §1.1). The fuel,
+/// independent of the school (form). Ki and Psionic abilities live here with
+/// `school: None`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MagicSource {
+    /// The Veil — arcane study, bloodline, pact, or art.
+    Arcane,
+    /// The gods' channel through the Veil — faith and oaths.
+    Divine,
+    /// The Song still singing in the world — nature and elements.
+    Primal,
+    /// Leakage from the Beyond — the mind as an unlicensed gate.
+    Psionic,
+    /// The Song flowing through a living body — discipline and ki.
+    Ki,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -3737,9 +3758,12 @@ pub struct AbilityMeta {
     pub contextual_stats: Option<StatAdj>,
     /// If provided, multiplies the precision power from armor for this ability
     pub precision_power_mult: Option<f32>,
-    /// School this ability belongs to, if it is a spell.
+    /// School (form) this ability belongs to, if it is a spell.
     #[serde(default)]
-    pub school: Option<SpellSchool>,
+    pub school: Option<School>,
+    /// Magic source (fuel) this ability draws on, if any.
+    #[serde(default)]
+    pub source: Option<MagicSource>,
     /// Per-ability cooldown in seconds, gated in `handle_ability`.
     #[serde(default)]
     pub cooldown: Option<f32>,
@@ -3996,6 +4020,17 @@ mod ground_aoe_tests {
         for id in [
             "common.abilities.spells.hollow.dread_whisper",
             "common.abilities.spells.gravesong.censure",
+        ] {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
+
+    #[test]
+    fn cantrips_deserialize() {
+        for id in [
+            "common.abilities.spells.arcane.cinderbolt",
+            "common.abilities.spells.divine.dawnmote",
+            "common.abilities.spells.primal.thornspit",
         ] {
             crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
         }

@@ -37,6 +37,7 @@ pub mod presence;
 pub mod projectile;
 pub mod shockwave;
 pub mod skillset;
+pub mod spell;
 mod stats;
 pub mod teleport;
 pub mod visual;
@@ -45,7 +46,7 @@ pub mod visual;
 pub use self::{
     ability::{
         Ability, AbilityCooldowns, AbilityInput, AbilityPool, ActiveAbilities, BASE_ABILITY_LIMIT,
-        CharacterAbility, CharacterAbilityType, SpellSchool, Stance,
+        CharacterAbility, CharacterAbilityType, MagicSource, School, Stance,
     },
     admin::{Admin, AdminRole},
     agent::{
@@ -112,6 +113,7 @@ pub use self::{
         SkillGroup, SkillGroupKind, SkillSet,
         skills::{self, Skill},
     },
+    spell::{SpellCompendium, SpellDef},
     stats::{Stats, StatsModifier},
     teleport::Teleporting,
     visual::{FrontendMarker, LightAnimation, LightEmitter},
