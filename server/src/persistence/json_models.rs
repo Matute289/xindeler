@@ -99,7 +99,10 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         | Weapon(ToolKind::Throwable)
         | Weapon(ToolKind::Empty)
         | Weapon(ToolKind::Natural)
-        | Weapon(ToolKind::Shovel) => panic!(
+        | Weapon(ToolKind::Shovel)
+        | Weapon(ToolKind::Tome)
+        | Weapon(ToolKind::HolySymbol)
+        | Weapon(ToolKind::Focus) => panic!(
             "Tried to add unsupported skill group to database: {:?}",
             skill_group
         ),
@@ -280,6 +283,9 @@ fn tool_kind_to_string(tool: Option<comp::item::tool::ToolKind>) -> String {
         Some(Bow) => "Bow",
         Some(Staff) => "Staff",
         Some(Sceptre) => "Sceptre",
+        Some(Tome) => "Tome",
+        Some(HolySymbol) => "HolySymbol",
+        Some(Focus) => "Focus",
         Some(Dagger) => "Dagger",
         Some(Shield) => "Shield",
         Some(Spear) => "Spear",
@@ -307,6 +313,9 @@ fn tool_kind_from_string(tool: String) -> Option<comp::item::tool::ToolKind> {
         "Bow" => Some(Bow),
         "Staff" => Some(Staff),
         "Sceptre" => Some(Sceptre),
+        "Tome" => Some(Tome),
+        "HolySymbol" => Some(HolySymbol),
+        "Focus" => Some(Focus),
         "Dagger" => Some(Dagger),
         "Shield" => Some(Shield),
         "Spear" => Some(Spear),

@@ -146,6 +146,9 @@ impl<'a> TargetData<'a> {
                 ToolKind::Bow
                 | ToolKind::Staff
                 | ToolKind::Sceptre
+                | ToolKind::Tome
+                | ToolKind::HolySymbol
+                | ToolKind::Focus
                 | ToolKind::Blowgun
                 | ToolKind::Debug
                 | ToolKind::Instrument,
