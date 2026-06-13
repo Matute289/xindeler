@@ -4024,4 +4024,15 @@ mod ground_aoe_tests {
             crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
         }
     }
+
+    #[test]
+    fn cantrips_deserialize() {
+        for id in [
+            "common.abilities.spells.arcane.cinderbolt",
+            "common.abilities.spells.divine.dawnmote",
+            "common.abilities.spells.primal.thornspit",
+        ] {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
 }

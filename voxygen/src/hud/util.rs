@@ -784,6 +784,10 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         "common.abilities.bow.death_volley" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_shot" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_heavy_shot" => imgs.bow_death_volley,
+        // Spells (cantrips) — TODO(magic-v2 polish): dedicated spell icons
+        "common.abilities.spells.arcane.cinderbolt" => imgs.fireball,
+        "common.abilities.spells.divine.dawnmote" => imgs.fireball,
+        "common.abilities.spells.primal.thornspit" => imgs.fireball,
         // Staff
         "common.abilities.staff.firebomb" => imgs.fireball,
         "common.abilities.staff.flamethrower" => imgs.flamethrower,
