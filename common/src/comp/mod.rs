@@ -45,7 +45,7 @@ pub mod visual;
 pub use self::{
     ability::{
         Ability, AbilityCooldowns, AbilityInput, AbilityPool, ActiveAbilities, BASE_ABILITY_LIMIT,
-        CharacterAbility, CharacterAbilityType, SpellSchool, Stance,
+        CharacterAbility, CharacterAbilityType, MagicSource, School, Stance,
     },
     admin::{Admin, AdminRole},
     agent::{

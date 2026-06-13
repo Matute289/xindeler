@@ -266,7 +266,8 @@ pub enum BuffKind {
     /// agent targeting (NPCs only in v1, spec §5).
     Charmed,
     /// The Hollow's surcharge: stacking multiplicative max-health reduction
-    /// applied by every Hollow-school cast via AbilityMeta.init_event.
+    /// applied by every Beyond-tainted Necromancy cast via
+    /// AbilityMeta.init_event.
     Hollowtouched,
     // =================
     //      COMPLEX
