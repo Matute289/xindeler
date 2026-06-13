@@ -8,7 +8,8 @@ use crate::{
             item::{
                 ItemDefinitionIdOwned, ItemKind, Tool,
                 tool::{
-                    AbilityContext, AbilityItem, AbilityKind, ContextualIndex, Stats, ToolKind,
+                    AbilityContext, AbilityItem, AbilityKind, AbilityMap, AbilitySpec,
+                    ContextualIndex, Stats, ToolKind,
                 },
             },
             slot::EquipSlot,
@@ -23,7 +24,7 @@ use crate::{
     },
     explosion::{ColorPreset, TerrainReplacementPreset},
     match_some,
-    resources::Secs,
+    resources::{Secs, Time},
     states::{
         behavior::JoinData,
         sprite_summon::SpriteSummonAnchor,
@@ -75,6 +76,57 @@ impl Default for ActiveAbilities {
             auxiliary_sets: HashMap::new(),
         }
     }
+}
+
+/// Per-ability cooldowns, keyed by ability id (the RON asset path, or the
+/// pool key for innate abilities). Stores the absolute game `Time` at which
+/// the ability is ready again; expired entries are pruned opportunistically
+/// on `set`, so no tick system is needed (magic-abilities spec §8). Not
+/// persisted across logout (accepted v1 exploit surface, spec Open Q #3).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AbilityCooldowns(pub HashMap<String, Time>);
+
+impl AbilityCooldowns {
+    pub fn is_ready(&self, ability_id: &str, now: Time) -> bool {
+        self.0
+            .get(ability_id)
+            .is_none_or(|ready_at| now.0 >= ready_at.0)
+    }
+
+    pub fn ready_at(&self, ability_id: &str) -> Option<Time> { self.0.get(ability_id).copied() }
+
+    pub fn set(&mut self, ability_id: &str, now: Time, cooldown_secs: f32) {
+        self.0.retain(|_, ready_at| ready_at.0 > now.0);
+        self.0.insert(
+            ability_id.to_string(),
+            Time(now.0 + f64::from(cooldown_secs)),
+        );
+    }
+}
+
+impl Component for AbilityCooldowns {
+    type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
+}
+
+/// Ability-set keys (manifest `Custom(...)` entries) granted to a character
+/// independent of equipment: racial innates and class signature abilities
+/// (magic-abilities spec §3 Path B). Indexed by `AuxiliaryAbility::Innate(i)`.
+/// Each key's set `primary` is the granted ability; the key itself doubles as
+/// the frontend ability id (icon/i18n key), like Contextualized pseudo_ids.
+///
+/// ORDERING CONTRACT (review M1): persisted hotbar slots store
+/// `Innate:index:N` positions into this Vec, so its order must be STABLE and
+/// append-only for a given character: producers must emit class abilities
+/// first (spec order), then racial innates, never reordering existing
+/// entries. Revisit key-based persistence before the pool producer ships
+/// (magic plan Phase 4) if this contract proves too fragile.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AbilityPool {
+    pub abilities: Vec<String>,
+}
+
+impl Component for AbilityPool {
+    type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
 }
 
 // make it pub, for UI stuff, if you want
@@ -198,6 +250,8 @@ impl ActiveAbilities {
         char_state: Option<&CharacterState>,
         context: &AbilityContext,
         stats: Option<&comp::Stats>,
+        ability_pool: Option<&AbilityPool>,
+        ability_map: &AbilityMap,
         // bool is from_offhand
     ) -> Option<(CharacterAbility, bool, SpecifiedAbility)> {
         let ability = self.get_ability(input, inv, Some(skill_set), stats);
@@ -274,6 +328,20 @@ impl ActiveAbilities {
             Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand, false),
             Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand, true),
             Ability::GliderAux(_) => inst_ability(EquipSlot::Glider, false),
+            Ability::InnateAux(index) => ability_pool
+                .and_then(|pool| pool.abilities.get(index))
+                .and_then(|key| {
+                    ability_map
+                        .get_ability_set(&AbilitySpec::Custom(key.clone()))
+                        .and_then(|set| set.primary(Some(skill_set), context))
+                        .map(|(item, i)| {
+                            (
+                                item.ability.clone().adjusted_by_skills(skill_set, None),
+                                false,
+                                spec_ability(i),
+                            )
+                        })
+                }),
             Ability::Empty => None,
             Ability::SpeciesMovement => matches!(body, Some(Body::Humanoid(_)))
                 .then(|| CharacterAbility::default_roll(char_state))
@@ -315,6 +383,7 @@ impl ActiveAbilities {
     pub fn all_available_abilities(
         inv: Option<&Inventory>,
         skill_set: Option<&SkillSet>,
+        ability_pool: Option<&AbilityPool>,
     ) -> Vec<AuxiliaryAbility> {
         let mut ability_buff = vec![];
         // Check if uses combo of two "equal" weapons
@@ -347,6 +416,13 @@ impl ActiveAbilities {
         Self::iter_available_abilities_on(inv, skill_set, EquipSlot::Glider)
             .map(AuxiliaryAbility::Glider)
             .for_each(|a| ability_buff.push(a));
+
+        // Push innate (class/racial) abilities
+        if let Some(pool) = ability_pool {
+            (0..pool.abilities.len())
+                .map(AuxiliaryAbility::Innate)
+                .for_each(|a| ability_buff.push(a));
+        }
 
         ability_buff
     }
@@ -391,6 +467,7 @@ pub enum Ability {
     MainWeaponAux(usize),
     OffWeaponAux(usize),
     GliderAux(usize),
+    InnateAux(usize),
     Empty,
     /* For future use
      * ArmorAbility(usize), */
@@ -407,9 +484,10 @@ impl Ability {
             Self::ToolPrimary => AbilityInput::Primary,
             Self::ToolSecondary => AbilityInput::Secondary,
             Self::SpeciesMovement => AbilityInput::Movement,
-            Self::GliderAux(idx) | Self::OffWeaponAux(idx) | Self::MainWeaponAux(idx) => {
-                AbilityInput::Auxiliary(*idx)
-            },
+            Self::GliderAux(idx)
+            | Self::OffWeaponAux(idx)
+            | Self::MainWeaponAux(idx)
+            | Self::InnateAux(idx) => AbilityInput::Auxiliary(*idx),
             Self::Empty => return None,
         };
 
@@ -421,6 +499,7 @@ impl Ability {
         char_state: Option<&CharacterState>,
         inv: Option<&'a Inventory>,
         skill_set: Option<&'a SkillSet>,
+        ability_pool: Option<&'a AbilityPool>,
         context: &AbilityContext,
     ) -> Option<&'a str> {
         let ability_set = |equip_slot| {
@@ -477,6 +556,9 @@ impl Ability {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
             AbilitySource::Weapons => match self {
@@ -491,6 +573,9 @@ impl Ability {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
         }
@@ -504,7 +589,7 @@ impl Ability {
             | Ability::GliderAux(_)
             | Ability::OffWeaponAux(_)
             | Ability::ToolGuard => true,
-            Ability::SpeciesMovement | Ability::Empty => false,
+            Ability::InnateAux(_) | Ability::SpeciesMovement | Ability::Empty => false,
         }
     }
 }
@@ -535,6 +620,7 @@ impl SpecifiedAbility {
         self,
         char_state: Option<&CharacterState>,
         inv: Option<&'a Inventory>,
+        ability_pool: Option<&'a AbilityPool>,
     ) -> Option<&'a str> {
         let ability_set = |equip_slot| {
             inv.and_then(|inv| inv.equipped(equip_slot))
@@ -579,6 +665,9 @@ impl SpecifiedAbility {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
             AbilitySource::Weapons => match self.ability {
@@ -590,6 +679,9 @@ impl SpecifiedAbility {
                 Ability::MainWeaponAux(_) => inst_ability(EquipSlot::ActiveMainhand),
                 Ability::OffWeaponAux(_) => inst_ability(EquipSlot::ActiveOffhand),
                 Ability::GliderAux(_) => inst_ability(EquipSlot::Glider),
+                Ability::InnateAux(index) => ability_pool
+                    .and_then(|pool| pool.abilities.get(index))
+                    .map(|key| key.as_str()),
                 Ability::Empty => None,
             },
         }
@@ -646,6 +738,7 @@ pub enum AuxiliaryAbility {
     MainWeapon(usize),
     OffWeapon(usize),
     Glider(usize),
+    Innate(usize),
     Empty,
 }
 
@@ -655,6 +748,7 @@ impl From<AuxiliaryAbility> for Ability {
             AuxiliaryAbility::MainWeapon(i) => Ability::MainWeaponAux(i),
             AuxiliaryAbility::OffWeapon(i) => Ability::OffWeaponAux(i),
             AuxiliaryAbility::Glider(i) => Ability::GliderAux(i),
+            AuxiliaryAbility::Innate(i) => Ability::InnateAux(i),
             AuxiliaryAbility::Empty => Ability::Empty,
         }
     }
@@ -737,6 +831,7 @@ impl From<&CharacterState> for CharacterAbilityType {
             | CharacterState::Throw(_)
             | CharacterState::LeapExplosionShockwave(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::LeapRanged(_)
             | CharacterState::Simple(_) => Self::Other,
         }
@@ -1086,6 +1181,28 @@ pub enum CharacterAbility {
         #[serde(default)]
         meta: AbilityMeta,
     },
+    GroundAoe {
+        energy_cost: f32,
+        buildup_duration: f32,
+        /// Telegraph time between target lock and the strike
+        delay: f32,
+        recover_duration: f32,
+        max_range: f32,
+        radius: f32,
+        min_falloff: f32,
+        damage: f32,
+        poise: f32,
+        knockback: Knockback,
+        #[serde(default)]
+        dodgeable: Dodgeable,
+        #[serde(default)]
+        reagent: Option<Reagent>,
+        /// If true the caster cannot move during the telegraph
+        #[serde(default)]
+        rooted_cast: bool,
+        #[serde(default)]
+        meta: AbilityMeta,
+    },
     BasicBeam {
         buildup_duration: f32,
         recover_duration: f32,
@@ -1431,6 +1548,9 @@ impl CharacterAbility {
                         && update.energy.try_change_by(-*energy_cost).is_ok()
                 },
                 CharacterAbility::Explosion { energy_cost, .. } => {
+                    update.energy.try_change_by(-*energy_cost).is_ok()
+                },
+                CharacterAbility::GroundAoe { energy_cost, .. } => {
                     update.energy.try_change_by(-*energy_cost).is_ok()
                 },
                 CharacterAbility::DiveMelee {
@@ -1902,6 +2022,31 @@ impl CharacterAbility {
                 knockback.strength *= stats.effect_power;
                 *radius *= stats.range;
             },
+            GroundAoe {
+                ref mut energy_cost,
+                ref mut buildup_duration,
+                delay: _,
+                ref mut recover_duration,
+                ref mut max_range,
+                ref mut radius,
+                min_falloff: _,
+                ref mut damage,
+                poise: ref mut poise_damage,
+                ref mut knockback,
+                dodgeable: _,
+                reagent: _,
+                rooted_cast: _,
+                meta: _,
+            } => {
+                *energy_cost /= stats.energy_efficiency;
+                *buildup_duration /= stats.speed;
+                *recover_duration /= stats.speed;
+                *damage *= stats.power;
+                *poise_damage *= stats.effect_power;
+                knockback.strength *= stats.effect_power;
+                *radius *= stats.range;
+                *max_range *= stats.range;
+            },
             BasicBeam {
                 ref mut buildup_duration,
                 ref mut recover_duration,
@@ -2223,6 +2368,7 @@ impl CharacterAbility {
             | Throw { energy_cost, .. }
             | Shockwave { energy_cost, .. }
             | Explosion { energy_cost, .. }
+            | GroundAoe { energy_cost, .. }
             | BasicAura { energy_cost, .. }
             | BasicBlock { energy_cost, .. }
             | SelfBuff { energy_cost, .. }
@@ -2295,6 +2441,7 @@ impl CharacterAbility {
             | LeapMelee { .. }
             | LeapShockwave { .. }
             | Explosion { .. }
+            | GroundAoe { .. }
             | ChargedMelee { .. }
             | ChargedRanged { .. }
             | Throw { .. }
@@ -2333,6 +2480,7 @@ impl CharacterAbility {
             | Throw { meta, .. }
             | Shockwave { meta, .. }
             | Explosion { meta, .. }
+            | GroundAoe { meta, .. }
             | BasicAura { meta, .. }
             | BasicBlock { meta, .. }
             | SelfBuff { meta, .. }
@@ -3104,6 +3252,41 @@ impl TryFrom<(&CharacterAbility, AbilityInfo, &JoinData<'_>)> for CharacterState
                 movement_modifier: movement_modifier.buildup,
                 ori_modifier: ori_modifier.buildup,
             }),
+            CharacterAbility::GroundAoe {
+                energy_cost: _,
+                buildup_duration,
+                delay,
+                recover_duration,
+                max_range,
+                radius,
+                min_falloff,
+                damage,
+                poise,
+                knockback,
+                dodgeable,
+                reagent,
+                rooted_cast,
+                meta: _,
+            } => CharacterState::GroundAoe(ground_aoe::Data {
+                static_data: ground_aoe::StaticData {
+                    buildup_duration: Duration::from_secs_f32(*buildup_duration),
+                    delay: Duration::from_secs_f32(*delay),
+                    recover_duration: Duration::from_secs_f32(*recover_duration),
+                    max_range: *max_range,
+                    radius: *radius,
+                    min_falloff: *min_falloff,
+                    damage: *damage,
+                    poise: *poise,
+                    knockback: *knockback,
+                    dodgeable: *dodgeable,
+                    reagent: *reagent,
+                    rooted_cast: *rooted_cast,
+                    ability_info,
+                },
+                timer: Duration::default(),
+                stage_section: StageSection::Buildup,
+                target_pos: None,
+            }),
             CharacterAbility::BasicBeam {
                 buildup_duration,
                 recover_duration,
@@ -3522,6 +3705,22 @@ impl TryFrom<(&CharacterAbility, AbilityInfo, &JoinData<'_>)> for CharacterState
     }
 }
 
+/// Spell school taxonomy (magic-abilities spec §1). Working names; the
+/// lore-cosmology spec owns final names. Carried in `AbilityMeta` for UI
+/// grouping, class gating, and future resistances.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpellSchool {
+    Ruin,
+    Wardcraft,
+    Threshold,
+    Flux,
+    Dawnfire,
+    Gravesong,
+    Verdance,
+    Pactbinding,
+    Hollow,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AbilityMeta {
@@ -3538,6 +3737,12 @@ pub struct AbilityMeta {
     pub contextual_stats: Option<StatAdj>,
     /// If provided, multiplies the precision power from armor for this ability
     pub precision_power_mult: Option<f32>,
+    /// School this ability belongs to, if it is a spell.
+    #[serde(default)]
+    pub school: Option<SpellSchool>,
+    /// Per-ability cooldown in seconds, gated in `handle_ability`.
+    #[serde(default)]
+    pub cooldown: Option<f32>,
 }
 
 impl StatAdj {
@@ -3734,4 +3939,65 @@ pub enum AbilityInitEvent {
 
 impl Component for Stance {
     type Storage = DerefFlaggedStorage<Self, specs::VecStorage<Self>>;
+}
+
+#[cfg(test)]
+mod ability_cooldown_tests {
+    use super::*;
+    use crate::resources::Time;
+
+    #[test]
+    fn fresh_component_is_ready() {
+        let cds = AbilityCooldowns::default();
+        assert!(cds.is_ready("common.abilities.spells.ruin.shatterburst", Time(0.0)));
+    }
+
+    #[test]
+    fn set_blocks_until_ready_time() {
+        let mut cds = AbilityCooldowns::default();
+        cds.set("a", Time(10.0), 30.0);
+        assert!(!cds.is_ready("a", Time(10.0)));
+        assert!(!cds.is_ready("a", Time(39.9)));
+        assert!(cds.is_ready("a", Time(40.0)));
+        assert!(cds.is_ready("b", Time(10.0)));
+    }
+
+    #[test]
+    fn set_prunes_expired_entries() {
+        let mut cds = AbilityCooldowns::default();
+        cds.set("a", Time(0.0), 5.0);
+        // "a" became ready at t=5; setting "b" at t=100 prunes it
+        cds.set("b", Time(100.0), 5.0);
+        assert_eq!(cds.0.len(), 1);
+        assert!(cds.ready_at("b").is_some());
+    }
+}
+
+#[cfg(test)]
+mod ground_aoe_tests {
+    // JoinData is impractical to construct in isolation; behaviour is covered
+    // by the deserialization test below and the in-game check. Here we pin
+    // the RON contract.
+    use crate::{assets::AssetExt, comp::CharacterAbility};
+
+    #[test]
+    fn shatterburst_deserializes_as_ground_aoe() {
+        let ability = crate::assets::Ron::<CharacterAbility>::load_expect(
+            "common.abilities.spells.ruin.shatterburst",
+        )
+        .read()
+        .0
+        .clone();
+        assert!(matches!(ability, CharacterAbility::GroundAoe { .. }));
+    }
+
+    #[test]
+    fn cc_spells_deserialize() {
+        for id in [
+            "common.abilities.spells.hollow.dread_whisper",
+            "common.abilities.spells.gravesong.censure",
+        ] {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
 }

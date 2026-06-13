@@ -1,0 +1,29 @@
+BasicRanged(
+    energy_cost: 70.0,
+    buildup_duration: 0.6,
+    recover_duration: 0.4,
+    projectile: (
+        kind: Explosive(
+            radius: 1.5,
+            min_falloff: 0.6,
+            reagent: Some(Purple),
+            terrain: None,
+        ),
+        attack: Some((
+            damage: 14,
+            buff: Some((
+                kind: Amnesia,
+                dur_secs: 5,
+                strength: Value(1.0),
+                chance: 1.0,
+            )),
+        )),
+    ),
+    projectile_body: Object(BoltFire),
+    projectile_speed: 70.0,
+    num_projectiles: Value(1),
+    meta: (
+        cooldown: Some(18.0),
+        school: Some(Gravesong),
+    ),
+)

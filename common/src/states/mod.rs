@@ -20,6 +20,7 @@ pub mod explosion;
 pub mod finisher_melee;
 pub mod glide;
 pub mod glide_wield;
+pub mod ground_aoe;
 pub mod idle;
 pub mod interact;
 pub mod leap_explosion_shockwave;

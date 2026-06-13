@@ -4,8 +4,8 @@ use crate::{
         Alignment, Body, CharacterState, Density, InputAttr, InputKind, InventoryAction, Melee,
         Ori, Pos, Scale, StateUpdate,
         ability::{
-            AbilityInitEvent, AbilityMeta, AbilityRequirements, Capability, SpecifiedAbility,
-            Stance,
+            AbilityInitEvent, AbilityMeta, AbilityRequirements, Capability, CharacterAbility,
+            SpecifiedAbility, Stance,
         },
         arthropod, biped_large, biped_small, bird_medium,
         buff::{Buff, BuffCategory, BuffChange, BuffData, BuffSource, DestInfo},
@@ -23,7 +23,10 @@ use crate::{
         theropod,
     },
     consts::{FRIC_GROUND, GRAVITY, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
-    event::{BuffEvent, ChangeStanceEvent, ComboChangeEvent, InventoryManipEvent, LocalEvent},
+    event::{
+        BuffEvent, ChangeStanceEvent, ComboChangeEvent, InventoryManipEvent, LocalEvent,
+        SetAbilityCooldownEvent,
+    },
     mounting::Volume,
     outcome::Outcome,
     states::{behavior::JoinData, utils::CharacterState::Idle, *},
@@ -1456,6 +1459,8 @@ fn handle_ability(
                     Some(data.character),
                     &context,
                     Some(data.stats),
+                    data.ability_pool,
+                    data.ability_map,
                 )
             })
             .map(|(mut a, f, s)| {
@@ -1464,7 +1469,10 @@ fn handle_ability(
                 }
                 (a, f, s)
             })
-            .filter(|(ability, _, _)| ability.requirements_paid(data, update))
+            .filter(|(ability, _, spec_ability)| {
+                cooldown_ready(data, ability, spec_ability)
+                    && ability.requirements_paid(data, update)
+            })
     {
         // TODO: Change requirements_paid to requirements_met, and then pay requirements
         // here (necessary after energy and combo moved to AbilityMeta)
@@ -1483,6 +1491,7 @@ fn handle_ability(
                 output_events.emit_server(InventoryManipEvent(data.entity, inv_manip));
             }
         }
+        let spec_ability_copy = spec_ability;
         match CharacterState::try_from((
             &ability,
             AbilityInfo::new(data, from_offhand, input, Some(spec_ability), ability_meta),
@@ -1491,6 +1500,20 @@ fn handle_ability(
             Ok(character_state) => {
                 let tool_kind = character_state.ability_info().and_then(|ai| ai.tool);
                 update.character = character_state;
+
+                if let Some(cooldown_secs) = ability_meta.cooldown
+                    && let Some(id) = spec_ability_copy.ability_id(
+                        Some(data.character),
+                        data.inventory,
+                        data.ability_pool,
+                    )
+                {
+                    output_events.emit_server(SetAbilityCooldownEvent {
+                        entity: data.entity,
+                        ability_id: id.to_string(),
+                        cooldown_secs,
+                    });
+                }
 
                 if let Some(init_event) = ability.ability_meta().init_event {
                     match init_event {
@@ -1546,6 +1569,25 @@ fn handle_ability(
         }
     }
     false
+}
+
+/// An ability with `meta.cooldown` may only fire when `AbilityCooldowns` says
+/// it is ready. Runs on client and server; the server-side check is
+/// authoritative (the event above is server-only), the client check uses the
+/// synced component for prediction.
+fn cooldown_ready(
+    data: &JoinData<'_>,
+    ability: &CharacterAbility,
+    spec_ability: &SpecifiedAbility,
+) -> bool {
+    ability.ability_meta().cooldown.is_none_or(|_| {
+        (*spec_ability)
+            .ability_id(Some(data.character), data.inventory, data.ability_pool)
+            .is_none_or(|id| {
+                data.ability_cooldowns
+                    .is_none_or(|cds| cds.is_ready(id, *data.time))
+            })
+    })
 }
 
 pub fn handle_input(

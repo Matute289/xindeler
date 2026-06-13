@@ -167,6 +167,7 @@ fn aux_ability_to_string(ability: comp::ability::AuxiliaryAbility) -> String {
         AuxiliaryAbility::MainWeapon(index) => format!("Main Weapon:index:{}", index),
         AuxiliaryAbility::OffWeapon(index) => format!("Off Weapon:index:{}", index),
         AuxiliaryAbility::Glider(index) => format!("Glider:index:{}", index),
+        AuxiliaryAbility::Innate(index) => format!("Innate:index:{}", index),
         AuxiliaryAbility::Empty => String::from("Empty"),
     }
 }
@@ -234,6 +235,27 @@ fn aux_ability_from_string(ability: &str) -> comp::ability::AuxiliaryAbility {
                 dev_panic!(String::from(
                     "Conversion from database to ability set failed. Unable to find an index for \
                      offhand abilities"
+                ));
+                AuxiliaryAbility::Empty
+            },
+        },
+        Some("Innate") => match parts
+            .next()
+            .map(|index| index.parse::<usize>().map_err(|_| index))
+        {
+            Some(Ok(index)) => AuxiliaryAbility::Innate(index),
+            Some(Err(error)) => {
+                dev_panic!(format!(
+                    "Conversion from database to ability set failed. Unable to parse index for \
+                     innate abilities: {}",
+                    error
+                ));
+                AuxiliaryAbility::Empty
+            },
+            None => {
+                dev_panic!(String::from(
+                    "Conversion from database to ability set failed. Unable to find an index for \
+                     innate abilities"
                 ));
                 AuxiliaryAbility::Empty
             },
@@ -425,6 +447,24 @@ pub mod tests {
         assert_eq!(
             super::db_string_to_class("Necromancer"),
             ClassKind::Adventurer
+        );
+    }
+
+    #[test]
+    fn innate_aux_ability_round_trips() {
+        use common::comp::ability::AuxiliaryAbility;
+        for ability in [
+            AuxiliaryAbility::Innate(0),
+            AuxiliaryAbility::Innate(3),
+            AuxiliaryAbility::MainWeapon(1),
+            AuxiliaryAbility::Empty,
+        ] {
+            let s = super::aux_ability_to_string(ability);
+            assert_eq!(super::aux_ability_from_string(&s), ability);
+        }
+        assert_eq!(
+            super::aux_ability_to_string(AuxiliaryAbility::Innate(3)),
+            "Innate:index:3"
         );
     }
 }

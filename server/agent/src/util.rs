@@ -236,6 +236,8 @@ impl AgentData<'_> {
                     Some(self.char_state),
                     &context,
                     self.stats,
+                    None,
+                    self.ability_map,
                 )
                 .map_or(Default::default(), |a| a.0),
         )

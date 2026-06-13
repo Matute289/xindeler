@@ -203,6 +203,15 @@ buff-ardenthunted = Ardent Hunted
 ## Septic Shot
 buff-septicshot = Septic Shot
     .desc = Your next arrow will cause infection in the target, making it more deadly if the target has any ongoing conditions.
+## Terrified
+buff-terrified = Terrified
+    .desc = Dread floods your limbs, slowing every step.
+## Charmed
+buff-charmed = Charmed
+    .desc = You cannot bring yourself to harm whoever did this to you.
+## Hollowtouched
+buff-hollowtouched = Hollowtouched
+    .desc = The Hollow has tasted you. Maximum health reduced.
 ## Util
 buff-mysterious = Mysterious effect
 buff-remove = Click to remove

@@ -257,6 +257,17 @@ pub enum BuffKind {
     /// Strength linearly increases the amount of additional combo generated and
     /// the additional energy reward.
     ArdentHunted,
+    /// Dread of death. Heavy movement slow (players); NPCs additionally rout
+    /// (server/agent). Strength scales the slow non-linearly like Crippled.
+    /// v1 implements the spec's sanctioned fallback (slow, not forced
+    /// movement) to avoid prediction artifacts; see magic spec §5 risk note.
+    Terrified,
+    /// Cannot bring itself to harm the charmer. No stat effects; consumed by
+    /// agent targeting (NPCs only in v1, spec §5).
+    Charmed,
+    /// The Hollow's surcharge: stacking multiplicative max-health reduction
+    /// applied by every Hollow-school cast via AbilityMeta.init_event.
+    Hollowtouched,
     // =================
     //      COMPLEX
     // =================
@@ -337,7 +348,10 @@ impl BuffKind {
             | BuffKind::Amnesia
             | BuffKind::OffBalance
             | BuffKind::Chilled
-            | BuffKind::ArdentHunted => BuffDescriptor::SimpleNegative,
+            | BuffKind::ArdentHunted
+            | BuffKind::Terrified
+            | BuffKind::Charmed
+            | BuffKind::Hollowtouched => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -371,7 +385,12 @@ impl BuffKind {
 
     /// Checks if multiple instances of the buff should be processed, instead of
     /// only the strongest.
-    pub fn stacks(self) -> bool { matches!(self, BuffKind::PotionSickness | BuffKind::Resilience) }
+    pub fn stacks(self) -> bool {
+        matches!(
+            self,
+            BuffKind::PotionSickness | BuffKind::Resilience | BuffKind::Hollowtouched
+        )
+    }
 
     pub fn effects(&self, data: &BuffData, source_entity: Option<Uid>) -> Vec<BuffEffect> {
         // Normalized nonlinear scaling
@@ -702,6 +721,14 @@ impl BuffKind {
                 })
                 .with_requirement(CombatRequirement::AttackSource(AttackSource::Projectile)),
             )],
+            BuffKind::Terrified => {
+                vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))]
+            },
+            BuffKind::Charmed => vec![],
+            BuffKind::Hollowtouched => vec![BuffEffect::MaxHealthModifier {
+                value: 1.0 - (0.08 * data.strength).min(0.4),
+                kind: ModifierKind::Multiplicative,
+            }],
         }
     }
 

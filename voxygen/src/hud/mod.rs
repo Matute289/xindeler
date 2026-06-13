@@ -3202,6 +3202,8 @@ impl Hud {
         let energies = ecs.read_storage::<comp::Energy>();
         let skillsets = ecs.read_storage::<comp::SkillSet>();
         let active_abilities = ecs.read_storage::<comp::ActiveAbilities>();
+        let ability_pools = ecs.read_storage::<comp::AbilityPool>();
+        let ability_map = ecs.read_resource::<comp::item::tool::AbilityMap>();
         let bodies = ecs.read_storage::<comp::Body>();
         let poises = ecs.read_storage::<comp::Poise>();
         let uids = ecs.read_storage::<Uid>();
@@ -3249,6 +3251,7 @@ impl Hud {
                 poise,
                 skillset,
                 active_abilities.get(entity),
+                ability_pools.get(entity),
                 body,
                 //&character_state,
                 self.pulse,
@@ -3260,6 +3263,7 @@ impl Hud {
                 i18n,
                 &self.item_i18n,
                 &msm,
+                &ability_map,
                 &rbm,
                 self.floaters.combo_floater,
                 &context,
@@ -3908,6 +3912,7 @@ impl Hud {
                     global_state,
                     skill_set,
                     active_abilities.get(entity).unwrap_or(&Default::default()),
+                    ability_pools.get(entity),
                     inventory,
                     char_state,
                     health,
@@ -5649,6 +5654,10 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::OffBalance => imgs.debuff_offbalance_0,
         BuffKind::Chilled => imgs.debuff_chilled,
         BuffKind::ArdentHunted => imgs.debuff_ardenthunted,
+        // TODO(magic-v1 polish): dedicated icons
+        BuffKind::Terrified => imgs.debuff_rooted_0,
+        BuffKind::Charmed => imgs.debuff_amnesia_0,
+        BuffKind::Hollowtouched => imgs.debuff_cursed_0,
     }
 }
 

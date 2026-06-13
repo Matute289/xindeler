@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Character creation is now a 4-step wizard (sex/race, appearance, class, hardcore + start zone) with the name always visible; each class shows only its valid starter weapons.
 - Classes now start with themed outfits: bronze mail (Warrior), purple linen robes (Mage), blue vestments (Cleric) and rawhide leathers with a stealth bonus (Rogue).
 - Items can now be restricted to a class whitelist; the tooltip shows "Requires Class" (red when unmet) and the server rejects mismatched equips.
+- Spells now have per-ability cooldowns (server-authoritative) and belong to one of nine spell schools.
+- New ground-targeted AoE cast mechanic with a visible telegraph ring, debuting with the Ruin spell Shatterburst.
+- New status effects: Terrified (slows and routs NPCs), Charmed (NPCs refuse to attack their charmer) and Hollowtouched (stacking max-health surcharge), with the first CC spells Dread Whisper and Censure.
 - Translators can now use fragment-based templates for modular weapons.
 - Airship captains can now be asked where they're currently heading, and where they're heading after reaching the current destination.
 - Courier, fetch, and messenger quests that can be started by talking to various civilized NPC's that can afford to pay you to get the job done.

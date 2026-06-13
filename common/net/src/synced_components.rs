@@ -73,6 +73,8 @@ macro_rules! synced_components {
             admin: Admin,
             combo: Combo,
             active_abilities: ActiveAbilities,
+            ability_cooldowns: AbilityCooldowns,
+            ability_pool: AbilityPool,
             can_build: CanBuild,
             is_interactor: IsInteractor,
             interactors: Interactors,
@@ -307,6 +309,14 @@ impl NetSync for Combo {
 
 impl NetSync for ActiveAbilities {
     const SYNC_FROM: SyncFrom = SyncFrom::ClientSpectatorEntity;
+}
+
+impl NetSync for AbilityCooldowns {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
+}
+
+impl NetSync for AbilityPool {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
 }
 
 impl NetSync for CanBuild {
