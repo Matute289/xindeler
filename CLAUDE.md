@@ -2,6 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Interaction Convention — Fill-in Worksheets (Matias ⇄ Claude)
+
+Whenever you need Matias to **make decisions, choose between options, confirm renames/changes, or supply information**, do **not** scatter the questions through prose or rely only on `AskUserQuestion`. Instead present a **plain-text fill-in worksheet** Matias can copy into Sublime Text, complete offline, and paste back whole — easy for him to fill, unambiguous for you to parse, with tables that never break alignment.
+
+Rules (full spec + canonical example: `docs/superpowers/conventions/fill-in-worksheets.md`):
+- Wrap the entire worksheet in a fenced code block so it renders monospace; align all columns and `->` arrows.
+- Header box with `=====` borders stating what it is and what happens on confirm; sections numbered and split by `------` rules.
+- **Bulk confirmations in a BLOCK** with one global `[DG] decisión global:` + `excepciones:` field ("OK a todos" once), and "(se mantienen / ya confirmados …)" notes so he sees what is NOT changing.
+- **Real decisions as `[Q1]`, `[Q2]`, …**, each with a `decisión:` blank line; coinages get **OPCIÓN A / OPCIÓN B**, a `[pick]`, and a free `propio` column.
+- Final action section `[P1] … (SI / NO)`; close with `FIN. Devolveme el bloque completado.`
+
+This is the default for any multi-decision / bulk request (`AskUserQuestion` only for 1–4 quick structural forks).
+
 ## Toolchain
 
 Nightly Rust is required (pinned in `rust-toolchain`). The project uses the 2024 edition. The `specs` ECS crate requires nightly.
