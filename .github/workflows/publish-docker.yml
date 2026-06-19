@@ -13,8 +13,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
+        # No `lfs: true` — LFS blobs come from the self-hosted VPS, not GitHub.
+
+      - name: Setup SSH (self-hosted VPS LFS store)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan greenmountain.dev >> ~/.ssh/known_hosts
+
+      - name: Pull LFS assets bundled into the image (from VPS)
+        run: |
+          git lfs install --local
+          # .lfsconfig already points lfs.url at the VPS. Pull ONLY the asset dirs the
+          # Dockerfile COPYs (assets/common, assets/server, assets/world) — not the full set —
+          # so this fetches from the VPS, never from GitHub.
+          git lfs pull -I "assets/common,assets/server,assets/world"
 
       - name: Install system dependencies
         run: |
