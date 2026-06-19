@@ -51,7 +51,6 @@ pub mod grid;
 pub mod interaction;
 pub mod link;
 pub mod lod;
-pub mod lore;
 pub mod lottery;
 pub mod map;
 pub mod mounting;

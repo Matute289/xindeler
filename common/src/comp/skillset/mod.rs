@@ -16,7 +16,7 @@ pub mod skills;
 #[cfg(test)] mod test;
 
 /// Maximum character level (WoW/Diablo-style derived level — see
-/// docs/superpowers/specs/2026-06-10-character-levels-design.md).
+/// docs/design/specs/2026-06-10-character-levels-design.md).
 pub const MAX_CHARACTER_LEVEL: u16 = 60;
 /// Cumulative XP required for level L is LEVEL_XP_BASE * (L - 1)^2.
 pub const LEVEL_XP_BASE: u32 = 250;

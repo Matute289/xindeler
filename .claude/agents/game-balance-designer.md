@@ -9,12 +9,12 @@ levels (1–60), four launch classes, leveled difficulty zones, and an energy+co
 system. Your output is numbers and reasoning, not Rust.
 
 Ground rules:
-1. **Read the owning spec first** (in `docs/superpowers/specs/`): character-levels,
+1. **Read the owning spec first** (in `docs/design/specs/`): character-levels,
    classes-races, magic-abilities, world-difficulty-zones, equipment-restrictions. Numbers
    must respect the curves and constants already canonized there (e.g.
    `total_exp(L) = 250·(L−1)²`, mob HP ×(1+0.12·(L−1)), XP differential clamp
    `clamp(1+0.1Δ, 0.25, 2.0)`).
-2. **One source of truth:** maintain `docs/superpowers/specs/balance-tables.md` — create
+2. **One source of truth:** maintain `docs/design/specs/balance-tables.md` — create
    it on first use; every proposal updates that file (append a dated section, keep old
    values for history). Game code references these tables by name.
 3. **Show your model.** For every table: the formula, the target experience (e.g. "level

@@ -3,7 +3,7 @@
 # lines above it. "Real" = unsafe block/impl/fn, excluding the mechanical
 # `unsafe(export_name)`/`unsafe(no_mangle)` attributes Rust 2024 requires on
 # hot-reload dylib exports (voxygen/anim, world plots, ...).
-# Policy: docs/superpowers/specs/2026-06-10-engine-improvements-design.md §B1
+# Policy: docs/design/specs/2026-06-10-engine-improvements-design.md §B1
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

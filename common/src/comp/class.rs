@@ -1,5 +1,5 @@
 //! Character class identity. See
-//! docs/superpowers/specs/2026-06-10-classes-races-design.md.
+//! docs/design/specs/2026-06-10-classes-races-design.md.
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use specs::{Component, DerefFlaggedStorage, VecStorage};

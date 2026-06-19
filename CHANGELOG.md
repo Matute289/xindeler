@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The lore canon now ships a machine-readable id index (`assets/lore/index.ron`), loaded via `common::lore::LoreIndex`, with a test that keeps the index in sync with the design-repo lore tree (it skips when that tree is not checked out).
 - Characters now have a level (1–60) derived from lifetime experience, shown on nameplates.
 - Level-ups now play a sound, announce the new level in chat, and the character level is shown in the Diary's character page.
 - Items can now require a minimum character level or race (and class, once classes land) to equip; gated items are grayed out in the bag with requirements shown in the tooltip.

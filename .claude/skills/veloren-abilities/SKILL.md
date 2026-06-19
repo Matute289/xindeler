@@ -5,7 +5,7 @@ description: Use when creating spells, combat abilities, buffs, auras, or new ma
 
 # veloren-abilities
 
-**REQUIRED:** Read `docs/superpowers/specs/2026-06-10-magic-abilities-design.md` first. Invoke `veloren-dev` and `superpowers:test-driven-development` before coding.
+**REQUIRED:** Read `docs/design/specs/2026-06-10-magic-abilities-design.md` first. Invoke `veloren-dev` and `superpowers:test-driven-development` before coding.
 
 ## The ability pipeline (end to end)
 
@@ -70,4 +70,4 @@ spec before writing Rust — most D&D-style effects are already expressible.
 - Server authority on all effects; FX are client-side only.
 - New BuffKinds need: variant, stacking/decay rules, icon asset, i18n string (`.ftl`).
 - Balance numbers from `game-balance-designer` tables; spell names/flavor from
-  `lore-writer` (canon check against `lore/`).
+  `lore-writer` (canon check against `docs/design/lore/`).

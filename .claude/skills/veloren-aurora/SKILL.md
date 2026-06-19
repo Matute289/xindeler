@@ -5,7 +5,7 @@ description: Use when implementing AURORA social-simulation features — NPC rel
 
 # veloren-aurora
 
-**REQUIRED:** Read `docs/superpowers/specs/2026-06-10-project-aurora-design.md` (the
+**REQUIRED:** Read `docs/design/specs/2026-06-10-project-aurora-design.md` (the
 GDD/TDD) and locate which AURORA phase your change belongs to. Invoke `veloren-dev` for
 ECS patterns and `superpowers:test-driven-development` before coding. For rtsim-heavy
 work, dispatch the `sim-systems-engineer` agent.
