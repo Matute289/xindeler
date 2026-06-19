@@ -1,0 +1,11 @@
+// Racial innate — Dwarf "Stoneblood" (magic-abilities plan Task 14).
+SelfBuff(
+    buildup_duration: 0.3,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: Fortitude, data: BuffData(strength: 1.0, duration: Some(10.0))),
+    ],
+    energy_cost: 0,
+    meta: (cooldown: Some(90.0)),
+)

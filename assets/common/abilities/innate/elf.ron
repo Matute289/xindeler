@@ -1,0 +1,12 @@
+// Racial innate — Elf "Fleetness" (magic-abilities plan Task 14).
+SelfBuff(
+    buildup_duration: 0.3,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: Hastened, data: BuffData(strength: 0.3, duration: Some(6.0))),
+        BuffDesc(kind: Agility, data: BuffData(strength: 0.3, duration: Some(6.0))),
+    ],
+    energy_cost: 0,
+    meta: (cooldown: Some(90.0)),
+)

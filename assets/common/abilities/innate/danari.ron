@@ -1,0 +1,10 @@
+// Racial innate — Danari "Shadowstep" (magic-abilities plan Task 14).
+// Short weaponless blink (8 m vs a staff's longer range); identity from cooldown.
+// Blink has no energy_cost field — it is free by nature.
+Blink(
+    buildup_duration: 0.4,
+    recover_duration: 0.25,
+    max_range: 8.0,
+    frontend_specifier: Some(CultistFlame),
+    meta: (cooldown: Some(45.0)),
+)

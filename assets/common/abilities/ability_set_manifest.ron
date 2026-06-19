@@ -1463,4 +1463,36 @@
         secondary: Simple(None, "common.abilities.custom.umber_legoom.doublestrike"),
         abilities: [],
     )),
+    // Racial innates (magic-abilities plan Task 14). The set key doubles as the
+    // frontend ability id (icon / i18n key). Granted via AbilityPool by species.
+    Custom("innate.human"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.human"),
+        secondary: Simple(None, "common.abilities.innate.human"),
+        abilities: [],
+    )),
+    Custom("innate.elf"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.elf"),
+        secondary: Simple(None, "common.abilities.innate.elf"),
+        abilities: [],
+    )),
+    Custom("innate.dwarf"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.dwarf"),
+        secondary: Simple(None, "common.abilities.innate.dwarf"),
+        abilities: [],
+    )),
+    Custom("innate.orc"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.orc"),
+        secondary: Simple(None, "common.abilities.innate.orc"),
+        abilities: [],
+    )),
+    Custom("innate.danari"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.danari"),
+        secondary: Simple(None, "common.abilities.innate.danari"),
+        abilities: [],
+    )),
+    Custom("innate.draugr"): AbilitySet((
+        primary: Simple(None, "common.abilities.innate.draugr"),
+        secondary: Simple(None, "common.abilities.innate.draugr"),
+        abilities: [],
+    )),
 })

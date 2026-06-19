@@ -747,7 +747,8 @@ impl StateExt for State {
             self.write_component_ignore_entity_dead(entity, character_class);
             self.write_component_ignore_entity_dead(entity, active_abilities);
             self.write_component_ignore_entity_dead(entity, comp::AbilityCooldowns::default());
-            self.write_component_ignore_entity_dead(entity, comp::AbilityPool::default());
+            // Grant the racial innate ability by species (magic-abilities plan Task 14).
+            self.write_component_ignore_entity_dead(entity, comp::AbilityPool::for_body(&body));
             self.write_component_ignore_entity_dead(entity, skill_set);
             self.write_component_ignore_entity_dead(entity, inventory);
             self.write_component_ignore_entity_dead(
