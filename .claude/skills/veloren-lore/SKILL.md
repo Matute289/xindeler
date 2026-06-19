@@ -1,12 +1,12 @@
 ---
 name: veloren-lore
-description: Use when writing lore content, naming deities/places/NPCs/items, or surfacing lore in game assets — enforces canon from docs/superpowers/lore and the original-IP rules
+description: Use when writing lore content, naming deities/places/NPCs/items, or surfacing lore in game assets — enforces canon from lore and the original-IP rules
 ---
 
 # veloren-lore
 
 **REQUIRED:** Read `docs/superpowers/specs/2026-06-10-lore-cosmology-design.md` before
-writing any lore. Canon lives in `docs/superpowers/lore/` (structure defined in that spec); the
+writing any lore. Canon lives in `lore/` (structure defined in that spec); the
 machine-readable index is `assets/lore/index.ron` once Phase 1 lands.
 
 ## IP rules (hard requirements)
@@ -16,15 +16,15 @@ machine-readable index is `assets/lore/index.ron` once Phase 1 lands.
 2. Lovecraft-INSPIRED is fine; Lovecraft names are not (no Cthulhu/Azathoth/etc. even
    where public domain — we maintain our own outer-gods canon).
 3. The spec carries a forbidden-names denylist; check new names against it AND grep
-   `docs/superpowers/lore/` for collisions before introducing them.
+   `lore/` for collisions before introducing them.
 
 ## Canon workflow
 
-1. Before writing: read `docs/superpowers/lore/00-cosmology.md` and the section your content touches
+1. Before writing: read `lore/00-cosmology.md` and the section your content touches
    (pantheon/fiends/outer-gods/planes/history).
-2. New canon entities (deity, fiend, plane, era, major NPC) require: a `docs/superpowers/lore/` entry,
+2. New canon entities (deity, fiend, plane, era, major NPC) require: a `lore/` entry,
    an `assets/lore/index.ron` id, and a naming-style check against
-   `docs/superpowers/lore/70-style-guide.md` (per-culture phonology).
+   `lore/70-style-guide.md` (per-culture phonology).
 3. Reference existing entities by their index id in code/data, never by retyping names.
 4. Existing Veloren content (Dagon/Dagonite, Mindflayer, Cultists, vampire castles,
    chapel sites) is **retconned in**, not replaced — the history spec maps them to eras.

@@ -100,7 +100,7 @@ In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates
 **Where docs live — two repos, one working tree:**
 - Design docs (specs, plans, task boards) live in `docs/superpowers/`, which is a **separate, private git repo** (`Matute289/xindeler-design`) nested inside this one and gitignored here. Commit and push design docs from inside `docs/superpowers/` — never into this (public) repo.
   - Specs → `docs/superpowers/specs/`, implementation plans → `docs/superpowers/plans/`, task boards → `docs/superpowers/tasks/` (index: `00-task-board.md`).
-- Lore canon (markdown) lives at `docs/superpowers/lore/` in the private design repo. `docs/lore/` is a legacy path kept gitignored as a guard — never create files there.
+- Lore canon (markdown) lives at `lore/` (repo root) — its **own** separate private repo (`Matute289/xindeler-lore`), nested and gitignored here; commit/push from inside `lore/`. A canon-lint pre-commit hook there (`lore/tools/canon_lint.py`) blocks copyright/denylist leaks. `docs/lore/` is a legacy path kept gitignored as a guard — never create files there.
 - `.superpowers/` (brainstorm scratch) and `graphify-out/` are local-only and gitignored; never commit them anywhere. Brainstorm conclusions belong as a spec/plan in `docs/superpowers/`.
 - The `gitlab` remote is the fetch-only upstream (push disabled); never push to it.
 

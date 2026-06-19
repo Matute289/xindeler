@@ -116,8 +116,10 @@ graphify-out/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 
-# Design docs live in private repo Matute289/xindeler-design (nested git repo)
+# Design docs (specs/plans/tasks) live in private repo Matute289/xindeler-design
 docs/superpowers/
-# legacy lore path — guard against accidental public commits; canonical home is
-# docs/superpowers/lore/ (private design repo)
+# Lore canon lives in its OWN private nested repo at the root (xindeler-lore);
+# the public assets/lore/index.ron is generated from it (that one IS tracked).
+/lore/
+# legacy lore path — guard against accidental public commits
 docs/lore/

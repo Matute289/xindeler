@@ -43,10 +43,8 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    /// The design-repo lore tree, relative to this crate.
-    fn lore_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/superpowers/lore")
-    }
+    /// The private lore repo (`xindeler/lore/`), relative to this crate.
+    fn lore_dir() -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("../lore") }
 
     /// Collect every `*.md` under `dir`, recursively.
     fn md_files(dir: &Path, out: &mut Vec<PathBuf>) {
