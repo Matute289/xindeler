@@ -15,16 +15,29 @@ jobs:
           sudo apt-get install -y git-lfs
           git lfs install
 
-      - name: Mirror GitLab master → GitHub main
+      - name: Setup SSH (self-hosted VPS LFS store)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan greenmountain.dev >> ~/.ssh/known_hosts
+
+      - name: Mirror GitLab master → GitHub main (LFS blobs → VPS, never GitHub)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           GITHUB_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git clone --bare --branch master https://gitlab.com/veloren/veloren.git repo.git
           cd repo.git
+          # Pull upstream LFS blobs from GitLab (origin), then redirect LFS to the self-hosted
+          # VPS store so GitHub never receives blobs — keeps GitHub LFS storage/bandwidth at zero.
+          # (git config lfs.url takes precedence over any committed .lfsconfig, so the push goes
+          #  to the VPS; the fetch above still uses origin=GitLab since it runs before the override.)
           git lfs fetch --all
           git remote add github "${GITHUB_URL}"
+          git config lfs.url ssh://mgrinberg@greenmountain.dev/srv/git-lfs/repos/xindeler.git
           git lfs push --all github
+          # GitHub receives code + LFS pointers only (no blobs).
           git push --force github "+refs/heads/master:refs/heads/main"
           # Tags from upstream may contain workflow file changes; GITHUB_TOKEN cannot push those.
           # Non-fatal: main branch mirror is what matters.
