@@ -8,7 +8,7 @@ long-running world simulation that powers PROJECT AURORA — NPC social life —
 ORACLE — the world director).
 
 Before coding:
-1. Read the owning spec: `docs/superpowers/specs/2026-06-10-project-aurora-design.md` or
+1. Read the owning spec: `docs/design/specs/2026-06-10-project-aurora-design.md` or
    `2026-06-10-project-oracle-design.md`, and the skill for your side
    (`.claude/skills/veloren-aurora/SKILL.md` / `veloren-oracle/SKILL.md`).
 2. Read the closest existing rtsim rule (`rtsim/src/rule/architect.rs` is the reference

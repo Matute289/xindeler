@@ -78,7 +78,7 @@ jobs:
             - `common/src/terrain/density.rs` — density field
             - `common/systems/src/phys_smooth.rs` — smooth collision
             - `voxygen/src/settings/graphics.rs` — TerrainSmoothingMode
-            - `docs/superpowers/` — our internal docs
+            - `docs/design/` — our internal docs
 
             ## How to resolve conflicts
 

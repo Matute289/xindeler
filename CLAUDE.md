@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Whenever you need Matias to **make decisions, choose between options, confirm renames/changes, or supply information**, do **not** scatter the questions through prose or rely only on `AskUserQuestion`. Instead present a **plain-text fill-in worksheet** Matias can copy into Sublime Text, complete offline, and paste back whole — easy for him to fill, unambiguous for you to parse, with tables that never break alignment.
 
-Rules (full spec + canonical example: `docs/superpowers/conventions/fill-in-worksheets.md`):
+Rules (full spec + canonical example: `docs/design/conventions/fill-in-worksheets.md`):
 - Wrap the entire worksheet in a fenced code block so it renders monospace; align all columns and `->` arrows.
 - Header box with `=====` borders stating what it is and what happens on confirm; sections numbered and split by `------` rules.
 - **Bulk confirmations in a BLOCK** with one global `[DG] decisión global:` + `excepciones:` field ("OK a todos" once), and "(se mantienen / ya confirmados …)" notes so he sees what is NOT changing.
@@ -98,10 +98,10 @@ In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates
 ## Documentation & Git Policy
 
 **Where docs live — two repos, one working tree:**
-- Design docs (specs, plans, task boards) live in `docs/superpowers/`, which is a **separate, private git repo** (`Matute289/xindeler-design`) nested inside this one and gitignored here. Commit and push design docs from inside `docs/superpowers/` — never into this (public) repo.
-  - Specs → `docs/superpowers/specs/`, implementation plans → `docs/superpowers/plans/`, task boards → `docs/superpowers/tasks/` (index: `00-task-board.md`).
-- Lore canon (markdown) lives at `docs/superpowers/lore/` in the private design repo. `docs/lore/` is a legacy path kept gitignored as a guard — never create files there.
-- `.superpowers/` (brainstorm scratch) and `graphify-out/` are local-only and gitignored; never commit them anywhere. Brainstorm conclusions belong as a spec/plan in `docs/superpowers/`.
+- Design docs (specs, plans, task boards) live in `docs/design/`, which is a **separate, private git repo** (`Matute289/xindeler-design`) nested inside this one and gitignored here. Commit and push design docs from inside `docs/design/` — never into this (public) repo.
+  - Specs → `docs/design/specs/`, implementation plans → `docs/design/plans/`, task boards → `docs/design/tasks/` (index: `00-task-board.md`).
+- Lore canon (markdown) lives at `docs/design/lore/` in the private design repo. `docs/lore/` is a legacy path kept gitignored as a guard — never create files there.
+- `.superpowers/` (brainstorm scratch) and `graphify-out/` are local-only and gitignored; never commit them anywhere. Brainstorm conclusions belong as a spec/plan in `docs/design/`.
 - The `gitlab` remote is the fetch-only upstream (push disabled); never push to it.
 
 **Branch protection (public repo `Matute289/xindeler`):**

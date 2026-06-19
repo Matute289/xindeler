@@ -5,7 +5,7 @@ description: Use when profiling, optimizing, or reviewing performance/memory-saf
 
 # veloren-engine-perf
 
-**REQUIRED:** Read `docs/superpowers/specs/2026-06-10-engine-improvements-design.md`
+**REQUIRED:** Read `docs/design/specs/2026-06-10-engine-improvements-design.md`
 before optimizing anything. Rule zero: **measure first** — no optimization PR without a
 before/after measurement attached.
 

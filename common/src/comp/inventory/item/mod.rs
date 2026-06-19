@@ -785,7 +785,7 @@ impl ItemDefinitionId<'_> {
 /// Optional gates restricting who may *equip* an item. Declared per item in
 /// RON; an absent field (or any `None` sub-field) means unrestricted. Pickup,
 /// carrying, trading, and NPC loadouts (`LoadoutBuilder`) are never gated.
-/// See docs/superpowers/specs/2026-06-10-equipment-restrictions-design.md.
+/// See docs/design/specs/2026-06-10-equipment-restrictions-design.md.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ItemRequirements {

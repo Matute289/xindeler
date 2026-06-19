@@ -11,11 +11,11 @@ description: Use when implementing character levels, classes, races, XP curves, 
 
 | Topic | Spec |
 |---|---|
-| Character level (derived, 1–60) | `docs/superpowers/specs/2026-06-10-character-levels-design.md` |
-| Classes + races | `docs/superpowers/specs/2026-06-10-classes-races-design.md` |
-| Item requirements (class/level/race) | `docs/superpowers/specs/2026-06-10-equipment-restrictions-design.md` |
-| Zone/mob levels, XP differential | `docs/superpowers/specs/2026-06-10-world-difficulty-zones-design.md` |
-| Program order & dependencies | `docs/superpowers/specs/2026-06-10-rpg-evolution-master-roadmap.md` |
+| Character level (derived, 1–60) | `docs/design/specs/2026-06-10-character-levels-design.md` |
+| Classes + races | `docs/design/specs/2026-06-10-classes-races-design.md` |
+| Item requirements (class/level/race) | `docs/design/specs/2026-06-10-equipment-restrictions-design.md` |
+| Zone/mob levels, XP differential | `docs/design/specs/2026-06-10-world-difficulty-zones-design.md` |
+| Program order & dependencies | `docs/design/specs/2026-06-10-rpg-evolution-master-roadmap.md` |
 
 ## Architecture facts (verified 2026-06-10)
 
