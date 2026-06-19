@@ -129,6 +129,37 @@ impl Component for AbilityPool {
     type Storage = DerefFlaggedStorage<Self, specs::DenseVecStorage<Self>>;
 }
 
+impl AbilityPool {
+    /// The racial-innate pool granted to a character at load by its body's
+    /// species (magic-abilities plan Task 14). Non-humanoids get an empty pool.
+    /// Kept here (not inline in the upstream-owned `initialize_character_data`)
+    /// to shrink the upstream-merge conflict surface.
+    pub fn for_body(body: &crate::comp::Body) -> Self {
+        use crate::comp::Body;
+        let key = match body {
+            Body::Humanoid(humanoid) => Some(Self::innate_set_key(humanoid.species)),
+            _ => None,
+        };
+        Self {
+            abilities: key.into_iter().map(String::from).collect(),
+        }
+    }
+
+    /// Manifest `Custom(...)` set key for a humanoid species' racial innate.
+    /// Exhaustive on purpose: a new species is a compile error until assigned.
+    fn innate_set_key(species: crate::comp::humanoid::Species) -> &'static str {
+        use crate::comp::humanoid::Species;
+        match species {
+            Species::Human => "innate.human",
+            Species::Elf => "innate.elf",
+            Species::Dwarf => "innate.dwarf",
+            Species::Orc => "innate.orc",
+            Species::Danari => "innate.danari",
+            Species::Draugr => "innate.draugr",
+        }
+    }
+}
+
 // make it pub, for UI stuff, if you want
 enum AbilitySource {
     Weapons,
@@ -4033,6 +4064,56 @@ mod ground_aoe_tests {
             "common.abilities.spells.primal.thornspit",
         ] {
             crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
+}
+
+#[cfg(test)]
+mod innate_tests {
+    use crate::{
+        assets::AssetExt,
+        comp::{item::tool::AbilitySpec, CharacterAbility},
+    };
+
+    // The six racial innate RONs parse as their expected CharacterAbility variant
+    // (magic-abilities plan Task 14).
+    #[test]
+    fn innate_ability_rons_load() {
+        let cases: [(&str, fn(&CharacterAbility) -> bool); 6] = [
+            ("human", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
+            ("elf", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
+            ("dwarf", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
+            ("orc", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
+            ("danari", |a| matches!(a, CharacterAbility::Blink { .. })),
+            ("draugr", |a| matches!(a, CharacterAbility::Shockwave { .. })),
+        ];
+        for (species, is_expected) in cases {
+            let id = format!("common.abilities.innate.{species}");
+            let ability = crate::assets::Ron::<CharacterAbility>::load_expect(&id)
+                .read()
+                .0
+                .clone();
+            assert!(
+                is_expected(&ability),
+                "innate.{species} loaded as an unexpected variant: {ability:?}"
+            );
+        }
+    }
+
+    // Every humanoid species' innate set-key (from the grant logic itself) resolves
+    // to a real manifest set. Ties AbilityPool::innate_set_key to the manifest, so a
+    // typo'd key or a new species left unmapped is caught here, not in-game.
+    #[test]
+    fn innate_set_key_matches_manifest() {
+        use crate::comp::{ability::AbilityPool, humanoid::ALL_SPECIES};
+        let map = crate::comp::item::tool::AbilityMap::load().read();
+        for species in ALL_SPECIES {
+            let key = AbilityPool::innate_set_key(species);
+            assert!(
+                map.get_ability_set(&AbilitySpec::Custom(key.to_string()))
+                    .is_some(),
+                "species {species:?} maps to {key}, which has no manifest set"
+            );
         }
     }
 }

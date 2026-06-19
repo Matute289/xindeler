@@ -1,0 +1,13 @@
+// Racial innate — Human "Second Wind" (magic-abilities plan Task 14).
+// Weaponless self-buff granted via AbilityPool; identity from the long cooldown.
+SelfBuff(
+    buildup_duration: 0.3,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: EnergyRegen, data: BuffData(strength: 2.0, duration: Some(8.0))),
+        BuffDesc(kind: Regeneration, data: BuffData(strength: 1.5, duration: Some(8.0))),
+    ],
+    energy_cost: 0,
+    meta: (cooldown: Some(120.0)),
+)
