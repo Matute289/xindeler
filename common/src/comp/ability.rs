@@ -4072,7 +4072,7 @@ mod ground_aoe_tests {
 mod innate_tests {
     use crate::{
         assets::AssetExt,
-        comp::{item::tool::AbilitySpec, CharacterAbility},
+        comp::{CharacterAbility, item::tool::AbilitySpec},
     };
 
     // The six racial innate RONs parse as their expected CharacterAbility variant
@@ -4085,7 +4085,9 @@ mod innate_tests {
             ("dwarf", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
             ("orc", |a| matches!(a, CharacterAbility::SelfBuff { .. })),
             ("danari", |a| matches!(a, CharacterAbility::Blink { .. })),
-            ("draugr", |a| matches!(a, CharacterAbility::Shockwave { .. })),
+            ("draugr", |a| {
+                matches!(a, CharacterAbility::Shockwave { .. })
+            }),
         ];
         for (species, is_expected) in cases {
             let id = format!("common.abilities.innate.{species}");
@@ -4101,8 +4103,8 @@ mod innate_tests {
     }
 
     // Every humanoid species' innate set-key (from the grant logic itself) resolves
-    // to a real manifest set. Ties AbilityPool::innate_set_key to the manifest, so a
-    // typo'd key or a new species left unmapped is caught here, not in-game.
+    // to a real manifest set. Ties AbilityPool::innate_set_key to the manifest, so
+    // a typo'd key or a new species left unmapped is caught here, not in-game.
     #[test]
     fn innate_set_key_matches_manifest() {
         use crate::comp::{ability::AbilityPool, humanoid::ALL_SPECIES};
