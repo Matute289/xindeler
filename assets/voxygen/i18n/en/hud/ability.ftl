@@ -530,3 +530,16 @@ common-abilities-spells-divine-dawnmote = Dawnmote
     .desc = A mote of dawnlight that sears what it touches.
 common-abilities-spells-primal-thornspit = Thornspit
     .desc = A hurled spine of hardened bramble.
+# Racial innates (magic-abilities Task 14) — keys derive from the AbilityPool set key.
+innate-human = Second Wind
+    .desc = Draw a deep breath, restoring energy and vigor over a few moments.
+innate-elf = Fleetness
+    .desc = Quicken your step and reflexes, moving with elven grace.
+innate-dwarf = Stoneblood
+    .desc = Steel your body with dwarven resilience, hardening against harm.
+innate-orc = Bloodrage
+    .desc = Give in to fury, striking harder while you abandon caution.
+innate-danari = Shadowstep
+    .desc = Slip a short distance through the veil, blinking past your foes.
+innate-draugr = Gravechill
+    .desc = Loose a burst of grave-cold, wounding and chilling those nearby.

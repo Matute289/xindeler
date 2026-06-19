@@ -788,6 +788,13 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         "common.abilities.spells.arcane.cinderbolt" => imgs.fireball,
         "common.abilities.spells.divine.dawnmote" => imgs.fireball,
         "common.abilities.spells.primal.thornspit" => imgs.fireball,
+        // Racial innates (magic-abilities Task 14) — reused icons until dedicated art.
+        "innate.human" => imgs.skill_sceptre_heal,
+        "innate.elf" => imgs.sword_agile_stance,
+        "innate.dwarf" => imgs.sword_heavy_stance,
+        "innate.orc" => imgs.sword_crippling_stance,
+        "innate.danari" => imgs.staff_fire_dash,
+        "innate.draugr" => imgs.hammer_seismic_shock,
         // Staff
         "common.abilities.staff.firebomb" => imgs.fireball,
         "common.abilities.staff.flamethrower" => imgs.flamethrower,
