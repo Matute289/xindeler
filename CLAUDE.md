@@ -84,6 +84,8 @@ The codebase uses `specs`. Components live in `common/src/comp/`, resources in `
 
 All game data (voxel models, audio, i18n strings, configs) lives in `assets/`. The build reads `VELOREN_ASSETS` at runtime; in dev it defaults to `$(pwd)/assets`. Asset configs use RON format. Items, recipes, and entity configs are data-driven and live under `assets/common/`.
 
+The large **binary** assets are stored via Git LFS on a self-hosted VPS store, **not** on GitHub — see **Git LFS & Binary Assets (the VPS)** below.
+
 ## Hot-reloading
 
 In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates and loaded at runtime. Changes to animation or AI code reload without restarting. This is gated by the `hot-reloading` feature; the `default-publish` feature set disables it for release builds.
@@ -107,6 +109,44 @@ In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates
 **Branch protection (public repo `Matute289/xindeler`):**
 - `main` and `development` are protected: no direct pushes (admins included), no force-pushes, no deletion. All changes land via PR with 1 approval.
 - AI agents must NEVER merge or approve PRs, push to `main`/`development`, or touch branch-protection settings. Workflow: branch off `development` → commit → push branch → open PR with base `development` → stop and report. Only Matias reviews and merges.
+
+## Git LFS & Binary Assets (the VPS) — IMPORTANT
+
+Large binary assets (`.vox`, `.png`/`.jpg`/`.jpeg`, `.ogg`/`.wav`, `.ttf`, `.ico`, `.obj`/`.blend`, `assets/world/map/*.bin`, etc. — the full list is `.gitattributes`) are **NOT stored on GitHub**. They live on a self-hosted Git LFS store on the VPS. GitHub holds only code, RON/i18n text, and tiny **LFS pointer files**.
+
+**Topology — three sources, one working tree:**
+- **GitHub public** (`Matute289/xindeler`, `origin`) — code + RON/i18n + LFS pointers. No blobs.
+- **VPS** (`greenmountain.dev:/srv/git-lfs/repos/xindeler.git`) — the actual binary blobs, served by `git-lfs-transfer` over **pure SSH** (no HTTP server, no Caddy). Private (SSH-key auth). It is the **single copy** of the binaries, so it must be backed up server-side. Server-side setup notes live in the private `MyServerVPS` repo (`git-lfs/`).
+- **GitHub private** (`Matute289/xindeler-design`, nested at `docs/design/`) — design/lore.
+
+**How it's wired:**
+- `.lfsconfig` (committed) sets `lfs.url = ssh://mgrinberg@greenmountain.dev/srv/git-lfs/repos/xindeler.git`. Every clone reads it, so all LFS push/fetch goes to the VPS — never GitHub.
+- `.gitattributes` tracks **only binaries**. RON/i18n and all text stay as normal git files — data-driven content travels with the code; never LFS-track it.
+- Requires **git-lfs ≥ 3.0** on every client (there is no HTTP fallback) plus SSH access to the VPS to fetch/push blobs.
+
+**Rules going forward:**
+- **Never re-introduce GitHub LFS.** No workflow may `actions/checkout` with `lfs: true` against GitHub, nor `git lfs push … github`. Route LFS to the VPS: local work uses the committed `.lfsconfig`; CI must add a `Setup SSH` step with `secrets.VPS_SSH_KEY` and pull from the VPS (see `publish-docker.yml` for the pattern).
+- To add new binary assets, just commit them normally — the pre-push hook sends blobs to the VPS automatically; GitHub gets only the pointer.
+- Without VPS SSH access, a clone gets code + pointers but **not** the real binaries — this is the intended privacy boundary (assets stay private).
+
+## Releases & CI
+
+**Where each build runs:**
+- **Code CI** (build / check / test / lint on PRs) → **GitHub Actions** (public repo = free, unlimited minutes). It must **not** pull LFS — compilation and tests don't need the binary assets.
+- **Server release** → built **on the VPS** (where the assets are local), not on GitHub Actions. `release.yml` triggers on a `v*` tag push, SSHes to the VPS with `secrets.VPS_SSH_KEY`, and runs `/srv/git-lfs/scripts/build-release.sh <tag>` → produces `/srv/git-lfs/releases/xindeler-server-<tag>.tar.gz`.
+- **Docker image** (`publish-docker.yml`, manual) → pulls only the asset dirs the image bundles (`assets/common,server,world`) from the VPS, builds `veloren-server-cli`, pushes to GHCR.
+- **Client release** (voxygen desktop installer + Airshipper) → **deferred** to the first client release; study Veloren's packaging then. The shipped client necessarily bundles its assets (players have them locally) — "private" means private in source control, not in the shipped binary.
+
+**GitHub Actions minutes:** the 2,000-minute quota is for **private** repos only; the public `xindeler` repo runs Actions for free. Heavy Rust builds run on the VPS anyway, so they don't consume GitHub minutes.
+
+## Upstream Sync (GitLab Veloren)
+
+Xindeler is a fork of `gitlab veloren/veloren` (the `gitlab` remote — fetch-only, never push). To pull upstream `master` and update without breaking or overwriting Xindeler's work:
+
+- **Use the `GitlabMasterMerger` skill** together with the `upstream-sync.yml` workflow. They bring upstream changes into a **review branch** (`upstream/review-…`) and integrate via **PR** — they do **not** force-push `main`/`development`.
+- ⚠️ **Never hard-mirror** upstream over our branches. (The old `mirror.yml` did `git push --force master→main` and was removed for exactly this reason; branch protection blocks it anyway.)
+- Upstream brings its own LFS binaries — these route to the **VPS** via `.lfsconfig`, never to GitHub.
+- After a sync, run the lint/test commands above and resolve conflicts so Xindeler customizations (classes, races, magic, lore-driven assets, CI/LFS config, etc.) are preserved — upstream must never clobber them.
 
 ## Build Profiles
 
