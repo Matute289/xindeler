@@ -286,6 +286,21 @@ impl SkillSet {
         };
         let mut persistence_load_error = None;
 
+        // Class skill groups are granted directly (unlock_skill_group at creation /
+        // /set_class), not earned through the skill tree, so seed their unlock skill
+        // here — both the loop below and class-gated abilities key off
+        // has_skill(UnlockGroup(..)). Also repairs characters saved before this
+        // seeding.
+        let class_groups: Vec<SkillGroupKind> = skillset
+            .skill_groups
+            .keys()
+            .copied()
+            .filter(|kind| matches!(kind, SkillGroupKind::Class(_)))
+            .collect();
+        for kind in class_groups {
+            skillset.skills.entry(Skill::UnlockGroup(kind)).or_insert(1);
+        }
+
         // Loops while checking the all_skills hashmap. For as long as it can find an
         // entry where the skill group kind is unlocked, insert the skills corresponding
         // to that skill group kind. When no more skill group kinds can be found, break
@@ -341,6 +356,12 @@ impl SkillSet {
             self.skill_groups
                 .insert(skill_group_kind, SkillGroup::new(skill_group_kind));
         }
+        // Record the group's unlock skill so `has_skill(UnlockGroup(..))` reflects
+        // membership. Class-gated abilities key off this, and load_from_database's
+        // skill-loading loop already assumes it. Symmetric with the General group.
+        self.skills
+            .entry(Skill::UnlockGroup(skill_group_kind))
+            .or_insert(1);
     }
 
     /// Returns an iterator over skill groups
@@ -707,5 +728,27 @@ mod class_tree_tests {
             // v1 stub trees are empty: no purchasable skills yet
             assert_eq!(group.total_skill_point_cost(), 0);
         }
+    }
+
+    // Class-gated abilities (e.g. Mage-only Shatterburst) rely on
+    // has_skill(UnlockGroup(Class(..))) reflecting membership.
+    #[test]
+    fn class_membership_is_detectable_via_has_skill() {
+        let mut mage = SkillSet::default();
+        mage.unlock_skill_group(SkillGroupKind::Class(ClassKind::Mage));
+        assert!(mage.has_skill(Skill::UnlockGroup(SkillGroupKind::Class(ClassKind::Mage))));
+        assert!(!mage.has_skill(Skill::UnlockGroup(SkillGroupKind::Class(ClassKind::Cleric))));
+    }
+
+    // A character loaded from the DB (skill_groups restored, skills map lacking the
+    // class UnlockGroup — e.g. saved before the seeding) still registers
+    // membership.
+    #[test]
+    fn loaded_class_member_keeps_unlock_skill() {
+        let kind = SkillGroupKind::Class(ClassKind::Cleric);
+        let mut groups = HashMap::new();
+        groups.insert(kind, SkillGroup::new(kind));
+        let (skillset, _err) = SkillSet::load_from_database(groups, HashMap::new());
+        assert!(skillset.has_skill(Skill::UnlockGroup(kind)));
     }
 }
