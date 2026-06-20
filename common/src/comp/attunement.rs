@@ -8,6 +8,7 @@
 //! inert until attuned) are wired in follow-ups (ENG-D2b / D2c).
 
 use super::inventory::{item::Quality, slot::EquipSlot};
+use crate::resources::Time;
 use serde::{Deserialize, Serialize};
 use specs::{Component, DerefFlaggedStorage, VecStorage};
 
@@ -81,6 +82,75 @@ pub fn attune_time(quality: Quality) -> f32 {
     }
 }
 
+/// In-progress attunements: each is an equip slot and the `Time` its attune
+/// channel finishes. Populated when a `RequiresAttunement` item is equipped and
+/// drained by `reconcile_attunement` as channels complete. (ENG-D2b.)
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attuning(pub Vec<(EquipSlot, Time)>);
+
+impl Component for Attuning {
+    type Storage = DerefFlaggedStorage<Self, VecStorage<Self>>;
+}
+
+/// The auto-attune-on-equip brain (Matias, 2026-06-20). Reconciles `attuning`
+/// (in-progress) and `attuned` (done) against the currently-equipped items:
+///
+/// - `equipped` lists every equipped item as `(slot, requires_attunement,
+///   quality)`.
+/// - An equipped attunement item with no attune in flight or done starts a
+///   channel of `attune_time(quality)` seconds.
+/// - A channel whose finish time has passed completes: the slot is attuned if
+///   the wearer is under the level cap (`max_attuned_items`), otherwise it is
+///   dropped and the item stays inert until re-equipped (a slot freed up).
+/// - A slot that no longer holds an attunement item is cleared from both — this
+///   is the **instant** un-attune on unequip.
+pub fn reconcile_attunement(
+    equipped: &[(EquipSlot, bool, Quality)],
+    level: u16,
+    now: Time,
+    attuning: &mut Attuning,
+    attuned: &mut AttunedItems,
+) {
+    // A slot is "live" only while it still holds an attunement-requiring item.
+    let is_live = |slot: EquipSlot| {
+        equipped
+            .iter()
+            .any(|(s, requires, _)| *s == slot && *requires)
+    };
+
+    // 1. Instant un-attune: drop any attuned/attuning slot whose item is gone or no
+    //    longer requires attunement (covers unequip, swap-out, and drop).
+    attuned.0.retain(|slot| is_live(*slot));
+    attuning.0.retain(|(slot, _)| is_live(*slot));
+
+    // 2. Start a channel for each equipped attunement item that has neither a
+    //    channel in flight nor a completed attune.
+    for (slot, requires, quality) in equipped {
+        if *requires && !attuned.is_attuned(*slot) && !attuning.0.iter().any(|(s, _)| s == slot) {
+            attuning
+                .0
+                .push((*slot, Time(now.0 + f64::from(attune_time(*quality)))));
+        }
+    }
+
+    // 3. Complete channels whose finish time has passed: attune if under the level
+    //    cap, otherwise drop (the item stays equipped but inert until it is
+    //    re-equipped after a slot frees up).
+    let max = max_attuned_items(level);
+    let mut completed = Vec::new();
+    attuning.0.retain(|(slot, finish)| {
+        if now.0 >= finish.0 {
+            completed.push(*slot);
+            false
+        } else {
+            true
+        }
+    });
+    for slot in completed {
+        attuned.attune(slot, max);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +202,118 @@ mod tests {
         assert!(a.unattune(r1));
         assert!(!a.is_attuned(r1));
         assert!(!a.unattune(r1)); // not attuned → false
+    }
+
+    // ---- reconcile_attunement (the auto-attune-on-equip brain) ----
+
+    const R1: EquipSlot = EquipSlot::Armor(ArmorSlot::Ring1);
+    const R2: EquipSlot = EquipSlot::Armor(ArmorSlot::Ring2);
+
+    #[test]
+    fn equipping_a_requires_item_starts_a_channel() {
+        let mut attuning = Attuning::default();
+        let mut attuned = AttunedItems::default();
+        // common = 3s; equipped at t=0 → finishes at t=3.
+        reconcile_attunement(
+            &[(R1, true, Quality::Common)],
+            1,
+            Time(0.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert_eq!(attuning.0.len(), 1);
+        assert_eq!(attuning.0[0].0, R1);
+        assert!((attuning.0[0].1.0 - 3.0).abs() < 1e-6);
+        assert_eq!(attuned.count(), 0); // not done yet
+    }
+
+    #[test]
+    fn non_attunement_item_is_ignored() {
+        let mut attuning = Attuning::default();
+        let mut attuned = AttunedItems::default();
+        reconcile_attunement(
+            &[(R1, false, Quality::Common)],
+            1,
+            Time(0.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert_eq!(attuning.0.len(), 0);
+        assert_eq!(attuned.count(), 0);
+    }
+
+    #[test]
+    fn channel_completes_under_cap() {
+        let mut attuning = Attuning(vec![(R1, Time(3.0))]);
+        let mut attuned = AttunedItems::default();
+        // now >= finish, level 1 cap = 1.
+        reconcile_attunement(
+            &[(R1, true, Quality::Common)],
+            1,
+            Time(3.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert!(attuned.is_attuned(R1));
+        assert_eq!(attuning.0.len(), 0);
+    }
+
+    #[test]
+    fn channel_over_cap_stays_inert() {
+        // r1 already attuned; level 1 cap = 1; r2's channel completes but cap is full.
+        let mut attuned = AttunedItems(vec![R1]);
+        let mut attuning = Attuning(vec![(R2, Time(3.0))]);
+        reconcile_attunement(
+            &[(R1, true, Quality::Common), (R2, true, Quality::Common)],
+            1,
+            Time(5.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert!(attuned.is_attuned(R1));
+        assert!(!attuned.is_attuned(R2)); // inert — cap full
+        assert_eq!(attuning.0.len(), 0); // dropped; re-equip to retry after freeing a slot
+    }
+
+    #[test]
+    fn unequip_clears_attuned_and_attuning_instantly() {
+        let mut attuned = AttunedItems(vec![R1]);
+        let mut attuning = Attuning(vec![(R2, Time(10.0))]);
+        // neither slot holds an attunement item anymore.
+        reconcile_attunement(&[], 5, Time(1.0), &mut attuning, &mut attuned);
+        assert_eq!(attuned.count(), 0);
+        assert_eq!(attuning.0.len(), 0);
+    }
+
+    #[test]
+    fn already_attuned_slot_does_not_restart_a_channel() {
+        let mut attuned = AttunedItems(vec![R1]);
+        let mut attuning = Attuning::default();
+        reconcile_attunement(
+            &[(R1, true, Quality::Common)],
+            1,
+            Time(100.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert!(attuned.is_attuned(R1));
+        assert_eq!(attuning.0.len(), 0); // no new channel for an already-attuned slot
+    }
+
+    #[test]
+    fn channel_in_progress_is_left_running() {
+        let mut attuning = Attuning(vec![(R1, Time(3.0))]);
+        let mut attuned = AttunedItems::default();
+        // t=1 < finish 3 → still running, not yet attuned, not restarted.
+        reconcile_attunement(
+            &[(R1, true, Quality::Common)],
+            1,
+            Time(1.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert_eq!(attuning.0.len(), 1);
+        assert!((attuning.0[0].1.0 - 3.0).abs() < 1e-6);
+        assert_eq!(attuned.count(), 0);
     }
 }
