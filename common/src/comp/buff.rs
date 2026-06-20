@@ -884,15 +884,27 @@ pub enum BuffCategory {
     Concentration,
 }
 
-/// Single external hit dealing at least this much damage breaks concentration
-/// (ENG-C2 / M5, Matias §6.5 "umbral de daño"). Flat and tunable — refine with
-/// `game-balance-designer` (e.g. proportional to max HP) when content lands.
-/// Self-inflicted costs (e.g. the Hemomancy HP price) do NOT break it: the
-/// break check only fires for hits with a `DamageSource` cause.
-pub const CONCENTRATION_BREAK_DAMAGE: f32 = 10.0;
+/// Concentration break threshold = base + a fraction of the bearer's **max
+/// HP**. Because max HP grows with level/skills, a more powerful character
+/// resists more before a hit breaks concentration (ENG-C2 / M5, Matias §6.5: "a
+/// medida que sube de nivel resiste más"). Tunable and kept modest so it stays
+/// playable — refine with `game-balance-designer` when content lands.
+/// Self-inflicted costs (e.g. the Hemomancy HP price, `cause: None`) do NOT
+/// break it: the check only fires for hits with a `DamageSource` cause.
+pub const CONCENTRATION_BREAK_BASE: f32 = 10.0;
+pub const CONCENTRATION_BREAK_HP_FRACTION: f32 = 0.1;
 
-/// Whether a single hit of `damage` (a positive amount) breaks concentration.
-pub fn concentration_breaks(damage: f32) -> bool { damage >= CONCENTRATION_BREAK_DAMAGE }
+/// The single-hit damage needed to break the concentration of a bearer whose
+/// maximum health is `max_hp`.
+pub fn concentration_break_threshold(max_hp: f32) -> f32 {
+    CONCENTRATION_BREAK_BASE + max_hp.max(0.0) * CONCENTRATION_BREAK_HP_FRACTION
+}
+
+/// Whether a single hit of `damage` (a positive amount) breaks the
+/// concentration of a bearer with `max_hp` maximum health.
+pub fn concentration_breaks(damage: f32, max_hp: f32) -> bool {
+    damage >= concentration_break_threshold(max_hp)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ModifierKind {
@@ -1442,13 +1454,27 @@ pub mod tests {
     }
 
     // ENG-C2 (M5): concentration breaks when a single hit deals at least the
-    // damage threshold (Matias §6.5 "umbral de daño").
+    // (max-HP-scaled) damage threshold (Matias §6.5 "umbral de daño").
     #[test]
     fn concentration_breaks_at_threshold() {
-        assert!(!concentration_breaks(CONCENTRATION_BREAK_DAMAGE - 0.01));
-        assert!(concentration_breaks(CONCENTRATION_BREAK_DAMAGE));
-        assert!(concentration_breaks(CONCENTRATION_BREAK_DAMAGE + 50.0));
-        assert!(!concentration_breaks(0.0));
+        let max_hp = 100.0;
+        let t = concentration_break_threshold(max_hp);
+        assert!(!concentration_breaks(t - 0.01, max_hp));
+        assert!(concentration_breaks(t, max_hp));
+        assert!(concentration_breaks(t + 50.0, max_hp));
+        assert!(!concentration_breaks(0.0, max_hp));
+    }
+
+    // ENG-C2 refinement (Matias): a more powerful (higher-max-HP) bearer resists
+    // more — the same hit that breaks a weak caster may not break a strong one.
+    #[test]
+    fn concentration_threshold_scales_with_power() {
+        let weak = concentration_break_threshold(50.0);
+        let strong = concentration_break_threshold(800.0);
+        assert!(strong > weak);
+        let hit = weak + 1.0;
+        assert!(concentration_breaks(hit, 50.0)); // breaks the weak caster
+        assert!(!concentration_breaks(hit, 800.0)); // same hit spares the strong one
     }
 
     // Concentration is a buff category so concentration-sustained effects can be
