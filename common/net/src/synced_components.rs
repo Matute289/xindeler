@@ -75,6 +75,10 @@ macro_rules! synced_components {
             active_abilities: ActiveAbilities,
             ability_cooldowns: AbilityCooldowns,
             ability_pool: AbilityPool,
+            // The attuned-item set (ENG-D2). `Attuning` (in-progress channels) is
+            // NOT synced — it carries absolute server `Time`, a different epoch
+            // than the client's, so a finish timestamp would be meaningless there.
+            attuned_items: AttunedItems,
             can_build: CanBuild,
             is_interactor: IsInteractor,
             interactors: Interactors,
@@ -312,6 +316,10 @@ impl NetSync for ActiveAbilities {
 }
 
 impl NetSync for AbilityCooldowns {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
+}
+
+impl NetSync for AttunedItems {
     const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
 }
 

@@ -248,6 +248,8 @@ impl State {
         ecs.register::<comp::ActiveAbilities>();
         ecs.register::<comp::AbilityCooldowns>();
         ecs.register::<comp::AbilityPool>();
+        ecs.register::<comp::AttunedItems>();
+        ecs.register::<comp::Attuning>();
         ecs.register::<comp::Buffs>();
         ecs.register::<comp::Auras>();
         ecs.register::<comp::EnteredAuras>();
