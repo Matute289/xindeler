@@ -59,6 +59,7 @@ event_emitters! {
         create_aura_entity: event::CreateAuraEntityEvent,
         help_downed: event::HelpDownedEvent,
         set_ability_cooldown: event::SetAbilityCooldownEvent,
+        health_change: event::HealthChangeEvent,
     }
 }
 
