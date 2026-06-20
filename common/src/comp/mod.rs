@@ -3,6 +3,7 @@ mod admin;
 pub mod agent;
 pub mod anchor;
 pub mod arcing;
+pub mod attunement;
 pub mod aura;
 pub mod beam;
 pub mod body;
@@ -55,6 +56,7 @@ pub use self::{
     },
     anchor::Anchor,
     arcing::{ArcProperties, Arcing},
+    attunement::{AttunedItems, attune_time, max_attuned_items},
     aura::{Aura, AuraChange, AuraKind, Auras, EnteredAuras},
     beam::Beam,
     body::{
