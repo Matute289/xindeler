@@ -56,7 +56,7 @@ pub use self::{
     },
     anchor::Anchor,
     arcing::{ArcProperties, Arcing},
-    attunement::{AttunedItems, attune_time, max_attuned_items},
+    attunement::{AttunedItems, Attuning, attune_time, max_attuned_items, reconcile_attunement},
     aura::{Aura, AuraChange, AuraKind, Auras, EnteredAuras},
     beam::Beam,
     body::{

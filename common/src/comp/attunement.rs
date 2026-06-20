@@ -10,7 +10,7 @@
 use super::inventory::{item::Quality, slot::EquipSlot};
 use crate::resources::Time;
 use serde::{Deserialize, Serialize};
-use specs::{Component, DerefFlaggedStorage, VecStorage};
+use specs::{Component, DenseVecStorage, DerefFlaggedStorage};
 
 /// The equipment slots a character currently has attuned. Session-only for now
 /// (persistence is a follow-up). Its length is bounded by `max_attuned_items`.
@@ -47,7 +47,7 @@ impl AttunedItems {
 }
 
 impl Component for AttunedItems {
-    type Storage = DerefFlaggedStorage<Self, VecStorage<Self>>;
+    type Storage = DerefFlaggedStorage<Self, DenseVecStorage<Self>>;
 }
 
 /// How many items a character of `level` may keep attuned at once.
@@ -89,7 +89,7 @@ pub fn attune_time(quality: Quality) -> f32 {
 pub struct Attuning(pub Vec<(EquipSlot, Time)>);
 
 impl Component for Attuning {
-    type Storage = DerefFlaggedStorage<Self, VecStorage<Self>>;
+    type Storage = DerefFlaggedStorage<Self, DenseVecStorage<Self>>;
 }
 
 /// The auto-attune-on-equip brain (Matias, 2026-06-20). Reconciles `attuning`
@@ -100,8 +100,10 @@ impl Component for Attuning {
 /// - An equipped attunement item with no attune in flight or done starts a
 ///   channel of `attune_time(quality)` seconds.
 /// - A channel whose finish time has passed completes: the slot is attuned if
-///   the wearer is under the level cap (`max_attuned_items`), otherwise it is
-///   dropped and the item stays inert until re-equipped (a slot freed up).
+///   the wearer is under the level cap (`max_attuned_items`). If the cap is
+///   full the (finished) channel stays **pending** and retries each reconcile,
+///   so the item is inert but auto-attunes the moment a slot frees — no
+///   re-equip, and no wasteful re-channeling.
 /// - A slot that no longer holds an attunement item is cleared from both — this
 ///   is the **instant** un-attune on unequip.
 pub fn reconcile_attunement(
@@ -134,21 +136,14 @@ pub fn reconcile_attunement(
     }
 
     // 3. Complete channels whose finish time has passed: attune if under the level
-    //    cap, otherwise drop (the item stays equipped but inert until it is
-    //    re-equipped after a slot frees up).
+    //    cap. `attune` returns whether the slot is attuned afterwards, so a channel
+    //    is kept only while it is still running OR finished-but-over-cap (retry
+    //    next reconcile — it attunes as soon as a slot frees, with no
+    //    re-channeling).
     let max = max_attuned_items(level);
-    let mut completed = Vec::new();
-    attuning.0.retain(|(slot, finish)| {
-        if now.0 >= finish.0 {
-            completed.push(*slot);
-            false
-        } else {
-            true
-        }
-    });
-    for slot in completed {
-        attuned.attune(slot, max);
-    }
+    attuning
+        .0
+        .retain(|(slot, finish)| now.0 < finish.0 || !attuned.attune(*slot, max));
 }
 
 #[cfg(test)]
@@ -259,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_over_cap_stays_inert() {
+    fn channel_over_cap_stays_pending_then_attunes_when_a_slot_frees() {
         // r1 already attuned; level 1 cap = 1; r2's channel completes but cap is full.
         let mut attuned = AttunedItems(vec![R1]);
         let mut attuning = Attuning(vec![(R2, Time(3.0))]);
@@ -272,7 +267,19 @@ mod tests {
         );
         assert!(attuned.is_attuned(R1));
         assert!(!attuned.is_attuned(R2)); // inert — cap full
-        assert_eq!(attuning.0.len(), 0); // dropped; re-equip to retry after freeing a slot
+        assert_eq!(attuning.0.len(), 1); // channel stays pending (finished), retries — no re-channel
+
+        // Free R1's slot (unequip it): only R2 remains equipped → R2 attunes now.
+        reconcile_attunement(
+            &[(R2, true, Quality::Common)],
+            1,
+            Time(6.0),
+            &mut attuning,
+            &mut attuned,
+        );
+        assert!(!attuned.is_attuned(R1)); // cleared (unequipped)
+        assert!(attuned.is_attuned(R2)); // auto-attuned the moment the slot freed
+        assert_eq!(attuning.0.len(), 0);
     }
 
     #[test]
