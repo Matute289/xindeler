@@ -527,8 +527,21 @@ impl Attack {
                         }
                     },
                     // Piercing damage ignores some penetration, and is handled when damage
-                    // reduction is computed Energy is a placeholder damage type
-                    DamageKind::Piercing | DamageKind::Energy => {},
+                    // reduction is computed. Energy and the magical/elemental kinds carry no
+                    // special physical mitigation here (per-kind resistances + the
+                    // Radiant/Necrotic affinity are a future balance task — ENG-A2 deferral).
+                    DamageKind::Piercing
+                    | DamageKind::Energy
+                    | DamageKind::Acid
+                    | DamageKind::Cold
+                    | DamageKind::Fire
+                    | DamageKind::Force
+                    | DamageKind::Lightning
+                    | DamageKind::Necrotic
+                    | DamageKind::Poison
+                    | DamageKind::Psychic
+                    | DamageKind::Radiant
+                    | DamageKind::Thunder => {},
                 }
                 for effect in damage.effects.iter() {
                     match effect {
@@ -1784,19 +1797,48 @@ impl From<AttackSource> for DamageSource {
     fn from(attack: AttackSource) -> Self { DamageSource::Attack(attack) }
 }
 
-/// DamageKind for the purpose of differentiating damage reduction
+/// DamageKind for the purpose of differentiating damage reduction.
+///
+/// The three physical kinds (Piercing/Slashing/Crushing) carry distinct
+/// mitigation behaviour (see the apply-damage match in this file). The
+/// magical/elemental kinds are the content damage taxonomy (Matias 2026-06-20,
+/// content-adaptation §6.2 / ENG-A2); for now they share the generic
+/// (no special physical interaction) mitigation of the legacy `Energy`
+/// placeholder. **Radiant is the opposite of Necrotic** — the resist/affinity
+/// interplay (e.g. undead take bonus Radiant; Necrotic harms the living /
+/// spares undead) is a future balance task and is NOT wired here yet.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageKind {
+    // --- physical ---
     /// Bypasses some protection from armor
     Piercing,
     /// Reduces energy of target, dealing additional damage when target energy
     /// is 0
     Slashing,
-    /// Deals additional poise damage the more armored the target is
+    /// Blunt/physical. Deals additional poise damage the more armored the
+    /// target is. Content name: **Bludgeoning** (serde alias) — kept as
+    /// `Crushing` in the engine for its poise behaviour.
+    #[serde(alias = "Bludgeoning")]
     Crushing,
-    /// Catch all for remaining damage kinds (TODO: differentiate further with
-    /// staff/sceptre reworks
+    // --- legacy generic ---
+    /// Legacy catch-all magical damage. Retained for back-compat with existing
+    /// RON; new content should use a specific kind below. Mitigated
+    /// generically.
     Energy,
+    // --- magical / elemental (content taxonomy, ENG-A2) ---
+    Acid,
+    Cold,
+    Fire,
+    Force,
+    Lightning,
+    /// Death/decay. Opposite of `Radiant` (affinity interplay deferred).
+    Necrotic,
+    Poison,
+    Psychic,
+    /// Holy/radiant light. Opposite of `Necrotic` (affinity interplay
+    /// deferred).
+    Radiant,
+    Thunder,
 }
 
 const PIERCING_PENETRATION_FRACTION: f32 = 0.75;
@@ -2491,4 +2533,54 @@ pub fn get_equip_slot_by_block_priority(inventory: Option<&Inventory>) -> EquipS
                 (None, None) => EquipSlot::ActiveMainhand,
             },
         )
+}
+
+#[cfg(test)]
+mod damage_kind_taxonomy_tests {
+    use super::DamageKind;
+
+    // ENG-A2: the full 13-kind content damage taxonomy (Matias 2026-06-20) parses
+    // from RON.
+    #[test]
+    fn all_content_kinds_parse() {
+        for s in [
+            "Acid",
+            "Bludgeoning",
+            "Cold",
+            "Fire",
+            "Force",
+            "Lightning",
+            "Necrotic",
+            "Piercing",
+            "Poison",
+            "Psychic",
+            "Radiant",
+            "Slashing",
+            "Thunder",
+        ] {
+            ron::from_str::<DamageKind>(s)
+                .unwrap_or_else(|e| panic!("DamageKind `{s}` must parse: {e}"));
+        }
+    }
+
+    // `Bludgeoning` is the content-facing name for the engine's `Crushing` (kept
+    // for its poise behaviour); a serde alias avoids renaming churn across code
+    // + existing RON.
+    #[test]
+    fn bludgeoning_aliases_crushing() {
+        assert_eq!(
+            ron::from_str::<DamageKind>("Bludgeoning").unwrap(),
+            DamageKind::Crushing
+        );
+    }
+
+    // Back-compat: existing RON using the legacy generic `Energy` still loads (no
+    // data migration).
+    #[test]
+    fn legacy_energy_still_parses() {
+        assert_eq!(
+            ron::from_str::<DamageKind>("Energy").unwrap(),
+            DamageKind::Energy
+        );
+    }
 }
