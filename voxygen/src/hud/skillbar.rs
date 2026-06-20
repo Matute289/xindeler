@@ -1325,6 +1325,7 @@ impl<'a> Skillbar<'a> {
                     a.activate_ability(
                         AbilityInput::Secondary,
                         Some(self.inventory),
+                        None, // display only; the server gates use (ENG-D2c)
                         self.skillset,
                         Some(self.body),
                         self.char_state,

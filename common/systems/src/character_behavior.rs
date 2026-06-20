@@ -5,10 +5,10 @@ use specs::{
 
 use common::{
     comp::{
-        self, AbilityCooldowns, AbilityPool, ActiveAbilities, Beam, Body, CharacterActivity,
-        CharacterState, Combo, Controller, Density, Energy, Hardcore, Health, Inventory,
-        InventoryManip, Mass, Melee, Ori, PhysicsState, Poise, Pos, PreviousPhysCache, Scale,
-        SkillSet, Stance, StateUpdate, Stats, Vel,
+        self, AbilityCooldowns, AbilityPool, ActiveAbilities, AttunedItems, Beam, Body,
+        CharacterActivity, CharacterState, Combo, Controller, Density, Energy, Hardcore, Health,
+        Inventory, InventoryManip, Mass, Melee, Ori, PhysicsState, Poise, Pos, PreviousPhysCache,
+        Scale, SkillSet, Stance, StateUpdate, Stats, Vel,
         character_state::{CharacterStateEvents, OutputEvents},
         inventory::item::{MaterialStatManifest, tool::AbilityMap},
     },
@@ -57,6 +57,7 @@ pub struct ReadData<'a> {
     alignments: ReadStorage<'a, comp::Alignment>,
     terrain: ReadExpect<'a, TerrainGrid>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, AttunedItems>,
     stances: ReadStorage<'a, Stance>,
     prev_phys_caches: ReadStorage<'a, PreviousPhysCache>,
 }
@@ -225,6 +226,7 @@ impl<'a> System<'a> for Sys {
                 density,
                 energy,
                 inventory,
+                attuned: read_data.attuned_items.get(entity),
                 controller,
                 health,
                 hardcore: read_data.hardcores.get(entity).is_some(),

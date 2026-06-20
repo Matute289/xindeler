@@ -1454,6 +1454,7 @@ fn handle_ability(
                 a.activate_ability(
                     ability_input,
                     data.inventory,
+                    data.attuned,
                     data.skill_set,
                     Some(data.body),
                     Some(data.character),

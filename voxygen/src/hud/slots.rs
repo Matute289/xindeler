@@ -192,6 +192,7 @@ impl<'a> SlotKey<HotbarSource<'a>, HotbarImageSource<'a>> for HotbarSlot {
                                 a.activate_ability(
                                     AbilityInput::Auxiliary(i),
                                     Some(inventory),
+                                    None, // display only; the server gates use (ENG-D2c)
                                     skillset,
                                     Some(body),
                                     *char_state,

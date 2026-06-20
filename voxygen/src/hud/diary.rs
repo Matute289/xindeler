@@ -1260,7 +1260,8 @@ impl Widget for Diary<'_> {
                         },
                         CharacterStat::Protection => {
                             let protection =
-                                combat::compute_protection(Some(self.inventory), self.msm);
+                                // display only; None = show ungated (ENG-D2c)
+                                combat::compute_protection(Some(self.inventory), None, self.msm);
                             match protection {
                                 Some(prot) => format!("{}", prot),
                                 None => String::from("Invincible"),

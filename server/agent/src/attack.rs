@@ -2685,6 +2685,7 @@ impl AgentData<'_> {
                 .activate_ability(
                     input,
                     Some(self.inventory),
+                    None, // NPCs don't attune (ENG-D2c)
                     self.skill_set,
                     self.body,
                     Some(self.char_state),

@@ -238,6 +238,7 @@ pub struct HealthChangeEventData<'a> {
     #[cfg(feature = "worldgen")]
     rtsim_entities: ReadStorage<'a, RtSimEntity>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, comp::AttunedItems>,
     agents: WriteStorage<'a, Agent>,
     healths: WriteStorage<'a, Health>,
     heads: WriteStorage<'a, Heads>,
@@ -263,7 +264,8 @@ impl ServerEvent for HealthChangeEvent {
                 // Skip damage if invincible.
                 if ev.change.amount < 0.0 &&
                     // None indicates invincibility.
-                    combat::compute_protection(inventory, &data.msm).is_none()
+                    combat::compute_protection(inventory, data.attuned_items.get(ev.entity), &data.msm)
+                        .is_none()
                 {
                     continue;
                 }
@@ -1538,6 +1540,8 @@ impl ServerEvent for LandOnGroundEvent {
                 let damage_reduction = Damage::compute_damage_reduction(
                     Some(damage),
                     inventories.get(ev.entity),
+                    // TODO(ENG-D2c): fall-damage protection is not attunement-gated yet.
+                    None,
                     stats.get(ev.entity),
                     &msm,
                 );
@@ -1655,6 +1659,7 @@ pub struct ExplosionData<'a> {
     energies: ReadStorage<'a, Energy>,
     combos: ReadStorage<'a, comp::Combo>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, comp::AttunedItems>,
     alignments: ReadStorage<'a, Alignment>,
     entered_auras: ReadStorage<'a, EnteredAuras>,
     buffs: ReadStorage<'a, comp::Buffs>,
@@ -2064,6 +2069,7 @@ impl ServerEvent for ExplosionEvent {
                                     entity: entity_b,
                                     uid: *uid_b,
                                     inventory: data.inventories.get(entity_b),
+                                    attuned: data.attuned_items.get(entity_b),
                                     stats: data.stats.get(entity_b),
                                     health: Some(health_b),
                                     pos: pos_b.0,
@@ -2245,7 +2251,8 @@ pub fn emit_effect_events(
         },
         common::effect::Effect::Damage(damage) => {
             let change = damage.calculate_health_change(
-                combat::Damage::compute_damage_reduction(Some(damage), inventory, stats, msm),
+                // TODO(ENG-D2c): effect-damage protection is not attunement-gated yet.
+                combat::Damage::compute_damage_reduction(Some(damage), inventory, None, stats, msm),
                 0.0,
                 damage_contributor,
                 None,
