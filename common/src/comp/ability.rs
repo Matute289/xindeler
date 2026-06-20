@@ -3756,6 +3756,19 @@ pub enum School {
     Hemomancy,
 }
 
+/// The Axiomancy subschools (our Dunamancy-analog branches). Only meaningful
+/// when `school == Axiomancy`; pairs with `form` (the classic school the effect
+/// physically takes) as the composite tag `Axiomancy(Subschool · Form)`.
+/// Asset-only metadata (magic-system-v2 §1.2; content-adaptation §4.1). IP:
+/// coined — the source "Chronurgy/Graviturgy" names are denylisted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AxiomSub {
+    /// Time / fate (Chronurgy-analog).
+    Chronomancy,
+    /// Gravity / mass (Graviturgy-analog).
+    Gravimancy,
+}
+
 /// Where a spell's energy COMES FROM (magic-system-v2 spec §1.1). The fuel,
 /// independent of the school (form). Ki and Psionic abilities live here with
 /// `school: None`.
@@ -3789,9 +3802,20 @@ pub struct AbilityMeta {
     pub contextual_stats: Option<StatAdj>,
     /// If provided, multiplies the precision power from armor for this ability
     pub precision_power_mult: Option<f32>,
-    /// School (form) this ability belongs to, if it is a spell.
+    /// School this ability belongs to, if it is a spell. For the meta-schools
+    /// (Axiomancy/Hemomancy) the underlying classic school is carried in
+    /// `form`.
     #[serde(default)]
     pub school: Option<School>,
+    /// For meta-school spells, the classic school the effect physically takes —
+    /// e.g. `Axiomancy(Gravimancy · Evocation)` ⇒ `form = Evocation`,
+    /// `Hemomancy(Necromancy)` ⇒ `form = Necromancy`. `None` for the classic
+    /// spells. (magic-system-v2 §1.2; content-adaptation §4.1)
+    #[serde(default)]
+    pub form: Option<School>,
+    /// Axiomancy subschool, when `school == Axiomancy`. `None` otherwise.
+    #[serde(default)]
+    pub subschool: Option<AxiomSub>,
     /// Magic source (fuel) this ability draws on, if any.
     #[serde(default)]
     pub source: Option<MagicSource>,
@@ -4025,6 +4049,36 @@ mod ability_cooldown_tests {
         cds.set("b", Time(100.0), 5.0);
         assert_eq!(cds.0.len(), 1);
         assert!(cds.ready_at("b").is_some());
+    }
+}
+
+#[cfg(test)]
+mod ability_meta_tag_tests {
+    use super::*;
+
+    // M1 (ENG-A1): the composite meta-school tag. Axiomancy(Subschool · Form) and
+    // Hemomancy(Form) need `form` + `subschool` on AbilityMeta.
+    // `deny_unknown_fields` means the RON must be accepted explicitly; the 542
+    // classic spells leave both None.
+    #[test]
+    fn meta_parses_form_and_subschool() {
+        // a gravity attack: Axiomancy(Gravimancy · Evocation)
+        let meta: AbilityMeta = ron::from_str(
+            "(school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Evocation))",
+        )
+        .expect("AbilityMeta with form + subschool must deserialize");
+        assert_eq!(meta.school, Some(School::Axiomancy));
+        assert_eq!(meta.subschool, Some(AxiomSub::Gravimancy));
+        assert_eq!(meta.form, Some(School::Evocation));
+    }
+
+    #[test]
+    fn meta_form_and_subschool_default_to_none() {
+        // classic spells (the 542) and non-spell abilities leave both None
+        let meta: AbilityMeta = ron::from_str("(school: Some(Evocation))")
+            .expect("classic-school meta must deserialize");
+        assert_eq!(meta.form, None);
+        assert_eq!(meta.subschool, None);
     }
 }
 
