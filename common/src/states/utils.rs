@@ -1,8 +1,8 @@
 use crate::{
     astar::Astar,
     comp::{
-        Alignment, Body, CharacterState, Density, InputAttr, InputKind, InventoryAction, Melee,
-        Ori, Pos, Scale, StateUpdate,
+        Alignment, Body, CharacterState, Density, HealthChange, InputAttr, InputKind,
+        InventoryAction, Melee, Ori, Pos, Scale, StateUpdate,
         ability::{
             AbilityInitEvent, AbilityMeta, AbilityRequirements, Capability, CharacterAbility,
             SpecifiedAbility, Stance,
@@ -24,8 +24,8 @@ use crate::{
     },
     consts::{FRIC_GROUND, GRAVITY, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
     event::{
-        BuffEvent, ChangeStanceEvent, ComboChangeEvent, InventoryManipEvent, LocalEvent,
-        SetAbilityCooldownEvent,
+        BuffEvent, ChangeStanceEvent, ComboChangeEvent, HealthChangeEvent, InventoryManipEvent,
+        LocalEvent, SetAbilityCooldownEvent,
     },
     mounting::Volume,
     outcome::Outcome,
@@ -1471,6 +1471,10 @@ fn handle_ability(
             })
             .filter(|(ability, _, spec_ability)| {
                 cooldown_ready(data, ability, spec_ability)
+                    && hp_cost_affordable(
+                        ability.ability_meta().hp_cost,
+                        data.health.map(|h| h.current()),
+                    )
                     && ability.requirements_paid(data, update)
             })
     {
@@ -1512,6 +1516,26 @@ fn handle_ability(
                         entity: data.entity,
                         ability_id: id.to_string(),
                         cooldown_secs,
+                    });
+                }
+
+                // Hemomancy "blood price" (M4 / ENG-C1): casting spends the
+                // caster's own HP. The activation filter already enforced the
+                // 1-HP floor (`hp_cost_affordable`), so in normal play this never
+                // brings the caster below 1.
+                if let Some(hp_cost) = ability_meta.hp_cost
+                    && hp_cost > 0.0
+                {
+                    output_events.emit_server(HealthChangeEvent {
+                        entity: data.entity,
+                        change: HealthChange {
+                            amount: -hp_cost,
+                            by: None,
+                            cause: None,
+                            time: *data.time,
+                            precise: false,
+                            instance: rand::random(),
+                        },
                     });
                 }
 
@@ -1588,6 +1612,17 @@ fn cooldown_ready(
                     .is_none_or(|cds| cds.is_ready(id, *data.time))
             })
     })
+}
+
+/// Whether an ability's optional HP cost (the Hemomancy "blood price", M4 /
+/// ENG-C1) can be paid right now. Normal play keeps a **1-HP floor**: the
+/// caster needs `cost + 1` current HP, so a normal cast never self-kills.
+/// Entities without a `Health` component (e.g. invulnerable) ignore the cost.
+///
+/// (Hardcore "no floor" — letting the blood price be lethal — is a documented
+/// follow-up; it needs the `Hardcore` flag plumbed into `JoinData`.)
+fn hp_cost_affordable(hp_cost: Option<f32>, current_hp: Option<f32>) -> bool {
+    hp_cost.is_none_or(|cost| current_hp.is_none_or(|hp| hp >= cost + 1.0))
 }
 
 pub fn handle_input(
@@ -2069,5 +2104,34 @@ impl ProjectileSpread {
             // TODO: Check if we want these to return something different
             Self::Increasing(spread) | Self::Horizontal(spread) => *spread,
         }
+    }
+}
+
+#[cfg(test)]
+mod hp_cost_tests {
+    use super::hp_cost_affordable;
+
+    // M4 (ENG-C1): the Hemomancy "blood price". Normal mode keeps a 1-HP floor —
+    // you need `cost + 1` current HP to cast, so a normal cast never self-kills.
+    // (Hardcore "no floor" is a documented follow-up; not covered here.)
+    #[test]
+    fn none_cost_is_free() {
+        assert!(hp_cost_affordable(None, Some(0.5)));
+        assert!(hp_cost_affordable(None, None));
+    }
+
+    #[test]
+    fn normal_requires_cost_plus_one_floor() {
+        assert!(hp_cost_affordable(Some(10.0), Some(11.0))); // exactly cost+1 → leaves 1 HP
+        assert!(hp_cost_affordable(Some(10.0), Some(50.0))); // plenty
+        assert!(!hp_cost_affordable(Some(10.0), Some(10.5))); // below the 1-HP floor
+        assert!(!hp_cost_affordable(Some(10.0), Some(10.0))); // can't pay full and keep the floor
+        assert!(!hp_cost_affordable(Some(10.0), Some(3.0))); // nowhere near
+    }
+
+    #[test]
+    fn missing_health_skips_cost() {
+        // entities without a Health component (e.g. invulnerable) ignore the cost
+        assert!(hp_cost_affordable(Some(10.0), None));
     }
 }

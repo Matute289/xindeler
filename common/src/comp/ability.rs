@@ -3822,6 +3822,12 @@ pub struct AbilityMeta {
     /// Per-ability cooldown in seconds, gated in `handle_ability`.
     #[serde(default)]
     pub cooldown: Option<f32>,
+    /// Per-ability HP cost — the Hemomancy "blood price" (M4 / ENG-C1). When
+    /// set, casting spends this much of the caster's own HP. Normal play keeps
+    /// a 1-HP floor (the cast is refused below `cost + 1`); see
+    /// `states::utils::hp_cost_affordable`.
+    #[serde(default)]
+    pub hp_cost: Option<f32>,
 }
 
 impl StatAdj {
@@ -4079,6 +4085,23 @@ mod ability_meta_tag_tests {
             .expect("classic-school meta must deserialize");
         assert_eq!(meta.form, None);
         assert_eq!(meta.subschool, None);
+    }
+
+    // M4 (ENG-C1): Hemomancy's per-spell HP cost (the "blood price"); serde-default
+    // so non-Hemomancy abilities omit it.
+    #[test]
+    fn meta_parses_hp_cost() {
+        let meta: AbilityMeta =
+            ron::from_str("(school: Some(Hemomancy), form: Some(Necromancy), hp_cost: Some(8.0))")
+                .expect("AbilityMeta with hp_cost must deserialize");
+        assert_eq!(meta.hp_cost, Some(8.0));
+    }
+
+    #[test]
+    fn meta_hp_cost_defaults_none() {
+        let meta: AbilityMeta =
+            ron::from_str("(school: Some(Evocation))").expect("meta must deserialize");
+        assert_eq!(meta.hp_cost, None);
     }
 }
 
