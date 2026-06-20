@@ -287,6 +287,9 @@ pub enum ItemTag {
     SalvageInto(Material, u32),
     Witch,
     Pirate,
+    /// The item grants its magic effects only while the wearer is *attuned* to
+    /// it (ENG-D2). Data-driven: add `RequiresAttunement` to an item's `tags`.
+    RequiresAttunement,
 }
 
 impl TagExampleInfo for ItemTag {
@@ -306,6 +309,7 @@ impl TagExampleInfo for ItemTag {
             ItemTag::SalvageInto(_, _) => "salvage",
             ItemTag::Witch => "witch",
             ItemTag::Pirate => "pirate",
+            ItemTag::RequiresAttunement => "attunement",
         }
     }
 
@@ -325,7 +329,8 @@ impl TagExampleInfo for ItemTag {
             | ItemTag::CraftingTool
             | ItemTag::Utility
             | ItemTag::Bag
-            | ItemTag::SalvageInto(_, _) => None,
+            | ItemTag::SalvageInto(_, _)
+            | ItemTag::RequiresAttunement => None,
         }
     }
 }
@@ -1550,6 +1555,15 @@ impl Item {
         }
     }
 
+    /// Non-allocating tag check — prefer this over `tags().contains(..)` on hot
+    /// paths (`tags()` allocates a `Vec`, and recurses for modular items).
+    pub fn has_tag(&self, tag: &ItemTag) -> bool {
+        match &self.item_base {
+            ItemBase::Simple(item_def) => item_def.tags.contains(tag),
+            ItemBase::Modular(mod_base) => mod_base.generate_tags(self.components()).contains(tag),
+        }
+    }
+
     pub fn is_modular(&self) -> bool {
         match &self.item_base {
             ItemBase::Simple(_) => false,
@@ -1889,6 +1903,14 @@ pub trait ItemDesc {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier;
     fn requirements(&self) -> Option<&ItemRequirements>;
 
+    /// Whether this item carries `tag`. The default delegates to `tags()`
+    /// (which allocates); `Item` overrides it with a non-allocating check.
+    fn has_tag(&self, tag: &ItemTag) -> bool { self.tags().contains(tag) }
+
+    /// Whether this item must be *attuned* before its magic effects apply
+    /// (ENG-D2). Data-driven via the `RequiresAttunement` tag.
+    fn requires_attunement(&self) -> bool { self.has_tag(&ItemTag::RequiresAttunement) }
+
     fn tool_info(&self) -> Option<ToolKind> {
         if let ItemKind::Tool(tool) = &*self.kind() {
             Some(tool.kind)
@@ -1980,6 +2002,8 @@ impl ItemDesc for Item {
     fn item_definition_id(&self) -> ItemDefinitionId<'_> { self.item_definition_id() }
 
     fn tags(&self) -> Vec<ItemTag> { self.tags() }
+
+    fn has_tag(&self, tag: &ItemTag) -> bool { Item::has_tag(self, tag) }
 
     fn is_modular(&self) -> bool { self.is_modular() }
 
