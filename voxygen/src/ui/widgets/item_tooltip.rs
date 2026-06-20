@@ -325,6 +325,7 @@ widget_ids! {
         desc,
         requirements_met,
         requirements_unmet,
+        requires_attunement,
         prices_buy,
         prices_sell,
         tooltip_hints,
@@ -1318,6 +1319,27 @@ impl Widget for ItemTooltip<'_> {
                 .set(state.ids.requirements_unmet, ui);
         }
 
+        // Attunement notice — magic items only grant their effects while attuned
+        // (ENG-D2). Informational, not a met/unmet gate; shown in arcane blue.
+        if item.requires_attunement() {
+            let anchor = if !req_unmet.is_empty() {
+                state.ids.requirements_unmet
+            } else if !req_met.is_empty() {
+                state.ids.requirements_met
+            } else {
+                req_anchor
+            };
+            widget::Text::new(&i18n.get_msg("hud-bag-requires_attunement"))
+                .x_align_to(state.ids.item_frame, conrod_core::position::Align::Start)
+                .graphics_for(id)
+                .parent(id)
+                .with_style(self.style.desc)
+                .color(Color::Rgba(0.55, 0.70, 1.0, 1.0))
+                .down_from(anchor, V_PAD)
+                .w(text_w)
+                .set(state.ids.requires_attunement, ui);
+        }
+
         // Price display
         if let Some((buy, sell, factor)) =
             util::price_desc(self.prices, item.item_definition_id(), item.quality(), i18n)
@@ -1329,7 +1351,9 @@ impl Widget for ItemTooltip<'_> {
                 .with_style(self.style.desc)
                 .color(Color::Rgba(factor, 1.0 - factor, 0.00, 1.0))
                 .down_from(
-                    if !req_unmet.is_empty() {
+                    if item.requires_attunement() {
+                        state.ids.requires_attunement
+                    } else if !req_unmet.is_empty() {
                         state.ids.requirements_unmet
                     } else if !req_met.is_empty() {
                         state.ids.requirements_met
@@ -1451,8 +1475,19 @@ impl Widget for ItemTooltip<'_> {
             0.0
         };
 
+        // Attunement notice (one line, see update())
+        let attune_h = if item.requires_attunement() {
+            widget::Text::new("placeholder")
+                .with_style(self.style.desc)
+                .get_h(ui)
+                .unwrap_or(0.0)
+                + V_PAD
+        } else {
+            0.0
+        };
+
         // extra padding to fit frame top padding
-        let height = frame_h + stat_h + desc_h + req_h + price_h + V_PAD + 5.0;
+        let height = frame_h + stat_h + desc_h + req_h + attune_h + price_h + V_PAD + 5.0;
         Dimension::Absolute(height)
     }
 }

@@ -287,6 +287,9 @@ pub enum ItemTag {
     SalvageInto(Material, u32),
     Witch,
     Pirate,
+    /// The item grants its magic effects only while the wearer is *attuned* to
+    /// it (ENG-D2). Data-driven: add `RequiresAttunement` to an item's `tags`.
+    RequiresAttunement,
 }
 
 impl TagExampleInfo for ItemTag {
@@ -306,6 +309,7 @@ impl TagExampleInfo for ItemTag {
             ItemTag::SalvageInto(_, _) => "salvage",
             ItemTag::Witch => "witch",
             ItemTag::Pirate => "pirate",
+            ItemTag::RequiresAttunement => "attunement",
         }
     }
 
@@ -325,7 +329,8 @@ impl TagExampleInfo for ItemTag {
             | ItemTag::CraftingTool
             | ItemTag::Utility
             | ItemTag::Bag
-            | ItemTag::SalvageInto(_, _) => None,
+            | ItemTag::SalvageInto(_, _)
+            | ItemTag::RequiresAttunement => None,
         }
     }
 }
@@ -1888,6 +1893,10 @@ pub trait ItemDesc {
     fn durability_lost(&self) -> Option<u32>;
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier;
     fn requirements(&self) -> Option<&ItemRequirements>;
+
+    /// Whether this item must be *attuned* before its magic effects apply
+    /// (ENG-D2). Data-driven via the `RequiresAttunement` tag.
+    fn requires_attunement(&self) -> bool { self.tags().contains(&ItemTag::RequiresAttunement) }
 
     fn tool_info(&self) -> Option<ToolKind> {
         if let ItemKind::Tool(tool) = &*self.kind() {
