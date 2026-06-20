@@ -2190,6 +2190,7 @@ impl ServerEvent for ExplosionEvent {
                                                 )
                                             }),
                                             data.inventories.get(entity_b),
+                                            data.attuned_items.get(entity_b),
                                             &data.msm,
                                             data.character_states.get(entity_b),
                                             data.stats.get(entity_b),
@@ -2223,6 +2224,7 @@ pub fn emit_effect_events(
     effect: common::effect::Effect,
     source: Option<(Uid, Option<Group>)>,
     inventory: Option<&Inventory>,
+    attuned: Option<&comp::AttunedItems>,
     msm: &MaterialStatManifest,
     char_state: Option<&CharacterState>,
     stats: Option<&Stats>,
@@ -2251,8 +2253,13 @@ pub fn emit_effect_events(
         },
         common::effect::Effect::Damage(damage) => {
             let change = damage.calculate_health_change(
-                // TODO(ENG-D2c): effect-damage protection is not attunement-gated yet.
-                combat::Damage::compute_damage_reduction(Some(damage), inventory, None, stats, msm),
+                combat::Damage::compute_damage_reduction(
+                    Some(damage),
+                    inventory,
+                    attuned,
+                    stats,
+                    msm,
+                ),
                 0.0,
                 damage_contributor,
                 None,

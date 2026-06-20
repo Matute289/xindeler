@@ -99,6 +99,16 @@ impl Component for Attuning {
 /// an item that `RequiresAttunement` contributes only while its `slot` is
 /// attuned; every other item always contributes. `requires` is the item's
 /// `RequiresAttunement` flag — pass `item.requires_attunement()`.
+///
+/// **v1 scope (Matias: "defensa + habilidades").** This gate is applied to:
+/// HP-damage protection (`combat::compute_protection`), max-energy from gear
+/// (`combat::compute_max_energy_mod`), and weapon abilities
+/// (`ActiveAbilities::activate_ability`). It is intentionally **not** applied
+/// yet to: offensive stats (precision / stealth / energy-reward — scattered
+/// across ~15 `states/*`), poise resilience (`compute_poise_resilience`, to
+/// avoid the `apply_poise_reduction` ripple), and fall-damage. Those are
+/// documented follow-ups; until then an unattuned item still grants *those*
+/// effects.
 pub fn item_effects_active(
     slot: EquipSlot,
     requires: bool,

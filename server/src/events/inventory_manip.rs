@@ -790,6 +790,8 @@ impl ServerEvent for InventoryManipEvent {
                                         effect,
                                         None,
                                         data.inventories.get(entity),
+                                        None, /* consumable self-effect: not attunement-gated
+                                               * (ENG-D2c) */
                                         &data.msm,
                                         data.character_states.get(entity),
                                         data.stats.get(entity),
@@ -809,6 +811,8 @@ impl ServerEvent for InventoryManipEvent {
                                         effect,
                                         None,
                                         data.inventories.get(entity),
+                                        None, /* consumable self-effect: not attunement-gated
+                                               * (ENG-D2c) */
                                         &data.msm,
                                         data.character_states.get(entity),
                                         data.stats.get(entity),
@@ -827,6 +831,7 @@ impl ServerEvent for InventoryManipEvent {
                                     effect,
                                     None,
                                     data.inventories.get(entity),
+                                    None, // consumable self-effect: not attunement-gated (ENG-D2c)
                                     &data.msm,
                                     data.character_states.get(entity),
                                     data.stats.get(entity),
