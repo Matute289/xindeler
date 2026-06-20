@@ -366,7 +366,10 @@ impl ServerEvent for HealthChangeEvent {
             // Hemomancy HP price, cause: None) do not break it.
             if ev.change.amount < 0.0
                 && ev.change.cause.is_some()
-                && buff::concentration_breaks(damage)
+                && buff::concentration_breaks(
+                    damage,
+                    data.healths.get(ev.entity).map_or(0.0, |h| h.maximum()),
+                )
             {
                 emitters.emit(BuffEvent {
                     entity: ev.entity,
