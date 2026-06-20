@@ -281,6 +281,8 @@ const IMAGE_W_FRAC: f64 = 0.3;
 const ICON_SIZE: [f64; 2] = [64.0, 64.0];
 /// Total item tooltip width
 const WIDTH: f64 = 320.0;
+// Arcane blue for the "Requires Attunement" notice (ENG-D2).
+const ATTUNEMENT_COLOR: Color = Color::Rgba(0.55, 0.70, 1.0, 1.0);
 
 /// A widget for displaying tooltips
 #[derive(Clone, WidgetCommon)]
@@ -1321,7 +1323,8 @@ impl Widget for ItemTooltip<'_> {
 
         // Attunement notice — magic items only grant their effects while attuned
         // (ENG-D2). Informational, not a met/unmet gate; shown in arcane blue.
-        if item.requires_attunement() {
+        let requires_attunement = item.requires_attunement();
+        if requires_attunement {
             let anchor = if !req_unmet.is_empty() {
                 state.ids.requirements_unmet
             } else if !req_met.is_empty() {
@@ -1334,7 +1337,7 @@ impl Widget for ItemTooltip<'_> {
                 .graphics_for(id)
                 .parent(id)
                 .with_style(self.style.desc)
-                .color(Color::Rgba(0.55, 0.70, 1.0, 1.0))
+                .color(ATTUNEMENT_COLOR)
                 .down_from(anchor, V_PAD)
                 .w(text_w)
                 .set(state.ids.requires_attunement, ui);
@@ -1351,7 +1354,7 @@ impl Widget for ItemTooltip<'_> {
                 .with_style(self.style.desc)
                 .color(Color::Rgba(factor, 1.0 - factor, 0.00, 1.0))
                 .down_from(
-                    if item.requires_attunement() {
+                    if requires_attunement {
                         state.ids.requires_attunement
                     } else if !req_unmet.is_empty() {
                         state.ids.requirements_unmet
