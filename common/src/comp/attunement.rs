@@ -52,14 +52,17 @@ impl Component for AttunedItems {
 
 /// How many items a character of `level` may keep attuned at once.
 ///
-/// Matias §I1: **L1-3 → 1**, **L4-7 → 2**, then **+1 per further 4 levels**
-/// (8-11 → 3, 12-15 → 4, …). Tunable; the exact bands await the final level
-/// cap.
+/// Matias (2026-06-20): **no attunement before L10**; the first item unlocks at
+/// **L10**, then **+1 item every 2 levels** (L12 → 2, L14 → 3, …). The level
+/// cap is 60 (→ 26 by the formula), but a character has only ~18 non-bag equip
+/// slots (see `EquipSlot`), so the cap stops binding around L44 — past that,
+/// late-game item *min-level* requirements (`ItemRequirements`), not attunement
+/// scarcity, are what pull players toward 60. Tunable.
 pub fn max_attuned_items(level: u16) -> u32 {
-    if level <= 3 {
-        1
+    if level < 10 {
+        0
     } else {
-        2 + u32::from((level - 4) / 4)
+        1 + u32::from((level - 10) / 2)
     }
 }
 
@@ -153,13 +156,14 @@ mod tests {
 
     #[test]
     fn cap_grows_with_level() {
-        assert_eq!(max_attuned_items(1), 1);
-        assert_eq!(max_attuned_items(3), 1);
-        assert_eq!(max_attuned_items(4), 2);
-        assert_eq!(max_attuned_items(7), 2);
-        assert_eq!(max_attuned_items(8), 3);
-        assert_eq!(max_attuned_items(11), 3);
-        assert_eq!(max_attuned_items(12), 4);
+        assert_eq!(max_attuned_items(1), 0);
+        assert_eq!(max_attuned_items(9), 0); // nothing before L10
+        assert_eq!(max_attuned_items(10), 1); // first attunement unlocks at L10
+        assert_eq!(max_attuned_items(11), 1);
+        assert_eq!(max_attuned_items(12), 2); // +1 every 2 levels
+        assert_eq!(max_attuned_items(14), 3);
+        assert_eq!(max_attuned_items(52), 22); // 22 items reached at L52
+        assert_eq!(max_attuned_items(60), 26); // at the level cap
     }
 
     #[test]
@@ -211,7 +215,7 @@ mod tests {
         // common = 3s; equipped at t=0 → finishes at t=3.
         reconcile_attunement(
             &[(R1, true, Quality::Common)],
-            1,
+            10,
             Time(0.0),
             &mut attuning,
             &mut attuned,
@@ -228,7 +232,7 @@ mod tests {
         let mut attuned = AttunedItems::default();
         reconcile_attunement(
             &[(R1, false, Quality::Common)],
-            1,
+            10,
             Time(0.0),
             &mut attuning,
             &mut attuned,
@@ -241,10 +245,10 @@ mod tests {
     fn channel_completes_under_cap() {
         let mut attuning = Attuning(vec![(R1, Time(3.0))]);
         let mut attuned = AttunedItems::default();
-        // now >= finish, level 1 cap = 1.
+        // now >= finish; level 10 → cap 1.
         reconcile_attunement(
             &[(R1, true, Quality::Common)],
-            1,
+            10,
             Time(3.0),
             &mut attuning,
             &mut attuned,
@@ -255,12 +259,12 @@ mod tests {
 
     #[test]
     fn channel_over_cap_stays_pending_then_attunes_when_a_slot_frees() {
-        // r1 already attuned; level 1 cap = 1; r2's channel completes but cap is full.
+        // r1 already attuned; level 10 → cap 1; r2's channel completes but cap is full.
         let mut attuned = AttunedItems(vec![R1]);
         let mut attuning = Attuning(vec![(R2, Time(3.0))]);
         reconcile_attunement(
             &[(R1, true, Quality::Common), (R2, true, Quality::Common)],
-            1,
+            10,
             Time(5.0),
             &mut attuning,
             &mut attuned,
@@ -272,7 +276,7 @@ mod tests {
         // Free R1's slot (unequip it): only R2 remains equipped → R2 attunes now.
         reconcile_attunement(
             &[(R2, true, Quality::Common)],
-            1,
+            10,
             Time(6.0),
             &mut attuning,
             &mut attuned,
@@ -287,7 +291,7 @@ mod tests {
         let mut attuned = AttunedItems(vec![R1]);
         let mut attuning = Attuning(vec![(R2, Time(10.0))]);
         // neither slot holds an attunement item anymore.
-        reconcile_attunement(&[], 5, Time(1.0), &mut attuning, &mut attuned);
+        reconcile_attunement(&[], 12, Time(1.0), &mut attuning, &mut attuned);
         assert_eq!(attuned.count(), 0);
         assert_eq!(attuning.0.len(), 0);
     }
@@ -298,7 +302,7 @@ mod tests {
         let mut attuning = Attuning::default();
         reconcile_attunement(
             &[(R1, true, Quality::Common)],
-            1,
+            10,
             Time(100.0),
             &mut attuning,
             &mut attuned,
@@ -314,7 +318,7 @@ mod tests {
         // t=1 < finish 3 → still running, not yet attuned, not restarted.
         reconcile_attunement(
             &[(R1, true, Quality::Common)],
-            1,
+            10,
             Time(1.0),
             &mut attuning,
             &mut attuned,
