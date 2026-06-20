@@ -150,6 +150,10 @@ pub struct JoinData<'a> {
     pub controller: &'a Controller,
     pub inputs: &'a ControllerInputs,
     pub health: Option<&'a Health>,
+    /// Whether the entity is a hardcore (permadeath) character — Hemomancy's
+    /// HP-cost may be lethal for these (no 1-HP floor); see
+    /// `hp_cost_affordable`.
+    pub hardcore: bool,
     pub heads: Option<&'a Heads>,
     pub energy: &'a Energy,
     pub inventory: Option<&'a Inventory>,
@@ -191,6 +195,7 @@ pub struct JoinStruct<'a> {
     pub inventory: Option<&'a Inventory>,
     pub controller: &'a mut Controller,
     pub health: Option<&'a Health>,
+    pub hardcore: bool,
     pub heads: Option<&'a Heads>,
     pub body: &'a Body,
     pub physics: &'a PhysicsState,
@@ -238,6 +243,7 @@ impl<'a> JoinData<'a> {
             controller: j.controller,
             inputs: &j.controller.inputs,
             health: j.health,
+            hardcore: j.hardcore,
             heads: j.heads,
             body: j.body,
             physics: j.physics,

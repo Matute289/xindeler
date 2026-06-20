@@ -6,9 +6,9 @@ use specs::{
 use common::{
     comp::{
         self, AbilityCooldowns, AbilityPool, ActiveAbilities, Beam, Body, CharacterActivity,
-        CharacterState, Combo, Controller, Density, Energy, Health, Inventory, InventoryManip,
-        Mass, Melee, Ori, PhysicsState, Poise, Pos, PreviousPhysCache, Scale, SkillSet, Stance,
-        StateUpdate, Stats, Vel,
+        CharacterState, Combo, Controller, Density, Energy, Hardcore, Health, Inventory,
+        InventoryManip, Mass, Melee, Ori, PhysicsState, Poise, Pos, PreviousPhysCache, Scale,
+        SkillSet, Stance, StateUpdate, Stats, Vel,
         character_state::{CharacterStateEvents, OutputEvents},
         inventory::item::{MaterialStatManifest, tool::AbilityMap},
     },
@@ -35,6 +35,7 @@ pub struct ReadData<'a> {
     time: Read<'a, Time>,
     lazy_update: Read<'a, LazyUpdate>,
     healths: ReadStorage<'a, Health>,
+    hardcores: ReadStorage<'a, Hardcore>,
     heads: ReadStorage<'a, Heads>,
     bodies: ReadStorage<'a, Body>,
     masses: ReadStorage<'a, Mass>,
@@ -226,6 +227,7 @@ impl<'a> System<'a> for Sys {
                 inventory,
                 controller,
                 health,
+                hardcore: read_data.hardcores.get(entity).is_some(),
                 heads,
                 body,
                 physics,
