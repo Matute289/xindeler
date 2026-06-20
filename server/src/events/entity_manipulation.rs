@@ -146,6 +146,7 @@ event_emitters! {
         destroy: DestroyEvent,
         downed: DownedEvent,
         outcome: Outcome,
+        buff: BuffEvent,
     }
 
     struct DestroyEvents[DestroyEmitters] {
@@ -357,6 +358,24 @@ impl ServerEvent for HealthChangeEvent {
                 && let Some(agent) = data.agents.get_mut(ev.entity)
             {
                 agent.inbox.push_back(AgentEvent::Hurt);
+            }
+
+            // Concentration (ENG-C2 / M5): an external hit at or above the break
+            // threshold ends the bearer's concentration. Only hits with a
+            // `DamageSource` cause count — self-inflicted costs (e.g. the
+            // Hemomancy HP price, cause: None) do not break it.
+            if ev.change.amount < 0.0
+                && ev.change.cause.is_some()
+                && buff::concentration_breaks(damage)
+            {
+                emitters.emit(BuffEvent {
+                    entity: ev.entity,
+                    buff_change: buff::BuffChange::RemoveByCategory {
+                        all_required: vec![],
+                        any_required: vec![BuffCategory::Concentration],
+                        none_required: vec![],
+                    },
+                });
             }
         }
     }
@@ -2514,6 +2533,22 @@ impl ServerEvent for BuffEvent {
                                 .is_some_and(|body| body.negates_buff(new_buff.kind))
                             {
                                 new_buff.effects.clear();
+                            }
+
+                            // One concentration at a time (ENG-C2 / M5): adding a
+                            // concentration buff removes any prior concentration.
+                            if new_buff.cat_ids.contains(&BuffCategory::Concentration) {
+                                let prior: Vec<_> = buffs
+                                    .buffs
+                                    .iter()
+                                    .filter(|(_, b)| {
+                                        b.cat_ids.contains(&BuffCategory::Concentration)
+                                    })
+                                    .map(|(key, _)| key)
+                                    .collect();
+                                for key in prior {
+                                    buffs.remove(key);
+                                }
                             }
 
                             buffs.insert(new_buff, *time);
