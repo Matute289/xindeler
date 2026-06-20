@@ -877,7 +877,22 @@ pub enum BuffCategory {
     RemoveOnAttack,
     RemoveOnLoadoutChange,
     SelfBuff,
+    /// Sustained by concentration (ENG-C2 / M5): only one such buff is held at
+    /// a time (a new one removes the prior), and it is removed when the
+    /// bearer takes a hit at or above the break threshold. Tag
+    /// concentration-spell buffs/auras with this.
+    Concentration,
 }
+
+/// Single external hit dealing at least this much damage breaks concentration
+/// (ENG-C2 / M5, Matias §6.5 "umbral de daño"). Flat and tunable — refine with
+/// `game-balance-designer` (e.g. proportional to max HP) when content lands.
+/// Self-inflicted costs (e.g. the Hemomancy HP price) do NOT break it: the
+/// break check only fires for hits with a `DamageSource` cause.
+pub const CONCENTRATION_BREAK_DAMAGE: f32 = 10.0;
+
+/// Whether a single hit of `damage` (a positive amount) breaks concentration.
+pub fn concentration_breaks(damage: f32) -> bool { damage >= CONCENTRATION_BREAK_DAMAGE }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ModifierKind {
@@ -1424,5 +1439,23 @@ pub mod tests {
                 .values()
                 .any(|b| b.end_time.unwrap().0 > 59.99)
         );
+    }
+
+    // ENG-C2 (M5): concentration breaks when a single hit deals at least the
+    // damage threshold (Matias §6.5 "umbral de daño").
+    #[test]
+    fn concentration_breaks_at_threshold() {
+        assert!(!concentration_breaks(CONCENTRATION_BREAK_DAMAGE - 0.01));
+        assert!(concentration_breaks(CONCENTRATION_BREAK_DAMAGE));
+        assert!(concentration_breaks(CONCENTRATION_BREAK_DAMAGE + 50.0));
+        assert!(!concentration_breaks(0.0));
+    }
+
+    // Concentration is a buff category so concentration-sustained effects can be
+    // tagged in RON and removed together (one-at-a-time + break-on-damage).
+    #[test]
+    fn concentration_is_a_buff_category() {
+        let cat: BuffCategory = ron::from_str("Concentration").expect("Concentration must parse");
+        assert_eq!(cat, BuffCategory::Concentration);
     }
 }
