@@ -1,0 +1,18 @@
+// Second debug attunement ring (ENG-D2) — pairs with test_attunement_ring to
+// exercise the level cap: at L10 the cap is 1, so equipping both leaves the
+// second pending until a slot frees (over-cap auto-attune). It also carries an
+// UNGATED stat (poise_resilience) to show the v1 gate is partial — protection is
+// gated until attuned, poise resilience applies regardless.
+ItemDef(
+    legacy_name: "Test Ring of Attunement II",
+    legacy_description: "Debug ring. Its protection is gated by attunement; its poise resilience is not.",
+    kind: Armor((
+        kind: Ring,
+        stats: Direct((
+            protection: Some(Normal(10.0)),
+            poise_resilience: Some(Normal(10.0)),
+        )),
+    )),
+    quality: High,
+    tags: [RequiresAttunement],
+)
