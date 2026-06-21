@@ -22,7 +22,7 @@ use client::{self, Client};
 use common::{
     combat,
     comp::{
-        self, Body, CharacterState, Energy, Health, Inventory, Poise, Stats,
+        self, AttunedItems, Body, CharacterState, Energy, Health, Inventory, Poise, Stats,
         ability::{Ability, AbilityPool, ActiveAbilities, AuxiliaryAbility, BASE_ABILITY_LIMIT},
         inventory::{
             item::{
@@ -49,6 +49,7 @@ use conrod_core::{
     widget_ids,
 };
 use i18n::Localization;
+use specs::WorldExt;
 use std::borrow::Cow;
 use strum::{EnumIter, IntoEnumIterator};
 use vek::*;
@@ -1259,9 +1260,12 @@ impl Widget for Diary<'_> {
                             format!("{:.2}", cr * 10.0)
                         },
                         CharacterStat::Protection => {
+                            // Player's attuned set, so Protection reflects gating (ENG-D2c).
+                            let attuned_items =
+                                self.client.state().ecs().read_storage::<AttunedItems>();
+                            let attuned = attuned_items.get(self.client.entity());
                             let protection =
-                                // display only; None = show ungated (ENG-D2c)
-                                combat::compute_protection(Some(self.inventory), None, self.msm);
+                                combat::compute_protection(Some(self.inventory), attuned, self.msm);
                             match protection {
                                 Some(prot) => format!("{}", prot),
                                 None => String::from("Invincible"),

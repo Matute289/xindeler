@@ -27,7 +27,7 @@ use common::{
     assets::AssetExt,
     combat::{Damage, combat_rating, perception_dist_multiplier_from_stealth},
     comp::{
-        Body, CharacterClass, Energy, Health, Inventory, Poise, SkillSet, Stats,
+        AttunedItems, Body, CharacterClass, Energy, Health, Inventory, Poise, SkillSet, Stats,
         inventory::{InventorySortOrder, slot::Slot},
         item::{ItemDef, ItemDesc, ItemI18n, MaterialStatManifest, Quality},
     },
@@ -1173,6 +1173,10 @@ impl Widget for Bag<'_> {
                         .resize(STATS.len(), &mut ui.widget_id_generator())
                 });
                 // Stats
+                // Player's attuned set, so the Protection display reflects
+                // attunement gating (ENG-D2c) rather than the raw armor value.
+                let attuned_items = self.client.state().ecs().read_storage::<AttunedItems>();
+                let attuned = attuned_items.get(self.info.viewpoint_entity);
                 let combat_rating = combat_rating(
                     inventory,
                     self.health,
@@ -1206,7 +1210,7 @@ impl Widget for Bag<'_> {
                             * Damage::compute_damage_reduction(
                                 None,
                                 Some(inventory),
-                                None, // display only; show ungated (ENG-D2c)
+                                attuned,
                                 Some(self.stats),
                                 self.msm
                             )) as i32
