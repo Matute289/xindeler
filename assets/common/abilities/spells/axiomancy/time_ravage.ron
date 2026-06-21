@@ -1,0 +1,19 @@
+ChargedRanged(
+    energy_cost: 266,
+    energy_drain: 0,
+    idle_drain: 0,
+    projectile: (
+        kind: Pointed,
+        attack: Some((damage: 1)),
+        scaled: Some((damage: 300, knockback: Some(5), energy: Some(5))),
+    ),
+    buildup_duration: 1.2,
+    charge_duration: 0.4,
+    recover_duration: 0.75,
+    projectile_body: Object(BoltFire),
+    projectile_light: None,
+    initial_projectile_speed: 40.0,
+    scaled_projectile_speed: 90.0,
+    move_speed: 0.5,
+    meta: (school: Some(Axiomancy), subschool: Some(Chronomancy), form: Some(Necromancy), source: Some(Arcane), cooldown: Some(74.0)),
+)

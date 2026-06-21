@@ -1,0 +1,13 @@
+BasicRanged(
+    energy_cost: 191,
+    buildup_duration: 0.95,
+    recover_duration: 0.6,
+    projectile: (
+        kind: Explosive(radius: 1.5, min_falloff: 0.5, reagent: Some(Purple), terrain: None),
+        attack: Some((damage: 14, energy: Some(5))),
+    ),
+    projectile_body: Object(BoltFire),
+    projectile_speed: 60.0,
+    num_projectiles: Value(1),
+    meta: (school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Necromancy), source: Some(Arcane), cooldown: Some(38.0)),
+)

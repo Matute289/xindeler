@@ -1,0 +1,10 @@
+SelfBuff(
+    buildup_duration: 0.6,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: Reckless, data: BuffData(strength: 0.15, duration: Some(60.0))),
+    ],
+    energy_cost: 83,
+    meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(18.0), hp_cost: Some(4.0)),
+)

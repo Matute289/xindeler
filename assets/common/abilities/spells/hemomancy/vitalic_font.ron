@@ -1,0 +1,15 @@
+BasicAura(
+    buildup_duration: 0.6,
+    cast_duration: 0.5,
+    recover_duration: 0.5,
+    targets: InGroup,
+    auras: [
+        (kind: Regeneration, strength: 10.0, duration: Some(30.0), category: Magical),
+    ],
+    aura_duration: Some(30.0),
+    range: 12.0,
+    energy_cost: 137.0,
+    scales_with_combo: false,
+    specifier: Some(HealingAura),
+    meta: (school: Some(Hemomancy), form: Some(Abjuration), source: Some(Arcane), cooldown: Some(24.0), hp_cost: Some(9.0)),
+)

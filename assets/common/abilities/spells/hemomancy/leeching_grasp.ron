@@ -1,0 +1,13 @@
+BasicMelee(
+    energy_cost: 70,
+    buildup_duration: 0.55,
+    swing_duration: 0.1,
+    hit_timing: 0.5,
+    recover_duration: 0.35,
+    melee_constructor: (
+        kind: Stab(damage: 18, poise: 5, knockback: 0, energy_regen: 0),
+        range: 3.0,
+        angle: 20.0,
+    ),
+    meta: (school: Some(Hemomancy), form: Some(Necromancy), source: Some(Arcane), cooldown: Some(16.0), hp_cost: Some(3.0)),
+)

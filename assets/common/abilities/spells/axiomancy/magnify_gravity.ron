@@ -1,0 +1,16 @@
+GroundAoe(
+    energy_cost: 70.0,
+    buildup_duration: 0.5,
+    delay: 0.5,
+    recover_duration: 0.35,
+    max_range: 18.0,
+    radius: 3.0,
+    min_falloff: 0.4,
+    damage: 16,
+    poise: 15,
+    knockback: (strength: 12, direction: Towards),
+    dodgeable: Roll,
+    reagent: Some(Purple),
+    rooted_cast: false,
+    meta: (school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(16.0)),
+)

@@ -1,0 +1,16 @@
+Explosion(
+    energy_cost: 98,
+    buildup_duration: 0.7,
+    action_duration: 0.3,
+    recover_duration: 0.45,
+    damage: 50,
+    poise: 30,
+    knockback: (direction: Away, strength: 20.0),
+    radius: 4,
+    min_falloff: 0.3,
+    dodgeable: Roll,
+    destroy_terrain: None,
+    eye_height: false,
+    reagent: Some(Red),
+    meta: (school: Some(Hemomancy), form: Some(Evocation), source: Some(Arcane), cooldown: Some(20.0), hp_cost: Some(5.0)),
+)
