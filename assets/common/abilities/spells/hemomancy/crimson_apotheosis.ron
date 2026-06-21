@@ -4,7 +4,7 @@ SelfBuff(
     recover_duration: 0.65,
     buffs: [
         BuffDesc(kind: Frenzied, data: BuffData(strength: 0.25, duration: Some(60.0))),
-        BuffDesc(kind: Regeneration, data: BuffData(strength: 20.0, duration: Some(60.0))),
+        BuffDesc(kind: Regeneration, data: BuffData(strength: 2.0, duration: Some(60.0))),
     ],
     energy_cost: 225,
     meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(60.0), hp_cost: Some(9.0)),

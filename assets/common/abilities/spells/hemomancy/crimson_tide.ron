@@ -6,7 +6,7 @@ GroundAoe(
     max_range: 40.0,
     radius: 8.0,
     min_falloff: 0.4,
-    damage: 22,
+    damage: 60,
     poise: 15,
     knockback: (strength: 10, direction: Away),
     dodgeable: Roll,
