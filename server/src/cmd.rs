@@ -210,6 +210,7 @@ fn do_command(
         ServerChatCommand::ServerPhysics => handle_server_physics,
         ServerChatCommand::SetBodyType => handle_set_body_type,
         ServerChatCommand::SetClass => handle_set_class,
+        ServerChatCommand::SetLevel => handle_set_level,
         ServerChatCommand::SetMotd => handle_set_motd,
         ServerChatCommand::SetWaypoint => handle_set_waypoint,
         ServerChatCommand::Ship => handle_spawn_ship,
@@ -5677,6 +5678,58 @@ fn handle_set_class(
         ServerGeneral::server_msg(
             ChatType::CommandInfo,
             Content::Plain(format!("Class set to {class:?}.")),
+        ),
+    );
+    Ok(())
+}
+
+/// `/set_level <level>` — admin-only test tool: set the target's character
+/// level instantly (no grinding) by adjusting the General skill group's earned
+/// XP. Server-authoritative: gated by `needs_role: Admin` AND re-checked here
+/// via `real_role(..) == Admin` so players can never invoke it.
+fn handle_set_level(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::skillset::MAX_CHARACTER_LEVEL;
+
+    // Defense in depth beyond `needs_role`: re-verify against the authoritative
+    // admin source (same pattern as `adminify`).
+    let client_uuid = uuid(server, client, "client")?;
+    if !matches!(real_role(server, client_uuid, "client")?, AdminRole::Admin) {
+        return Err(Content::Plain(
+            "Only admins may use /set_level.".to_string(),
+        ));
+    }
+
+    let level = parse_cmd_args!(args, u16).ok_or_else(|| action.help_content())?;
+    if !(1..=MAX_CHARACTER_LEVEL).contains(&level) {
+        return Err(Content::Plain(format!(
+            "Level must be between 1 and {MAX_CHARACTER_LEVEL}."
+        )));
+    }
+
+    if let Some(mut skill_set) = server
+        .state
+        .ecs_mut()
+        .write_storage::<comp::SkillSet>()
+        .get_mut(target)
+    {
+        skill_set.set_level(level);
+    } else {
+        return Err(Content::Plain(
+            "Target has no skill set to set a level on.".to_string(),
+        ));
+    }
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!("Character level set to {level}.")),
         ),
     );
     Ok(())

@@ -412,6 +412,30 @@ impl SkillSet {
     /// always computed from lifetime XP so it can never desync.
     pub fn character_level(&self) -> u16 { level_from_total_exp(self.total_earned_exp()) }
 
+    /// Set the character's derived level by adjusting the **General** skill
+    /// group's earned XP so `total_earned_exp()` equals
+    /// `total_exp_for_level(level)` (clamped to `1..=MAX_CHARACTER_LEVEL`).
+    /// Intended for admin/test setup (the `/set_level` command). Other
+    /// skill groups' earned XP is preserved — if it already exceeds the
+    /// target the resulting level may be higher. Spent exp on the General
+    /// group is preserved; the remainder becomes available to spend.
+    pub fn set_level(&mut self, level: u16) {
+        let level = level.clamp(1, MAX_CHARACTER_LEVEL);
+        let target = total_exp_for_level(level);
+        let general = SkillGroupKind::General;
+        let general_earned = self
+            .skill_groups
+            .get(&general)
+            .map_or(0, |sg| sg.earned_exp);
+        let other_earned = self.total_earned_exp().saturating_sub(general_earned);
+        let new_general_earned = target.saturating_sub(other_earned);
+        if let Some(sg) = self.skill_groups.get_mut(&general) {
+            let spent = sg.spent_exp();
+            sg.earned_exp = new_general_earned;
+            sg.available_exp = new_general_earned.saturating_sub(spent);
+        }
+    }
+
     /// Gets the available experience for a particular skill group
     pub fn available_experience(&self, skill_group: SkillGroupKind) -> u32 {
         self.skill_group(skill_group)
@@ -706,6 +730,30 @@ mod character_level_tests {
                 assert_eq!(level_from_total_exp(xp - 1), level - 1);
             }
         }
+    }
+
+    #[test]
+    fn set_level_sets_character_level() {
+        for level in [1u16, 10, 52, 60] {
+            let mut skill_set = SkillSet::default();
+            skill_set.set_level(level);
+            assert_eq!(
+                skill_set.character_level(),
+                level,
+                "set_level({level}) should yield character_level()=={level}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_level_clamps_out_of_range() {
+        let mut over = SkillSet::default();
+        over.set_level(100);
+        assert_eq!(over.character_level(), MAX_CHARACTER_LEVEL);
+
+        let mut under = SkillSet::default();
+        under.set_level(0);
+        assert_eq!(under.character_level(), 1);
     }
 }
 
