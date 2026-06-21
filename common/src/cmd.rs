@@ -419,6 +419,7 @@ pub enum ServerChatCommand {
     MakeBlock,
     MakeNpc,
     MakeSprite,
+    MakeTestChar,
     MakeVolume,
     Motd,
     Mount,
@@ -1108,6 +1109,24 @@ impl ServerChatCommand {
                 Content::localized("command-world-desc"),
                 None,
             ),
+            ServerChatCommand::MakeTestChar => cmd(
+                vec![
+                    Integer("level", 1, Required),
+                    Enum(
+                        "class",
+                        vec![
+                            "warrior".to_owned(),
+                            "mage".to_owned(),
+                            "cleric".to_owned(),
+                            "rogue".to_owned(),
+                        ],
+                        Optional,
+                    ),
+                    Enum("kit", KITS.to_vec(), Optional),
+                ],
+                Content::localized("command-make_test_char-desc"),
+                Some(Admin),
+            ),
             ServerChatCommand::MakeVolume => cmd(
                 vec![Integer("size", 15, Optional)],
                 Content::localized("command-make_volume-desc"),
@@ -1280,6 +1299,7 @@ impl ServerChatCommand {
             ServerChatCommand::Wiring => "wiring",
             ServerChatCommand::Whitelist => "whitelist",
             ServerChatCommand::World => "world",
+            ServerChatCommand::MakeTestChar => "make_test_char",
             ServerChatCommand::MakeVolume => "make_volume",
             ServerChatCommand::Location => "location",
             ServerChatCommand::CreateLocation => "create_location",
