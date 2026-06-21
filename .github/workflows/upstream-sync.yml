@@ -65,20 +65,19 @@ jobs:
 
             1. Review the diff
             2. Identify which upstream changes are safe to integrate (bug fixes, asset updates, non-conflicting features)
-            3. Identify which upstream changes conflict with our custom modifications (terrain rendering, Transvoxel, collision, etc.)
+            3. Identify which upstream changes conflict with our custom modifications (magic/attunement, combat, classes/races, progression)
             4. For each conflict: adapt the upstream change to work alongside our code, or discard it if it reverts our work
             5. Only merge after conflicts are resolved and changes are validated
 
             ## Our priority areas (never let upstream overwrite these)
 
-            - `voxygen/src/mesh/terrain.rs` — Transvoxel meshing path
-            - `voxygen/src/mesh/transvoxel.rs` — Transvoxel algorithm
-            - `voxygen/src/render/pipelines/smooth_terrain.rs` — smooth pipeline
-            - `assets/voxygen/shaders/smooth-terrain-*.glsl` — smooth shaders
-            - `common/src/terrain/density.rs` — density field
-            - `common/systems/src/phys_smooth.rs` — smooth collision
-            - `voxygen/src/settings/graphics.rs` — TerrainSmoothingMode
+            - `common/src/comp/attunement.rs`, `server/src/sys/attunement.rs` — attunement (ENG-D2)
+            - `common/src/combat.rs`, `common/src/comp/ability.rs` — combat formulas + abilities/magic
+            - `common/src/comp/inventory/` — items (RequiresAttunement, has_tag, etc.)
+            - skillset / character-levels / classes-races, `server/src/persistence/*` — progression (⚠️ DB)
+            - `.lfsconfig`, `.gitattributes`, `.github/workflows/*` — CI/LFS (never re-introduce GitHub LFS)
             - `docs/design/` — our internal docs
+            # NOTE: the old smooth-terrain/Transvoxel pipeline was discarded — see docs/design/DEFERRED-TO-V2.md
 
             ## How to resolve conflicts
 
