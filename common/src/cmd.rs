@@ -447,6 +447,7 @@ pub enum ServerChatCommand {
     ServerPhysics,
     SetBodyType,
     SetClass,
+    SetLevel,
     SetMotd,
     SetWaypoint,
     Ship,
@@ -932,6 +933,11 @@ impl ServerChatCommand {
                 Content::localized("command-set_class-desc"),
                 None,
             ),
+            ServerChatCommand::SetLevel => cmd(
+                vec![Integer("level", 1, Required)],
+                Content::localized("command-set_level-desc"),
+                Some(Admin),
+            ),
             ServerChatCommand::SetMotd => cmd(
                 vec![Any("locale", Optional), Message(Optional)],
                 Content::localized("command-set_motd-desc"),
@@ -1248,6 +1254,7 @@ impl ServerChatCommand {
             ServerChatCommand::Say => "say",
             ServerChatCommand::ServerPhysics => "server_physics",
             ServerChatCommand::SetClass => "set_class",
+            ServerChatCommand::SetLevel => "set_level",
             ServerChatCommand::SetMotd => "set_motd",
             ServerChatCommand::SetBodyType => "set_body_type",
             ServerChatCommand::Ship => "ship",
