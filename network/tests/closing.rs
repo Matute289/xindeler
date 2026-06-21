@@ -19,7 +19,8 @@
 //!  - You sometimes see sleep(1000ms) this is used when we rely on the
 //!    underlying TCP functionality, as this simulates client and server
 
-use std::{assert_matches, sync::Arc};
+use core::assert_matches;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 use veloren_network::{Network, ParticipantError, ParticipantEvent, Pid, Promises, StreamError};
 mod helper;

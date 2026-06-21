@@ -154,7 +154,8 @@ impl ChatExporter {
             ChatType::Kill(kill_source, from) => {
                 let kill_source = match kill_source.clone() {
                     comp::chat::KillSource::Player(uid, t) => {
-                        KillSource::Player(player_info_from_uid(uid)?, t)
+                        let player_info = player_info_from_uid(uid)?;
+                        KillSource::Player(player_info, t)
                     },
                     comp::chat::KillSource::NonPlayer(name, t) => KillSource::NonPlayer(name, t),
                     comp::chat::KillSource::NonExistent(t) => KillSource::NonExistent(t),

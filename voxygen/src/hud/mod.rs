@@ -32,7 +32,6 @@ pub mod tutorial;
 pub mod util;
 
 pub use chat::MessageBacklog;
-pub use controller_icons::IconHandler;
 pub use crafting::CraftingTab;
 pub use hotbar::{SlotContents as HotbarSlotContents, State as HotbarState};
 pub use item_imgs::animate_by_pulse;
@@ -634,6 +633,7 @@ pub struct BlockFloater {
 pub struct DebugInfo {
     pub tps: f64,
     pub frame_time: Duration,
+    pub frame_variance: Duration,
     pub ping_ms: f64,
     pub coordinates: Option<comp::Pos>,
     pub velocity: Option<comp::Vel>,
@@ -1870,7 +1870,7 @@ impl Hud {
                 self.floaters
                     .skill_point_displays
                     .retain(|d| d.timer > 0_f32);
-                if let Some(display) = self.floaters.skill_point_displays.iter_mut().next() {
+                if let Some(display) = self.floaters.skill_point_displays.first_mut() {
                     let fade = if display.timer < 3.0 {
                         display.timer * 0.33
                     } else if display.timer < 2.0 {
@@ -2712,9 +2712,10 @@ impl Hud {
 
             // Ticks per second
             let debug_msg_ticks_per_sec = format!(
-                "FPS: {:.0} ({}ms)",
+                "FPS: {:.0} ({}ms) (~{}ms)",
                 debug_info.tps,
-                debug_info.frame_time.as_millis()
+                debug_info.frame_time.as_millis(),
+                debug_info.frame_variance.as_millis(),
             );
             Text::new(&debug_msg_ticks_per_sec)
                 .color(TEXT_COLOR)
@@ -3064,8 +3065,7 @@ impl Hud {
                     if label.starts_with(crate::render::UI_PREMULTIPLY_PASS) {
                         continue;
                     }
-                    let timings_text =
-                        &format!("{:16}{:.3} ms", format!("{label}:"), timing.2 * 1000.0,);
+                    let timings_text = &format!("{label:16}{:.3} ms", timing.2 * 1000.0);
                     let timings_widget = Text::new(timings_text)
                         .color(TEXT_COLOR)
                         .down(V_PAD)
