@@ -1114,12 +1114,11 @@ impl ServerChatCommand {
                     Integer("level", 1, Required),
                     Enum(
                         "class",
-                        vec![
-                            "warrior".to_owned(),
-                            "mage".to_owned(),
-                            "cleric".to_owned(),
-                            "rogue".to_owned(),
-                        ],
+                        // Single source of truth — don't hardcode the class list.
+                        crate::comp::class::ClassKind::PLAYABLE
+                            .iter()
+                            .map(|c| c.keyword().to_owned())
+                            .collect(),
                         Optional,
                     ),
                     Enum("kit", KITS.to_vec(), Optional),

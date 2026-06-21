@@ -430,9 +430,15 @@ impl SkillSet {
         let other_earned = self.total_earned_exp().saturating_sub(general_earned);
         let new_general_earned = target.saturating_sub(other_earned);
         if let Some(sg) = self.skill_groups.get_mut(&general) {
+            // Never drop earned_exp below what's already been spent on skill points:
+            // doing so would make `spent_exp()` silently shrink while the unlocked
+            // skills + earned_sp remain, desyncing the live component from its
+            // persisted form (a forced respec on relog). Floor at `spent` instead —
+            // a down-level request below that floor just can't go lower (rare; the
+            // General tree has no purchasable skills in v1, so spent is normally 0).
             let spent = sg.spent_exp();
-            sg.earned_exp = new_general_earned;
-            sg.available_exp = new_general_earned.saturating_sub(spent);
+            sg.earned_exp = new_general_earned.max(spent);
+            sg.available_exp = sg.earned_exp - spent;
         }
     }
 
@@ -754,6 +760,37 @@ mod character_level_tests {
         let mut under = SkillSet::default();
         under.set_level(0);
         assert_eq!(under.character_level(), 1);
+    }
+
+    #[test]
+    fn set_level_downlevel_never_corrupts_spent_exp() {
+        // Simulate a General group with spent exp (earned 5000, available 1000 →
+        // spent 4000), as if skill points had been bought.
+        let mut ss = SkillSet::default();
+        {
+            let sg = ss
+                .skill_groups
+                .get_mut(&SkillGroupKind::General)
+                .expect("General always exists");
+            sg.earned_exp = 5000;
+            sg.available_exp = 1000;
+        }
+        assert_eq!(ss.skill_groups[&SkillGroupKind::General].spent_exp(), 4000);
+
+        // Down-level to 1 (target total exp 0): earned must floor at spent, not
+        // drop below it (which would silently shrink spent_exp → respec on relog).
+        ss.set_level(1);
+        let sg = &ss.skill_groups[&SkillGroupKind::General];
+        assert!(
+            sg.earned_exp >= sg.available_exp,
+            "earned >= available invariant"
+        );
+        assert_eq!(
+            sg.spent_exp(),
+            4000,
+            "spent exp preserved (no silent respec)"
+        );
+        assert_eq!(sg.earned_exp, 4000, "floored at spent, never below");
     }
 }
 
