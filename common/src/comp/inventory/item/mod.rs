@@ -1564,6 +1564,17 @@ impl Item {
         }
     }
 
+    /// Whether this item must be *attuned* before its effects apply (ENG-D2).
+    /// Allocation-free on both bases — modular items never carry the static
+    /// `RequiresAttunement` tag, so we skip `generate_tags` entirely. This
+    /// shadows the `ItemDesc` default on the hot combat/ability paths.
+    pub fn requires_attunement(&self) -> bool {
+        match &self.item_base {
+            ItemBase::Simple(item_def) => item_def.tags.contains(&ItemTag::RequiresAttunement),
+            ItemBase::Modular(_) => false,
+        }
+    }
+
     pub fn is_modular(&self) -> bool {
         match &self.item_base {
             ItemBase::Simple(_) => false,

@@ -6,7 +6,7 @@ use crate::{
         inventory::{
             Inventory,
             item::{
-                ItemDefinitionIdOwned, ItemKind, Tool,
+                ItemDefinitionIdOwned, ItemDesc, ItemKind, Tool,
                 tool::{
                     AbilityContext, AbilityItem, AbilityKind, AbilityMap, AbilitySpec,
                     ContextualIndex, Stats, ToolKind,
@@ -276,6 +276,7 @@ impl ActiveAbilities {
         &self,
         input: AbilityInput,
         inv: Option<&Inventory>,
+        attuned: Option<&comp::AttunedItems>,
         skill_set: &SkillSet,
         body: Option<&Body>,
         char_state: Option<&CharacterState>,
@@ -287,8 +288,13 @@ impl ActiveAbilities {
     ) -> Option<(CharacterAbility, bool, SpecifiedAbility)> {
         let ability = self.get_ability(input, inv, Some(skill_set), stats);
 
+        // ENG-D2c: a weapon that RequiresAttunement grants no abilities until its
+        // slot is attuned (the item is inert).
         let ability_set = |equip_slot| {
             inv.and_then(|inv| inv.equipped(equip_slot))
+                .filter(|item| {
+                    comp::item_effects_active(equip_slot, item.requires_attunement(), attuned)
+                })
                 .and_then(|i| i.item_config().map(|c| &c.abilities))
         };
 

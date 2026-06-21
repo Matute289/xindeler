@@ -1206,6 +1206,7 @@ impl Widget for Bag<'_> {
                             * Damage::compute_damage_reduction(
                                 None,
                                 Some(inventory),
+                                None, // display only; show ungated (ENG-D2c)
                                 Some(self.stats),
                                 self.msm
                             )) as i32

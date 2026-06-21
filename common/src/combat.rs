@@ -1,9 +1,10 @@
 use crate::{
     assets::{AssetExt, Ron},
     comp::{
-        Alignment, Body, Buffs, CharacterState, Combo, Energy, Group, Health, HealthChange,
-        InputKind, Inventory, Mass, Ori, Player, Poise, PoiseChange, SkillSet, Stats,
+        Alignment, AttunedItems, Body, Buffs, CharacterState, Combo, Energy, Group, Health,
+        HealthChange, InputKind, Inventory, Mass, Ori, Player, Poise, PoiseChange, SkillSet, Stats,
         ability::Capability,
+        attunement::item_effects_active,
         aura::{AuraKindVariant, EnteredAuras},
         buff::{Buff, BuffChange, BuffData, BuffDescriptor, BuffKind, BuffSource, DestInfo},
         inventory::{
@@ -99,6 +100,9 @@ pub struct TargetInfo<'a> {
     pub entity: EcsEntity,
     pub uid: Uid,
     pub inventory: Option<&'a Inventory>,
+    /// The target's attuned-item set, so unattuned gear grants no defense
+    /// (ENG-D2c). `None` is treated as "nothing attuned".
+    pub attuned: Option<&'a AttunedItems>,
     pub stats: Option<&'a Stats>,
     pub health: Option<&'a Health>,
     pub pos: Vec3<f32>,
@@ -268,8 +272,13 @@ impl Attack {
                 .and_then(|a| a.stats)
                 .map_or(0.0, |s| s.mitigations_penetration)
                 .clamp(0.0, 1.0);
-            let raw_damage_reduction =
-                Damage::compute_damage_reduction(Some(damage), target.inventory, target.stats, msm);
+            let raw_damage_reduction = Damage::compute_damage_reduction(
+                Some(damage),
+                target.inventory,
+                target.attuned,
+                target.stats,
+                msm,
+            );
 
             if raw_damage_reduction >= 1.0 {
                 raw_damage_reduction
@@ -1857,10 +1866,11 @@ impl Damage {
     pub fn compute_damage_reduction(
         damage: Option<Self>,
         inventory: Option<&Inventory>,
+        attuned: Option<&AttunedItems>,
         stats: Option<&Stats>,
         msm: &MaterialStatManifest,
     ) -> f32 {
-        let protection = compute_protection(inventory, msm);
+        let protection = compute_protection(inventory, attuned, msm);
 
         let penetration = if let Some(damage) = damage {
             if let DamageKind::Piercing = damage.kind {
@@ -2237,11 +2247,13 @@ pub fn combat_rating(
     // Normalized with a standard max health of 100
     let health_rating = health.base_max()
         / 100.0
-        / (1.0 - Damage::compute_damage_reduction(None, Some(inventory), None, msm)).max(0.00001);
+        / (1.0 - Damage::compute_damage_reduction(None, Some(inventory), None, None, msm))
+            .max(0.00001);
 
     // Normalized with a standard max energy of 100 and energy reward multiplier of
     // x1
-    let energy_rating = (energy.base_max() + compute_max_energy_mod(Some(inventory), msm)) / 100.0
+    let energy_rating = (energy.base_max() + compute_max_energy_mod(Some(inventory), None, msm))
+        / 100.0
         * compute_energy_reward_mod(Some(inventory), msm);
 
     // Normalized with a standard max poise of 100
@@ -2321,11 +2333,16 @@ pub fn compute_energy_reward_mod(inventory: Option<&Inventory>, msm: &MaterialSt
 
 /// Computes the additive modifier that should be applied to max energy from the
 /// currently equipped items
-pub fn compute_max_energy_mod(inventory: Option<&Inventory>, msm: &MaterialStatManifest) -> f32 {
+pub fn compute_max_energy_mod(
+    inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
+    msm: &MaterialStatManifest,
+) -> f32 {
     // Defaults to a value of 0 if no inventory is present
     inventory.map_or(0.0, |inv| {
-        inv.equipped_items()
-            .filter_map(|item| {
+        inv.equipped_items_with_slot()
+            .filter(|(slot, item)| item_effects_active(*slot, item.requires_attunement(), attuned))
+            .filter_map(|(_, item)| {
                 if let ItemKind::Armor(armor) = &*item.kind() {
                     armor
                         .stats(msm, item.stats_durability_multiplier())
@@ -2383,11 +2400,13 @@ pub fn stealth_multiplier_from_items(
 /// the armor equipped makes the entity invulnerable
 pub fn compute_protection(
     inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
     msm: &MaterialStatManifest,
 ) -> Option<f32> {
     inventory.map_or(Some(0.0), |inv| {
-        inv.equipped_items()
-            .filter_map(|item| {
+        inv.equipped_items_with_slot()
+            .filter(|(slot, item)| item_effects_active(*slot, item.requires_attunement(), attuned))
+            .filter_map(|(_, item)| {
                 if let ItemKind::Armor(armor) = &*item.kind() {
                     armor
                         .stats(msm, item.stats_durability_multiplier())
@@ -2407,6 +2426,11 @@ pub fn compute_protection(
 /// Computes the total resilience provided from armor. Is used to determine the
 /// reduction applied to poise damage received by an entity. None indicates that
 /// the armor equipped makes the entity invulnerable to poise damage.
+// NOTE (ENG-D2c): poise resilience is intentionally NOT attunement-gated in v1.
+// It's a secondary (stagger) defense and gating it would ripple through
+// `Poise::compute_poise_damage_reduction` → `apply_poise_reduction` and all
+// their callers. HP-damage protection (`compute_protection`), max-energy and
+// weapon abilities ARE gated; poise gating is a possible follow-up.
 pub fn compute_poise_resilience(
     inventory: Option<&Inventory>,
     msm: &MaterialStatManifest,

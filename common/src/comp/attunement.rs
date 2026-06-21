@@ -95,6 +95,28 @@ impl Component for Attuning {
     type Storage = DerefFlaggedStorage<Self, DenseVecStorage<Self>>;
 }
 
+/// Whether an equipped item's effects currently apply (ENG-D2c effect-gating):
+/// an item that `RequiresAttunement` contributes only while its `slot` is
+/// attuned; every other item always contributes. `requires` is the item's
+/// `RequiresAttunement` flag — pass `item.requires_attunement()`.
+///
+/// **v1 scope (Matias: "defensa + habilidades").** This gate is applied to:
+/// HP-damage protection (`combat::compute_protection`), max-energy from gear
+/// (`combat::compute_max_energy_mod`), and weapon abilities
+/// (`ActiveAbilities::activate_ability`). It is intentionally **not** applied
+/// yet to: offensive stats (precision / stealth / energy-reward — scattered
+/// across ~15 `states/*`), poise resilience (`compute_poise_resilience`, to
+/// avoid the `apply_poise_reduction` ripple), and fall-damage. Those are
+/// documented follow-ups; until then an unattuned item still grants *those*
+/// effects.
+pub fn item_effects_active(
+    slot: EquipSlot,
+    requires: bool,
+    attuned: Option<&AttunedItems>,
+) -> bool {
+    !requires || attuned.is_some_and(|a| a.is_attuned(slot))
+}
+
 /// The auto-attune-on-equip brain (Matias, 2026-06-20). Reconciles `attuning`
 /// (in-progress) and `attuned` (done) against the currently-equipped items:
 ///
@@ -326,5 +348,17 @@ mod tests {
         assert_eq!(attuning.0.len(), 1);
         assert!((attuning.0[0].1.0 - 3.0).abs() < 1e-6);
         assert_eq!(attuned.count(), 0);
+    }
+
+    #[test]
+    fn item_effects_active_gates_only_unattuned_requires() {
+        let attuned = AttunedItems(vec![R1]);
+        // Non-attunement items are always active.
+        assert!(item_effects_active(R2, false, Some(&attuned)));
+        assert!(item_effects_active(R2, false, None));
+        // Attunement items are active only while their slot is attuned.
+        assert!(item_effects_active(R1, true, Some(&attuned)));
+        assert!(!item_effects_active(R2, true, Some(&attuned)));
+        assert!(!item_effects_active(R1, true, None));
     }
 }

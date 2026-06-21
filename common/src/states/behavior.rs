@@ -1,6 +1,6 @@
 use crate::{
     comp::{
-        self, AbilityCooldowns, AbilityPool, ActiveAbilities, Alignment, Beam, Body,
+        self, AbilityCooldowns, AbilityPool, ActiveAbilities, Alignment, AttunedItems, Beam, Body,
         CharacterActivity, CharacterState, Combo, ControlAction, Controller, ControllerInputs,
         Density, Energy, Health, InputAttr, InputKind, Inventory, InventoryAction, Mass, Melee,
         Ori, PhysicsState, Pos, PreviousPhysCache, Scale, SkillSet, Stance, StateUpdate, Stats,
@@ -157,6 +157,9 @@ pub struct JoinData<'a> {
     pub heads: Option<&'a Heads>,
     pub energy: &'a Energy,
     pub inventory: Option<&'a Inventory>,
+    /// The wearer's attuned-item set, so unattuned gear grants no abilities
+    /// (ENG-D2c). `None` is treated as "nothing attuned".
+    pub attuned: Option<&'a AttunedItems>,
     pub body: &'a Body,
     pub physics: &'a PhysicsState,
     pub melee_attack: Option<&'a Melee>,
@@ -193,6 +196,7 @@ pub struct JoinStruct<'a> {
     pub density: FlaggedAccessMut<'a, &'a mut Density, Density>,
     pub energy: FlaggedAccessMut<'a, &'a mut Energy, Energy>,
     pub inventory: Option<&'a Inventory>,
+    pub attuned: Option<&'a AttunedItems>,
     pub controller: &'a mut Controller,
     pub health: Option<&'a Health>,
     pub hardcore: bool,
@@ -240,6 +244,7 @@ impl<'a> JoinData<'a> {
             density: &j.density,
             energy: &j.energy,
             inventory: j.inventory,
+            attuned: j.attuned,
             controller: j.controller,
             inputs: &j.controller.inputs,
             health: j.health,

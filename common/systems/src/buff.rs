@@ -54,6 +54,7 @@ pub struct ReadData<'a> {
     dt: Read<'a, DeltaTime>,
     events: Events<'a>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, common::comp::AttunedItems>,
     healths: ReadStorage<'a, Health>,
     energies: ReadStorage<'a, Energy>,
     physics_states: ReadStorage<'a, PhysicsState>,
@@ -499,6 +500,7 @@ impl<'a> System<'a> for Sys {
             let infinite_damage_reduction = (Damage::compute_damage_reduction(
                 None,
                 read_data.inventories.get(entity),
+                read_data.attuned_items.get(entity),
                 Some(&stat),
                 &read_data.msm,
             ) - 1.0)
