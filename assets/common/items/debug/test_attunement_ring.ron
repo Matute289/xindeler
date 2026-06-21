@@ -1,0 +1,18 @@
+// Debug item for testing the attunement system (ENG-D2).
+// Grants large, obvious protection + max-energy — but ONLY while attuned
+// (RequiresAttunement). Equip it on a test character (see the `test-attunement`
+// kit / `/make_test_char`), then watch: the timed auto-attune on equip, the
+// Protection tooltip gated until attuned, and the instant un-attune on unequip.
+ItemDef(
+    legacy_name: "Test Ring of Attunement",
+    legacy_description: "Debug ring. Grants its power only while you are attuned to it.",
+    kind: Armor((
+        kind: Ring,
+        stats: Direct((
+            protection: Some(Normal(20.0)),
+            energy_max: Some(20.0),
+        )),
+    )),
+    quality: High,
+    tags: [RequiresAttunement],
+)

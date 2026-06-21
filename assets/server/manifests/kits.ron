@@ -1,5 +1,11 @@
 #![enable(implicit_some)]
 {
+    // Attunement test kit (ENG-D2): a RequiresAttunement ring whose effects are
+    // gated until attuned. Use with `/make_test_char <lvl> mage test-attunement`
+    // or the test-harness roster.
+    "test-attunement": [
+        (Item("common.items.debug.test_attunement_ring"), 1),
+    ],
     "debug": [
         (Item("common.items.debug.admin_black_hole"),1),
         (Item("common.items.debug.admin_stick"),1),
