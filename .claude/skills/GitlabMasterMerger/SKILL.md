@@ -88,8 +88,8 @@ Then evaluate each overlap on **three axes**:
 Cross-reference the file against our specs and plans:
 
 - **Unrelated to our objectives**: Upstream changed a file we only touched for telemetry/logging/infra. We keep both. ✅ Safe.
-- **Touches our feature area**: The upstream change modifies code in a subsystem we redesigned (e.g., terrain rendering, smooth terrain pipeline, Transvoxel, normal maps). **Evaluate carefully**: does the upstream change conflict with our design goals? Read the relevant spec section.
-- **Overwrites our work**: The upstream change replaces code we implemented as part of Phase 1/2/3. 🔴 Critical — see Decision Matrix below.
+- **Touches our feature area**: The upstream change modifies code in a subsystem we built (e.g., the magic / attunement systems, combat formulas, abilities, classes/races, progression). **Evaluate carefully**: does the upstream change conflict with our design goals? Read the relevant spec section.
+- **Overwrites our work**: The upstream change replaces code we implemented. 🔴 Critical — see Decision Matrix below.
 
 ### C. Value of the upstream change
 - Is this a bug fix in an unrelated system? (high value, merge it)
@@ -199,15 +199,14 @@ VELOREN_ASSETS="$(pwd)/assets" cargo check --workspace 2>&1 | tail -5
 ```
 Must end with `Finished`. Do not proceed to Phase 5 until this passes.
 
-Also confirm our Phase 1–3 terrain files are unchanged by the merge:
+Also confirm our key feature files kept our intent through the merge:
 ```bash
-MERGE_BASE=$(git merge-base HEAD gitlab/master)
 git diff upstream-merge-staging..upstream-merge-staging~1 -- \
-  assets/voxygen/shaders/smooth-terrain-frag.glsl \
-  assets/voxygen/shaders/smooth-terrain-vert.glsl \
-  voxygen/src/render/pipelines/terrain.rs \
-  common/src/terrain/density.rs \
-  common/src/terrain/block.rs
+  common/src/comp/attunement.rs \
+  server/src/sys/attunement.rs \
+  common/src/combat.rs \
+  common/src/comp/ability.rs \
+  common/src/comp/inventory/
 ```
 Expected: these files should not appear in the merge diff unless upstream explicitly changed them (which is rare and would require deep evaluation in Phase 2).
 
@@ -279,15 +278,24 @@ If adaptation plans were created, list them:
 
 ---
 
-## Key files to always protect (Phase 1–3 terrain pipeline)
+## Key files to always protect (our active work — magic / RPG / attunement)
 
-Never accept upstream changes to these files without explicit user confirmation:
+Never accept upstream changes to these without explicit user confirmation:
 
-- `assets/voxygen/shaders/smooth-terrain-frag.glsl`
-- `assets/voxygen/shaders/smooth-terrain-vert.glsl`
-- `voxygen/src/render/pipelines/terrain.rs`
-- `common/src/terrain/density.rs`
-- `common/src/terrain/block.rs`
-- Any file matching `*transvoxel*` or `*smooth_terrain*`
+- **Attunement (ENG-D2):** `common/src/comp/attunement.rs`, `server/src/sys/attunement.rs`,
+  and the `RequiresAttunement` / `has_tag` / `requires_attunement` additions in
+  `common/src/comp/inventory/mod.rs`.
+- **Magic / combat / abilities:** `common/src/combat.rs`, `common/src/comp/ability.rs`,
+  the spell taxonomy / `SpellDef` files, `common/systems/src/{beam,melee,arcing,pool,shockwave,projectile,buff,stats,character_behavior}.rs`,
+  `common/src/states/behavior.rs` + `utils.rs`.
+- **Items / progression:** `common/src/comp/inventory/`, skillset / character levels /
+  classes-races, `server/src/persistence/*` (⚠️ DB schema).
+- **CI / LFS / privacy:** `.lfsconfig`, `.gitattributes`, `.github/workflows/*` — **never
+  re-introduce GitHub LFS** (keep VPS-SSH LFS); upstream's `.gitlab-ci.yml` / `.gitlab/CI/*`
+  are theirs (we run GitHub Actions).
+- `docs/design/` — our internal design repo.
+
+(The old smooth-terrain / Transvoxel pipeline was **discarded** — see
+`docs/design/DEFERRED-TO-V2.md`. Do not protect or re-introduce it.)
 
 If upstream touches any of these, escalate to full evaluation in Phase 2 before proceeding.
