@@ -1,0 +1,22 @@
+// Example roster for the admin test-character harness (ATC-B).
+//
+// Copy this to `roster.ron` (git-ignored) and edit, then run against a server
+// where <username> is an admin:
+//
+//   cargo run --bin test_harness --features "bin_bot,tick_network" -- \
+//     --username <admin> --server localhost --roster client/roster.ron
+//
+// Fields: name (required), level (required, 1-60), class? (warrior|mage|cleric|
+// rogue), race? (human|orc|elf|dwarf|danari|draugr — set at creation), kit?
+// (any kit from server.manifests.kits, e.g. "all").
+(
+    characters: [
+        // Level-10 mage with a full item kit — handy for the attunement test once a
+        // RequiresAttunement item is tagged (then swap "all" for a "test-attunement" kit).
+        (name: "att-mage-10", level: 10, class: "mage", race: "human", kit: "all"),
+        // Max-level orc warrior.
+        (name: "tank-60", level: 60, class: "warrior", race: "orc"),
+        // Minimal: just a level (created as a Human Warrior).
+        (name: "lvl-30", level: 30),
+    ],
+)
