@@ -1,11 +1,11 @@
 use crate::{
     astar::Astar,
     comp::{
-        Alignment, Body, CharacterState, Density, InputAttr, InputKind, InventoryAction, Melee,
-        Ori, Pos, Scale, StateUpdate,
+        Alignment, Body, CharacterState, Density, HealthChange, InputAttr, InputKind,
+        InventoryAction, Melee, Ori, Pos, Scale, StateUpdate,
         ability::{
-            AbilityInitEvent, AbilityMeta, AbilityRequirements, Capability, SpecifiedAbility,
-            Stance,
+            AbilityInitEvent, AbilityMeta, AbilityRequirements, Capability, CharacterAbility,
+            SpecifiedAbility, Stance,
         },
         arthropod, biped_large, biped_small, bird_medium,
         buff::{Buff, BuffCategory, BuffChange, BuffData, BuffSource, DestInfo},
@@ -22,8 +22,11 @@ use crate::{
         skills::{SKILL_MODIFIERS, Skill, SwimSkill},
         theropod,
     },
-    consts::{FRIC_GROUND, GRAVITY, HIRES_SCALE, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
-    event::{BuffEvent, ChangeStanceEvent, ComboChangeEvent, InventoryManipEvent, LocalEvent},
+    consts::{FRIC_GROUND, GRAVITY, MAX_MOUNT_RANGE, MAX_PICKUP_RANGE},
+    event::{
+        BuffEvent, ChangeStanceEvent, ComboChangeEvent, HealthChangeEvent, InventoryManipEvent,
+        LocalEvent, SetAbilityCooldownEvent,
+    },
     mounting::Volume,
     outcome::Outcome,
     states::{behavior::JoinData, utils::CharacterState::Idle, *},
@@ -47,159 +50,159 @@ use strum::Display;
 use tracing::warn;
 use vek::*;
 
-pub const MOVEMENT_THRESHOLD_VEL: f32 = 3.0 * HIRES_SCALE;
+pub const MOVEMENT_THRESHOLD_VEL: f32 = 3.0;
 
 impl Body {
     pub fn base_accel(&self) -> f32 {
         match self {
             // Note: Entities have been slowed down relative to humanoid speeds, but it may be worth
             // reverting/increasing speed once we've established slower AI.
-            Body::Humanoid(_) => 100.0 * HIRES_SCALE,
+            Body::Humanoid(_) => 100.0,
             Body::QuadrupedSmall(body) => match body.species {
-                quadruped_small::Species::Turtle => 30.0 * HIRES_SCALE,
-                quadruped_small::Species::Axolotl => 70.0 * HIRES_SCALE,
-                quadruped_small::Species::Pig => 70.0 * HIRES_SCALE,
-                quadruped_small::Species::Sheep => 70.0 * HIRES_SCALE,
-                quadruped_small::Species::Truffler => 70.0 * HIRES_SCALE,
-                quadruped_small::Species::Fungome => 70.0 * HIRES_SCALE,
-                quadruped_small::Species::Goat => 80.0 * HIRES_SCALE,
-                quadruped_small::Species::Raccoon => 100.0 * HIRES_SCALE,
-                quadruped_small::Species::Frog => 150.0 * HIRES_SCALE,
-                quadruped_small::Species::Porcupine => 100.0 * HIRES_SCALE,
-                quadruped_small::Species::Beaver => 100.0 * HIRES_SCALE,
-                quadruped_small::Species::Rabbit => 110.0 * HIRES_SCALE,
-                quadruped_small::Species::Cat => 150.0 * HIRES_SCALE,
-                quadruped_small::Species::Quokka => 100.0 * HIRES_SCALE,
-                quadruped_small::Species::MossySnail => 20.0 * HIRES_SCALE,
-                _ => 125.0 * HIRES_SCALE,
+                quadruped_small::Species::Turtle => 30.0,
+                quadruped_small::Species::Axolotl => 70.0,
+                quadruped_small::Species::Pig => 70.0,
+                quadruped_small::Species::Sheep => 70.0,
+                quadruped_small::Species::Truffler => 70.0,
+                quadruped_small::Species::Fungome => 70.0,
+                quadruped_small::Species::Goat => 80.0,
+                quadruped_small::Species::Raccoon => 100.0,
+                quadruped_small::Species::Frog => 150.0,
+                quadruped_small::Species::Porcupine => 100.0,
+                quadruped_small::Species::Beaver => 100.0,
+                quadruped_small::Species::Rabbit => 110.0,
+                quadruped_small::Species::Cat => 150.0,
+                quadruped_small::Species::Quokka => 100.0,
+                quadruped_small::Species::MossySnail => 20.0,
+                _ => 125.0,
             },
             Body::QuadrupedMedium(quadruped_medium) => match quadruped_medium.species {
-                quadruped_medium::Species::Grolgar => 100.0 * HIRES_SCALE,
-                quadruped_medium::Species::Saber => 110.0 * HIRES_SCALE,
-                quadruped_medium::Species::Tiger => 110.0 * HIRES_SCALE,
-                quadruped_medium::Species::Tuskram => 85.0 * HIRES_SCALE,
-                quadruped_medium::Species::Lion => 105.0 * HIRES_SCALE,
-                quadruped_medium::Species::Tarasque => 100.0 * HIRES_SCALE,
-                quadruped_medium::Species::Wolf => 130.0 * HIRES_SCALE,
-                quadruped_medium::Species::Frostfang => 115.0 * HIRES_SCALE,
-                quadruped_medium::Species::Mouflon => 75.0 * HIRES_SCALE,
-                quadruped_medium::Species::Catoblepas => 60.0 * HIRES_SCALE,
-                quadruped_medium::Species::Bonerattler => 115.0 * HIRES_SCALE,
-                quadruped_medium::Species::Deer => 120.0 * HIRES_SCALE,
-                quadruped_medium::Species::Hirdrasil => 110.0 * HIRES_SCALE,
-                quadruped_medium::Species::Roshwalr => 70.0 * HIRES_SCALE,
-                quadruped_medium::Species::Donkey => 90.0 * HIRES_SCALE,
-                quadruped_medium::Species::Camel => 75.0 * HIRES_SCALE,
-                quadruped_medium::Species::Zebra => 150.0 * HIRES_SCALE,
-                quadruped_medium::Species::Antelope => 155.0 * HIRES_SCALE,
-                quadruped_medium::Species::Kelpie => 140.0 * HIRES_SCALE,
-                quadruped_medium::Species::Horse => 140.0 * HIRES_SCALE,
-                quadruped_medium::Species::Barghest => 80.0 * HIRES_SCALE,
-                quadruped_medium::Species::Cattle => 80.0 * HIRES_SCALE,
-                quadruped_medium::Species::Darkhound => 115.0 * HIRES_SCALE,
-                quadruped_medium::Species::Highland => 80.0 * HIRES_SCALE,
-                quadruped_medium::Species::Yak => 80.0 * HIRES_SCALE,
-                quadruped_medium::Species::Panda => 90.0 * HIRES_SCALE,
-                quadruped_medium::Species::Bear => 90.0 * HIRES_SCALE,
-                quadruped_medium::Species::Dreadhorn => 95.0 * HIRES_SCALE,
-                quadruped_medium::Species::Moose => 105.0 * HIRES_SCALE,
-                quadruped_medium::Species::Snowleopard => 115.0 * HIRES_SCALE,
-                quadruped_medium::Species::Mammoth => 75.0 * HIRES_SCALE,
-                quadruped_medium::Species::Elephant => 75.0 * HIRES_SCALE,
-                quadruped_medium::Species::Ngoubou => 95.0 * HIRES_SCALE,
-                quadruped_medium::Species::Llama => 100.0 * HIRES_SCALE,
-                quadruped_medium::Species::Alpaca => 100.0 * HIRES_SCALE,
-                quadruped_medium::Species::Akhlut => 90.0 * HIRES_SCALE,
-                quadruped_medium::Species::Bristleback => 105.0 * HIRES_SCALE,
-                quadruped_medium::Species::ClaySteed => 85.0 * HIRES_SCALE,
+                quadruped_medium::Species::Grolgar => 100.0,
+                quadruped_medium::Species::Saber => 110.0,
+                quadruped_medium::Species::Tiger => 110.0,
+                quadruped_medium::Species::Tuskram => 85.0,
+                quadruped_medium::Species::Lion => 105.0,
+                quadruped_medium::Species::Tarasque => 100.0,
+                quadruped_medium::Species::Wolf => 130.0,
+                quadruped_medium::Species::Frostfang => 115.0,
+                quadruped_medium::Species::Mouflon => 75.0,
+                quadruped_medium::Species::Catoblepas => 60.0,
+                quadruped_medium::Species::Bonerattler => 115.0,
+                quadruped_medium::Species::Deer => 120.0,
+                quadruped_medium::Species::Hirdrasil => 110.0,
+                quadruped_medium::Species::Roshwalr => 70.0,
+                quadruped_medium::Species::Donkey => 90.0,
+                quadruped_medium::Species::Camel => 75.0,
+                quadruped_medium::Species::Zebra => 150.0,
+                quadruped_medium::Species::Antelope => 155.0,
+                quadruped_medium::Species::Kelpie => 140.0,
+                quadruped_medium::Species::Horse => 140.0,
+                quadruped_medium::Species::Barghest => 80.0,
+                quadruped_medium::Species::Cattle => 80.0,
+                quadruped_medium::Species::Darkhound => 115.0,
+                quadruped_medium::Species::Highland => 80.0,
+                quadruped_medium::Species::Yak => 80.0,
+                quadruped_medium::Species::Panda => 90.0,
+                quadruped_medium::Species::Bear => 90.0,
+                quadruped_medium::Species::Dreadhorn => 95.0,
+                quadruped_medium::Species::Moose => 105.0,
+                quadruped_medium::Species::Snowleopard => 115.0,
+                quadruped_medium::Species::Mammoth => 75.0,
+                quadruped_medium::Species::Elephant => 75.0,
+                quadruped_medium::Species::Ngoubou => 95.0,
+                quadruped_medium::Species::Llama => 100.0,
+                quadruped_medium::Species::Alpaca => 100.0,
+                quadruped_medium::Species::Akhlut => 90.0,
+                quadruped_medium::Species::Bristleback => 105.0,
+                quadruped_medium::Species::ClaySteed => 85.0,
             },
             Body::BipedLarge(body) => match body.species {
-                biped_large::Species::Slysaurok => 100.0 * HIRES_SCALE,
-                biped_large::Species::Occultsaurok => 100.0 * HIRES_SCALE,
-                biped_large::Species::Mightysaurok => 100.0 * HIRES_SCALE,
-                biped_large::Species::Mindflayer => 90.0 * HIRES_SCALE,
-                biped_large::Species::Minotaur => 60.0 * HIRES_SCALE,
-                biped_large::Species::Huskbrute => 130.0 * HIRES_SCALE,
-                biped_large::Species::Cultistwarlord => 110.0 * HIRES_SCALE,
-                biped_large::Species::Cultistwarlock => 90.0 * HIRES_SCALE,
-                biped_large::Species::Gigasfrost => 45.0 * HIRES_SCALE,
-                biped_large::Species::Gigasfire => 50.0 * HIRES_SCALE,
-                biped_large::Species::Forgemaster => 100.0 * HIRES_SCALE,
-                _ => 80.0 * HIRES_SCALE,
+                biped_large::Species::Slysaurok => 100.0,
+                biped_large::Species::Occultsaurok => 100.0,
+                biped_large::Species::Mightysaurok => 100.0,
+                biped_large::Species::Mindflayer => 90.0,
+                biped_large::Species::Minotaur => 60.0,
+                biped_large::Species::Huskbrute => 130.0,
+                biped_large::Species::Cultistwarlord => 110.0,
+                biped_large::Species::Cultistwarlock => 90.0,
+                biped_large::Species::Gigasfrost => 45.0,
+                biped_large::Species::Gigasfire => 50.0,
+                biped_large::Species::Forgemaster => 100.0,
+                _ => 80.0,
             },
-            Body::BirdMedium(_) => 80.0 * HIRES_SCALE,
-            Body::FishMedium(_) => 80.0 * HIRES_SCALE,
-            Body::Dragon(_) => 250.0 * HIRES_SCALE,
-            Body::BirdLarge(_) => 110.0 * HIRES_SCALE,
-            Body::FishSmall(_) => 60.0 * HIRES_SCALE,
+            Body::BirdMedium(_) => 80.0,
+            Body::FishMedium(_) => 80.0,
+            Body::Dragon(_) => 250.0,
+            Body::BirdLarge(_) => 110.0,
+            Body::FishSmall(_) => 60.0,
             Body::BipedSmall(biped_small) => match biped_small.species {
-                biped_small::Species::Haniwa => 65.0 * HIRES_SCALE,
-                biped_small::Species::Boreal => 100.0 * HIRES_SCALE,
-                biped_small::Species::Gnarling => 70.0 * HIRES_SCALE,
-                _ => 80.0 * HIRES_SCALE,
+                biped_small::Species::Haniwa => 65.0,
+                biped_small::Species::Boreal => 100.0,
+                biped_small::Species::Gnarling => 70.0,
+                _ => 80.0,
             },
             Body::Object(_) => 0.0,
             Body::Item(_) => 0.0,
             Body::Golem(body) => match body.species {
-                golem::Species::ClayGolem => 120.0 * HIRES_SCALE,
-                golem::Species::IronGolem => 100.0 * HIRES_SCALE,
-                _ => 60.0 * HIRES_SCALE,
+                golem::Species::ClayGolem => 120.0,
+                golem::Species::IronGolem => 100.0,
+                _ => 60.0,
             },
             Body::Theropod(theropod) => match theropod.species {
                 theropod::Species::Archaeos
                 | theropod::Species::Odonto
-                | theropod::Species::Ntouka => 110.0 * HIRES_SCALE,
-                theropod::Species::Dodarock => 75.0 * HIRES_SCALE,
-                theropod::Species::Yale => 115.0 * HIRES_SCALE,
-                _ => 125.0 * HIRES_SCALE,
+                | theropod::Species::Ntouka => 110.0,
+                theropod::Species::Dodarock => 75.0,
+                theropod::Species::Yale => 115.0,
+                _ => 125.0,
             },
             Body::QuadrupedLow(quadruped_low) => match quadruped_low.species {
-                quadruped_low::Species::Crocodile => 60.0 * HIRES_SCALE,
-                quadruped_low::Species::SeaCrocodile => 60.0 * HIRES_SCALE,
-                quadruped_low::Species::Alligator => 65.0 * HIRES_SCALE,
-                quadruped_low::Species::Salamander => 85.0 * HIRES_SCALE,
-                quadruped_low::Species::Elbst => 85.0 * HIRES_SCALE,
-                quadruped_low::Species::Monitor => 130.0 * HIRES_SCALE,
-                quadruped_low::Species::Asp => 100.0 * HIRES_SCALE,
-                quadruped_low::Species::Tortoise => 60.0 * HIRES_SCALE,
-                quadruped_low::Species::Rocksnapper => 70.0 * HIRES_SCALE,
-                quadruped_low::Species::Rootsnapper => 70.0 * HIRES_SCALE,
-                quadruped_low::Species::Reefsnapper => 70.0 * HIRES_SCALE,
-                quadruped_low::Species::Pangolin => 90.0 * HIRES_SCALE,
-                quadruped_low::Species::Maneater => 80.0 * HIRES_SCALE,
-                quadruped_low::Species::Sandshark => 125.0 * HIRES_SCALE,
-                quadruped_low::Species::Hakulaq => 125.0 * HIRES_SCALE,
-                quadruped_low::Species::Dagon => 140.0 * HIRES_SCALE,
-                quadruped_low::Species::Lavadrake => 100.0 * HIRES_SCALE,
-                quadruped_low::Species::Icedrake => 100.0 * HIRES_SCALE,
-                quadruped_low::Species::Basilisk => 85.0 * HIRES_SCALE,
-                quadruped_low::Species::Deadwood => 110.0 * HIRES_SCALE,
-                quadruped_low::Species::Mossdrake => 100.0 * HIRES_SCALE,
-                quadruped_low::Species::Driggle => 120.0 * HIRES_SCALE,
-                quadruped_low::Species::Snaretongue => 120.0 * HIRES_SCALE,
-                quadruped_low::Species::Hydra => 100.0 * HIRES_SCALE,
+                quadruped_low::Species::Crocodile => 60.0,
+                quadruped_low::Species::SeaCrocodile => 60.0,
+                quadruped_low::Species::Alligator => 65.0,
+                quadruped_low::Species::Salamander => 85.0,
+                quadruped_low::Species::Elbst => 85.0,
+                quadruped_low::Species::Monitor => 130.0,
+                quadruped_low::Species::Asp => 100.0,
+                quadruped_low::Species::Tortoise => 60.0,
+                quadruped_low::Species::Rocksnapper => 70.0,
+                quadruped_low::Species::Rootsnapper => 70.0,
+                quadruped_low::Species::Reefsnapper => 70.0,
+                quadruped_low::Species::Pangolin => 90.0,
+                quadruped_low::Species::Maneater => 80.0,
+                quadruped_low::Species::Sandshark => 125.0,
+                quadruped_low::Species::Hakulaq => 125.0,
+                quadruped_low::Species::Dagon => 140.0,
+                quadruped_low::Species::Lavadrake => 100.0,
+                quadruped_low::Species::Icedrake => 100.0,
+                quadruped_low::Species::Basilisk => 85.0,
+                quadruped_low::Species::Deadwood => 110.0,
+                quadruped_low::Species::Mossdrake => 100.0,
+                quadruped_low::Species::Driggle => 120.0,
+                quadruped_low::Species::Snaretongue => 120.0,
+                quadruped_low::Species::Hydra => 100.0,
             },
-            Body::Ship(ship::Body::Carriage) => 40.0 * HIRES_SCALE,
-            Body::Ship(ship::Body::Train) => 9.0 * HIRES_SCALE,
+            Body::Ship(ship::Body::Carriage) => 40.0,
+            Body::Ship(ship::Body::Train) => 9.0,
             Body::Ship(_) => 0.0,
             Body::Arthropod(arthropod) => match arthropod.species {
-                arthropod::Species::Tarantula => 85.0 * HIRES_SCALE,
-                arthropod::Species::Blackwidow => 95.0 * HIRES_SCALE,
-                arthropod::Species::Antlion => 115.0 * HIRES_SCALE,
-                arthropod::Species::Hornbeetle => 80.0 * HIRES_SCALE,
-                arthropod::Species::Leafbeetle => 65.0 * HIRES_SCALE,
-                arthropod::Species::Stagbeetle => 80.0 * HIRES_SCALE,
-                arthropod::Species::Weevil => 70.0 * HIRES_SCALE,
-                arthropod::Species::Cavespider => 90.0 * HIRES_SCALE,
-                arthropod::Species::Moltencrawler => 70.0 * HIRES_SCALE,
-                arthropod::Species::Mosscrawler => 70.0 * HIRES_SCALE,
-                arthropod::Species::Sandcrawler => 70.0 * HIRES_SCALE,
-                arthropod::Species::Dagonite => 70.0 * HIRES_SCALE,
-                arthropod::Species::Emberfly => 75.0 * HIRES_SCALE,
+                arthropod::Species::Tarantula => 85.0,
+                arthropod::Species::Blackwidow => 95.0,
+                arthropod::Species::Antlion => 115.0,
+                arthropod::Species::Hornbeetle => 80.0,
+                arthropod::Species::Leafbeetle => 65.0,
+                arthropod::Species::Stagbeetle => 80.0,
+                arthropod::Species::Weevil => 70.0,
+                arthropod::Species::Cavespider => 90.0,
+                arthropod::Species::Moltencrawler => 70.0,
+                arthropod::Species::Mosscrawler => 70.0,
+                arthropod::Species::Sandcrawler => 70.0,
+                arthropod::Species::Dagonite => 70.0,
+                arthropod::Species::Emberfly => 75.0,
             },
             Body::Crustacean(body) => match body.species {
-                crustacean::Species::Crab | crustacean::Species::SoldierCrab => 80.0 * HIRES_SCALE,
-                crustacean::Species::Karkatha => 120.0 * HIRES_SCALE,
+                crustacean::Species::Crab | crustacean::Species::SoldierCrab => 80.0,
+                crustacean::Species::Karkatha => 120.0,
             },
             Body::Plugin(body) => body.base_accel(),
         }
@@ -1451,11 +1454,14 @@ fn handle_ability(
                 a.activate_ability(
                     ability_input,
                     data.inventory,
+                    data.attuned,
                     data.skill_set,
                     Some(data.body),
                     Some(data.character),
                     &context,
                     Some(data.stats),
+                    data.ability_pool,
+                    data.ability_map,
                 )
             })
             .map(|(mut a, f, s)| {
@@ -1464,7 +1470,15 @@ fn handle_ability(
                 }
                 (a, f, s)
             })
-            .filter(|(ability, _, _)| ability.requirements_paid(data, update))
+            .filter(|(ability, _, spec_ability)| {
+                cooldown_ready(data, ability, spec_ability)
+                    && hp_cost_affordable(
+                        ability.ability_meta().hp_cost,
+                        data.health.map(|h| h.current()),
+                        data.hardcore,
+                    )
+                    && ability.requirements_paid(data, update)
+            })
     {
         // TODO: Change requirements_paid to requirements_met, and then pay requirements
         // here (necessary after energy and combo moved to AbilityMeta)
@@ -1483,6 +1497,7 @@ fn handle_ability(
                 output_events.emit_server(InventoryManipEvent(data.entity, inv_manip));
             }
         }
+        let spec_ability_copy = spec_ability;
         match CharacterState::try_from((
             &ability,
             AbilityInfo::new(data, from_offhand, input, Some(spec_ability), ability_meta),
@@ -1491,6 +1506,40 @@ fn handle_ability(
             Ok(character_state) => {
                 let tool_kind = character_state.ability_info().and_then(|ai| ai.tool);
                 update.character = character_state;
+
+                if let Some(cooldown_secs) = ability_meta.cooldown
+                    && let Some(id) = spec_ability_copy.ability_id(
+                        Some(data.character),
+                        data.inventory,
+                        data.ability_pool,
+                    )
+                {
+                    output_events.emit_server(SetAbilityCooldownEvent {
+                        entity: data.entity,
+                        ability_id: id.to_string(),
+                        cooldown_secs,
+                    });
+                }
+
+                // Hemomancy "blood price" (M4 / ENG-C1): casting spends the
+                // caster's own HP. The activation filter already enforced the
+                // 1-HP floor (`hp_cost_affordable`), so in normal play this never
+                // brings the caster below 1.
+                if let Some(hp_cost) = ability_meta.hp_cost
+                    && hp_cost > 0.0
+                {
+                    output_events.emit_server(HealthChangeEvent {
+                        entity: data.entity,
+                        change: HealthChange {
+                            amount: -hp_cost,
+                            by: None,
+                            cause: None,
+                            time: *data.time,
+                            precise: false,
+                            instance: rand::random(),
+                        },
+                    });
+                }
 
                 if let Some(init_event) = ability.ability_meta().init_event {
                     match init_event {
@@ -1546,6 +1595,37 @@ fn handle_ability(
         }
     }
     false
+}
+
+/// An ability with `meta.cooldown` may only fire when `AbilityCooldowns` says
+/// it is ready. Runs on client and server; the server-side check is
+/// authoritative (the event above is server-only), the client check uses the
+/// synced component for prediction.
+fn cooldown_ready(
+    data: &JoinData<'_>,
+    ability: &CharacterAbility,
+    spec_ability: &SpecifiedAbility,
+) -> bool {
+    ability.ability_meta().cooldown.is_none_or(|_| {
+        (*spec_ability)
+            .ability_id(Some(data.character), data.inventory, data.ability_pool)
+            .is_none_or(|id| {
+                data.ability_cooldowns
+                    .is_none_or(|cds| cds.is_ready(id, *data.time))
+            })
+    })
+}
+
+/// Whether an ability's optional HP cost (the Hemomancy "blood price", M4 /
+/// ENG-C1) can be paid right now.
+/// - **Normal** play keeps a **1-HP floor**: the caster needs `cost + 1`
+///   current HP, so a normal cast never self-kills.
+/// - **Hardcore** (permadeath) has **no floor** (ENG-C1b, Matias §6.4): the
+///   blood price may be lethal, so the cast is always allowed to be paid.
+///
+/// Entities without a `Health` component (e.g. invulnerable) ignore the cost.
+fn hp_cost_affordable(hp_cost: Option<f32>, current_hp: Option<f32>, hardcore: bool) -> bool {
+    hp_cost.is_none_or(|cost| hardcore || current_hp.is_none_or(|hp| hp >= cost + 1.0))
 }
 
 pub fn handle_input(
@@ -2027,5 +2107,43 @@ impl ProjectileSpread {
             // TODO: Check if we want these to return something different
             Self::Increasing(spread) | Self::Horizontal(spread) => *spread,
         }
+    }
+}
+
+#[cfg(test)]
+mod hp_cost_tests {
+    use super::hp_cost_affordable;
+
+    // M4 (ENG-C1/C1b): the Hemomancy "blood price". Normal mode keeps a 1-HP
+    // floor — you need `cost + 1` current HP to cast, so a normal cast never
+    // self-kills. Hardcore has no floor (the price may be lethal).
+    #[test]
+    fn none_cost_is_free() {
+        assert!(hp_cost_affordable(None, Some(0.5), false));
+        assert!(hp_cost_affordable(None, None, false));
+        assert!(hp_cost_affordable(None, Some(0.5), true));
+    }
+
+    #[test]
+    fn normal_requires_cost_plus_one_floor() {
+        assert!(hp_cost_affordable(Some(10.0), Some(11.0), false)); // exactly cost+1 → leaves 1 HP
+        assert!(hp_cost_affordable(Some(10.0), Some(50.0), false)); // plenty
+        assert!(!hp_cost_affordable(Some(10.0), Some(10.5), false)); // below the 1-HP floor
+        assert!(!hp_cost_affordable(Some(10.0), Some(10.0), false)); // can't pay full and keep the floor
+        assert!(!hp_cost_affordable(Some(10.0), Some(3.0), false)); // nowhere near
+    }
+
+    #[test]
+    fn hardcore_has_no_floor() {
+        // ENG-C1b: hardcore can pay the blood price even when it would be lethal
+        assert!(hp_cost_affordable(Some(10.0), Some(10.0), true));
+        assert!(hp_cost_affordable(Some(10.0), Some(3.0), true));
+        assert!(hp_cost_affordable(Some(10.0), Some(0.5), true));
+    }
+
+    #[test]
+    fn missing_health_skips_cost() {
+        // entities without a Health component (e.g. invulnerable) ignore the cost
+        assert!(hp_cost_affordable(Some(10.0), None, false));
     }
 }

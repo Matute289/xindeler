@@ -21,7 +21,7 @@ Checklist — verify each point against the actual code, citing `file:line`:
    (full component vs event/outcome)? Could an `Outcome` or server message be cheaper?
 4. **Derived vs stored state** — flag stored state that could desync from its source of
    truth (e.g. character level must stay derived from SkillSet XP, per
-   `docs/superpowers/specs/2026-06-10-character-levels-design.md`).
+   `docs/design/specs/2026-06-10-character-levels-design.md`).
 5. **Persistence** — new persisted fields: `#[serde(default)]` for compat? DB changes via
    a new refinery migration in `server/src/migrations/` (never editing applied ones)?
    `json_models.rs` converters extended on BOTH directions (the to-db side panics on

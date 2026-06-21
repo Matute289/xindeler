@@ -52,11 +52,11 @@ comm -12 <(echo "$UPSTREAM_FILES" | sort) <(echo "$OUR_FILES" | sort)
 
 ```bash
 # 1h. Read our documented objectives — specs, plans, tasks
-ls docs/superpowers/specs/ 2>/dev/null
-ls docs/superpowers/plans/ 2>/dev/null
+ls docs/design/specs/ 2>/dev/null
+ls docs/design/plans/ 2>/dev/null
 # Read the most recent spec and any open plans
-ls -t docs/superpowers/specs/*.md 2>/dev/null | head -3
-ls -t docs/superpowers/plans/*.md 2>/dev/null | head -5
+ls -t docs/design/specs/*.md 2>/dev/null | head -3
+ls -t docs/design/plans/*.md 2>/dev/null | head -5
 ```
 
 Read the content of the most recent spec file and the last 3 plan files to understand current objectives.
@@ -274,7 +274,7 @@ After a successful merge, produce a concise summary:
 If adaptation plans were created, list them:
 ```
 ### Follow-up plans created:
-- docs/superpowers/plans/<filename>.md — <one line description>
+- docs/design/plans/<filename>.md — <one line description>
 ```
 
 ---

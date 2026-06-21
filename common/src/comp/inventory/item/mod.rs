@@ -287,6 +287,9 @@ pub enum ItemTag {
     SalvageInto(Material, u32),
     Witch,
     Pirate,
+    /// The item grants its magic effects only while the wearer is *attuned* to
+    /// it (ENG-D2). Data-driven: add `RequiresAttunement` to an item's `tags`.
+    RequiresAttunement,
 }
 
 impl TagExampleInfo for ItemTag {
@@ -306,6 +309,7 @@ impl TagExampleInfo for ItemTag {
             ItemTag::SalvageInto(_, _) => "salvage",
             ItemTag::Witch => "witch",
             ItemTag::Pirate => "pirate",
+            ItemTag::RequiresAttunement => "attunement",
         }
     }
 
@@ -325,7 +329,8 @@ impl TagExampleInfo for ItemTag {
             | ItemTag::CraftingTool
             | ItemTag::Utility
             | ItemTag::Bag
-            | ItemTag::SalvageInto(_, _) => None,
+            | ItemTag::SalvageInto(_, _)
+            | ItemTag::RequiresAttunement => None,
         }
     }
 }
@@ -785,10 +790,12 @@ impl ItemDefinitionId<'_> {
 /// Optional gates restricting who may *equip* an item. Declared per item in
 /// RON; an absent field (or any `None` sub-field) means unrestricted. Pickup,
 /// carrying, trading, and NPC loadouts (`LoadoutBuilder`) are never gated.
-/// See docs/superpowers/specs/2026-06-10-equipment-restrictions-design.md.
+/// See docs/design/specs/2026-06-10-equipment-restrictions-design.md.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ItemRequirements {
+    /// Whitelist of classes that may equip this item. None = any class.
+    pub classes: Option<Vec<crate::comp::class::ClassKind>>,
     /// Minimum derived character level (see `SkillSet::character_level`).
     pub min_level: Option<u16>,
     /// Whitelist of humanoid species that may equip this item.
@@ -799,15 +806,29 @@ pub struct ItemRequirements {
 /// rejection and the client tooltip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnmetRequirement {
+    Class,
     Level { needed: u16 },
     Race,
 }
 
 impl ItemRequirements {
-    /// Requirements unmet at the given character level/species. `species` is
-    /// `None` for non-humanoid bodies, which therefore fail any race gate.
-    pub fn unmet(&self, level: u16, species: Option<humanoid::Species>) -> Vec<UnmetRequirement> {
+    /// Requirements unmet for the given class/level/species combination.
+    /// `class` is `None` for entities without a `CharacterClass` component
+    /// (NPCs, spectators), which therefore fail any class gate.
+    /// `species` is `None` for non-humanoid bodies, which therefore fail any
+    /// race gate.
+    pub fn unmet(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        level: u16,
+        species: Option<humanoid::Species>,
+    ) -> Vec<UnmetRequirement> {
         let mut unmet = Vec::new();
+        if let Some(classes) = &self.classes
+            && !class.is_some_and(|c| classes.contains(&c))
+        {
+            unmet.push(UnmetRequirement::Class);
+        }
         if let Some(needed) = self.min_level
             && level < needed
         {
@@ -1498,18 +1519,30 @@ impl Item {
 
     /// Requirements this entity fails for equipping this item. Shared by
     /// server enforcement and the client tooltip so they always agree.
-    pub fn unmet_requirements(&self, skill_set: &SkillSet, body: &Body) -> Vec<UnmetRequirement> {
+    /// `class` comes from `CharacterClass`; pass `None` for NPCs/spectators.
+    pub fn unmet_requirements_with_class(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        skill_set: &SkillSet,
+        body: &Body,
+    ) -> Vec<UnmetRequirement> {
         self.requirements().map_or_else(Vec::new, |requirements| {
             let species = match body {
                 Body::Humanoid(humanoid_body) => Some(humanoid_body.species),
                 _ => None,
             };
-            requirements.unmet(skill_set.character_level(), species)
+            requirements.unmet(class, skill_set.character_level(), species)
         })
     }
 
-    pub fn meets_requirements(&self, skill_set: &SkillSet, body: &Body) -> bool {
-        self.unmet_requirements(skill_set, body).is_empty()
+    pub fn meets_requirements_with_class(
+        &self,
+        class: Option<crate::comp::class::ClassKind>,
+        skill_set: &SkillSet,
+        body: &Body,
+    ) -> bool {
+        self.unmet_requirements_with_class(class, skill_set, body)
+            .is_empty()
     }
 
     // TODO: Maybe try to make slice again instead of vec? Could also try to make an
@@ -1519,6 +1552,26 @@ impl Item {
             ItemBase::Simple(item_def) => item_def.tags.to_vec(),
             // TODO: Do this properly. It'll probably be important at some point.
             ItemBase::Modular(mod_base) => mod_base.generate_tags(self.components()),
+        }
+    }
+
+    /// Non-allocating tag check — prefer this over `tags().contains(..)` on hot
+    /// paths (`tags()` allocates a `Vec`, and recurses for modular items).
+    pub fn has_tag(&self, tag: &ItemTag) -> bool {
+        match &self.item_base {
+            ItemBase::Simple(item_def) => item_def.tags.contains(tag),
+            ItemBase::Modular(mod_base) => mod_base.generate_tags(self.components()).contains(tag),
+        }
+    }
+
+    /// Whether this item must be *attuned* before its effects apply (ENG-D2).
+    /// Allocation-free on both bases — modular items never carry the static
+    /// `RequiresAttunement` tag, so we skip `generate_tags` entirely. This
+    /// shadows the `ItemDesc` default on the hot combat/ability paths.
+    pub fn requires_attunement(&self) -> bool {
+        match &self.item_base {
+            ItemBase::Simple(item_def) => item_def.tags.contains(&ItemTag::RequiresAttunement),
+            ItemBase::Modular(_) => false,
         }
     }
 
@@ -1861,6 +1914,14 @@ pub trait ItemDesc {
     fn stats_durability_multiplier(&self) -> DurabilityMultiplier;
     fn requirements(&self) -> Option<&ItemRequirements>;
 
+    /// Whether this item carries `tag`. The default delegates to `tags()`
+    /// (which allocates); `Item` overrides it with a non-allocating check.
+    fn has_tag(&self, tag: &ItemTag) -> bool { self.tags().contains(tag) }
+
+    /// Whether this item must be *attuned* before its magic effects apply
+    /// (ENG-D2). Data-driven via the `RequiresAttunement` tag.
+    fn requires_attunement(&self) -> bool { self.has_tag(&ItemTag::RequiresAttunement) }
+
     fn tool_info(&self) -> Option<ToolKind> {
         if let ItemKind::Tool(tool) = &*self.kind() {
             Some(tool.kind)
@@ -1952,6 +2013,8 @@ impl ItemDesc for Item {
     fn item_definition_id(&self) -> ItemDefinitionId<'_> { self.item_definition_id() }
 
     fn tags(&self) -> Vec<ItemTag> { self.tags() }
+
+    fn has_tag(&self, tag: &ItemTag) -> bool { Item::has_tag(self, tag) }
 
     fn is_modular(&self) -> bool { self.is_modular() }
 
@@ -2321,6 +2384,7 @@ mod tests {
                 tags: [],
                 ability_spec: None,
                 requirements: Some((
+                    classes: None,
                     min_level: Some(10),
                     races: Some([Draugr]),
                 )),
@@ -2404,45 +2468,68 @@ mod tests {
 
         // No requirements -> everyone passes.
         let open = gated_test_item(None);
-        assert!(open.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(open.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
+
+        use crate::comp::class::ClassKind;
 
         // Empty requirements block -> everyone passes.
         let empty = gated_test_item(Some(ItemRequirements::default()));
-        assert!(empty.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(empty.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
 
         // Level gate alone, boundary inclusive (level == min_level passes).
         let lvl10 = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: Some(10),
             races: None,
         }));
-        assert!(!lvl10.meets_requirements(&skill_set_at_level(9), &human));
-        assert!(lvl10.meets_requirements(&skill_set_at_level(10), &human));
+        assert!(!lvl10.meets_requirements_with_class(None, &skill_set_at_level(9), &human));
+        assert!(lvl10.meets_requirements_with_class(None, &skill_set_at_level(10), &human));
         assert_eq!(
-            lvl10.unmet_requirements(&skill_set_at_level(9), &human),
+            lvl10.unmet_requirements_with_class(None, &skill_set_at_level(9), &human),
             vec![UnmetRequirement::Level { needed: 10 }]
         );
 
         // Race gate alone.
         let draugr_only = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: None,
             races: Some(vec![humanoid::Species::Draugr]),
         }));
-        assert!(draugr_only.meets_requirements(&skill_set_at_level(1), &draugr));
-        assert!(!draugr_only.meets_requirements(&skill_set_at_level(1), &human));
+        assert!(draugr_only.meets_requirements_with_class(None, &skill_set_at_level(1), &draugr));
+        assert!(!draugr_only.meets_requirements_with_class(None, &skill_set_at_level(1), &human));
 
         // Combined gates: both must hold.
         let both = gated_test_item(Some(ItemRequirements {
+            classes: None,
             min_level: Some(10),
             races: Some(vec![humanoid::Species::Draugr]),
         }));
-        assert!(both.meets_requirements(&skill_set_at_level(10), &draugr));
-        assert!(!both.meets_requirements(&skill_set_at_level(9), &draugr));
-        assert!(!both.meets_requirements(&skill_set_at_level(10), &human));
+        assert!(both.meets_requirements_with_class(None, &skill_set_at_level(10), &draugr));
+        assert!(!both.meets_requirements_with_class(None, &skill_set_at_level(9), &draugr));
+        assert!(!both.meets_requirements_with_class(None, &skill_set_at_level(10), &human));
         assert_eq!(
-            both.unmet_requirements(&skill_set_at_level(9), &human)
+            both.unmet_requirements_with_class(None, &skill_set_at_level(9), &human)
                 .len(),
             2
         );
+
+        // Class gate alone. Adventurer (legacy) is never listed on items, so
+        // class-gated items exclude legacy characters until /set_class.
+        let cleric_only = gated_test_item(Some(ItemRequirements {
+            classes: Some(vec![ClassKind::Cleric]),
+            min_level: None,
+            races: None,
+        }));
+        assert!(!cleric_only.meets_requirements_with_class(
+            Some(ClassKind::Adventurer),
+            &skill_set_at_level(1),
+            &human,
+        ));
+        assert!(cleric_only.meets_requirements_with_class(
+            Some(ClassKind::Cleric),
+            &skill_set_at_level(1),
+            &human,
+        ));
     }
 
     #[test]

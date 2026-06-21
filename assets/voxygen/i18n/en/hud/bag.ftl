@@ -65,3 +65,5 @@ hud-bag-split_swap_slots_drop_items = { $slot_deficit ->
 hud-bag-requirements_not_met = You don't meet the requirements to equip this item.
 hud-bag-requirement_level = Requires Level { $level }
 hud-bag-requirement_race = Requires Race: { $races }
+hud-bag-requirement_class = Requires Class: { $classes }
+hud-bag-requires_attunement = Requires Attunement

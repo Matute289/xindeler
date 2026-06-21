@@ -23,7 +23,7 @@ use common::{
     combat,
     comp::{
         self, Body, CharacterState, Energy, Health, Inventory, Poise, Stats,
-        ability::{Ability, ActiveAbilities, AuxiliaryAbility, BASE_ABILITY_LIMIT},
+        ability::{Ability, AbilityPool, ActiveAbilities, AuxiliaryAbility, BASE_ABILITY_LIMIT},
         inventory::{
             item::{
                 ItemI18n, ItemKind, MaterialStatManifest,
@@ -189,6 +189,7 @@ pub struct Diary<'a> {
     global_state: &'a GlobalState,
     skill_set: &'a SkillSet,
     active_abilities: &'a ActiveAbilities,
+    ability_pool: Option<&'a AbilityPool>,
     inventory: &'a Inventory,
     char_state: &'a CharacterState,
     health: &'a Health,
@@ -239,6 +240,7 @@ impl<'a> Diary<'a> {
         global_state: &'a GlobalState,
         skill_set: &'a SkillSet,
         active_abilities: &'a ActiveAbilities,
+        ability_pool: Option<&'a AbilityPool>,
         inventory: &'a Inventory,
         char_state: &'a CharacterState,
         health: &'a Health,
@@ -265,6 +267,7 @@ impl<'a> Diary<'a> {
             global_state,
             skill_set,
             active_abilities,
+            ability_pool,
             inventory,
             char_state,
             health,
@@ -856,6 +859,7 @@ impl Widget for Diary<'_> {
                     amount_text_color: TEXT_COLOR,
                     content_source: &(
                         self.active_abilities,
+                        self.ability_pool,
                         self.inventory,
                         self.skill_set,
                         self.context,
@@ -880,6 +884,7 @@ impl Widget for Diary<'_> {
                             Some(self.char_state),
                             Some(self.inventory),
                             Some(self.skill_set),
+                            self.ability_pool,
                             self.context,
                         );
                     let (ability_title, ability_desc) = if let Some(ability_id) = ability_id {
@@ -943,6 +948,7 @@ impl Widget for Diary<'_> {
                 let abilities: Vec<_> = ActiveAbilities::all_available_abilities(
                     Some(self.inventory),
                     Some(self.skill_set),
+                    self.ability_pool,
                 )
                 .into_iter()
                 .map(|a| {
@@ -951,6 +957,7 @@ impl Widget for Diary<'_> {
                             Some(self.char_state),
                             Some(self.inventory),
                             Some(self.skill_set),
+                            self.ability_pool,
                             self.context,
                         ),
                         a,
@@ -1054,6 +1061,7 @@ impl Widget for Diary<'_> {
                     amount_text_color: TEXT_COLOR,
                     content_source: &(
                         self.active_abilities,
+                        self.ability_pool,
                         self.inventory,
                         self.skill_set,
                         self.context,
@@ -1252,7 +1260,8 @@ impl Widget for Diary<'_> {
                         },
                         CharacterStat::Protection => {
                             let protection =
-                                combat::compute_protection(Some(self.inventory), self.msm);
+                                // display only; None = show ungated (ENG-D2c)
+                                combat::compute_protection(Some(self.inventory), None, self.msm);
                             match protection {
                                 Some(prot) => format!("{}", prot),
                                 None => String::from("Invincible"),
@@ -2956,6 +2965,7 @@ fn unlock_skill_strings(group: SkillGroupKind) -> SkillStrings<'static> {
             SkillStrings::plain("hud-skill-unlck_sceptre_title", "hud-skill-unlck_sceptre")
         },
         SkillGroupKind::General
+        | SkillGroupKind::Class(_)
         | SkillGroupKind::Weapon(
             ToolKind::Dagger
             | ToolKind::Shield
@@ -2968,7 +2978,10 @@ fn unlock_skill_strings(group: SkillGroupKind) -> SkillStrings<'static> {
             | ToolKind::Pick
             | ToolKind::Shovel
             | ToolKind::Natural
-            | ToolKind::Empty,
+            | ToolKind::Empty
+            | ToolKind::Tome
+            | ToolKind::HolySymbol
+            | ToolKind::Focus,
         ) => {
             tracing::warn!("Requesting title for unlocking unexpected skill group");
             SkillStrings::Empty

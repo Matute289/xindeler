@@ -5,7 +5,6 @@ use crate::{
     util::{DHashMap, DHashSet, seed_expan},
 };
 use common::{
-    consts::HIRES_SCALE,
     store::{Id, Store},
     terrain::{MapSizeLg, TERRAIN_CHUNK_BLOCKS_LG},
     util::Dir,
@@ -518,15 +517,10 @@ impl Airships {
     pub const AIRSHIP_TRANSITION_SPEED_RATIO: f32 = 0.75;
     /// The cruising height varies by route index and there can be only four
     /// routes.
-    pub const CRUISE_HEIGHTS: [f32; 4] = [
-        400.0 * HIRES_SCALE,
-        475.0 * HIRES_SCALE,
-        550.0 * HIRES_SCALE,
-        625.0 * HIRES_SCALE,
-    ];
+    pub const CRUISE_HEIGHTS: [f32; 4] = [400.0, 475.0, 550.0, 625.0];
     /// The distance from the docking position where the airship starts the
     /// transition flight phase.
-    const DOCKING_TRANSITION_OFFSET: f32 = 175.0 * HIRES_SCALE;
+    const DOCKING_TRANSITION_OFFSET: f32 = 175.0;
     /// The vector from the dock alignment point when the airship is docked on
     /// the port side.
     const DOCK_ALIGN_POS_PORT: Vec2<f32> =
@@ -540,7 +534,7 @@ impl Airships {
     // should be used.
     /// The absolute offset from the airship's position to the docking alignment
     /// point on the X axis. The airship is assumed to be facing positive Y.
-    const DOCK_ALIGN_X: f32 = 18.0 * HIRES_SCALE;
+    const DOCK_ALIGN_X: f32 = 18.0;
     /// The offset from the airship's position to the docking alignment point on
     /// the Y axis. The airship is assumed to be facing positive Y.
     /// This is positive if the docking alignment point is in front of the
@@ -548,7 +542,7 @@ impl Airships {
     const DOCK_ALIGN_Y: f32 = 1.0;
     /// The minimum distance from the route leg midpoint to the world
     /// boundaries.
-    const ROUTE_LEG_MIDPOINT_MARGIN: f32 = 200.0 * HIRES_SCALE;
+    const ROUTE_LEG_MIDPOINT_MARGIN: f32 = 200.0;
     /// The angle for calculating the route leg midpoint.
     const ROUTE_LEG_MIDPOINT_OFFSET_RADIANS: f32 = 0.087266;
 

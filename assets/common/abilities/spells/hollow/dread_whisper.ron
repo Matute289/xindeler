@@ -1,0 +1,35 @@
+BasicRanged(
+    energy_cost: 90.0,
+    buildup_duration: 0.8,
+    recover_duration: 0.5,
+    projectile: (
+        kind: Explosive(
+            radius: 2.0,
+            min_falloff: 0.5,
+            reagent: Some(Purple),
+            terrain: None,
+        ),
+        attack: Some((
+            damage: 18,
+            buff: Some((
+                kind: Terrified,
+                dur_secs: 4,
+                strength: Value(0.8),
+                chance: 1.0,
+            )),
+        )),
+    ),
+    projectile_body: Object(BoltFire),
+    projectile_speed: 60.0,
+    num_projectiles: Value(1),
+    meta: (
+        init_event: Some(GainBuff(
+            kind: Hollowtouched,
+            strength: 1.0,
+            duration: Some(60.0),
+        )),
+        cooldown: Some(25.0),
+        school: Some(Necromancy),
+        source: Some(Arcane),
+    ),
+)

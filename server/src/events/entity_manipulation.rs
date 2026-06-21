@@ -11,6 +11,7 @@ use crate::{
     },
     error,
     events::entity_creation::handle_create_npc,
+    metrics::GameplayMetrics,
     persistence::character_updater::CharacterUpdater,
     pet::tame_pet,
     state_ext::StateExt,
@@ -46,8 +47,9 @@ use common::{
         EntityAttackedHookEvent, EventBus, ExplosionEvent, HealthChangeEvent, HelpDownedEvent,
         KillEvent, KnockbackEvent, LandOnGroundEvent, MakeAdminEvent, ParryHookEvent,
         PermanentChange, PoiseChangeEvent, RegrowHeadEvent, RemoveLightEmitterEvent, RespawnEvent,
-        ShootEvent, SoundEvent, StartInteractionEvent, StartTeleportingEvent, TeleportToEvent,
-        TeleportToPositionEvent, TransformEvent, UpdateMapMarkerEvent,
+        SetAbilityCooldownEvent, ShootEvent, SoundEvent, StartInteractionEvent,
+        StartTeleportingEvent, TeleportToEvent, TeleportToPositionEvent, TransformEvent,
+        UpdateMapMarkerEvent,
     },
     event_emitters,
     explosion::{ColorPreset, TerrainReplacementPreset},
@@ -55,6 +57,7 @@ use common::{
     link::Is,
     lottery::distribute_many,
     mounting::{Mounting, Rider, VolumeRider},
+    npc::NPC_NAMES,
     outcome::{HealthChangeInfo, Outcome},
     resources::{EntitiesDiedLastTick, ProgramTime, Secs, Time},
     spiral::Spiral2d,
@@ -100,6 +103,7 @@ pub(super) fn register_event_systems(builder: &mut DispatcherBuilder) {
     event_dispatch::<ComboChangeEvent>(builder, &[]);
     event_dispatch::<ParryHookEvent>(builder, &[]);
     event_dispatch::<TeleportToEvent>(builder, &[]);
+    event_dispatch::<SetAbilityCooldownEvent>(builder, &[]);
     event_dispatch::<EntityAttackedHookEvent>(builder, &[]);
     event_dispatch::<ChangeAbilityEvent>(builder, &[]);
     event_dispatch::<UpdateMapMarkerEvent>(builder, &[]);
@@ -144,6 +148,7 @@ event_emitters! {
         destroy: DestroyEvent,
         downed: DownedEvent,
         outcome: Outcome,
+        buff: BuffEvent,
     }
 
     struct DestroyEvents[DestroyEmitters] {
@@ -235,6 +240,7 @@ pub struct HealthChangeEventData<'a> {
     #[cfg(feature = "worldgen")]
     rtsim_entities: ReadStorage<'a, RtSimEntity>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, comp::AttunedItems>,
     agents: WriteStorage<'a, Agent>,
     healths: WriteStorage<'a, Health>,
     heads: WriteStorage<'a, Heads>,
@@ -260,7 +266,8 @@ impl ServerEvent for HealthChangeEvent {
                 // Skip damage if invincible.
                 if ev.change.amount < 0.0 &&
                     // None indicates invincibility.
-                    combat::compute_protection(inventory, &data.msm).is_none()
+                    combat::compute_protection(inventory, data.attuned_items.get(ev.entity), &data.msm)
+                        .is_none()
                 {
                     continue;
                 }
@@ -355,6 +362,27 @@ impl ServerEvent for HealthChangeEvent {
                 && let Some(agent) = data.agents.get_mut(ev.entity)
             {
                 agent.inbox.push_back(AgentEvent::Hurt);
+            }
+
+            // Concentration (ENG-C2 / M5): an external hit at or above the break
+            // threshold ends the bearer's concentration. Only hits with a
+            // `DamageSource` cause count — self-inflicted costs (e.g. the
+            // Hemomancy HP price, cause: None) do not break it.
+            if ev.change.amount < 0.0
+                && ev.change.cause.is_some()
+                && buff::concentration_breaks(
+                    damage,
+                    data.healths.get(ev.entity).map_or(0.0, |h| h.maximum()),
+                )
+            {
+                emitters.emit(BuffEvent {
+                    entity: ev.entity,
+                    buff_change: buff::BuffChange::RemoveByCategory {
+                        all_required: vec![],
+                        any_required: vec![BuffCategory::Concentration],
+                        none_required: vec![],
+                    },
+                });
             }
         }
     }
@@ -616,6 +644,7 @@ pub struct DestroyEventData<'a> {
     buffs: ReadStorage<'a, comp::Buffs>,
     orientations: ReadStorage<'a, comp::Ori>,
     combos: ReadStorage<'a, comp::Combo>,
+    gameplay_metrics: ReadExpect<'a, GameplayMetrics>,
 }
 
 /// Handle an entity dying. If it is a player, it will send a message to all
@@ -644,6 +673,55 @@ impl ServerEvent for DestroyEvent {
 
                     if let Some(pos) = data.positions.get(ev.entity).copied() {
                         data.entities_died_last_tick.0.push((ev.entity, pos));
+                    }
+
+                    if let Some(body) = data.bodies.get(ev.entity) {
+                        let npc_names = NPC_NAMES.read();
+                        let body_type = npc_names
+                            .get_species_meta(body)
+                            .map(|meta| meta.keyword.as_str())
+                            .unwrap_or("other");
+
+                        let weapon = match ev.cause.cause {
+                            Some(DamageSource::Attack(AttackSource::Melee)) => "melee",
+                            Some(DamageSource::Attack(AttackSource::Projectile)) => "projectile",
+                            Some(DamageSource::Attack(AttackSource::Beam)) => "beam",
+                            Some(DamageSource::Attack(AttackSource::GroundShockwave))
+                            | Some(DamageSource::Attack(AttackSource::AirShockwave))
+                            | Some(DamageSource::Attack(AttackSource::UndodgeableShockwave)) => {
+                                "shockwave"
+                            },
+                            Some(DamageSource::Attack(AttackSource::Explosion)) => "explosion",
+                            Some(DamageSource::Attack(AttackSource::Arc)) => "arc",
+                            Some(DamageSource::Attack(AttackSource::Pool)) => "pool",
+                            Some(DamageSource::Buff(_)) => "buff",
+                            Some(DamageSource::Other) => "other",
+                            Some(DamageSource::Falling) => "fall",
+                            None => "unknown",
+                        };
+
+                        data.gameplay_metrics
+                            .entity_kills_by_type
+                            .with_label_values(&[body_type, weapon])
+                            .inc();
+
+                        // quantize the kill locations to a grid size that won't
+                        // create a million prometheus series - in other words,
+                        // round down to the nearest 1000th block
+                        if let Some(pos) = data.positions.get(ev.entity) {
+                            const QUANTIZE: i32 = 1000;
+                            let wpos = pos.0.xy();
+
+                            let x = ((wpos.x.floor() as i32).div_euclid(QUANTIZE) * QUANTIZE)
+                                .to_string();
+                            let y = ((wpos.y.floor() as i32).div_euclid(QUANTIZE) * QUANTIZE)
+                                .to_string();
+
+                            data.gameplay_metrics
+                                .entity_kills_by_location
+                                .with_label_values(&[body_type, &x, &y])
+                                .inc();
+                        }
                     }
                 } else {
                     // Skip for entities that have already died
@@ -1514,6 +1592,8 @@ impl ServerEvent for LandOnGroundEvent {
                 let damage_reduction = Damage::compute_damage_reduction(
                     Some(damage),
                     inventories.get(ev.entity),
+                    // TODO(ENG-D2c): fall-damage protection is not attunement-gated yet.
+                    None,
                     stats.get(ev.entity),
                     &msm,
                 );
@@ -1631,6 +1711,7 @@ pub struct ExplosionData<'a> {
     energies: ReadStorage<'a, Energy>,
     combos: ReadStorage<'a, comp::Combo>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, comp::AttunedItems>,
     alignments: ReadStorage<'a, Alignment>,
     entered_auras: ReadStorage<'a, EnteredAuras>,
     buffs: ReadStorage<'a, comp::Buffs>,
@@ -2040,6 +2121,7 @@ impl ServerEvent for ExplosionEvent {
                                     entity: entity_b,
                                     uid: *uid_b,
                                     inventory: data.inventories.get(entity_b),
+                                    attuned: data.attuned_items.get(entity_b),
                                     stats: data.stats.get(entity_b),
                                     health: Some(health_b),
                                     pos: pos_b.0,
@@ -2160,6 +2242,7 @@ impl ServerEvent for ExplosionEvent {
                                                 )
                                             }),
                                             data.inventories.get(entity_b),
+                                            data.attuned_items.get(entity_b),
                                             &data.msm,
                                             data.character_states.get(entity_b),
                                             data.stats.get(entity_b),
@@ -2193,6 +2276,7 @@ pub fn emit_effect_events(
     effect: common::effect::Effect,
     source: Option<(Uid, Option<Group>)>,
     inventory: Option<&Inventory>,
+    attuned: Option<&comp::AttunedItems>,
     msm: &MaterialStatManifest,
     char_state: Option<&CharacterState>,
     stats: Option<&Stats>,
@@ -2221,7 +2305,13 @@ pub fn emit_effect_events(
         },
         common::effect::Effect::Damage(damage) => {
             let change = damage.calculate_health_change(
-                combat::Damage::compute_damage_reduction(Some(damage), inventory, stats, msm),
+                combat::Damage::compute_damage_reduction(
+                    Some(damage),
+                    inventory,
+                    attuned,
+                    stats,
+                    msm,
+                ),
                 0.0,
                 damage_contributor,
                 None,
@@ -2514,6 +2604,22 @@ impl ServerEvent for BuffEvent {
                                 new_buff.effects.clear();
                             }
 
+                            // One concentration at a time (ENG-C2 / M5): adding a
+                            // concentration buff removes any prior concentration.
+                            if new_buff.cat_ids.contains(&BuffCategory::Concentration) {
+                                let prior: Vec<_> = buffs
+                                    .buffs
+                                    .iter()
+                                    .filter(|(_, b)| {
+                                        b.cat_ids.contains(&BuffCategory::Concentration)
+                                    })
+                                    .map(|(key, _)| key)
+                                    .collect();
+                                for key in prior {
+                                    buffs.remove(key);
+                                }
+                            }
+
                             buffs.insert(new_buff, *time);
                         }
                     },
@@ -2770,6 +2876,21 @@ impl ServerEvent for TeleportToEvent {
                 force_updates
                     .get_mut(ev.entity)
                     .map(|force_update| force_update.update());
+            }
+        }
+    }
+}
+
+impl ServerEvent for SetAbilityCooldownEvent {
+    type SystemData<'a> = (Read<'a, Time>, WriteStorage<'a, comp::AbilityCooldowns>);
+
+    fn handle(
+        events: impl ExactSizeIterator<Item = Self>,
+        (time, mut ability_cooldowns): Self::SystemData<'_>,
+    ) {
+        for ev in events {
+            if let Some(mut cooldowns) = ability_cooldowns.get_mut(ev.entity) {
+                cooldowns.set(&ev.ability_id, *time, ev.cooldown_secs);
             }
         }
     }

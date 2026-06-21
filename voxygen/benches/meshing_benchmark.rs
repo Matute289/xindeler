@@ -150,12 +150,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     generate_mesh(
                         black_box(&volume),
-                        black_box((
-                            range,
-                            Vec2::new(8192, 8192),
-                            &BlocksOfInterest::default(),
-                            veloren_voxygen::render::TerrainSmoothingMode::Disabled,
-                        )),
+                        black_box((range, Vec2::new(8192, 8192), &BlocksOfInterest::default())),
                     )
                 })
             });

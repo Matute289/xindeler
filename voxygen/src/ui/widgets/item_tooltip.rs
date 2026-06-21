@@ -8,7 +8,7 @@ use crate::hud::{
 use client::Client;
 use common::{
     comp::{
-        Body, Energy, Inventory, SkillSet,
+        Body, CharacterClass, Energy, Inventory, SkillSet,
         item::{
             Item, ItemDesc, ItemI18n, ItemKind, ItemTag, MaterialStatManifest, Quality,
             armor::Protection, item_key::ItemKey, modular::ModularComponent,
@@ -281,6 +281,8 @@ const IMAGE_W_FRAC: f64 = 0.3;
 const ICON_SIZE: [f64; 2] = [64.0, 64.0];
 /// Total item tooltip width
 const WIDTH: f64 = 320.0;
+// Arcane blue for the "Requires Attunement" notice (ENG-D2).
+const ATTUNEMENT_COLOR: Color = Color::Rgba(0.55, 0.70, 1.0, 1.0);
 
 /// A widget for displaying tooltips
 #[derive(Clone, WidgetCommon)]
@@ -325,6 +327,7 @@ widget_ids! {
         desc,
         requirements_met,
         requirements_unmet,
+        requires_attunement,
         prices_buy,
         prices_sell,
         tooltip_hints,
@@ -1267,8 +1270,8 @@ impl Widget for ItemTooltip<'_> {
                 .set(state.ids.desc, ui);
         }
 
-        // Equipment requirements (level/race gates)
-        let viewer = {
+        // Equipment requirements (level/race/class gates)
+        let (viewer, viewer_class) = {
             let ecs = self.client.state().ecs();
             let entity = self.info.viewpoint_entity;
             let level = ecs
@@ -1279,9 +1282,13 @@ impl Widget for ItemTooltip<'_> {
                 .read_storage::<Body>()
                 .get(entity)
                 .and_then(|body| match_some!(*body, Body::Humanoid(b) => b.species));
-            level.map(|level| (level, species))
+            let class = ecs
+                .read_storage::<CharacterClass>()
+                .get(entity)
+                .map(|c| c.0);
+            (level.map(|level| (level, species)), class)
         };
-        let (req_met, req_unmet) = util::requirements_text(item, viewer, i18n);
+        let (req_met, req_unmet) = util::requirements_text(item, viewer_class, viewer, i18n);
         let req_anchor = if !desc.is_empty() {
             state.ids.desc
         } else if stats_count > 0 {
@@ -1314,6 +1321,28 @@ impl Widget for ItemTooltip<'_> {
                 .set(state.ids.requirements_unmet, ui);
         }
 
+        // Attunement notice — magic items only grant their effects while attuned
+        // (ENG-D2). Informational, not a met/unmet gate; shown in arcane blue.
+        let requires_attunement = item.requires_attunement();
+        if requires_attunement {
+            let anchor = if !req_unmet.is_empty() {
+                state.ids.requirements_unmet
+            } else if !req_met.is_empty() {
+                state.ids.requirements_met
+            } else {
+                req_anchor
+            };
+            widget::Text::new(&i18n.get_msg("hud-bag-requires_attunement"))
+                .x_align_to(state.ids.item_frame, conrod_core::position::Align::Start)
+                .graphics_for(id)
+                .parent(id)
+                .with_style(self.style.desc)
+                .color(ATTUNEMENT_COLOR)
+                .down_from(anchor, V_PAD)
+                .w(text_w)
+                .set(state.ids.requires_attunement, ui);
+        }
+
         // Price display
         if let Some((buy, sell, factor)) =
             util::price_desc(self.prices, item.item_definition_id(), item.quality(), i18n)
@@ -1325,7 +1354,9 @@ impl Widget for ItemTooltip<'_> {
                 .with_style(self.style.desc)
                 .color(Color::Rgba(factor, 1.0 - factor, 0.00, 1.0))
                 .down_from(
-                    if !req_unmet.is_empty() {
+                    if requires_attunement {
+                        state.ids.requires_attunement
+                    } else if !req_unmet.is_empty() {
                         state.ids.requirements_unmet
                     } else if !req_met.is_empty() {
                         state.ids.requirements_met
@@ -1432,7 +1463,9 @@ impl Widget for ItemTooltip<'_> {
 
         // Equipment requirements
         let req_line_count = self.item.requirements().map_or(0, |r| {
-            r.min_level.is_some() as usize + r.races.is_some() as usize
+            r.classes.is_some() as usize
+                + r.min_level.is_some() as usize
+                + r.races.is_some() as usize
         });
         let req_h = if req_line_count > 0 {
             widget::Text::new("placeholder")
@@ -1445,8 +1478,19 @@ impl Widget for ItemTooltip<'_> {
             0.0
         };
 
+        // Attunement notice (one line, see update())
+        let attune_h = if item.requires_attunement() {
+            widget::Text::new("placeholder")
+                .with_style(self.style.desc)
+                .get_h(ui)
+                .unwrap_or(0.0)
+                + V_PAD
+        } else {
+            0.0
+        };
+
         // extra padding to fit frame top padding
-        let height = frame_h + stat_h + desc_h + req_h + price_h + V_PAD + 5.0;
+        let height = frame_h + stat_h + desc_h + req_h + attune_h + price_h + V_PAD + 5.0;
         Dimension::Absolute(height)
     }
 }

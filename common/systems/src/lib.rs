@@ -11,7 +11,6 @@ pub mod melee;
 mod mount;
 pub mod phys;
 mod phys_events;
-pub mod phys_smooth;
 mod pool;
 pub mod projectile;
 mod shockwave;

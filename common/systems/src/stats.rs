@@ -31,6 +31,7 @@ pub struct ReadData<'a> {
     events: Events<'a>,
     char_states: ReadStorage<'a, CharacterState>,
     inventories: ReadStorage<'a, Inventory>,
+    attuned_items: ReadStorage<'a, common::comp::AttunedItems>,
     msm: ReadExpect<'a, MaterialStatManifest>,
 }
 
@@ -91,7 +92,11 @@ impl<'a> System<'a> for Sys {
             // Calculates energy scaling from stats and inventory
             let energy_mods = StatsModifier {
                 add_mod: stat.max_energy_modifiers.add_mod
-                    + combat::compute_max_energy_mod(inventory, &read_data.msm),
+                    + combat::compute_max_energy_mod(
+                        inventory,
+                        read_data.attuned_items.get(entity),
+                        &read_data.msm,
+                    ),
                 mult_mod: stat.max_energy_modifiers.mult_mod,
             };
 
@@ -147,6 +152,7 @@ impl<'a> System<'a> for Sys {
                 | CharacterState::Throw(_)
                 | CharacterState::Shockwave(_)
                 | CharacterState::Explosion(_)
+                | CharacterState::GroundAoe(_)
                 | CharacterState::BasicBeam(_)
                 | CharacterState::BasicAura(_)
                 | CharacterState::Blink(_)

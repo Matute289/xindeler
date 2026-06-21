@@ -8,7 +8,6 @@ license.workspace = true
 workspace = true
 
 [features]
-terrain-hires = ["common/terrain-hires"]
 simd = ["vek/platform_intrinsics"]
 plugins = ["common-state/plugins"]
 
@@ -19,7 +18,6 @@ common = { package = "veloren-common", path = ".." }
 common-net = { package = "veloren-common-net", path = "../net" }
 common-ecs = { package = "veloren-common-ecs", path = "../ecs" }
 common-base = { package = "veloren-common-base", path = "../base" }
-common-state = { package = "veloren-common-state", path = "../state" }
 
 rand = { workspace = true }
 rayon = { workspace = true }

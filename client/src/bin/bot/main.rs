@@ -103,7 +103,7 @@ impl BotClient {
         for (username, client) in self.bot_clients.iter_mut() {
             trace!(?username, "tick");
             let _msgs: Result<Vec<veloren_client::Event>, veloren_client::Error> =
-                client.tick(comp::ControllerInputs::default(), self.clock.dt());
+                client.tick(comp::ControllerInputs::default(), self.clock.game_dt());
         }
     }
 
@@ -195,6 +195,9 @@ impl BotClient {
                 body.into(),
                 false,
                 None,
+                // Bots use Warrior; keep in sync with valid_starter_items(Warrior) — the
+                // sword/axe/hammer starter whitelist gates this weapon choice.
+                comp::class::ClassKind::Warrior,
             );
             client.load_character_list();
         }

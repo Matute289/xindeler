@@ -25,7 +25,7 @@ use client::{Client, ServerInfo};
 use common::{
     LoadoutBuilder,
     character::{CharacterId, CharacterItem, MAX_CHARACTERS_PER_PLAYER, MAX_NAME_LENGTH},
-    comp::{self, Inventory, Item, humanoid, inventory::slot::EquipSlot},
+    comp::{self, Inventory, Item, class::ClassKind, humanoid, inventory::slot::EquipSlot},
     map::Marker,
     resources::Time,
     terrain::TerrainChunkSize,
@@ -62,6 +62,21 @@ const STARTER_AXE: &str = "common.items.weapons.axe.starter_axe";
 const STARTER_STAFF: &str = "common.items.weapons.staff.starter_staff";
 const STARTER_SWORD: &str = "common.items.weapons.sword.starter";
 const STARTER_SWORDS: &str = "common.items.weapons.sword_1h.starter";
+const STARTER_SCEPTRE: &str = "common.items.weapons.sceptre.starter_sceptre";
+
+/// Default starter weapon shown when a class is picked; must be a member of
+/// the server-side whitelist in server/src/character_creator.rs.
+fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<&'static str>) {
+    match class {
+        // Adventurer can't be picked at creation; no starter weapons (matches
+        // the server's empty whitelist).
+        ClassKind::Adventurer => (None, None),
+        ClassKind::Warrior => (Some(STARTER_SWORD), None),
+        ClassKind::Mage => (Some(STARTER_STAFF), None),
+        ClassKind::Cleric => (Some(STARTER_SCEPTRE), None),
+        ClassKind::Rogue => (Some(STARTER_SWORDS), Some(STARTER_SWORDS)),
+    }
+}
 
 // TODO: what does this comment mean?
 // // Use in future MR to make this a starter weapon
@@ -98,6 +113,7 @@ image_ids_ice! {
         hammer: "voxygen.element.weapons.hammer",
         bow: "voxygen.element.weapons.bow",
         staff: "voxygen.element.weapons.staff",
+        sceptre: "voxygen.element.weapons.sceptre",
 
         // Hardcore icon
         hardcore: "voxygen.element.ui.map.icons.dif_map_icon",
@@ -150,6 +166,7 @@ pub enum Event {
         body: comp::Body,
         hardcore: bool,
         start_site: Option<SiteId>,
+        class: ClassKind,
     },
     EditCharacter {
         alias: String,
@@ -183,9 +200,11 @@ enum Mode {
         inventory: Box<Inventory>,
         mainhand: Option<&'static str>,
         offhand: Option<&'static str>,
+        class: ClassKind,
 
         body_type_buttons: [button::State; 2],
         species_buttons: [button::State; 6],
+        class_buttons: [button::State; 4],
         tool_buttons: [button::State; 6],
         sliders: Sliders,
         hardcore_enabled: bool,
@@ -198,12 +217,56 @@ enum Mode {
         rand_name_button: button::State,
         prev_starting_site_button: button::State,
         next_starting_site_button: button::State,
+        wizard_back_button: button::State,
+        wizard_next_button: button::State,
+        /// Current step of the creation wizard. Unused in edit mode.
+        step: CreationStep,
         /// `character_id.is_some()` can be used to determine if we're in edit
         /// mode as opposed to create mode.
         // TODO: Something less janky? Express the problem domain better!
         character_id: Option<CharacterId>,
         start_site_idx: Option<usize>,
     },
+}
+
+/// Sequential steps of the character-creation wizard (creation mode only).
+/// Edit mode ignores this and renders a single combined screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreationStep {
+    Body,
+    Appearance,
+    Class,
+    Finish,
+}
+
+impl CreationStep {
+    fn next(self) -> Self {
+        match self {
+            CreationStep::Body => CreationStep::Appearance,
+            CreationStep::Appearance => CreationStep::Class,
+            CreationStep::Class => CreationStep::Finish,
+            CreationStep::Finish => CreationStep::Finish,
+        }
+    }
+
+    fn back(self) -> Self {
+        match self {
+            CreationStep::Body => CreationStep::Body,
+            CreationStep::Appearance => CreationStep::Body,
+            CreationStep::Class => CreationStep::Appearance,
+            CreationStep::Finish => CreationStep::Class,
+        }
+    }
+
+    /// 1-based index for the progress label.
+    fn index(self) -> u8 {
+        match self {
+            CreationStep::Body => 1,
+            CreationStep::Appearance => 2,
+            CreationStep::Class => 3,
+            CreationStep::Finish => 4,
+        }
+    }
 }
 
 impl Mode {
@@ -242,8 +305,10 @@ impl Mode {
             inventory,
             mainhand,
             offhand,
+            class: ClassKind::Warrior,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
+            class_buttons: Default::default(),
             tool_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
@@ -256,6 +321,9 @@ impl Mode {
             rand_name_button: Default::default(),
             prev_starting_site_button: Default::default(),
             next_starting_site_button: Default::default(),
+            wizard_back_button: Default::default(),
+            wizard_next_button: Default::default(),
+            step: CreationStep::Body,
             character_id: None,
             start_site_idx: None,
         }
@@ -273,8 +341,10 @@ impl Mode {
             inventory: Box::new(inventory.clone()),
             mainhand: None,
             offhand: None,
+            class: ClassKind::Adventurer,
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
+            class_buttons: Default::default(),
             tool_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
@@ -287,6 +357,10 @@ impl Mode {
             rand_name_button: Default::default(),
             prev_starting_site_button: Default::default(),
             next_starting_site_button: Default::default(),
+            wizard_back_button: Default::default(),
+            wizard_next_button: Default::default(),
+            // Unused in edit mode (single combined screen).
+            step: CreationStep::Body,
             character_id: Some(character_id),
             start_site_idx: None,
         }
@@ -338,6 +412,7 @@ enum Message {
     Name(String),
     BodyType(humanoid::BodyType),
     Species(humanoid::Species),
+    Class(ClassKind),
     Tool((Option<&'static str>, Option<&'static str>)),
     RandomizeCharacter,
     HardcoreEnabled(bool),
@@ -355,6 +430,8 @@ enum Message {
     StartingSite(usize),
     PrevStartingSite,
     NextStartingSite,
+    WizardNext,
+    WizardBack,
     // Workaround for widgets that require a message but we don't want them to actually do
     // anything
     DoNothing,
@@ -961,10 +1038,12 @@ impl Controls {
                 inventory: _,
                 mainhand,
                 offhand: _,
+                class,
                 left_scroll,
                 right_scroll,
                 body_type_buttons,
                 species_buttons,
+                class_buttons,
                 tool_buttons,
                 sliders,
                 hardcore_enabled,
@@ -975,9 +1054,15 @@ impl Controls {
                 rand_name_button,
                 prev_starting_site_button,
                 next_starting_site_button,
+                wizard_back_button,
+                wizard_next_button,
+                step,
                 character_id,
                 start_site_idx,
             } => {
+                // Copy the step out so the later `match` doesn't keep `step`
+                // borrowed while we build widgets from the other fields.
+                let step = *step;
                 let unselected_style = style::button::Style::new(imgs.icon_border)
                     .hover_image(imgs.icon_border_mo)
                     .press_image(imgs.icon_border_press);
@@ -1012,8 +1097,8 @@ impl Controls {
                 };
 
                 // TODO: tooltips
-                let (tool, species, body_type) = if character_id.is_some() {
-                    (Column::new(), Column::new(), Row::new())
+                let (tool, species, body_type, class_section) = if character_id.is_some() {
+                    (Column::new(), Column::new(), Row::new(), Column::new())
                 } else {
                     let (body_m_ico, body_f_ico) = match body.species {
                         humanoid::Species::Human => (imgs.human_m, imgs.human_f),
@@ -1127,6 +1212,103 @@ impl Controls {
                         .into(),
                     ])
                     .spacing(1);
+                    // Class picker: four text buttons, one per playable class.
+                    let [
+                        warrior_class_button,
+                        mage_class_button,
+                        cleric_class_button,
+                        rogue_class_button,
+                    ] = class_buttons;
+                    // Selection is signalled ONLY by text color: every state
+                    // shares the same button images, so the geometry never
+                    // changes and the 2x2 grid stays stable under the cursor
+                    // (selected-style image swaps caused reflow + misclicks).
+                    let class_button_style = |selected: bool| {
+                        if selected {
+                            style::button::Style::new(imgs.button)
+                                .hover_image(imgs.button_hover)
+                                .press_image(imgs.button_press)
+                                .text_color(Color::from_rgb(0.93, 0.78, 0.28))
+                        } else {
+                            button_style
+                        }
+                    };
+                    // 2 per row: new classes extend downward, never sideways.
+                    let class_section = Column::with_children(vec![
+                        Row::with_children(vec![
+                            neat_button(
+                                warrior_class_button,
+                                i18n.get_msg("char_selection-class_warrior").into_owned(),
+                                FILL_FRAC_ONE,
+                                class_button_style(*class == ClassKind::Warrior),
+                                Some(Message::Class(ClassKind::Warrior)),
+                            ),
+                            neat_button(
+                                mage_class_button,
+                                i18n.get_msg("char_selection-class_mage").into_owned(),
+                                FILL_FRAC_ONE,
+                                class_button_style(*class == ClassKind::Mage),
+                                Some(Message::Class(ClassKind::Mage)),
+                            ),
+                        ])
+                        .height(Length::Units(26))
+                        .spacing(2)
+                        .into(),
+                        Row::with_children(vec![
+                            neat_button(
+                                cleric_class_button,
+                                i18n.get_msg("char_selection-class_cleric").into_owned(),
+                                FILL_FRAC_ONE,
+                                class_button_style(*class == ClassKind::Cleric),
+                                Some(Message::Class(ClassKind::Cleric)),
+                            ),
+                            neat_button(
+                                rogue_class_button,
+                                i18n.get_msg("char_selection-class_rogue").into_owned(),
+                                FILL_FRAC_ONE,
+                                class_button_style(*class == ClassKind::Rogue),
+                                Some(Message::Class(ClassKind::Rogue)),
+                            ),
+                        ])
+                        .height(Length::Units(26))
+                        .spacing(2)
+                        .into(),
+                    ])
+                    .align_items(Align::Center)
+                    .spacing(2);
+
+                    // Tool buttons gated by the current class's whitelist.
+                    // A button with no on_press is visually present but non-interactive.
+                    let icon_button_opt = |button, selected, msg: Option<Message>, img| {
+                        let btn = Button::<_, IcedRenderer>::new(
+                            button,
+                            Space::new(Length::Units(60), Length::Units(60)),
+                        )
+                        .style(if selected {
+                            selected_style
+                        } else {
+                            unselected_style
+                        });
+                        let btn = match msg {
+                            Some(m) => btn.on_press(m),
+                            None => btn,
+                        };
+                        Container::new(btn).style(style::container::Style::image(img))
+                    };
+                    let icon_button_tooltip_opt =
+                        |button, selected, msg: Option<Message>, img, tooltip_i18n_key| {
+                            icon_button_opt(button, selected, msg, img).with_tooltip(
+                                tooltip_manager,
+                                move || {
+                                    let tooltip_text = i18n.get_msg(tooltip_i18n_key);
+                                    tooltip::text(&tooltip_text, tooltip_style)
+                                },
+                            )
+                        };
+
+                    // Weapon picker for step 3: render ONLY the weapons valid for
+                    // the currently selected class. Every button gets a real
+                    // `on_press` (no disabled/placeholder buttons).
                     let [
                         sword_button,
                         swords_button,
@@ -1135,67 +1317,86 @@ impl Controls {
                         bow_button,
                         staff_button,
                     ] = tool_buttons;
-                    let tool = Column::with_children(vec![
-                        Row::with_children(vec![
-                            icon_button_tooltip(
-                                sword_button,
-                                *mainhand == Some(STARTER_SWORD),
-                                Message::Tool((Some(STARTER_SWORD), None)),
-                                imgs.sword,
-                                "common-weapons-greatsword",
-                            )
+                    let tool = match *class {
+                        ClassKind::Warrior | ClassKind::Adventurer => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    sword_button,
+                                    *mainhand == Some(STARTER_SWORD),
+                                    Some(Message::Tool((Some(STARTER_SWORD), None))),
+                                    imgs.sword,
+                                    "common-weapons-greatsword",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    hammer_button,
+                                    *mainhand == Some(STARTER_HAMMER),
+                                    Some(Message::Tool((Some(STARTER_HAMMER), None))),
+                                    imgs.hammer,
+                                    "common-weapons-hammer",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    axe_button,
+                                    *mainhand == Some(STARTER_AXE),
+                                    Some(Message::Tool((Some(STARTER_AXE), None))),
+                                    imgs.axe,
+                                    "common-weapons-axe",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
                             .into(),
-                            icon_button_tooltip(
-                                hammer_button,
-                                *mainhand == Some(STARTER_HAMMER),
-                                Message::Tool((Some(STARTER_HAMMER), None)),
-                                imgs.hammer,
-                                "common-weapons-hammer",
-                            )
-                            .into(),
-                            icon_button_tooltip(
-                                axe_button,
-                                *mainhand == Some(STARTER_AXE),
-                                Message::Tool((Some(STARTER_AXE), None)),
-                                imgs.axe,
-                                "common-weapons-axe",
-                            )
-                            .into(),
-                        ])
-                        .spacing(1)
-                        .into(),
-                        Row::with_children(vec![
-                            icon_button_tooltip(
-                                swords_button,
-                                *mainhand == Some(STARTER_SWORDS),
-                                Message::Tool((Some(STARTER_SWORDS), Some(STARTER_SWORDS))),
-                                imgs.swords,
-                                "common-weapons-shortswords",
-                            )
-                            .into(),
-                            icon_button_tooltip(
-                                bow_button,
-                                *mainhand == Some(STARTER_BOW),
-                                Message::Tool((Some(STARTER_BOW), None)),
-                                imgs.bow,
-                                "common-weapons-bow",
-                            )
-                            .into(),
-                            icon_button_tooltip(
+                        ]),
+                        ClassKind::Mage => Column::with_children(vec![
+                            icon_button_tooltip_opt(
                                 staff_button,
                                 *mainhand == Some(STARTER_STAFF),
-                                Message::Tool((Some(STARTER_STAFF), None)),
+                                Some(Message::Tool((Some(STARTER_STAFF), None))),
                                 imgs.staff,
                                 "common-weapons-staff",
                             )
                             .into(),
-                        ])
-                        .spacing(1)
-                        .into(),
-                    ])
+                        ]),
+                        ClassKind::Cleric => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                staff_button,
+                                *mainhand == Some(STARTER_SCEPTRE),
+                                Some(Message::Tool((Some(STARTER_SCEPTRE), None))),
+                                imgs.sceptre,
+                                "common-weapons-sceptre",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Rogue => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    swords_button,
+                                    *mainhand == Some(STARTER_SWORDS),
+                                    Some(Message::Tool((
+                                        Some(STARTER_SWORDS),
+                                        Some(STARTER_SWORDS),
+                                    ))),
+                                    imgs.swords,
+                                    "common-weapons-shortswords",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    bow_button,
+                                    *mainhand == Some(STARTER_BOW),
+                                    Some(Message::Tool((Some(STARTER_BOW), None))),
+                                    imgs.bow,
+                                    "common-weapons-bow",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
+                            .into(),
+                        ]),
+                    }
                     .spacing(1);
 
-                    (tool, species, body_type)
+                    (tool, species, body_type, class_section)
                 };
 
                 const SLIDER_TEXT_SIZE: u16 = 20;
@@ -1399,16 +1600,57 @@ impl Controls {
                     tooltip::text(&tooltip_text, tooltip_style)
                 });
 
-                let left_column_content = vec![
-                    body_type.into(),
-                    tool.into(),
-                    species.into(),
-                    slider_options.into(),
-                    hardcore_checkbox.into(),
-                    rand_character.into(),
-                ];
+                let left_column_content: Vec<Element<Message>> = if character_id.is_some() {
+                    // Edit mode keeps the single combined screen.
+                    vec![
+                        body_type.into(),
+                        class_section.into(),
+                        tool.into(),
+                        species.into(),
+                        slider_options.into(),
+                        hardcore_checkbox.into(),
+                        rand_character.into(),
+                    ]
+                } else {
+                    // Creation mode: the wizard renders one step at a time. The
+                    // title for the current step replaces the per-section titles.
+                    let step_title_key = match step {
+                        CreationStep::Body => "char_selection-step_body",
+                        CreationStep::Appearance => "char_selection-step_appearance",
+                        CreationStep::Class => "char_selection-step_class",
+                        CreationStep::Finish => "char_selection-step_finish",
+                    };
+                    let step_title: Element<Message> =
+                        Text::new(i18n.get_msg(step_title_key).into_owned())
+                            .size(fonts.cyri.scale(26))
+                            .into();
+                    match step {
+                        // Sex and race get their own labelled sections with
+                        // breathing room so it's clear which group is which.
+                        CreationStep::Body => vec![
+                            Text::new(i18n.get_msg("char_selection-sex").into_owned())
+                                .size(fonts.cyri.scale(18))
+                                .into(),
+                            body_type.into(),
+                            Space::new(Length::Fill, Length::Units(12)).into(),
+                            step_title,
+                            species.into(),
+                            rand_character.into(),
+                        ],
+                        CreationStep::Appearance => {
+                            vec![step_title, slider_options.into(), rand_character.into()]
+                        },
+                        CreationStep::Class => {
+                            vec![step_title, class_section.into(), tool.into()]
+                        },
+                        CreationStep::Finish => vec![step_title, hardcore_checkbox.into()],
+                    }
+                };
 
-                let right_column_content = if character_id.is_none() {
+                // The start-zone map panel renders only on the Finish step (and
+                // never in edit mode).
+                let show_map = character_id.is_none() && step == CreationStep::Finish;
+                let right_column_content = if show_map {
                     let map_sz = Vec2::new(500, 500);
                     let map_img = Image::new(self.map_img)
                         .height(Length::Units(map_sz.x))
@@ -1584,7 +1826,9 @@ impl Controls {
                     // .max_width(360)
                     // .width(Length::Fill)
                     .height(Length::Fill);
-                    if character_id.is_none() {
+                    // Only the Finish step (in creation mode) shows the framed map
+                    // panel; everything else keeps the right column empty/bare.
+                    if show_map {
                         Column::with_children(vec![
                             Container::new(column)
                                 .style(style::container::Style::color(Rgba::from_translucent(
@@ -1710,6 +1954,24 @@ impl Controls {
                     create
                 };
 
+                // In creation mode the Crear button only appears on the final
+                // step; otherwise the wizard's "Next" advances the step. In edit
+                // mode the Confirm button is always shown.
+                let show_create = character_id.is_some() || step == CreationStep::Finish;
+                let create_cell: Element<Message> = if show_create {
+                    Container::new(create)
+                        .width(Length::Fill)
+                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
+                        .align_x(Align::End)
+                        .into()
+                } else {
+                    // Reserve the slot so the name input stays centred.
+                    Container::new(Space::new(Length::Fill, Length::Shrink))
+                        .width(Length::Fill)
+                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
+                        .into()
+                };
+
                 let bottom = Row::with_children(vec![
                     Container::new(back)
                         .width(Length::Fill)
@@ -1719,15 +1981,70 @@ impl Controls {
                         .width(Length::Fill)
                         .center_x()
                         .into(),
-                    Container::new(create)
-                        .width(Length::Fill)
-                        .height(Length::Units(SMALL_BUTTON_HEIGHT))
-                        .align_x(Align::End)
-                        .into(),
+                    create_cell,
                 ])
                 .align_items(Align::End);
 
-                Column::with_children(vec![top.into(), bottom.into()])
+                // Wizard navigation bar (creation mode only).
+                let nav_bar: Option<Element<Message>> = if character_id.is_none() {
+                    let prev = neat_button(
+                        wizard_back_button,
+                        i18n.get_msg("char_selection-wizard_back").into_owned(),
+                        FILL_FRAC_ONE,
+                        button_style,
+                        // Disabled on the first step.
+                        (step != CreationStep::Body).then_some(Message::WizardBack),
+                    );
+                    let progress: Element<Message> = Text::new(
+                        i18n.get_msg_ctx("char_selection-wizard_step", &i18n::fluent_args! {
+                            "step" => step.index(),
+                        })
+                        .into_owned(),
+                    )
+                    .size(fonts.cyri.scale(20))
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .into();
+                    // The "Next" slot becomes empty on the final step (the Crear
+                    // button takes over in the bottom row).
+                    let next_cell: Element<Message> = if step == CreationStep::Finish {
+                        Space::new(Length::Fill, Length::Shrink).into()
+                    } else {
+                        neat_button(
+                            wizard_next_button,
+                            i18n.get_msg("char_selection-wizard_next").into_owned(),
+                            FILL_FRAC_ONE,
+                            button_style,
+                            Some(Message::WizardNext),
+                        )
+                    };
+                    Some(
+                        Row::with_children(vec![
+                            Container::new(prev).width(Length::Fill).center_x().into(),
+                            Container::new(progress)
+                                .width(Length::Fill)
+                                .center_x()
+                                .into(),
+                            Container::new(next_cell)
+                                .width(Length::Fill)
+                                .center_x()
+                                .into(),
+                        ])
+                        .height(Length::Units(28))
+                        .align_items(Align::Center)
+                        .padding(5)
+                        .into(),
+                    )
+                } else {
+                    None
+                };
+
+                let mut bottom_children: Vec<Element<Message>> = vec![top.into()];
+                if let Some(nav_bar) = nav_bar {
+                    bottom_children.push(nav_bar);
+                }
+                bottom_children.push(bottom.into());
+
+                Column::with_children(bottom_children)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(5)
@@ -1854,6 +2171,7 @@ impl Controls {
                     hardcore_enabled,
                     mainhand,
                     offhand,
+                    class,
                     start_site_idx,
                     ..
                 } = &self.mode
@@ -1864,6 +2182,7 @@ impl Controls {
                         offhand: offhand.map(String::from),
                         body: comp::Body::Humanoid(*body),
                         hardcore: *hardcore_enabled,
+                        class: *class,
                         start_site: self
                             .possible_starting_sites
                             .get(start_site_idx.unwrap_or_default())
@@ -1897,6 +2216,35 @@ impl Controls {
                 if let Mode::CreateOrEdit { body, .. } = &mut self.mode {
                     body.species = value;
                     body.validate();
+                }
+            },
+            Message::Class(value) => {
+                if let Mode::CreateOrEdit {
+                    class,
+                    mainhand,
+                    offhand,
+                    inventory,
+                    ..
+                } = &mut self.mode
+                {
+                    *class = value;
+                    let (new_mainhand, new_offhand) = default_starter_for_class(value);
+                    *mainhand = new_mainhand;
+                    *offhand = new_offhand;
+                    inventory.replace_loadout_item(
+                        EquipSlot::ActiveMainhand,
+                        mainhand.map(Item::new_from_asset_expect),
+                        // Voxygen is not authoritative on inventory so we don't care if fake time
+                        // is supplied
+                        Time(0.0),
+                    );
+                    inventory.replace_loadout_item(
+                        EquipSlot::ActiveOffhand,
+                        offhand.map(Item::new_from_asset_expect),
+                        // Voxygen is not authoritative on inventory so we don't care if fake time
+                        // is supplied
+                        Time(0.0),
+                    );
                 }
             },
             Message::Tool(value) => {
@@ -2026,6 +2374,16 @@ impl Controls {
                             + 1)
                             % self.possible_starting_sites.len(),
                     );
+                }
+            },
+            Message::WizardNext => {
+                if let Mode::CreateOrEdit { step, .. } = &mut self.mode {
+                    *step = step.next();
+                }
+            },
+            Message::WizardBack => {
+                if let Mode::CreateOrEdit { step, .. } = &mut self.mode {
+                    *step = step.back();
                 }
             },
         }

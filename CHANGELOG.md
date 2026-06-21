@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Characters now have a level (1–60) derived from lifetime experience, shown on nameplates.
 - Level-ups now play a sound, announce the new level in chat, and the character level is shown in the Diary's character page.
+- Items can now require a minimum character level or race (and class, once classes land) to equip; gated items are grayed out in the bag with requirements shown in the tooltip.
+- Characters now choose a class (Warrior, Mage, Cleric or Rogue) at creation, with class starting kits and a class skill pool. Legacy characters load as Adventurer and pick once via /set_class.
+- Species now grant small racial passives (e.g. Orc +3% damage, Elf +3% move speed).
+- Character creation is now a 4-step wizard (sex/race, appearance, class, hardcore + start zone) with the name always visible; each class shows only its valid starter weapons.
+- Classes now start with themed outfits: bronze mail (Warrior), purple linen robes (Mage), blue vestments (Cleric) and rawhide leathers with a stealth bonus (Rogue).
+- Items can now be restricted to a class whitelist; the tooltip shows "Requires Class" (red when unmet) and the server rejects mismatched equips.
+- Spells now have per-ability cooldowns (server-authoritative), a source (Arcane, Divine, Primal, Psionic, Ki) and a school (Evocation, Necromancy, Abjuration, Axiomancy, …), and are catalogued in a spell compendium.
+- Three caster weapons — Tome, Holy Symbol and Focus — each with a castable starter spell set (Cinderbolt/Dawnmote/Thornspit basic attacks plus Shatterburst, Censure and Dread Whisper).
+- Caster signature spells now require the matching class: a Tome's Shatterburst needs Mage and a Holy Symbol's Censure needs Cleric (the basic cantrips stay available to anyone).
+- Each playable race now has a unique innate ability, usable without a weapon and bindable from the Diary: Human Second Wind, Elf Fleetness, Dwarf Stoneblood, Orc Bloodrage, Danari Shadowstep (a short blink) and Draugr Gravechill (a chilling burst).
+- New ground-targeted AoE cast mechanic with a visible telegraph ring, debuting with the Ruin spell Shatterburst.
+- New status effects: Terrified (slows and routs NPCs), Charmed (NPCs refuse to attack their charmer) and Hollowtouched (stacking max-health surcharge), with the first CC spells Dread Whisper and Censure.
 - Translators can now use fragment-based templates for modular weapons.
 - Airship captains can now be asked where they're currently heading, and where they're heading after reaching the current destination.
 - Courier, fetch, and messenger quests that can be started by talking to various civilized NPC's that can afford to pay you to get the job done.
@@ -32,8 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sword dual wielding animation
 - Savannah guard huts
 - Added market stands and other small structures to villages
-
+- Added a custom conrod rich text widget to render in-line images
 - Added 5 new Firestaff abilities.
+- Server-side Prometheus metrics for entity deaths, locations, and causes of death
+- New river ambience
   
 ### Changed
 
@@ -45,8 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repairing items no longer costs resources.
 - Characters are now slightly taller
 - Parry no longer depends on armor
+- Mindflayer drops glowing remains with 25% chance
+- Quests now give larger coin rewards, and trader NPCs have higher amounts of coins to be able to afford to pay for the larger quest rewards
 
 ### Removed
+
 - Removed Firestaff ability upgrades.
 
 ### Fixed
@@ -55,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat command autocomplete now works correctly again.
 - Resources in spots are now tracked by rtsim.
 - Fix Orientation of Wildskin Drum's Thumbnail
+- Fast river sfx
 
 ## [0.18.0] - 2026-01-23
 

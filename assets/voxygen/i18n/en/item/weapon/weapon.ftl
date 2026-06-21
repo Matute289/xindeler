@@ -46,6 +46,15 @@ weapon-staff-firestaff_humble_stick = Humble Stick
 weapon-staff-firestaff_starter = Gnarled Rod
     .desc = Smells like resin and magic.
 
+weapon-tome-apprentice_tome = Apprentice Tome
+    .desc = Margins crowded with a student's frantic leyline notes.
+
+weapon-holy_symbol-initiate_symbol = Initiate's Symbol
+    .desc = A carved wooden pendant blessed at a roadside shrine.
+
+weapon-focus-wanderer_focus = Wanderer's Focus
+    .desc = A smooth river stone worn as a channel for wild spirits.
+
 weapon-sword-caladbolg = Caladbolg
     .desc = You sense an eldritch presence watching you.
 

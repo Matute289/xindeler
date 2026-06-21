@@ -93,7 +93,6 @@ impl QueryServer {
                 &raw_msg_buf[2..(raw_msg_buf.len() - VELOREN_HEADER.len())]
             } else {
                 if let Ok(mut metrics) = metrics.lock() {
-                    metrics.received_packets += 1;
                     metrics.dropped_packets += 1;
                 }
                 continue;

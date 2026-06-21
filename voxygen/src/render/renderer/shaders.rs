@@ -64,8 +64,6 @@ impl Asset for Shaders {
             "rope-frag",
             "terrain-vert",
             "terrain-frag",
-            "smooth-terrain-vert",
-            "smooth-terrain-frag",
             "fluid-vert",
             "fluid-frag.cheap",
             "fluid-frag.shiny",

@@ -35,6 +35,7 @@ pub(crate) use character::parse_waypoint;
 pub struct PersistedComponents {
     pub body: comp::Body,
     pub hardcore: Option<comp::Hardcore>,
+    pub character_class: comp::CharacterClass,
     pub stats: comp::Stats,
     pub skill_set: comp::SkillSet,
     pub inventory: comp::Inventory,

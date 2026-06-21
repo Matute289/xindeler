@@ -12,10 +12,9 @@ use crate::{
     },
     render::{
         AltIndices, CullingMode, FigureSpriteAtlasData, FirstPassDrawer, FluidVertex, GlobalModel,
-        Instances, LodData, Mesh, Model, NormalMapBindGroup, RenderError, Renderer,
-        SPRITE_VERT_PAGE_SIZE, SmoothTerrainVertex, SpriteDrawer, SpriteGlobalsBindGroup,
-        SpriteInstance, SpriteVertex, SpriteVerts, TerrainAtlasData, TerrainLocals,
-        TerrainShadowDrawer, TerrainSmoothingMode, TerrainVertex,
+        Instances, LodData, Mesh, Model, RenderError, Renderer, SPRITE_VERT_PAGE_SIZE,
+        SpriteDrawer, SpriteGlobalsBindGroup, SpriteInstance, SpriteVertex, SpriteVerts,
+        TerrainAtlasData, TerrainLocals, TerrainShadowDrawer, TerrainVertex,
         pipelines::{self, AtlasData, AtlasTextures},
     },
     scene::terrain::sprite::SpriteModelConfig,
@@ -80,7 +79,6 @@ pub struct TerrainChunkData {
     // GPU data
     load_time: f32,
     opaque_model: Option<Model<TerrainVertex>>,
-    smooth_opaque_model: Option<Model<SmoothTerrainVertex>>,
     fluid_model: Option<Model<FluidVertex>>,
     /// If this is `None`, this texture is not allocated in the current atlas,
     /// and therefore there is no need to free its allocation.
@@ -137,7 +135,6 @@ pub struct MeshWorkerResponseMesh {
     sun_occluder_z_bounds: (f32, f32),
     opaque_mesh: Mesh<TerrainVertex>,
     fluid_mesh: Mesh<FluidVertex>,
-    smooth_opaque_mesh: Mesh<SmoothTerrainVertex>,
     atlas_texture_data: TerrainAtlasData,
     atlas_size: Vec2<u16>,
     light_map: LightMapFn,
@@ -261,7 +258,6 @@ fn mesh_worker(
     chunk: Arc<TerrainChunk>,
     range: Aabb<i32>,
     sprite_render_state: &SpriteRenderState,
-    terrain_smoothing: TerrainSmoothingMode,
 ) -> MeshWorkerResponse {
     span!(_guard, "mesh_worker");
     let blocks_of_interest = BlocksOfInterest::from_blocks(
@@ -280,7 +276,7 @@ fn mesh_worker(
         let (
             opaque_mesh,
             fluid_mesh,
-            smooth_opaque_mesh,
+            _shadow_mesh,
             (
                 bounds,
                 atlas_texture_data,
@@ -296,7 +292,6 @@ fn mesh_worker(
                 range,
                 Vec2::new(max_texture_size, max_texture_size),
                 &blocks_of_interest,
-                terrain_smoothing,
             ),
         );
         mesh = Some(MeshWorkerResponseMesh {
@@ -305,7 +300,6 @@ fn mesh_worker(
             sun_occluder_z_bounds,
             opaque_mesh,
             fluid_mesh,
-            smooth_opaque_mesh,
             atlas_texture_data,
             atlas_size,
             light_map,
@@ -446,7 +440,6 @@ pub struct Terrain<V: RectRasterableVol = TerrainChunk> {
     /// for any particular chunk; look at the `texture` field in
     /// `TerrainChunkData` for that.
     atlas_textures: Arc<AtlasTextures<pipelines::terrain::Locals, TerrainAtlasData>>,
-    normal_map_bind_group: NormalMapBindGroup,
 
     phantom: PhantomData<V>,
 }
@@ -679,7 +672,6 @@ impl<V: RectRasterableVol> Terrain<V> {
                 &sprite_render_context.sprite_verts_buffer,
             ),
             atlas_textures: Arc::new(atlas_textures),
-            normal_map_bind_group: renderer.bind_smooth_terrain_normal_maps(),
             phantom: PhantomData,
         }
     }
@@ -1120,7 +1112,6 @@ impl<V: RectRasterableVol> Terrain<V> {
             let started_tick = todo.started_tick;
             let sprite_render_state = Arc::clone(&self.sprite_render_state);
             let cnt = Arc::clone(&self.mesh_todos_active);
-            let terrain_smoothing = scene_data.terrain_smoothing;
             cnt.fetch_add(1, Ordering::Relaxed);
             scene_data
                 .state
@@ -1136,7 +1127,6 @@ impl<V: RectRasterableVol> Terrain<V> {
                         chunk,
                         aabb,
                         &sprite_render_state,
-                        terrain_smoothing,
                     ));
                     cnt.fetch_sub(1, Ordering::Relaxed);
                 });
@@ -1232,7 +1222,6 @@ impl<V: RectRasterableVol> Terrain<V> {
                         self.insert_chunk(response.pos, TerrainChunkData {
                             load_time,
                             opaque_model: renderer.create_model(&mesh.opaque_mesh),
-                            smooth_opaque_model: renderer.create_model(&mesh.smooth_opaque_mesh),
                             fluid_model: renderer.create_model(&mesh.fluid_mesh),
                             atlas_alloc: Some(allocation.id),
                             atlas_textures: Arc::clone(&self.atlas_textures),
@@ -1658,25 +1647,6 @@ impl<V: RectRasterableVol> Terrain<V> {
                 };
                 drawer.draw(model, atlas_textures, locals, alt_indices, culling_mode)
             });
-    }
-
-    pub fn render_smooth<'a>(&'a self, drawer: &mut FirstPassDrawer<'a>, focus_pos: Vec3<f32>) {
-        span!(_guard, "render_smooth", "Terrain::render_smooth");
-        let mut drawer = drawer.draw_smooth_terrain(&self.normal_map_bind_group);
-
-        let focus_chunk = Vec2::from(focus_pos).map2(TerrainChunk::RECT_SIZE, |e: f32, sz| {
-            (e as i32).div_euclid(sz as i32)
-        });
-
-        Spiral2d::new()
-            .filter_map(|rpos| {
-                let pos = focus_chunk + rpos;
-                Some((rpos, self.chunks.get(&pos)?))
-            })
-            .take(self.chunks.len())
-            .filter(|(_, chunk)| chunk.visible.is_visible())
-            .filter_map(|(_, chunk)| Some((chunk.smooth_opaque_model.as_ref()?, &chunk.locals)))
-            .for_each(|(model, locals)| drawer.draw(model, locals));
     }
 
     pub fn render_sprites<'a>(

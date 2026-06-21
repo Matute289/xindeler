@@ -7,7 +7,6 @@ use crate::{
     },
 };
 use common::{
-    consts::HIRES_SCALE,
     generation::{EntityInfo, EntitySpawn},
     terrain::{
         Block, BlockKind, CoordinateConversions, SpriteKind, TerrainChunkSize,
@@ -40,10 +39,10 @@ fn to_wpos(cell: Vec2<i32>, level: u32) -> Vec2<i32> {
     (cell * CELL_SIZE) - (level & 1) as i32 * CELL_SIZE / 4
 }
 
-const AVG_LEVEL_DEPTH: i32 = (120.0 * HIRES_SCALE) as i32;
+const AVG_LEVEL_DEPTH: i32 = 120;
 pub const LAYERS: u32 = 5;
-const MIN_RADIUS: f32 = 8.0 * HIRES_SCALE;
-const MAX_RADIUS: f32 = 64.0 * HIRES_SCALE;
+const MIN_RADIUS: f32 = 8.0;
+const MAX_RADIUS: f32 = 64.0;
 
 fn node_at(cell: Vec2<i32>, level: u32, land: &Land) -> Option<Node> {
     let rand = RandomField::new(37 + level);

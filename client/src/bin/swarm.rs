@@ -122,8 +122,11 @@ fn run_client(
             &mut None,
             &username,
             "",
-            |_| false,
-            |_| {},
+            None,                      // locale
+            |_| false,                 // auth_trusted
+            &|_| {},                   // init_stage_update
+            |_| {},                    // add_foreign_systems
+            std::path::PathBuf::new(), // config_dir
             ClientType::Game,
         )) {
             Err(e) => tracing::warn!(?e, "Client {} disconnected", index),
@@ -135,7 +138,7 @@ fn run_client(
 
     let mut tick = |client: &mut Client| -> Result<(), veloren_client::Error> {
         clock.tick();
-        client.tick_network(clock.dt())?;
+        client.tick_network(clock.real_dt())?;
         Ok(())
     };
 
@@ -154,6 +157,9 @@ fn run_client(
             body(),
             false,
             None,
+            // Bots use Warrior; keep in sync with valid_starter_items(Warrior) — the
+            // sword/axe/hammer starter whitelist gates this weapon choice.
+            comp::class::ClassKind::Warrior,
         );
 
         client.load_character_list();

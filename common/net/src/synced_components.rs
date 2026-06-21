@@ -22,6 +22,7 @@ macro_rules! synced_components {
         $macro! {
             body: Body,
             hardcore: Hardcore,
+            character_class: CharacterClass,
             stats: Stats,
             buffs: Buffs,
             auras: Auras,
@@ -72,6 +73,12 @@ macro_rules! synced_components {
             admin: Admin,
             combo: Combo,
             active_abilities: ActiveAbilities,
+            ability_cooldowns: AbilityCooldowns,
+            ability_pool: AbilityPool,
+            // The attuned-item set (ENG-D2). `Attuning` (in-progress channels) is
+            // NOT synced — it carries absolute server `Time`, a different epoch
+            // than the client's, so a finish timestamp would be meaningless there.
+            attuned_items: AttunedItems,
             can_build: CanBuild,
             is_interactor: IsInteractor,
             interactors: Interactors,
@@ -129,6 +136,10 @@ impl NetSync for Body {
 }
 
 impl NetSync for Hardcore {
+    const SYNC_FROM: SyncFrom = SyncFrom::AnyEntity;
+}
+
+impl NetSync for CharacterClass {
     const SYNC_FROM: SyncFrom = SyncFrom::AnyEntity;
 }
 
@@ -302,6 +313,18 @@ impl NetSync for Combo {
 
 impl NetSync for ActiveAbilities {
     const SYNC_FROM: SyncFrom = SyncFrom::ClientSpectatorEntity;
+}
+
+impl NetSync for AbilityCooldowns {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
+}
+
+impl NetSync for AttunedItems {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
+}
+
+impl NetSync for AbilityPool {
+    const SYNC_FROM: SyncFrom = SyncFrom::ClientEntity;
 }
 
 impl NetSync for CanBuild {

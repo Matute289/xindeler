@@ -257,6 +257,18 @@ pub enum BuffKind {
     /// Strength linearly increases the amount of additional combo generated and
     /// the additional energy reward.
     ArdentHunted,
+    /// Dread of death. Heavy movement slow (players); NPCs additionally rout
+    /// (server/agent). Strength scales the slow non-linearly like Crippled.
+    /// v1 implements the spec's sanctioned fallback (slow, not forced
+    /// movement) to avoid prediction artifacts; see magic spec §5 risk note.
+    Terrified,
+    /// Cannot bring itself to harm the charmer. No stat effects; consumed by
+    /// agent targeting (NPCs only in v1, spec §5).
+    Charmed,
+    /// The Hollow's surcharge: stacking multiplicative max-health reduction
+    /// applied by every Beyond-tainted Necromancy cast via
+    /// AbilityMeta.init_event.
+    Hollowtouched,
     // =================
     //      COMPLEX
     // =================
@@ -337,7 +349,10 @@ impl BuffKind {
             | BuffKind::Amnesia
             | BuffKind::OffBalance
             | BuffKind::Chilled
-            | BuffKind::ArdentHunted => BuffDescriptor::SimpleNegative,
+            | BuffKind::ArdentHunted
+            | BuffKind::Terrified
+            | BuffKind::Charmed
+            | BuffKind::Hollowtouched => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -371,7 +386,12 @@ impl BuffKind {
 
     /// Checks if multiple instances of the buff should be processed, instead of
     /// only the strongest.
-    pub fn stacks(self) -> bool { matches!(self, BuffKind::PotionSickness | BuffKind::Resilience) }
+    pub fn stacks(self) -> bool {
+        matches!(
+            self,
+            BuffKind::PotionSickness | BuffKind::Resilience | BuffKind::Hollowtouched
+        )
+    }
 
     pub fn effects(&self, data: &BuffData, source_entity: Option<Uid>) -> Vec<BuffEffect> {
         // Normalized nonlinear scaling
@@ -702,6 +722,14 @@ impl BuffKind {
                 })
                 .with_requirement(CombatRequirement::AttackSource(AttackSource::Projectile)),
             )],
+            BuffKind::Terrified => {
+                vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))]
+            },
+            BuffKind::Charmed => vec![],
+            BuffKind::Hollowtouched => vec![BuffEffect::MaxHealthModifier {
+                value: 1.0 - (0.08 * data.strength).min(0.4),
+                kind: ModifierKind::Multiplicative,
+            }],
         }
     }
 
@@ -849,6 +877,33 @@ pub enum BuffCategory {
     RemoveOnAttack,
     RemoveOnLoadoutChange,
     SelfBuff,
+    /// Sustained by concentration (ENG-C2 / M5): only one such buff is held at
+    /// a time (a new one removes the prior), and it is removed when the
+    /// bearer takes a hit at or above the break threshold. Tag
+    /// concentration-spell buffs/auras with this.
+    Concentration,
+}
+
+/// Concentration break threshold = base + a fraction of the bearer's **max
+/// HP**. Because max HP grows with level/skills, a more powerful character
+/// resists more before a hit breaks concentration (ENG-C2 / M5, Matias §6.5: "a
+/// medida que sube de nivel resiste más"). Tunable and kept modest so it stays
+/// playable — refine with `game-balance-designer` when content lands.
+/// Self-inflicted costs (e.g. the Hemomancy HP price, `cause: None`) do NOT
+/// break it: the check only fires for hits with a `DamageSource` cause.
+pub const CONCENTRATION_BREAK_BASE: f32 = 10.0;
+pub const CONCENTRATION_BREAK_HP_FRACTION: f32 = 0.1;
+
+/// The single-hit damage needed to break the concentration of a bearer whose
+/// maximum health is `max_hp`.
+pub fn concentration_break_threshold(max_hp: f32) -> f32 {
+    CONCENTRATION_BREAK_BASE + max_hp.max(0.0) * CONCENTRATION_BREAK_HP_FRACTION
+}
+
+/// Whether a single hit of `damage` (a positive amount) breaks the
+/// concentration of a bearer with `max_hp` maximum health.
+pub fn concentration_breaks(damage: f32, max_hp: f32) -> bool {
+    damage >= concentration_break_threshold(max_hp)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1396,5 +1451,37 @@ pub mod tests {
                 .values()
                 .any(|b| b.end_time.unwrap().0 > 59.99)
         );
+    }
+
+    // ENG-C2 (M5): concentration breaks when a single hit deals at least the
+    // (max-HP-scaled) damage threshold (Matias §6.5 "umbral de daño").
+    #[test]
+    fn concentration_breaks_at_threshold() {
+        let max_hp = 100.0;
+        let t = concentration_break_threshold(max_hp);
+        assert!(!concentration_breaks(t - 0.01, max_hp));
+        assert!(concentration_breaks(t, max_hp));
+        assert!(concentration_breaks(t + 50.0, max_hp));
+        assert!(!concentration_breaks(0.0, max_hp));
+    }
+
+    // ENG-C2 refinement (Matias): a more powerful (higher-max-HP) bearer resists
+    // more — the same hit that breaks a weak caster may not break a strong one.
+    #[test]
+    fn concentration_threshold_scales_with_power() {
+        let weak = concentration_break_threshold(50.0);
+        let strong = concentration_break_threshold(800.0);
+        assert!(strong > weak);
+        let hit = weak + 1.0;
+        assert!(concentration_breaks(hit, 50.0)); // breaks the weak caster
+        assert!(!concentration_breaks(hit, 800.0)); // same hit spares the strong one
+    }
+
+    // Concentration is a buff category so concentration-sustained effects can be
+    // tagged in RON and removed together (one-at-a-time + break-on-damage).
+    #[test]
+    fn concentration_is_a_buff_category() {
+        let cat: BuffCategory = ron::from_str("Concentration").expect("Concentration must parse");
+        assert_eq!(cat, BuffCategory::Concentration);
     }
 }

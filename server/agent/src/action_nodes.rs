@@ -19,6 +19,7 @@ use common::{
         ability::BASE_ABILITY_LIMIT,
         agent::{FlightMode, PidControllers, Sound, SoundKind, Target},
         biped_large, body,
+        buff::{BuffKind, BuffSource},
         inventory::slot::EquipSlot,
         item::{
             ConsumableKind, Effects, Item, ItemDesc, ItemKind,
@@ -37,6 +38,7 @@ use common::{
     states::basic_beam,
     terrain::Block,
     time::DayPeriod,
+    uid::Uid,
     util::Dir,
     vol::ReadVol,
 };
@@ -1217,7 +1219,12 @@ impl AgentData<'_> {
 
             let attack_fn: common_dynlib::Symbol<
                 fn(&Self, &mut Agent, &mut Controller, &TargetData, &ReadData),
-            > = unsafe { lib.get(ATTACK_FN) }.unwrap_or_else(|e| {
+            > = // SAFETY: `ATTACK_FN` names the `attack_inner` symbol exported
+                // with `#[unsafe(export_name)]` by this same crate's
+                // `be-dyn-lib` build (`veloren-server-agent` dylib), compiled
+                // from this workspace by the hot-reload watcher; the symbol's
+                // type signature here matches that exported fn item exactly.
+                unsafe { lib.get(ATTACK_FN) }.unwrap_or_else(|e| {
                 panic!(
                     "Trying to use: {} but had error: {:?}",
                     CStr::from_bytes_with_nul(ATTACK_FN)
@@ -1244,6 +1251,19 @@ impl AgentData<'_> {
         let rng = &mut rng();
 
         self.dismount_uncontrollable(controller, read_data);
+
+        // Magic spec §5: override hostile engagement for CC buff states.
+        if self.is_terrified(read_data) {
+            self.flee(agent, controller, read_data, tgt_data.pos);
+            return;
+        }
+        if let Some(target_uid) = tgt_data.uid
+            && self.is_charmed_by(target_uid, read_data)
+        {
+            // Stand down: charmed entities refuse to engage the charmer.
+            agent.target = None;
+            return;
+        }
 
         let tool_tactic = |tool_kind| match tool_kind {
             ToolKind::Bow => Tactic::Bow,
@@ -2225,6 +2245,23 @@ impl AgentData<'_> {
 
     pub fn below_flee_health(&self, agent: &Agent) -> bool {
         self.damage.min(1.0) < agent.psyche.flee_health
+    }
+
+    /// Magic spec §5: Terrified entities rout instead of fighting.
+    pub fn is_terrified(&self, read_data: &ReadData) -> bool {
+        read_data
+            .buffs
+            .get(*self.entity)
+            .is_some_and(|buffs| buffs.contains(BuffKind::Terrified))
+    }
+
+    /// Magic spec §5: Charmed entities will not attack their charmer.
+    pub fn is_charmed_by(&self, target_uid: Uid, read_data: &ReadData) -> bool {
+        read_data.buffs.get(*self.entity).is_some_and(|buffs| {
+            buffs.iter_kind(BuffKind::Charmed).any(|(_, buff)| {
+                matches!(buff.source, BuffSource::Character { by, .. } if by == target_uid)
+            })
+        })
     }
 
     pub fn is_more_dangerous_than_target(

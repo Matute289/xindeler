@@ -116,27 +116,6 @@ impl BlockKind {
                 | BlockKind::Sand
         )
     }
-
-    /// Index into the terrain normal map texture array (0-7).
-    /// Layer 0 = rock (default for unrecognised kinds).
-    pub fn normal_map_index(&self) -> u8 {
-        match self {
-            BlockKind::Rock
-            | BlockKind::WeakRock
-            | BlockKind::GlowingRock
-            | BlockKind::GlowingWeakRock
-            | BlockKind::Lava
-            | BlockKind::Misc => 0,
-            BlockKind::Grass => 1,
-            BlockKind::Sand => 2,
-            BlockKind::Snow | BlockKind::ArtSnow => 3,
-            BlockKind::Earth => 4,
-            BlockKind::Wood => 5,
-            BlockKind::Ice => 6,
-            BlockKind::Leaves | BlockKind::ArtLeaves | BlockKind::GlowingMushroom => 7,
-            BlockKind::Air | BlockKind::Water => 0,
-        }
-    }
 }
 
 /// # Format
@@ -839,20 +818,3 @@ impl Block {
 
 const _: () = assert!(core::mem::size_of::<BlockKind>() == 1);
 const _: () = assert!(core::mem::size_of::<Block>() == 4);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normal_map_index_covers_all_kinds() {
-        use strum::IntoEnumIterator;
-        for kind in BlockKind::iter() {
-            let idx = kind.normal_map_index();
-            assert!(
-                idx < 8,
-                "BlockKind::{kind:?} returned out-of-range index {idx}"
-            );
-        }
-    }
-}

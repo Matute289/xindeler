@@ -108,6 +108,13 @@ impl Compiler for ShaderCCompiler {
             source: wgpu::ShaderSource::SpirV(Cow::Borrowed(spv.as_binary())),
         };
         let runtimechecks = wgpu::ShaderRuntimeChecks::unchecked();
+        // SAFETY: the SPIR-V in `descriptor` was produced and validated by
+        // shaderc from our own shader sources just above; `_trusted` +
+        // `ShaderRuntimeChecks::unchecked()` skips wgpu's re-validation AND
+        // runtime bounds checks, trusting that output. Invariant: only
+        // shaderc-emitted (never user-supplied or disk-cached) binaries reach
+        // this call. A shaderc miscompile could cause GPU-side OOB —
+        // acceptable for our own shaders; never route arbitrary sources here.
         #[expect(unsafe_code)]
         Ok(unsafe { device.create_shader_module_trusted(descriptor, runtimechecks) })
     }
@@ -168,6 +175,12 @@ impl Compiler for WgpuCompiler {
             },
         };
         let runtimechecks = wgpu::ShaderRuntimeChecks::unchecked();
+        // SAFETY: mirrors the SPIR-V path above — `descriptor` holds our own
+        // GLSL shader source (includes resolved from our asset tree), never
+        // user-supplied input; parse/validation errors are still surfaced via
+        // the surrounding `push_error_scope`/`pop_error_scope` pair, while
+        // `ShaderRuntimeChecks::unchecked()` skips runtime bounds checks,
+        // trusting our shaders. Arbitrary sources must never be routed here.
         #[expect(unsafe_code)]
         let shader = unsafe { device.create_shader_module_trusted(descriptor, runtimechecks) };
 

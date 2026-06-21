@@ -5,7 +5,7 @@ description: Use when implementing ORACLE world-director features — world even
 
 # veloren-oracle
 
-**REQUIRED:** Read `docs/superpowers/specs/2026-06-10-project-oracle-design.md` (the
+**REQUIRED:** Read `docs/design/specs/2026-06-10-project-oracle-design.md` (the
 GDD/TDD) and identify the phase your change belongs to. Invoke `veloren-dev` and
 `superpowers:test-driven-development` before coding. For sim internals, dispatch the
 `sim-systems-engineer` agent.
@@ -13,7 +13,7 @@ GDD/TDD) and identify the phase your change belongs to. Invoke `veloren-dev` and
 ## Division of labor (do not blur it)
 
 **ORACLE decides WHAT happens in the world** (events, arcs, ecosystem shifts, climate);
-**AURORA decides how inhabitants react** (`docs/superpowers/specs/2026-06-10-project-aurora-design.md`).
+**AURORA decides how inhabitants react** (`docs/design/specs/2026-06-10-project-aurora-design.md`).
 ORACLE publishes typed world facts; AURORA consumes them. If you're writing per-NPC
 reaction logic, you're in the wrong spec — use `veloren-aurora`.
 

@@ -35,9 +35,6 @@ pub use self::{
         rain_occlusion::Locals as RainOcclusionLocals,
         shadow::{Locals as ShadowLocals, PointLightMatrix},
         skybox::{Vertex as SkyboxVertex, create_mesh as create_skybox_mesh},
-        smooth_terrain::{
-            NormalMapBindGroup, NormalMapLayout, SmoothTerrainPipeline, SmoothTerrainVertex,
-        },
         sprite::{
             Instance as SpriteInstance, SpriteGlobalsBindGroup, SpriteVerts,
             VERT_PAGE_SIZE as SPRITE_VERT_PAGE_SIZE, Vertex as SpriteVertex,
@@ -387,35 +384,6 @@ impl BloomMode {
     fn is_on(&self) -> bool { matches!(self, BloomMode::On(_)) }
 }
 
-/// Terrain meshing algorithm quality tier.
-/// Disabled = existing greedy mesher; Soft/Smooth/Ultra = Transvoxel with
-/// increasing LOD.
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    strum::EnumIter,
-    strum::Display,
-)]
-pub enum TerrainSmoothingMode {
-    /// Use existing greedy mesher — zero performance overhead, identical to
-    /// today.
-    #[default]
-    Disabled,
-    /// Transvoxel, 1 LOD level, smooth collision. Minimum: GTX 1060 / RX 580.
-    Soft,
-    /// Transvoxel, 3 LOD levels, smooth collision. Minimum: RTX 3060 / RX 6600.
-    Smooth,
-    /// Transvoxel, 3 LOD levels + normal maps, smooth collision. Minimum: RTX
-    /// 3070 / RX 6800.
-    Ultra,
-}
-
 /// Render modes
 #[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -441,8 +409,6 @@ pub struct RenderMode {
     pub profiler_enabled: bool,
     #[serde(skip)]
     pub enable_naga: bool,
-
-    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl Default for RenderMode {
@@ -464,7 +430,6 @@ impl Default for RenderMode {
             present_mode: PresentMode::default(),
             profiler_enabled: false,
             enable_naga: std::env::var("VELOREN_DISABLE_NAGA_SHADERS").is_err(),
-            terrain_smoothing: TerrainSmoothingMode::default(),
         }
     }
 }
@@ -486,7 +451,6 @@ impl RenderMode {
                 flashing_lights_enabled: self.flashing_lights_enabled,
                 experimental_shaders: self.experimental_shaders,
                 enable_naga: self.enable_naga,
-                terrain_smoothing: self.terrain_smoothing,
             },
             OtherModes {
                 upscale_mode: self.upscale_mode,
@@ -514,7 +478,6 @@ pub struct PipelineModes {
     flashing_lights_enabled: bool,
     experimental_shaders: HashSet<ExperimentalShader>,
     enable_naga: bool,
-    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 /// Other render modes that don't effect pipelines
@@ -619,4 +582,10 @@ pub enum ExperimentalShader {
     DiscardTransparency,
     /// Display chunk borders for easier debugging.
     ShowChunkBorders,
+    /// Adds a layer of colour quantization to the output, giving a retro
+    /// palette feel.
+    ColorQuantization,
+    /// Adds outlines around the perimeters of objects for a pixel art feel.
+    /// Best at lower internal resolutions.
+    Outlines,
 }

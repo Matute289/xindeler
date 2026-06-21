@@ -73,6 +73,7 @@ pub struct AgentData<'a> {
     pub stance: Option<&'a Stance>,
     pub cached_spatial_grid: &'a common::CachedSpatialGrid,
     pub msm: &'a MaterialStatManifest,
+    pub ability_map: &'a AbilityMap,
     pub rtsim_entity: Option<&'a RtSimEntity>,
 }
 
@@ -145,6 +146,9 @@ impl<'a> TargetData<'a> {
                 ToolKind::Bow
                 | ToolKind::Staff
                 | ToolKind::Sceptre
+                | ToolKind::Tome
+                | ToolKind::HolySymbol
+                | ToolKind::Focus
                 | ToolKind::Blowgun
                 | ToolKind::Debug
                 | ToolKind::Instrument,

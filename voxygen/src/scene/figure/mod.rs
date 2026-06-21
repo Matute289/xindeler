@@ -1297,7 +1297,9 @@ impl FigureMgr {
             } else {
                 // Check whether we can shadow.
                 meta.can_shadow_sun = (data.can_shadow_sun)(pos, radius);
-                meta.can_occlude_rain = (data.can_occlude_rain)(pos, radius);
+                // Only very large figures can occlude rain!
+                meta.can_occlude_rain =
+                    matches!(body, Body::Ship(_)) && (data.can_occlude_rain)(pos, radius);
             }
             (in_frustum, lpindex)
         } else {
@@ -1354,7 +1356,7 @@ impl FigureMgr {
         let ability_id = character.and_then(|c| {
             c.ability_info()
                 .and_then(|a| a.ability)
-                .and_then(|a| a.ability_id(Some(c), inventory))
+                .and_then(|a| a.ability_id(Some(c), inventory, None))
         });
 
         let move_dir = {

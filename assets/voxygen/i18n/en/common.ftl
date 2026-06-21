@@ -67,6 +67,13 @@ common-species-elf = Elf
 common-species-draugr = Draugr
 common-species-danari = Danari
 
+## Classes
+common-class-warrior = Warrior
+common-class-mage = Mage
+common-class-cleric = Cleric
+common-class-rogue = Rogue
+common-class-adventurer = Adventurer
+
 ## Tools
 common-weapons-axe = Axe
 common-weapons-dagger = Dagger
@@ -78,6 +85,9 @@ common-weapons-bow = Bow
 common-weapons-hammer = Hammer
 common-weapons-general = General Combat
 common-weapons-sceptre = Healing Sceptre
+common-weapons-tome = Tome
+common-weapons-holy_symbol = Holy Symbol
+common-weapons-focus = Focus
 common-weapons-shield = Shield
 common-weapons-spear = Spear
 common-tool-debug = Debug
@@ -90,7 +100,13 @@ common-tool-throwable = Throwable
 
 ## Item Kinds
 common-kind-modular_component = Modular Component
-common-kind-modular_component_partial = Component
+    .sword = Sword Component
+    .axe = Axe Component
+    .hammer = Hammer Component
+    .bow = Bow Component
+    .staff = Firestaff Component
+    .sceptre = Sceptre Component
+
 common-kind-glider = Glider
 common-kind-consumable = Consumable
 common-kind-utility = Utility

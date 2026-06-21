@@ -3,12 +3,14 @@ mod admin;
 pub mod agent;
 pub mod anchor;
 pub mod arcing;
+pub mod attunement;
 pub mod aura;
 pub mod beam;
 pub mod body;
 pub mod buff;
 pub mod character_state;
 pub mod chat;
+pub mod class;
 pub mod combo;
 pub mod compass;
 pub mod controller;
@@ -36,6 +38,7 @@ pub mod presence;
 pub mod projectile;
 pub mod shockwave;
 pub mod skillset;
+pub mod spell;
 mod stats;
 pub mod teleport;
 pub mod visual;
@@ -43,8 +46,8 @@ pub mod visual;
 // Reexports
 pub use self::{
     ability::{
-        Ability, AbilityInput, ActiveAbilities, BASE_ABILITY_LIMIT, CharacterAbility,
-        CharacterAbilityType, Stance,
+        Ability, AbilityCooldowns, AbilityInput, AbilityPool, ActiveAbilities, BASE_ABILITY_LIMIT,
+        CharacterAbility, CharacterAbilityType, MagicSource, School, Stance,
     },
     admin::{Admin, AdminRole},
     agent::{
@@ -53,6 +56,10 @@ pub use self::{
     },
     anchor::Anchor,
     arcing::{ArcProperties, Arcing},
+    attunement::{
+        AttunedItems, Attuning, attune_time, item_effects_active, max_attuned_items,
+        reconcile_attunement,
+    },
     aura::{Aura, AuraChange, AuraKind, Auras, EnteredAuras},
     beam::Beam,
     body::{
@@ -68,6 +75,7 @@ pub use self::{
     chat::{
         ChatMode, ChatMsg, ChatType, Faction, SpeechBubble, SpeechBubbleType, UnresolvedChatMsg,
     },
+    class::{CharacterClass, ClassKind},
     combo::Combo,
     controller::{
         ControlAction, ControlEvent, Controller, ControllerInputs, GroupManip, InputAttr,
@@ -110,6 +118,7 @@ pub use self::{
         SkillGroup, SkillGroupKind, SkillSet,
         skills::{self, Skill},
     },
+    spell::{SpellCompendium, SpellDef},
     stats::{Stats, StatsModifier},
     teleport::Teleporting,
     visual::{FrontendMarker, LightAnimation, LightEmitter},

@@ -7,7 +7,6 @@ use crate::{
 };
 use common::{
     calendar::{Calendar, CalendarEvent},
-    consts::HIRES_SCALE,
     terrain::{
         CoordinateConversions, TerrainChunkSize, quadratic_nearest_point, river_spline_coeffs,
         uniform_idx_as_vec2, vec2_as_uniform_idx,
@@ -1233,7 +1232,7 @@ impl<'a> Sampler<'a> for ColumnGen<'a> {
                     Rgb::lerp(cliff, sand, alt.sub(basement).mul(0.25)),
                     // Land
                     ground,
-                    ((alt - base_sea_level) / (12.0 * HIRES_SCALE)).clamped(0.0, 1.0),
+                    ((alt - base_sea_level) / 12.0).clamped(0.0, 1.0),
                 ),
                 surface_veg,
             ),

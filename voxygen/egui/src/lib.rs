@@ -193,7 +193,12 @@ pub fn maintain(
                 Option<u64>,
                 Vec<(String, bool)>,
             ) -> EguiActions,
-        > = unsafe { lib.get(MAINTAIN_EGUI_FN) }.unwrap_or_else(|e| {
+        > = // SAFETY: `MAINTAIN_EGUI_FN` names the `maintain_egui_inner`
+            // symbol exported with `#[unsafe(export_name)]` by this same
+            // crate's `be-dyn-lib` build (`voxygen-egui` dylib), compiled
+            // from this workspace by the hot-reload watcher; the symbol's
+            // type signature here matches that exported fn item exactly.
+            unsafe { lib.get(MAINTAIN_EGUI_FN) }.unwrap_or_else(|e| {
             panic!(
                 "Trying to use: {} but had error: {:?}",
                 CStr::from_bytes_with_nul(MAINTAIN_EGUI_FN)

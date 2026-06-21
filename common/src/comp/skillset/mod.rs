@@ -1,6 +1,6 @@
 use crate::{
     assets::{AssetExt, Ron},
-    comp::{item::tool::ToolKind, skills::Skill},
+    comp::{class::ClassKind, item::tool::ToolKind, skills::Skill},
 };
 use core::borrow::{Borrow, BorrowMut};
 use hashbrown::HashMap;
@@ -16,7 +16,7 @@ pub mod skills;
 #[cfg(test)] mod test;
 
 /// Maximum character level (WoW/Diablo-style derived level — see
-/// docs/superpowers/specs/2026-06-10-character-levels-design.md).
+/// docs/design/specs/2026-06-10-character-levels-design.md).
 pub const MAX_CHARACTER_LEVEL: u16 = 60;
 /// Cumulative XP required for level L is LEVEL_XP_BASE * (L - 1)^2.
 pub const LEVEL_XP_BASE: u32 = 250;
@@ -108,6 +108,7 @@ lazy_static! {
 pub enum SkillGroupKind {
     General,
     Weapon(ToolKind),
+    Class(ClassKind),
 }
 
 impl SkillGroupKind {
@@ -117,7 +118,8 @@ impl SkillGroupKind {
     pub fn skill_point_cost(self, level: u16) -> u32 {
         use std::f32::consts::E;
         match self {
-            Self::Weapon(ToolKind::Sword | ToolKind::Axe | ToolKind::Hammer | ToolKind::Bow) => {
+            Self::Weapon(ToolKind::Sword | ToolKind::Axe | ToolKind::Hammer | ToolKind::Bow)
+            | Self::Class(_) => {
                 let level = level as f32;
                 ((400.0 * (level / (level + 20.0)).powi(2) + 5.0 * E.powf(0.025 * level))
                     .min(u32::MAX as f32) as u32)
@@ -284,6 +286,21 @@ impl SkillSet {
         };
         let mut persistence_load_error = None;
 
+        // Class skill groups are granted directly (unlock_skill_group at creation /
+        // /set_class), not earned through the skill tree, so seed their unlock skill
+        // here — both the loop below and class-gated abilities key off
+        // has_skill(UnlockGroup(..)). Also repairs characters saved before this
+        // seeding.
+        let class_groups: Vec<SkillGroupKind> = skillset
+            .skill_groups
+            .keys()
+            .copied()
+            .filter(|kind| matches!(kind, SkillGroupKind::Class(_)))
+            .collect();
+        for kind in class_groups {
+            skillset.skills.entry(Skill::UnlockGroup(kind)).or_insert(1);
+        }
+
         // Loops while checking the all_skills hashmap. For as long as it can find an
         // entry where the skill group kind is unlocked, insert the skills corresponding
         // to that skill group kind. When no more skill group kinds can be found, break
@@ -332,13 +349,19 @@ impl SkillSet {
             && self.skill_group_accessible_if_exists(skill_group_kind)
     }
 
-    ///  Unlocks a skill group for a player. It starts with 0 exp and 0 skill
-    ///  points.
-    fn unlock_skill_group(&mut self, skill_group_kind: SkillGroupKind) {
+    /// Unlocks a skill group directly. Used by character creation and
+    /// /set_class; players unlock weapon groups via Skill::UnlockGroup instead.
+    pub fn unlock_skill_group(&mut self, skill_group_kind: SkillGroupKind) {
         if !self.skill_groups.contains_key(&skill_group_kind) {
             self.skill_groups
                 .insert(skill_group_kind, SkillGroup::new(skill_group_kind));
         }
+        // Record the group's unlock skill so `has_skill(UnlockGroup(..))` reflects
+        // membership. Class-gated abilities key off this, and load_from_database's
+        // skill-loading loop already assumes it. Symmetric with the General group.
+        self.skills
+            .entry(Skill::UnlockGroup(skill_group_kind))
+            .or_insert(1);
     }
 
     /// Returns an iterator over skill groups
@@ -683,5 +706,49 @@ mod character_level_tests {
                 assert_eq!(level_from_total_exp(xp - 1), level - 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod class_tree_tests {
+    use super::*;
+
+    #[test]
+    fn class_skill_groups_have_defs_and_stable_hashes() {
+        for class in ClassKind::PLAYABLE {
+            let group = SkillGroupKind::Class(class);
+            assert!(
+                SKILL_GROUP_DEFS.contains_key(&group),
+                "missing manifest entry: {group:?}"
+            );
+            assert!(
+                SKILL_GROUP_HASHES.contains_key(&group),
+                "missing hash: {group:?}"
+            );
+            // v1 stub trees are empty: no purchasable skills yet
+            assert_eq!(group.total_skill_point_cost(), 0);
+        }
+    }
+
+    // Class-gated abilities (e.g. Mage-only Shatterburst) rely on
+    // has_skill(UnlockGroup(Class(..))) reflecting membership.
+    #[test]
+    fn class_membership_is_detectable_via_has_skill() {
+        let mut mage = SkillSet::default();
+        mage.unlock_skill_group(SkillGroupKind::Class(ClassKind::Mage));
+        assert!(mage.has_skill(Skill::UnlockGroup(SkillGroupKind::Class(ClassKind::Mage))));
+        assert!(!mage.has_skill(Skill::UnlockGroup(SkillGroupKind::Class(ClassKind::Cleric))));
+    }
+
+    // A character loaded from the DB (skill_groups restored, skills map lacking the
+    // class UnlockGroup — e.g. saved before the seeding) still registers
+    // membership.
+    #[test]
+    fn loaded_class_member_keeps_unlock_skill() {
+        let kind = SkillGroupKind::Class(ClassKind::Cleric);
+        let mut groups = HashMap::new();
+        groups.insert(kind, SkillGroup::new(kind));
+        let (skillset, _err) = SkillSet::load_from_database(groups, HashMap::new());
+        assert!(skillset.has_skill(Skill::UnlockGroup(kind)));
     }
 }

@@ -22,7 +22,6 @@ use common::{
 };
 use common_base::{prof_span, span};
 use common_ecs::{Job, Origin, ParMode, Phase, PhysicsMetrics, System};
-use common_state::SmoothTerrainSettings;
 use rayon::iter::ParallelIterator;
 use specs::{
     Entities, Join, LendJoin, ParJoin, Read, ReadExpect, ReadStorage, SystemData, Write,
@@ -161,7 +160,6 @@ pub struct PhysicsRead<'a> {
     stats: ReadStorage<'a, Stats>,
     weather: Option<Read<'a, WeatherGrid>>,
     time_of_day: Read<'a, TimeOfDay>,
-    smooth_terrain: Read<'a, SmoothTerrainSettings>,
 }
 
 #[derive(SystemData)]
@@ -1037,7 +1035,6 @@ impl PhysicsData<'_> {
                                     read,
                                     &ori,
                                     friction_factor,
-                                    read.smooth_terrain.passes,
                                 );
                                 tgt_pos = cpos.0;
                             },
@@ -1073,7 +1070,6 @@ impl PhysicsData<'_> {
                                     read,
                                     &ori,
                                     friction_factor,
-                                    read.smooth_terrain.passes,
                                 );
 
                                 // Sticky things shouldn't move when on a surface
@@ -1285,7 +1281,6 @@ impl PhysicsData<'_> {
                                                 read,
                                                 &ori,
                                                 |vel| friction_factor(previous_cache_other.ori * vel),
-                                                0, // no smooth-floor snap for voxel colliders
                                             );
 
                                             // Transform entity attributes back into world space now

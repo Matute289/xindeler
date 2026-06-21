@@ -58,6 +58,8 @@ event_emitters! {
         regrow_head: event::RegrowHeadEvent,
         create_aura_entity: event::CreateAuraEntityEvent,
         help_downed: event::HelpDownedEvent,
+        set_ability_cooldown: event::SetAbilityCooldownEvent,
+        health_change: event::HealthChangeEvent,
     }
 }
 
@@ -149,6 +151,8 @@ pub enum CharacterState {
     Shockwave(shockwave::Data),
     /// An explosion attack
     Explosion(explosion::Data),
+    /// A telegraphed ground-targeted area-of-effect strike
+    GroundAoe(ground_aoe::Data),
     /// A continuous attack that affects all creatures in a cone originating
     /// from the source
     BasicBeam(basic_beam::Data),
@@ -215,6 +219,7 @@ impl CharacterState {
             | CharacterState::LeapShockwave(_)
             | CharacterState::LeapExplosionShockwave(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::ChargedMelee(_)
             | CharacterState::ChargedRanged(_)
             | CharacterState::RapidRanged(_)
@@ -290,6 +295,7 @@ impl CharacterState {
             | CharacterState::RapidRanged(_)
             | CharacterState::Shockwave(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::BasicBeam(_)
             | CharacterState::BasicAura(_)
             | CharacterState::StaticAura(_)
@@ -341,6 +347,7 @@ impl CharacterState {
             | CharacterState::LeapShockwave(_)
             | CharacterState::LeapExplosionShockwave(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::ChargedRanged(_)
             | CharacterState::ChargedMelee(_)
             | CharacterState::RapidRanged(_)
@@ -409,6 +416,7 @@ impl CharacterState {
                 | CharacterState::Throw(_)
                 | CharacterState::Shockwave(_)
                 | CharacterState::Explosion(_)
+                | CharacterState::GroundAoe(_)
                 | CharacterState::BasicBeam(_)
                 | CharacterState::BasicAura(_)
                 | CharacterState::SelfBuff(_)
@@ -498,6 +506,7 @@ impl CharacterState {
             | CharacterState::Roll(_)
             | CharacterState::Boost(_)
             | CharacterState::Explosion(_)
+            | CharacterState::GroundAoe(_)
             | CharacterState::LeapExplosionShockwave(_)
             | CharacterState::LeapShockwave(_)
             | CharacterState::Shockwave(_)
@@ -782,6 +791,7 @@ impl CharacterState {
             CharacterState::Throw(data) => data.behavior(j, output_events),
             CharacterState::Shockwave(data) => data.behavior(j, output_events),
             CharacterState::Explosion(data) => data.behavior(j, output_events),
+            CharacterState::GroundAoe(data) => data.behavior(j, output_events),
             CharacterState::BasicBeam(data) => data.behavior(j, output_events),
             CharacterState::BasicAura(data) => data.behavior(j, output_events),
             CharacterState::Blink(data) => data.behavior(j, output_events),
@@ -847,6 +857,7 @@ impl CharacterState {
             CharacterState::Throw(data) => data.handle_event(j, output_events, action),
             CharacterState::Shockwave(data) => data.handle_event(j, output_events, action),
             CharacterState::Explosion(data) => data.handle_event(j, output_events, action),
+            CharacterState::GroundAoe(data) => data.handle_event(j, output_events, action),
             CharacterState::BasicBeam(data) => data.handle_event(j, output_events, action),
             CharacterState::BasicAura(data) => data.handle_event(j, output_events, action),
             CharacterState::Blink(data) => data.handle_event(j, output_events, action),
@@ -908,6 +919,7 @@ impl CharacterState {
             CharacterState::Throw(data) => Some(data.static_data.ability_info),
             CharacterState::Shockwave(data) => Some(data.static_data.ability_info),
             CharacterState::Explosion(data) => Some(data.static_data.ability_info),
+            CharacterState::GroundAoe(data) => Some(data.static_data.ability_info),
             CharacterState::BasicBeam(data) => Some(data.static_data.ability_info),
             CharacterState::BasicAura(data) => Some(data.static_data.ability_info),
             CharacterState::Blink(data) => Some(data.static_data.ability_info),
@@ -960,6 +972,7 @@ impl CharacterState {
             CharacterState::Throw(data) => Some(data.stage_section),
             CharacterState::Shockwave(data) => Some(data.stage_section),
             CharacterState::Explosion(data) => Some(data.stage_section),
+            CharacterState::GroundAoe(data) => Some(data.stage_section),
             CharacterState::BasicBeam(data) => Some(data.stage_section),
             CharacterState::BasicAura(data) => Some(data.stage_section),
             CharacterState::Blink(data) => Some(data.stage_section),
@@ -1103,6 +1116,12 @@ impl CharacterState {
                 recover: Some(data.static_data.recover_duration),
                 ..Default::default()
             }),
+            CharacterState::GroundAoe(data) => Some(DurationsInfo {
+                buildup: Some(data.static_data.buildup_duration),
+                action: Some(data.static_data.delay),
+                recover: Some(data.static_data.recover_duration),
+                ..Default::default()
+            }),
             CharacterState::BasicBeam(data) => Some(DurationsInfo {
                 buildup: Some(data.static_data.buildup_duration),
                 recover: Some(data.static_data.recover_duration),
@@ -1242,6 +1261,7 @@ impl CharacterState {
             CharacterState::Throw(data) => Some(data.timer),
             CharacterState::Shockwave(data) => Some(data.timer),
             CharacterState::Explosion(data) => Some(data.timer),
+            CharacterState::GroundAoe(data) => Some(data.timer),
             CharacterState::BasicBeam(data) => Some(data.timer),
             CharacterState::BasicAura(data) => Some(data.timer),
             CharacterState::Blink(data) => Some(data.timer),
@@ -1314,6 +1334,7 @@ impl CharacterState {
                 data.static_data.dodgeable.shockwave_attack_source_slice()
             },
             CharacterState::Explosion(_) => &[AttackSource::Explosion],
+            CharacterState::GroundAoe(_) => &[AttackSource::Explosion],
             CharacterState::BasicBeam(_) => &[AttackSource::Beam],
             CharacterState::BasicAura(_) => &[],
             CharacterState::Blink(_) => &[],

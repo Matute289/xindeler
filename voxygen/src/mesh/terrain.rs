@@ -4,19 +4,12 @@ use crate::{
     mesh::{
         MeshGen,
         greedy::{self, GreedyConfig, GreedyMesh},
-        transvoxel::mesh_transvoxel,
     },
-    render::{
-        AltIndices, FluidVertex, Mesh, SmoothTerrainVertex, TerrainAtlasData, TerrainSmoothingMode,
-        TerrainVertex, Vertex,
-    },
+    render::{AltIndices, FluidVertex, Mesh, TerrainAtlasData, TerrainVertex, Vertex},
     scene::terrain::{BlocksOfInterest, DEEP_ALT, SHALLOW_ALT},
 };
 use common::{
-    terrain::{
-        Block, TerrainChunk,
-        density::{convert_chunk_to_density_field, smooth_density_field},
-    },
+    terrain::{Block, TerrainChunk},
     util::either_with,
     vol::{ReadVol, RectRasterableVol},
     volumes::vol_grid_2d::{CachedVolGrid2d, VolGrid2d},
@@ -40,7 +33,9 @@ pub const SUNLIGHT: u8 = 24;
 pub const SUNLIGHT_INV: f32 = 1.0 / SUNLIGHT as f32;
 pub const MAX_LIGHT_DIST: i32 = SUNLIGHT as i32;
 
-fn calc_light<
+/// Public for criterion benches (`voxygen/benches/light_benchmark.rs`); not
+/// intended as API — call through `generate_mesh`.
+pub fn calc_light<
     V: RectRasterableVol<Vox = Block> + ReadVol + Debug,
     L: Iterator<Item = (Vec3<i32>, u8)>,
 >(
@@ -60,161 +55,172 @@ fn calc_light<
         max: bounds.max + Vec3::new(SUNLIGHT as i32, SUNLIGHT as i32, 1),
     };
 
-    let mut vol_cached = vol.cached();
-
-    let mut light_map = vec![UNKNOWN; outer.size().product() as usize];
-    let lm_idx = {
-        let (w, h, _) = outer.clone().size().into_tuple();
-        move |x, y, z| (w * h * z + h * x + y) as usize
-    };
-    // Light propagation queue
-    let mut prop_que = lit_blocks
-        .map(|(pos, light)| {
-            let rpos = pos - outer.min;
-            light_map[lm_idx(rpos.x, rpos.y, rpos.z)] = light.min(SUNLIGHT); // Brightest light
-            (rpos.x as u8, rpos.y as u8, rpos.z as u16)
-        })
-        .collect::<VecDeque<_>>();
-    // Start sun rays
-    if is_sunlight {
-        for x in 0..outer.size().w {
-            for y in 0..outer.size().h {
-                let mut light = SUNLIGHT as f32;
-                for z in (0..outer.size().d).rev() {
-                    let (min_light, attenuation) = vol_cached
-                        .get(outer.min + Vec3::new(x, y, z))
-                        .map_or((0, 0.0), |b| b.get_max_sunlight());
-
-                    if light > min_light as f32 {
-                        light = (light - attenuation).max(min_light as f32);
-                    }
-
-                    light_map[lm_idx(x, y, z)] = light.floor() as u8;
-
-                    if light <= 0.0 {
-                        break;
-                    } else {
-                        prop_que.push_back((x as u8, y as u8, z as u16));
-                    }
-                }
-            }
-        }
-    }
-
-    // Determines light propagation
-    let propagate = |src: u8,
-                     dest: &mut u8,
-                     pos: Vec3<i32>,
-                     prop_que: &mut VecDeque<_>,
-                     vol: &mut CachedVolGrid2d<V>| {
-        if *dest != OPAQUE {
-            if *dest == UNKNOWN {
-                if vol.get(outer.min + pos).ok().is_some_and(|b| b.is_fluid()) {
-                    *dest = src.saturating_sub(1);
-                    // Can't propagate further
-                    if *dest > 1 {
-                        prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
-                    }
-                } else {
-                    *dest = OPAQUE;
-                }
-            } else if *dest < src.saturating_sub(1) {
-                *dest = src - 1;
-                // Can't propagate further
-                if *dest > 1 {
-                    prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
-                }
-            }
-        }
-    };
-
-    // Propagate light
-    while let Some(pos) = prop_que.pop_front() {
-        let pos = Vec3::new(pos.0 as i32, pos.1 as i32, pos.2 as i32);
-        let light = light_map[lm_idx(pos.x, pos.y, pos.z)];
-
-        // Up
-        // Bounds checking
-        if pos.z + 1 < outer.size().d {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y, pos.z + 1)).unwrap(),
-                Vec3::new(pos.x, pos.y, pos.z + 1),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        // Down
-        if pos.z > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y, pos.z - 1)).unwrap(),
-                Vec3::new(pos.x, pos.y, pos.z - 1),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        // The XY directions
-        if pos.y + 1 < outer.size().h {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y + 1, pos.z)).unwrap(),
-                Vec3::new(pos.x, pos.y + 1, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.y > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x, pos.y - 1, pos.z)).unwrap(),
-                Vec3::new(pos.x, pos.y - 1, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.x + 1 < outer.size().w {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x + 1, pos.y, pos.z)).unwrap(),
-                Vec3::new(pos.x + 1, pos.y, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-        if pos.x > 0 {
-            propagate(
-                light,
-                light_map.get_mut(lm_idx(pos.x - 1, pos.y, pos.z)).unwrap(),
-                Vec3::new(pos.x - 1, pos.y, pos.z),
-                &mut prop_que,
-                &mut vol_cached,
-            )
-        }
-    }
-
+    // Hoisted: used in both the early-out closure and the full BFS path.
     let min_bounds = Aabb {
         min: bounds.min - 1,
         max: bounds.max + 1,
     };
-
-    // Minimise light map to reduce duplication. We can now discard light info
-    // for blocks outside of the chunk borders.
-    let mut light_map2 = vec![UNKNOWN; min_bounds.size().product() as usize];
     let lm_idx2 = {
         let (w, h, _) = min_bounds.clone().size().into_tuple();
         move |x, y, z| (w * h * z + h * x + y) as usize
     };
-    for z in 0..min_bounds.size().d {
-        for x in 0..min_bounds.size().w {
-            for y in 0..min_bounds.size().h {
-                let off = min_bounds.min - outer.min;
-                light_map2[lm_idx2(x, y, z)] = light_map[lm_idx(x + off.x, y + off.y, z + off.z)];
+
+    // Early-out: a non-sunlight pass with no seed blocks can never light
+    // anything — every cell would stay UNKNOWN, which the closure maps to
+    // 0.0, exactly what an empty light map yields via
+    // `.get(..) == None → default_light (== 0) → 0.0`. Bit-identical output;
+    // skips both full-volume allocations, the BFS, and the minimization copy.
+    let mut lit_blocks = lit_blocks.peekable();
+    let light_map2 = if !is_sunlight && default_light == 0 && lit_blocks.peek().is_none() {
+        Vec::new()
+    } else {
+        let mut vol_cached = vol.cached();
+
+        let mut light_map = vec![UNKNOWN; outer.size().product() as usize];
+        let lm_idx = {
+            let (w, h, _) = outer.clone().size().into_tuple();
+            move |x, y, z| (w * h * z + h * x + y) as usize
+        };
+        // Light propagation queue
+        let mut prop_que = lit_blocks
+            .map(|(pos, light)| {
+                let rpos = pos - outer.min;
+                light_map[lm_idx(rpos.x, rpos.y, rpos.z)] = light.min(SUNLIGHT); // Brightest light
+                (rpos.x as u8, rpos.y as u8, rpos.z as u16)
+            })
+            .collect::<VecDeque<_>>();
+        // Start sun rays
+        if is_sunlight {
+            for x in 0..outer.size().w {
+                for y in 0..outer.size().h {
+                    let mut light = SUNLIGHT as f32;
+                    for z in (0..outer.size().d).rev() {
+                        let (min_light, attenuation) = vol_cached
+                            .get(outer.min + Vec3::new(x, y, z))
+                            .map_or((0, 0.0), |b| b.get_max_sunlight());
+
+                        if light > min_light as f32 {
+                            light = (light - attenuation).max(min_light as f32);
+                        }
+
+                        light_map[lm_idx(x, y, z)] = light.floor() as u8;
+
+                        if light <= 0.0 {
+                            break;
+                        } else {
+                            prop_que.push_back((x as u8, y as u8, z as u16));
+                        }
+                    }
+                }
             }
         }
-    }
 
-    drop(light_map);
+        // Determines light propagation
+        let propagate = |src: u8,
+                         dest: &mut u8,
+                         pos: Vec3<i32>,
+                         prop_que: &mut VecDeque<_>,
+                         vol: &mut CachedVolGrid2d<V>| {
+            if *dest != OPAQUE {
+                if *dest == UNKNOWN {
+                    if vol.get(outer.min + pos).ok().is_some_and(|b| b.is_fluid()) {
+                        *dest = src.saturating_sub(1);
+                        // Can't propagate further
+                        if *dest > 1 {
+                            prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
+                        }
+                    } else {
+                        *dest = OPAQUE;
+                    }
+                } else if *dest < src.saturating_sub(1) {
+                    *dest = src - 1;
+                    // Can't propagate further
+                    if *dest > 1 {
+                        prop_que.push_back((pos.x as u8, pos.y as u8, pos.z as u16));
+                    }
+                }
+            }
+        };
+
+        // Propagate light
+        while let Some(pos) = prop_que.pop_front() {
+            let pos = Vec3::new(pos.0 as i32, pos.1 as i32, pos.2 as i32);
+            let light = light_map[lm_idx(pos.x, pos.y, pos.z)];
+
+            // Up
+            // Bounds checking
+            if pos.z + 1 < outer.size().d {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y, pos.z + 1)).unwrap(),
+                    Vec3::new(pos.x, pos.y, pos.z + 1),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            // Down
+            if pos.z > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y, pos.z - 1)).unwrap(),
+                    Vec3::new(pos.x, pos.y, pos.z - 1),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            // The XY directions
+            if pos.y + 1 < outer.size().h {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y + 1, pos.z)).unwrap(),
+                    Vec3::new(pos.x, pos.y + 1, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.y > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x, pos.y - 1, pos.z)).unwrap(),
+                    Vec3::new(pos.x, pos.y - 1, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.x + 1 < outer.size().w {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x + 1, pos.y, pos.z)).unwrap(),
+                    Vec3::new(pos.x + 1, pos.y, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+            if pos.x > 0 {
+                propagate(
+                    light,
+                    light_map.get_mut(lm_idx(pos.x - 1, pos.y, pos.z)).unwrap(),
+                    Vec3::new(pos.x - 1, pos.y, pos.z),
+                    &mut prop_que,
+                    &mut vol_cached,
+                )
+            }
+        }
+
+        // Minimise light map to reduce duplication. We can now discard light info
+        // for blocks outside of the chunk borders.
+        let mut light_map2 = vec![UNKNOWN; min_bounds.size().product() as usize];
+        for z in 0..min_bounds.size().d {
+            for x in 0..min_bounds.size().w {
+                for y in 0..min_bounds.size().h {
+                    let off = min_bounds.min - outer.min;
+                    light_map2[lm_idx2(x, y, z)] =
+                        light_map[lm_idx(x + off.x, y + off.y, z + off.z)];
+                }
+            }
+        }
+        light_map2
+    };
 
     move |wpos| {
         let pos = wpos - min_bounds.min;
@@ -234,16 +240,11 @@ fn calc_light<
 #[expect(clippy::type_complexity)]
 pub fn generate_mesh<'a>(
     vol: &'a VolGrid2d<TerrainChunk>,
-    (range, max_texture_size, boi, smoothing): (
-        Aabb<i32>,
-        Vec2<u16>,
-        &'a BlocksOfInterest,
-        TerrainSmoothingMode,
-    ),
+    (range, max_texture_size, _boi): (Aabb<i32>, Vec2<u16>, &'a BlocksOfInterest),
 ) -> MeshGen<
     TerrainVertex,
     FluidVertex,
-    SmoothTerrainVertex,
+    TerrainVertex,
     (
         Aabb<f32>,
         TerrainAtlasData,
@@ -259,147 +260,6 @@ pub fn generate_mesh<'a>(
         "generate_mesh",
         "<&VolGrid2d as Meshable<_, _>>::generate_mesh"
     );
-
-    // Transvoxel path — smooth iso-surface meshing.
-    if smoothing != TerrainSmoothingMode::Disabled {
-        // Chunks containing site structures (crafting stations, fireplaces,
-        // building entrances) must use the greedy mesher — Transvoxel would
-        // smooth away their flat vertical wall geometry making them invisible.
-        let has_structures = !boi.interactables.is_empty()
-            || !boi.smokers.is_empty()
-            || !boi.one_way_walls.is_empty();
-
-        if !has_structures {
-            use crate::render::Tri;
-            let s = range.size();
-            let padded_size = Vec3::new((s.w + 2) as u32, (s.h + 2) as u32, (s.d + 2) as u32);
-            let offset = range.min - Vec3::new(1, 1, 1);
-            let mut density = convert_chunk_to_density_field(vol, offset, padded_size);
-            let smooth_passes = match smoothing {
-                TerrainSmoothingMode::Soft => 1,
-                TerrainSmoothingMode::Smooth => 2,
-                TerrainSmoothingMode::Ultra => 3,
-                TerrainSmoothingMode::Disabled => unreachable!(),
-            };
-            smooth_density_field(&mut density, smooth_passes);
-            // Threshold calibrated so the isosurface lands at the block surface
-            // after N passes of Gaussian smoothing (analytically derived for flat
-            // terrain: the post-smoothed density at the first air block gives the
-            // threshold that places the surface at the solid/air block boundary).
-            let transvoxel_threshold: u8 = match smooth_passes {
-                1 => 64,
-                2 => 94,
-                3 => 101,
-                _ => 127,
-            };
-            let tris = mesh_transvoxel(&density, transvoxel_threshold);
-
-            // ----------------------------------------------------------------
-            // Build a colour atlas: one texel per (chunk-local x, y) column.
-            // Each texel stores the colour of the topmost solid block in that
-            // column, giving Transvoxel vertices their correct block colours.
-            // ----------------------------------------------------------------
-            let atlas_w = (s.w as usize).min(32);
-            let atlas_h = (s.h as usize).min(32);
-            let mut col_lights = vec![[0u8; 4]; atlas_w * atlas_h];
-            let kinds_atlas = vec![0u8; atlas_w * atlas_h];
-            {
-                let mut vol_cached = vol.cached();
-                for ax in 0..atlas_w {
-                    for ay in 0..atlas_h {
-                        let wx = range.min.x + ax as i32;
-                        let wy = range.min.y + ay as i32;
-                        let mut color = Rgb::broadcast(128u8);
-                        for wz in (range.min.z..range.max.z).rev() {
-                            if let Ok(b) = vol_cached.get(Vec3::new(wx, wy, wz)) {
-                                if !b.is_filled() {
-                                    continue;
-                                }
-                                color = b.get_color().unwrap_or(color);
-                                break;
-                            }
-                        }
-                        let idx = ax * atlas_h + ay;
-                        col_lights[idx] = TerrainVertex::make_col_light(254, 0, color, false);
-                    }
-                }
-            }
-            let atlas_data = TerrainAtlasData {
-                col_lights,
-                kinds: kinds_atlas,
-            };
-            let atlas_size = Vec2::new(atlas_w as u16, atlas_h as u16);
-
-            // ----------------------------------------------------------------
-            // Emit smooth mesh — SmoothTerrainVertex with float pos,
-            // 10-10-10-2 normal, and per-vertex color baked from the atlas.
-            // ----------------------------------------------------------------
-            let mut smooth_opaque_mesh: Mesh<SmoothTerrainVertex> = Mesh::new();
-            // Field (1,1,1) = world range.min → delta = (-1, -1, range.min.z - 1).
-            let mesh_delta = Vec3::new(-1.0f32, -1.0, (range.min.z - 1) as f32);
-            // Bilinear col_light sampling: blend the 4 nearest atlas texels by
-            // fractional vertex position. Using .round() caused alternating
-            // bright/dark triangles on flat terrain (the diamond checkerboard
-            // pattern) because adjacent vertices would snap to different texels.
-            let col_light_for = |pos: Vec3<f32>| -> u32 {
-                let cp = pos + mesh_delta;
-                let ax = cp.x.clamp(0.0, (atlas_w - 1) as f32);
-                let ay = cp.y.clamp(0.0, (atlas_h - 1) as f32);
-                let ax0 = (ax.floor() as usize).min(atlas_w - 1);
-                let ay0 = (ay.floor() as usize).min(atlas_h - 1);
-                let ax1 = (ax0 + 1).min(atlas_w - 1);
-                let ay1 = (ay0 + 1).min(atlas_h - 1);
-                let tx = ax - ax.floor();
-                let ty = ay - ay.floor();
-                let s = |x: usize, y: usize| atlas_data.col_lights[x * atlas_h + y];
-                let [c00, c10, c01, c11] = [s(ax0, ay0), s(ax1, ay0), s(ax0, ay1), s(ax1, ay1)];
-                let lerp_ch = |v00: u8, v10: u8, v01: u8, v11: u8| -> u8 {
-                    let v0 = v00 as f32 * (1.0 - tx) + v10 as f32 * tx;
-                    let v1 = v01 as f32 * (1.0 - tx) + v11 as f32 * tx;
-                    (v0 * (1.0 - ty) + v1 * ty) as u8
-                };
-                u32::from_le_bytes([
-                    lerp_ch(c00[0], c10[0], c01[0], c11[0]),
-                    lerp_ch(c00[1], c10[1], c01[1], c11[1]),
-                    lerp_ch(c00[2], c10[2], c01[2], c11[2]),
-                    lerp_ch(c00[3], c10[3], c01[3], c11[3]),
-                ])
-            };
-            for tri in &tris {
-                let [p0, p1, p2] = tri.positions;
-                let [n0, n1, n2] = tri.normals;
-                let [k0, k1, k2] = tri.kinds;
-                smooth_opaque_mesh.push_tri(Tri::new(
-                    SmoothTerrainVertex::new(p0 + mesh_delta, n0, col_light_for(p0), k0),
-                    SmoothTerrainVertex::new(p1 + mesh_delta, n1, col_light_for(p1), k1),
-                    SmoothTerrainVertex::new(p2 + mesh_delta, n2, col_light_for(p2), k2),
-                ));
-            }
-
-            let bounds = Aabb {
-                min: range.min.map(|e| e as f32),
-                max: range.max.map(|e| e as f32),
-            };
-            let sun_occluder_z_bounds = (bounds.min.z, bounds.max.z);
-            return (
-                Mesh::new(),        // opaque_mesh = empty (smooth replaces greedy here)
-                Mesh::new(),        // fluid_mesh = empty for Transvoxel path
-                smooth_opaque_mesh, // slot 2: Mesh<SmoothTerrainVertex>
-                (
-                    bounds,
-                    atlas_data,
-                    atlas_size,
-                    Arc::new(|_| 1.0f32),
-                    Arc::new(|_| 0.0f32),
-                    AltIndices {
-                        deep_end: 0,
-                        underground_end: 0,
-                    },
-                    sun_occluder_z_bounds,
-                ),
-            );
-        } // end if !has_structures
-    }
 
     // Find blocks that should glow
     // TODO: Search neighbouring chunks too!
@@ -685,7 +545,7 @@ pub fn generate_mesh<'a>(
             .chain(opaque_surface)
             .collect(),
         fluid_mesh,
-        Mesh::<SmoothTerrainVertex>::new(),
+        Mesh::new(),
         (
             bounds,
             atlas_data,

@@ -2685,11 +2685,14 @@ impl AgentData<'_> {
                 .activate_ability(
                     input,
                     Some(self.inventory),
+                    None, // NPCs don't attune (ENG-D2c)
                     self.skill_set,
                     self.body,
                     Some(self.char_state),
                     &context,
                     self.stats,
+                    None,
+                    &read_data.ability_map,
                 )
                 .map_or(Default::default(), |a| a.0)
         };

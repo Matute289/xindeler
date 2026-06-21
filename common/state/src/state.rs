@@ -2,7 +2,7 @@
 use crate::plugin::PluginMgr;
 #[cfg(feature = "plugins")]
 use crate::plugin::memory_manager::EcsWorld;
-use crate::{BuildArea, NoDurabilityArea, SmoothTerrainSettings};
+use crate::{BuildArea, NoDurabilityArea};
 #[cfg(feature = "plugins")]
 use common::uid::IdMaps;
 use common::{
@@ -39,7 +39,13 @@ use specs::{
     shred::{Fetch, FetchMut, SendDispatcher},
     storage::{MaskedStorage as EcsMaskedStorage, Storage as EcsStorage},
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 use timer_queue::TimerQueue;
 use vek::*;
 
@@ -137,16 +143,58 @@ pub type Pools = Arc<ThreadPool>;
 
 impl State {
     pub fn pools(game_mode: GameMode) -> Pools {
-        let thread_name_infix = match game_mode {
-            GameMode::Server => "s",
-            GameMode::Client => "c",
-            GameMode::Singleplayer => "sp",
+        let (thread_name_infix, is_main_task) = match game_mode {
+            GameMode::Server => ("s", true),
+            GameMode::Client => ("c", true),
+            // Note: We don't currently use `Singleplayer`. When we do, server-side tasks should be
+            // deprioritised in favour of things that sit on the main thread!
+            GameMode::Singleplayer => ("sp", false),
+        };
+
+        let is_first_error = Arc::new(AtomicBool::new(true));
+        let set_priority = move || {
+            use thread_priority::*;
+            let priority = if is_main_task {
+                // These threads are critical for the main tick loop, so need a higher priority
+                ThreadPriority::Crossplatform(TryFrom::try_from(50).unwrap())
+            } else {
+                ThreadPriority::Min
+            };
+            let res = cfg_select! {
+                target_os = "linux" => std::thread::current().set_priority_and_policy(
+                    ThreadSchedulePolicy::Realtime(RealtimeThreadSchedulePolicy::RoundRobin),
+                    priority,
+                ),
+                _ => std::thread::current().set_priority(priority),
+            };
+            if let Err(err) = res
+                && is_first_error.swap(false, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    "Unable to set priority/schedule policy for dispatcher pool thread: {err}"
+                );
+            }
         };
 
         Arc::new(
             ThreadPoolBuilder::new()
                 .num_threads(num_cpus::get().max(common::consts::MIN_RECOMMENDED_RAYON_THREADS))
                 .thread_name(move |i| format!("rayon-{}-{}", thread_name_infix, i))
+                .spawn_handler(|thread| {
+                    let mut b = std::thread::Builder::new();
+                    if let Some(name) = thread.name() {
+                        b = b.name(name.to_owned());
+                    }
+                    if let Some(stack_size) = thread.stack_size() {
+                        b = b.stack_size(stack_size);
+                    }
+                    let set_priority = set_priority.clone();
+                    b.spawn(move || {
+                        set_priority();
+                        thread.run()
+                    })?;
+                    Ok(())
+                })
                 .build()
                 .unwrap(),
         )
@@ -240,11 +288,16 @@ impl State {
         // Register server -> all clients synced components.
         ecs.register::<comp::Body>();
         ecs.register::<comp::Hardcore>();
+        ecs.register::<comp::CharacterClass>();
         ecs.register::<comp::body::parts::Heads>();
         ecs.register::<comp::Player>();
         ecs.register::<comp::Stats>();
         ecs.register::<comp::SkillSet>();
         ecs.register::<comp::ActiveAbilities>();
+        ecs.register::<comp::AbilityCooldowns>();
+        ecs.register::<comp::AbilityPool>();
+        ecs.register::<comp::AttunedItems>();
+        ecs.register::<comp::Attuning>();
         ecs.register::<comp::Buffs>();
         ecs.register::<comp::Auras>();
         ecs.register::<comp::EnteredAuras>();
@@ -369,7 +422,6 @@ impl State {
         ecs.insert(Trades::default());
         ecs.insert(PlayerPhysicsSettings::default());
         ecs.insert(VolumeRiders::default());
-        ecs.insert(SmoothTerrainSettings::default());
 
         // Load plugins from asset directory
         #[cfg(feature = "plugins")]

@@ -102,10 +102,8 @@ impl EcsAccessManager {
         let ecs_world = ptr.map(|ptr| {
             // SAFETY: If this is Some, we are inside an `execute_with` call and this is
             // a valid reference at least until `execute_with` returns.
-            //
             // We hold a shared borrow guard while the reference is in use here and abort
             // if `execute_with` finishes while this is still held.
-            //
             // The called closure can't escape the reference because it must be callable for
             // any set of lifetimes. Variance of the lifetime parameters in EcsWorld are
             // not an issue for the same reason.

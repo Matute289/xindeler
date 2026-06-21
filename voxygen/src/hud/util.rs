@@ -3,6 +3,7 @@ use common::{
     comp::{
         BuffData, BuffKind,
         body::humanoid::Species,
+        class::ClassKind,
         inventory::trade_pricing::TradePricing,
         item::{
             Effects, Item, ItemDefinitionId, ItemDesc, ItemI18n, ItemKind, MaterialKind,
@@ -79,6 +80,7 @@ pub fn item_text<'a, I: ItemDesc + ?Sized>(
 /// e.g. spectators) renders everything as met.
 pub fn requirements_text(
     item: &dyn ItemDesc,
+    class: Option<ClassKind>,
     viewer: Option<(u16, Option<Species>)>,
     i18n: &Localization,
 ) -> (Vec<String>, Vec<String>) {
@@ -89,9 +91,26 @@ pub fn requirements_text(
     // Reuse the shared predicate so the tooltip can never disagree with the
     // server's enforcement.
     let unmet_kinds = viewer
-        .map(|(level, species)| requirements.unmet(level, species))
+        .map(|(level, species)| requirements.unmet(class, level, species))
         .unwrap_or_default();
 
+    if let Some(classes) = &requirements.classes {
+        let names = classes
+            .iter()
+            .map(|c| i18n.get_msg(class_i18n_key(*c)).into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line = i18n
+            .get_msg_ctx("hud-bag-requirement_class", &fluent_args! {
+                "classes" => names,
+            })
+            .into_owned();
+        if unmet_kinds.contains(&UnmetRequirement::Class) {
+            unmet.push(line);
+        } else {
+            met.push(line);
+        }
+    }
     if let Some(needed) = requirements.min_level {
         let line = i18n
             .get_msg_ctx("hud-bag-requirement_level", &fluent_args! {
@@ -138,6 +157,16 @@ fn species_i18n_key(species: Species) -> &'static str {
     }
 }
 
+fn class_i18n_key(class: ClassKind) -> &'static str {
+    match class {
+        ClassKind::Adventurer => "common-class-adventurer",
+        ClassKind::Warrior => "common-class-warrior",
+        ClassKind::Mage => "common-class-mage",
+        ClassKind::Cleric => "common-class-cleric",
+        ClassKind::Rogue => "common-class-rogue",
+    }
+}
+
 pub fn describe<'a, I: ItemDesc + ?Sized>(
     item: &I,
     i18n: &'a Localization,
@@ -163,11 +192,7 @@ pub fn kind_text<'a>(kind: &ItemKind, i18n: &'a Localization) -> Cow<'a, str> {
         )),
         ItemKind::ModularComponent(mc) => {
             if let Some(toolkind) = mc.toolkind() {
-                Cow::Owned(format!(
-                    "{} {}",
-                    i18n.get_msg(&format!("common-weapons-{}", toolkind.identifier_name())),
-                    i18n.get_msg("common-kind-modular_component_partial")
-                ))
+                i18n.get_attr("common-kind-modular_component", toolkind.identifier_name())
             } else {
                 i18n.get_msg("common-kind-modular_component")
             }
@@ -297,6 +322,9 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::OffBalance => "buff-offbalance",
         BuffKind::Chilled => "buff-chilled",
         BuffKind::ArdentHunted => "buff-ardenthunted",
+        BuffKind::Terrified => "buff-terrified",
+        BuffKind::Charmed => "buff-charmed",
+        BuffKind::Hollowtouched => "buff-hollowtouched",
         // Neutral
         BuffKind::Polymorphed => "buff-polymorphed",
     }
@@ -444,7 +472,10 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         | BuffKind::Chilled
                         | BuffKind::ArdentHunter
                         | BuffKind::ArdentHunted
-                        | BuffKind::SepticShot => Cow::Borrowed(""),
+                        | BuffKind::SepticShot
+                        | BuffKind::Terrified
+                        | BuffKind::Charmed
+                        | BuffKind::Hollowtouched => Cow::Borrowed(""),
                     };
 
                     write!(&mut description, "{}", buff_desc).unwrap();
@@ -485,6 +516,9 @@ fn tool_kind<'a>(tool: &Tool, i18n: &'a Localization) -> Cow<'a, str> {
         ToolKind::Dagger => i18n.get_msg("common-weapons-dagger"),
         ToolKind::Staff => i18n.get_msg("common-weapons-staff"),
         ToolKind::Sceptre => i18n.get_msg("common-weapons-sceptre"),
+        ToolKind::Tome => i18n.get_msg("common-weapons-tome"),
+        ToolKind::HolySymbol => i18n.get_msg("common-weapons-holy_symbol"),
+        ToolKind::Focus => i18n.get_msg("common-weapons-focus"),
         ToolKind::Shield => i18n.get_msg("common-weapons-shield"),
         ToolKind::Spear => i18n.get_msg("common-weapons-spear"),
         ToolKind::Blowgun => i18n.get_msg("common-weapons-blowgun"),
@@ -746,6 +780,17 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         "common.abilities.bow.death_volley" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_shot" => imgs.bow_death_volley,
         "common.abilities.bow.death_volley_heavy_shot" => imgs.bow_death_volley,
+        // Spells (cantrips) — TODO(magic-v2 polish): dedicated spell icons
+        "common.abilities.spells.arcane.cinderbolt" => imgs.fireball,
+        "common.abilities.spells.divine.dawnmote" => imgs.fireball,
+        "common.abilities.spells.primal.thornspit" => imgs.fireball,
+        // Racial innates (magic-abilities Task 14) — reused icons until dedicated art.
+        "innate.human" => imgs.skill_sceptre_heal,
+        "innate.elf" => imgs.sword_agile_stance,
+        "innate.dwarf" => imgs.sword_heavy_stance,
+        "innate.orc" => imgs.sword_crippling_stance,
+        "innate.danari" => imgs.staff_fire_dash,
+        "innate.draugr" => imgs.hammer_seismic_shock,
         // Staff
         "common.abilities.staff.firebomb" => imgs.fireball,
         "common.abilities.staff.flamethrower" => imgs.flamethrower,

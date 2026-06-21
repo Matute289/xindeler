@@ -1,0 +1,29 @@
+// Racial innate — Draugr "Gravechill" (magic-abilities plan Task 14).
+// Weaponless icy burst that chills nearby foes; identity from cooldown, not energy.
+Shockwave(
+    energy_cost: 0.0,
+    buildup_duration: 0.4,
+    swing_duration: 0.1,
+    recover_duration: 0.4,
+    damage: 6,
+    poise_damage: 0,
+    knockback: ( strength: 10, direction: Away),
+    shockwave_angle: 360.0,
+    shockwave_vertical_angle: 90.0,
+    shockwave_speed: 20.0,
+    shockwave_duration: 0.5,
+    dodgeable: Roll,
+    move_efficiency: 0.1,
+    damage_kind: Energy,
+    specifier: Ice,
+    damage_effect: Some(Buff((
+        kind: Chilled,
+        dur_secs: 4.0,
+        strength: Value(0.3),
+        chance: 1.0,
+    ))),
+    ori_rate: 1.0,
+    timing: PostBuildup,
+    emit_outcome: true,
+    meta: (cooldown: Some(60.0)),
+)

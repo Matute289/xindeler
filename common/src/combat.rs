@@ -1,9 +1,10 @@
 use crate::{
     assets::{AssetExt, Ron},
     comp::{
-        Alignment, Body, Buffs, CharacterState, Combo, Energy, Group, Health, HealthChange,
-        InputKind, Inventory, Mass, Ori, Player, Poise, PoiseChange, SkillSet, Stats,
+        Alignment, AttunedItems, Body, Buffs, CharacterState, Combo, Energy, Group, Health,
+        HealthChange, InputKind, Inventory, Mass, Ori, Player, Poise, PoiseChange, SkillSet, Stats,
         ability::Capability,
+        attunement::item_effects_active,
         aura::{AuraKindVariant, EnteredAuras},
         buff::{Buff, BuffChange, BuffData, BuffDescriptor, BuffKind, BuffSource, DestInfo},
         inventory::{
@@ -99,6 +100,9 @@ pub struct TargetInfo<'a> {
     pub entity: EcsEntity,
     pub uid: Uid,
     pub inventory: Option<&'a Inventory>,
+    /// The target's attuned-item set, so unattuned gear grants no defense
+    /// (ENG-D2c). `None` is treated as "nothing attuned".
+    pub attuned: Option<&'a AttunedItems>,
     pub stats: Option<&'a Stats>,
     pub health: Option<&'a Health>,
     pub pos: Vec3<f32>,
@@ -268,8 +272,13 @@ impl Attack {
                 .and_then(|a| a.stats)
                 .map_or(0.0, |s| s.mitigations_penetration)
                 .clamp(0.0, 1.0);
-            let raw_damage_reduction =
-                Damage::compute_damage_reduction(Some(damage), target.inventory, target.stats, msm);
+            let raw_damage_reduction = Damage::compute_damage_reduction(
+                Some(damage),
+                target.inventory,
+                target.attuned,
+                target.stats,
+                msm,
+            );
 
             if raw_damage_reduction >= 1.0 {
                 raw_damage_reduction
@@ -527,8 +536,21 @@ impl Attack {
                         }
                     },
                     // Piercing damage ignores some penetration, and is handled when damage
-                    // reduction is computed Energy is a placeholder damage type
-                    DamageKind::Piercing | DamageKind::Energy => {},
+                    // reduction is computed. Energy and the magical/elemental kinds carry no
+                    // special physical mitigation here (per-kind resistances + the
+                    // Radiant/Necrotic affinity are a future balance task — ENG-A2 deferral).
+                    DamageKind::Piercing
+                    | DamageKind::Energy
+                    | DamageKind::Acid
+                    | DamageKind::Cold
+                    | DamageKind::Fire
+                    | DamageKind::Force
+                    | DamageKind::Lightning
+                    | DamageKind::Necrotic
+                    | DamageKind::Poison
+                    | DamageKind::Psychic
+                    | DamageKind::Radiant
+                    | DamageKind::Thunder => {},
                 }
                 for effect in damage.effects.iter() {
                     match effect {
@@ -1784,19 +1806,48 @@ impl From<AttackSource> for DamageSource {
     fn from(attack: AttackSource) -> Self { DamageSource::Attack(attack) }
 }
 
-/// DamageKind for the purpose of differentiating damage reduction
+/// DamageKind for the purpose of differentiating damage reduction.
+///
+/// The three physical kinds (Piercing/Slashing/Crushing) carry distinct
+/// mitigation behaviour (see the apply-damage match in this file). The
+/// magical/elemental kinds are the content damage taxonomy (Matias 2026-06-20,
+/// content-adaptation §6.2 / ENG-A2); for now they share the generic
+/// (no special physical interaction) mitigation of the legacy `Energy`
+/// placeholder. **Radiant is the opposite of Necrotic** — the resist/affinity
+/// interplay (e.g. undead take bonus Radiant; Necrotic harms the living /
+/// spares undead) is a future balance task and is NOT wired here yet.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageKind {
+    // --- physical ---
     /// Bypasses some protection from armor
     Piercing,
     /// Reduces energy of target, dealing additional damage when target energy
     /// is 0
     Slashing,
-    /// Deals additional poise damage the more armored the target is
+    /// Blunt/physical. Deals additional poise damage the more armored the
+    /// target is. Content name: **Bludgeoning** (serde alias) — kept as
+    /// `Crushing` in the engine for its poise behaviour.
+    #[serde(alias = "Bludgeoning")]
     Crushing,
-    /// Catch all for remaining damage kinds (TODO: differentiate further with
-    /// staff/sceptre reworks
+    // --- legacy generic ---
+    /// Legacy catch-all magical damage. Retained for back-compat with existing
+    /// RON; new content should use a specific kind below. Mitigated
+    /// generically.
     Energy,
+    // --- magical / elemental (content taxonomy, ENG-A2) ---
+    Acid,
+    Cold,
+    Fire,
+    Force,
+    Lightning,
+    /// Death/decay. Opposite of `Radiant` (affinity interplay deferred).
+    Necrotic,
+    Poison,
+    Psychic,
+    /// Holy/radiant light. Opposite of `Necrotic` (affinity interplay
+    /// deferred).
+    Radiant,
+    Thunder,
 }
 
 const PIERCING_PENETRATION_FRACTION: f32 = 0.75;
@@ -1815,10 +1866,11 @@ impl Damage {
     pub fn compute_damage_reduction(
         damage: Option<Self>,
         inventory: Option<&Inventory>,
+        attuned: Option<&AttunedItems>,
         stats: Option<&Stats>,
         msm: &MaterialStatManifest,
     ) -> f32 {
-        let protection = compute_protection(inventory, msm);
+        let protection = compute_protection(inventory, attuned, msm);
 
         let penetration = if let Some(damage) = damage {
             if let DamageKind::Piercing = damage.kind {
@@ -2195,11 +2247,13 @@ pub fn combat_rating(
     // Normalized with a standard max health of 100
     let health_rating = health.base_max()
         / 100.0
-        / (1.0 - Damage::compute_damage_reduction(None, Some(inventory), None, msm)).max(0.00001);
+        / (1.0 - Damage::compute_damage_reduction(None, Some(inventory), None, None, msm))
+            .max(0.00001);
 
     // Normalized with a standard max energy of 100 and energy reward multiplier of
     // x1
-    let energy_rating = (energy.base_max() + compute_max_energy_mod(Some(inventory), msm)) / 100.0
+    let energy_rating = (energy.base_max() + compute_max_energy_mod(Some(inventory), None, msm))
+        / 100.0
         * compute_energy_reward_mod(Some(inventory), msm);
 
     // Normalized with a standard max poise of 100
@@ -2279,11 +2333,16 @@ pub fn compute_energy_reward_mod(inventory: Option<&Inventory>, msm: &MaterialSt
 
 /// Computes the additive modifier that should be applied to max energy from the
 /// currently equipped items
-pub fn compute_max_energy_mod(inventory: Option<&Inventory>, msm: &MaterialStatManifest) -> f32 {
+pub fn compute_max_energy_mod(
+    inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
+    msm: &MaterialStatManifest,
+) -> f32 {
     // Defaults to a value of 0 if no inventory is present
     inventory.map_or(0.0, |inv| {
-        inv.equipped_items()
-            .filter_map(|item| {
+        inv.equipped_items_with_slot()
+            .filter(|(slot, item)| item_effects_active(*slot, item.requires_attunement(), attuned))
+            .filter_map(|(_, item)| {
                 if let ItemKind::Armor(armor) = &*item.kind() {
                     armor
                         .stats(msm, item.stats_durability_multiplier())
@@ -2341,11 +2400,13 @@ pub fn stealth_multiplier_from_items(
 /// the armor equipped makes the entity invulnerable
 pub fn compute_protection(
     inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
     msm: &MaterialStatManifest,
 ) -> Option<f32> {
     inventory.map_or(Some(0.0), |inv| {
-        inv.equipped_items()
-            .filter_map(|item| {
+        inv.equipped_items_with_slot()
+            .filter(|(slot, item)| item_effects_active(*slot, item.requires_attunement(), attuned))
+            .filter_map(|(_, item)| {
                 if let ItemKind::Armor(armor) = &*item.kind() {
                     armor
                         .stats(msm, item.stats_durability_multiplier())
@@ -2365,6 +2426,11 @@ pub fn compute_protection(
 /// Computes the total resilience provided from armor. Is used to determine the
 /// reduction applied to poise damage received by an entity. None indicates that
 /// the armor equipped makes the entity invulnerable to poise damage.
+// NOTE (ENG-D2c): poise resilience is intentionally NOT attunement-gated in v1.
+// It's a secondary (stagger) defense and gating it would ripple through
+// `Poise::compute_poise_damage_reduction` → `apply_poise_reduction` and all
+// their callers. HP-damage protection (`compute_protection`), max-energy and
+// weapon abilities ARE gated; poise gating is a possible follow-up.
 pub fn compute_poise_resilience(
     inventory: Option<&Inventory>,
     msm: &MaterialStatManifest,
@@ -2491,4 +2557,54 @@ pub fn get_equip_slot_by_block_priority(inventory: Option<&Inventory>) -> EquipS
                 (None, None) => EquipSlot::ActiveMainhand,
             },
         )
+}
+
+#[cfg(test)]
+mod damage_kind_taxonomy_tests {
+    use super::DamageKind;
+
+    // ENG-A2: the full 13-kind content damage taxonomy (Matias 2026-06-20) parses
+    // from RON.
+    #[test]
+    fn all_content_kinds_parse() {
+        for s in [
+            "Acid",
+            "Bludgeoning",
+            "Cold",
+            "Fire",
+            "Force",
+            "Lightning",
+            "Necrotic",
+            "Piercing",
+            "Poison",
+            "Psychic",
+            "Radiant",
+            "Slashing",
+            "Thunder",
+        ] {
+            ron::from_str::<DamageKind>(s)
+                .unwrap_or_else(|e| panic!("DamageKind `{s}` must parse: {e}"));
+        }
+    }
+
+    // `Bludgeoning` is the content-facing name for the engine's `Crushing` (kept
+    // for its poise behaviour); a serde alias avoids renaming churn across code
+    // + existing RON.
+    #[test]
+    fn bludgeoning_aliases_crushing() {
+        assert_eq!(
+            ron::from_str::<DamageKind>("Bludgeoning").unwrap(),
+            DamageKind::Crushing
+        );
+    }
+
+    // Back-compat: existing RON using the legacy generic `Energy` still loads (no
+    // data migration).
+    #[test]
+    fn legacy_energy_still_parses() {
+        assert_eq!(
+            ron::from_str::<DamageKind>("Energy").unwrap(),
+            DamageKind::Energy
+        );
+    }
 }

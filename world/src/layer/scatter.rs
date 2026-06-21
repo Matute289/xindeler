@@ -6,7 +6,6 @@ use crate::{
 };
 use common::{
     calendar::{Calendar, CalendarEvent},
-    consts::HIRES_SCALE,
     terrain::{Block, BlockKind, SpriteKind, sprite::SnowCovered},
 };
 use noise::NoiseFn;
@@ -32,7 +31,7 @@ pub fn density_factor_by_altitude(lower_limit: f32, altitude: f32, upper_limit: 
 const MUSH_FACT: f32 = 1.0e-4; // To balance things around the mushroom spawning rate
 const GRASS_FACT: f32 = 1.0e-3; // To balance things around the grass spawning rate
 const TREE_FACT: f32 = 0.15e-3; // To balance things around the wood spawning rate
-const DEPTH_WATER_NORM: f32 = 15.0 * HIRES_SCALE; // Water depth at which regular underwater sprites start spawning
+const DEPTH_WATER_NORM: f32 = 15.0; // Water depth at which regular underwater sprites start spawning
 pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Option<&Calendar>) {
     enum WaterMode {
         Underwater,
@@ -173,9 +172,9 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     * MUSH_FACT
                     * 200.0
                     * (!col.snow_cover) as i32 as f32 /* To prevent spawning in snow covered areas */
-                    * density_factor_by_altitude(-500.0 * HIRES_SCALE, col.alt, 500.0 * HIRES_SCALE), /* To prevent
-                                                                                                       * spawning at high
-                                                                                                       * altitudes */
+                    * density_factor_by_altitude(-500.0 , col.alt, 500.0), /* To prevent
+                                                                            * spawning at high
+                                                                            * altitudes */
                     Some((0.0, 128.0, 0.30)),
                 )
             },
@@ -207,13 +206,9 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     )) * col.tree_density
                         * MUSH_FACT
                         * 600.0
-                        * density_factor_by_altitude(
-                            200.0 * HIRES_SCALE,
-                            col.alt,
-                            1000.0 * HIRES_SCALE,
-                        ), /* To control
-                            * spawning based
-                            * on altitude */
+                        * density_factor_by_altitude(200.0, col.alt, 1000.0), /* To control
+                                                                               * spawning based
+                                                                               * on altitude */
                     Some((0.0, 100.0, 0.15)),
                 )
             },
@@ -761,7 +756,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                 (
                     MUSH_FACT
                         * 1.0e-6
-                        * if col.alt < col.water_level - DEPTH_WATER_NORM + 30.0 * HIRES_SCALE {
+                        * if col.alt < col.water_level - DEPTH_WATER_NORM + 30.0 {
                             1.0
                         } else {
                             0.0
@@ -817,7 +812,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 300.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 18.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 18.0
                         {
                             1.0
                         } else {
@@ -837,7 +832,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     MUSH_FACT
                         * 600.0
                         * if col.water_level <= CONFIG.sea_level
-                            && (col.water_level - col.alt) < 3.0 * HIRES_SCALE
+                            && (col.water_level - col.alt) < 3.0
                         {
                             1.0
                         } else {
@@ -858,7 +853,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 50.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 11.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 11.0
                         {
                             1.0
                         } else {
@@ -879,7 +874,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 50.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 11.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 11.0
                         {
                             1.0
                         } else {
@@ -899,7 +894,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     MUSH_FACT
                         * 250.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0
                         {
                             1.0
                         } else {
@@ -919,7 +914,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     MUSH_FACT
                         * 250.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0
                         {
                             1.0
                         } else {
@@ -940,7 +935,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 500.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0
                         {
                             1.0
                         } else {
@@ -961,7 +956,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 125.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM - 9.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM - 9.0
                         {
                             1.0
                         } else {
@@ -982,7 +977,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 220.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM - 9.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM - 9.0
                         {
                             1.0
                         } else {
@@ -1003,7 +998,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 300.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 3.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 3.0
                         {
                             1.0
                         } else {
@@ -1024,7 +1019,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 160.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0
                         {
                             1.0
                         } else {
@@ -1045,7 +1040,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                         * MUSH_FACT
                         * 120.0
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 10.0
                         {
                             1.0
                         } else {
@@ -1065,7 +1060,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     (c.rockiness - 0.5).max(0.0)
                         * 1.0e-3
                         * if col.water_level <= CONFIG.sea_level
-                            && col.alt < col.water_level - DEPTH_WATER_NORM + 20.0 * HIRES_SCALE
+                            && col.alt < col.water_level - DEPTH_WATER_NORM + 20.0
                         {
                             1.0
                         } else {
@@ -1102,7 +1097,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     close(col.temp, 0.2, 0.6).min(close(col.humidity, CONFIG.jungle_hum, 0.4))
                         * GRASS_FACT
                         * 100.0
-                        * ((col.alt - CONFIG.sea_level) / (12.0 * HIRES_SCALE)).clamped(0.0, 1.0)
+                        * ((col.alt - CONFIG.sea_level) / 12.0).clamped(0.0, 1.0)
                         * col
                             .water_dist
                             .map_or(0.0, |d| 1.0 / (1.0 + (d.abs() * 0.4).powi(2))),
@@ -1119,7 +1114,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                     close(col.temp, 0.2, 0.6).min(close(col.humidity, CONFIG.jungle_hum, 0.4))
                         * GRASS_FACT
                         * 100.0
-                        * ((col.alt - CONFIG.sea_level) / (12.0 * HIRES_SCALE)).clamped(0.0, 1.0)
+                        * ((col.alt - CONFIG.sea_level) / 12.0).clamped(0.0, 1.0)
                         * col
                             .water_dist
                             .map_or(0.0, |d| 1.0 / (1.0 + (d.abs() * 0.40).powi(2))),
@@ -1138,7 +1133,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                             .water_dist
                             .map(|wd| Lerp::lerp(0.2, 0.0, (wd / 8.0).clamped(0.0, 1.0)))
                             .unwrap_or(0.0)
-                        * ((col.alt - CONFIG.sea_level) / (12.0 * HIRES_SCALE)).clamped(0.0, 1.0),
+                        * ((col.alt - CONFIG.sea_level) / 12.0).clamped(0.0, 1.0),
                     Some((0.2, 128.0, 0.5)),
                 )
             },
@@ -1155,7 +1150,7 @@ pub fn apply_scatter_to(canvas: &mut Canvas, _rng: &mut impl Rng, calendar: Opti
                             .water_dist
                             .map(|wd| Lerp::lerp(0.2, 0.0, (wd / 8.0).clamped(0.0, 1.0)))
                             .unwrap_or(0.0)
-                        * ((col.alt - CONFIG.sea_level) / (12.0 * HIRES_SCALE)).clamped(0.0, 1.0),
+                        * ((col.alt - CONFIG.sea_level) / 12.0).clamped(0.0, 1.0),
                     Some((0.2, 128.0, 0.5)),
                 )
             },

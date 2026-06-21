@@ -33,7 +33,7 @@ use crate::{
     render::{
         CloudsLocals, Consts, CullingMode, Drawer, GlobalModel, Globals, GlobalsBindGroup, Light,
         Model, PointLightMatrix, PostProcessLocals, RainOcclusionLocals, Renderer, Shadow,
-        ShadowLocals, SkyboxVertex, TerrainSmoothingMode, create_skybox_mesh,
+        ShadowLocals, SkyboxVertex, create_skybox_mesh,
     },
     session::PlayerDebugLines,
     settings::Settings,
@@ -158,7 +158,6 @@ pub struct SceneData<'a> {
     pub is_aiming: bool,
     pub interpolated_time_of_day: Option<f64>,
     pub wind_vel: Vec2<f32>,
-    pub terrain_smoothing: TerrainSmoothingMode,
 }
 
 impl SceneData<'_> {
@@ -367,9 +366,7 @@ impl Scene {
             tether_mgr: TetherMgr::new(renderer),
             sfx_mgr: SfxMgr::default(),
             music_mgr: MusicMgr::new(&calendar),
-            ambience_mgr: AmbienceMgr {
-                ambience: ambience::load_ambience_items(),
-            },
+            ambience_mgr: AmbienceMgr::new(ambience::load_ambience_items()),
             integrated_rain_vel: 0.0,
             wind_vel: Vec2::zero(),
             interpolated_time_of_day: None,
@@ -546,21 +543,6 @@ impl Scene {
         span!(_guard, "maintain", "Scene::maintain");
         // Get player position.
         let ecs = scene_data.state.ecs();
-
-        // Sync the graphics-side TerrainSmoothingMode into the ECS resource so
-        // that the physics system can read the correct pass count every frame.
-        {
-            use common_state::SmoothTerrainSettings;
-            let passes = match scene_data.terrain_smoothing {
-                TerrainSmoothingMode::Disabled => 0u8,
-                TerrainSmoothingMode::Soft => 1,
-                TerrainSmoothingMode::Smooth => 2,
-                TerrainSmoothingMode::Ultra => 3,
-            };
-            if let Some(mut smooth) = ecs.try_fetch_mut::<SmoothTerrainSettings>() {
-                smooth.passes = passes;
-            }
-        }
 
         let dt = ecs.fetch::<DeltaTime>().0;
 
@@ -1444,6 +1426,7 @@ impl Scene {
             scene_data.state,
             client,
             &self.camera,
+            &self.terrain,
         );
 
         self.music_mgr.maintain(audio, scene_data.state, client);
@@ -1540,7 +1523,6 @@ impl Scene {
 
             self.terrain
                 .render(&mut first_pass, focus_pos, culling_mode);
-            self.terrain.render_smooth(&mut first_pass, focus_pos);
 
             self.figure_mgr.render(
                 &mut first_pass.draw_figures(),

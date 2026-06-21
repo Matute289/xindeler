@@ -228,6 +228,7 @@ impl<'a> System<'a> for Sys {
                         stats: read_data.stats.get(entity),
                         cached_spatial_grid: &read_data.cached_spatial_grid,
                         msm: &read_data.msm,
+                        ability_map: &read_data.ability_map,
                         poise: read_data.poises.get(entity),
                         stance: read_data.stances.get(entity),
                     };

@@ -66,12 +66,10 @@ generic_body_from_impl!(comp::crustacean::Body);
 pub struct CharacterPosition {
     pub waypoint: Option<Vec3<f32>>,
     pub map_marker: Option<Vec2<i32>>,
-    #[serde(default)]
-    pub hires: bool,
 }
 
 pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> String {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     let skill_group_string = match skill_group {
         General => "General",
         Weapon(ToolKind::Sword) => "Weapon Sword",
@@ -81,6 +79,16 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Weapon(ToolKind::Staff) => "Weapon Staff",
         Weapon(ToolKind::Sceptre) => "Weapon Sceptre",
         Weapon(ToolKind::Pick) => "Weapon Pick",
+        Class(ClassKind::Warrior) => "Class Warrior",
+        Class(ClassKind::Mage) => "Class Mage",
+        Class(ClassKind::Cleric) => "Class Cleric",
+        Class(ClassKind::Rogue) => "Class Rogue",
+        // Adventurer has no class tree; a Class(Adventurer) group reaching
+        // persistence is a bug, consistent with the unsupported-weapon arm.
+        Class(ClassKind::Adventurer) => panic!(
+            "Tried to add unsupported skill group to database: {:?}",
+            skill_group
+        ),
         Weapon(ToolKind::Dagger)
         | Weapon(ToolKind::Shield)
         | Weapon(ToolKind::Spear)
@@ -91,7 +99,10 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         | Weapon(ToolKind::Throwable)
         | Weapon(ToolKind::Empty)
         | Weapon(ToolKind::Natural)
-        | Weapon(ToolKind::Shovel) => panic!(
+        | Weapon(ToolKind::Shovel)
+        | Weapon(ToolKind::Tome)
+        | Weapon(ToolKind::HolySymbol)
+        | Weapon(ToolKind::Focus) => panic!(
             "Tried to add unsupported skill group to database: {:?}",
             skill_group
         ),
@@ -100,7 +111,7 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
 }
 
 pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::SkillGroupKind {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind::*};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind::*};
     match skill_group_string {
         "General" => General,
         "Weapon Sword" => Weapon(ToolKind::Sword),
@@ -110,12 +121,40 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Weapon Staff" => Weapon(ToolKind::Staff),
         "Weapon Sceptre" => Weapon(ToolKind::Sceptre),
         "Weapon Pick" => Weapon(ToolKind::Pick),
+        "Class Warrior" => Class(ClassKind::Warrior),
+        "Class Mage" => Class(ClassKind::Mage),
+        "Class Cleric" => Class(ClassKind::Cleric),
+        "Class Rogue" => Class(ClassKind::Rogue),
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
             skill_group_string
         ),
     }
+}
+
+pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
+    use comp::class::ClassKind::*;
+    match class {
+        Adventurer => "Adventurer",
+        Warrior => "Warrior",
+        Mage => "Mage",
+        Cleric => "Cleric",
+        Rogue => "Rogue",
+    }
+    .to_string()
+}
+
+/// Unlike the skill-group converter this never panics: unknown strings fall
+/// back to Adventurer with a warning so a DB downgrade never bricks a save.
+pub fn db_string_to_class(class_string: &str) -> comp::class::ClassKind {
+    comp::class::ClassKind::ALL
+        .into_iter()
+        .find(|class| class_to_db_string(*class) == class_string)
+        .unwrap_or_else(|| {
+            tracing::warn!(unknown = ?class_string, "Unknown class in database, defaulting to Adventurer");
+            comp::class::ClassKind::Adventurer
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,6 +170,7 @@ fn aux_ability_to_string(ability: comp::ability::AuxiliaryAbility) -> String {
         AuxiliaryAbility::MainWeapon(index) => format!("Main Weapon:index:{}", index),
         AuxiliaryAbility::OffWeapon(index) => format!("Off Weapon:index:{}", index),
         AuxiliaryAbility::Glider(index) => format!("Glider:index:{}", index),
+        AuxiliaryAbility::Innate(index) => format!("Innate:index:{}", index),
         AuxiliaryAbility::Empty => String::from("Empty"),
     }
 }
@@ -202,6 +242,27 @@ fn aux_ability_from_string(ability: &str) -> comp::ability::AuxiliaryAbility {
                 AuxiliaryAbility::Empty
             },
         },
+        Some("Innate") => match parts
+            .next()
+            .map(|index| index.parse::<usize>().map_err(|_| index))
+        {
+            Some(Ok(index)) => AuxiliaryAbility::Innate(index),
+            Some(Err(error)) => {
+                dev_panic!(format!(
+                    "Conversion from database to ability set failed. Unable to parse index for \
+                     innate abilities: {}",
+                    error
+                ));
+                AuxiliaryAbility::Empty
+            },
+            None => {
+                dev_panic!(String::from(
+                    "Conversion from database to ability set failed. Unable to find an index for \
+                     innate abilities"
+                ));
+                AuxiliaryAbility::Empty
+            },
+        },
         Some("Empty") => AuxiliaryAbility::Empty,
         unknown => {
             dev_panic!(format!(
@@ -222,6 +283,9 @@ fn tool_kind_to_string(tool: Option<comp::item::tool::ToolKind>) -> String {
         Some(Bow) => "Bow",
         Some(Staff) => "Staff",
         Some(Sceptre) => "Sceptre",
+        Some(Tome) => "Tome",
+        Some(HolySymbol) => "HolySymbol",
+        Some(Focus) => "Focus",
         Some(Dagger) => "Dagger",
         Some(Shield) => "Shield",
         Some(Spear) => "Spear",
@@ -249,6 +313,9 @@ fn tool_kind_from_string(tool: String) -> Option<comp::item::tool::ToolKind> {
         "Bow" => Some(Bow),
         "Staff" => Some(Staff),
         "Sceptre" => Some(Sceptre),
+        "Tome" => Some(Tome),
+        "HolySymbol" => Some(HolySymbol),
+        "Focus" => Some(Focus),
         "Dagger" => Some(Dagger),
         "Shield" => Some(Shield),
         "Spear" => Some(Spear),
@@ -349,26 +416,64 @@ pub mod tests {
              forward compatible with migration V50.",
         );
     }
-}
-
-#[cfg(test)]
-mod waypoint_migration_tests {
-    use super::CharacterPosition;
 
     #[test]
-    fn old_save_defaults_hires_to_false() {
-        let json = r#"{"waypoint":[100.0,200.0,50.0],"map_marker":[100,200]}"#;
-        let pos: CharacterPosition = serde_json::de::from_str(json).expect("must parse");
-        assert!(
-            !pos.hires,
-            "old saves without hires field must default to false"
+    fn skill_group_db_string_round_trips() {
+        use common::comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind};
+        let kinds = [
+            SkillGroupKind::General,
+            SkillGroupKind::Weapon(ToolKind::Sword),
+            SkillGroupKind::Weapon(ToolKind::Axe),
+            SkillGroupKind::Weapon(ToolKind::Hammer),
+            SkillGroupKind::Weapon(ToolKind::Bow),
+            SkillGroupKind::Weapon(ToolKind::Staff),
+            SkillGroupKind::Weapon(ToolKind::Sceptre),
+            SkillGroupKind::Weapon(ToolKind::Pick),
+            SkillGroupKind::Class(ClassKind::Warrior),
+            SkillGroupKind::Class(ClassKind::Mage),
+            SkillGroupKind::Class(ClassKind::Cleric),
+            SkillGroupKind::Class(ClassKind::Rogue),
+        ];
+        for kind in kinds {
+            assert_eq!(
+                super::db_string_to_skill_group(&super::skill_group_to_db_string(kind)),
+                kind,
+                "round trip failed for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn class_db_string_round_trips_and_tolerates_unknown() {
+        use common::comp::class::ClassKind;
+        for class in ClassKind::ALL {
+            assert_eq!(
+                super::db_string_to_class(&super::class_to_db_string(class)),
+                class
+            );
+        }
+        // A downgrade/foreign DB must never brick the server (spec §4)
+        assert_eq!(
+            super::db_string_to_class("Necromancer"),
+            ClassKind::Adventurer
         );
     }
 
     #[test]
-    fn hires_save_parses_hires_true() {
-        let json = r#"{"waypoint":[200.0,400.0,100.0],"map_marker":[200,400],"hires":true}"#;
-        let pos: CharacterPosition = serde_json::de::from_str(json).expect("must parse");
-        assert!(pos.hires);
+    fn innate_aux_ability_round_trips() {
+        use common::comp::ability::AuxiliaryAbility;
+        for ability in [
+            AuxiliaryAbility::Innate(0),
+            AuxiliaryAbility::Innate(3),
+            AuxiliaryAbility::MainWeapon(1),
+            AuxiliaryAbility::Empty,
+        ] {
+            let s = super::aux_ability_to_string(ability);
+            assert_eq!(super::aux_ability_from_string(&s), ability);
+        }
+        assert_eq!(
+            super::aux_ability_to_string(AuxiliaryAbility::Innate(3)),
+            "Innate:index:3"
+        );
     }
 }

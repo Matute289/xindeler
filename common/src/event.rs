@@ -232,6 +232,7 @@ pub struct UpdateCharacterDataEvent {
     pub components: (
         comp::Body,
         Option<comp::Hardcore>,
+        comp::CharacterClass,
         comp::Stats,
         comp::SkillSet,
         comp::Inventory,
@@ -498,6 +499,12 @@ pub struct TeleportToEvent {
     pub entity: EcsEntity,
     pub target: Uid,
     pub max_range: Option<f32>,
+}
+
+pub struct SetAbilityCooldownEvent {
+    pub entity: EcsEntity,
+    pub ability_id: String,
+    pub cooldown_secs: f32,
 }
 
 pub struct SoundEvent {

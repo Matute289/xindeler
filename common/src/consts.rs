@@ -1,24 +1,17 @@
-/// Multiplier applied to all block-unit constants when the block size is
-/// halved. 2.0 with `terrain-hires` feature, 1.0 otherwise.
-#[cfg(feature = "terrain-hires")]
-pub const HIRES_SCALE: f32 = 2.0;
-#[cfg(not(feature = "terrain-hires"))]
-pub const HIRES_SCALE: f32 = 1.0;
-
 // The limit on distance between the entity and a collectible (squared)
-pub const MAX_PICKUP_RANGE: f32 = 5.0 * HIRES_SCALE;
-pub const MAX_MOUNT_RANGE: f32 = 5.0 * HIRES_SCALE;
-pub const MAX_SPRITE_MOUNT_RANGE: f32 = 2.0 * HIRES_SCALE;
-pub const MAX_TRADE_RANGE: f32 = 5.0 * HIRES_SCALE;
-pub const MAX_NPCINTERACT_RANGE: f32 = 8.0 * HIRES_SCALE;
-pub const MAX_INTERACT_RANGE: f32 = 5.0 * HIRES_SCALE;
-pub const MAX_WAYPOINT_RANGE: f32 = 4.0 * HIRES_SCALE;
+pub const MAX_PICKUP_RANGE: f32 = 5.0;
+pub const MAX_MOUNT_RANGE: f32 = 5.0;
+pub const MAX_SPRITE_MOUNT_RANGE: f32 = 2.0;
+pub const MAX_TRADE_RANGE: f32 = 5.0;
+pub const MAX_NPCINTERACT_RANGE: f32 = 8.0;
+pub const MAX_INTERACT_RANGE: f32 = 5.0;
+pub const MAX_WAYPOINT_RANGE: f32 = 4.0;
 // Player-imperceptible offset to ensure campfire healing is always
 // within waypoint range (may not be necessary if floating point handling is
 // reliable)
 pub const MAX_CAMPFIRE_RANGE: f32 = MAX_WAYPOINT_RANGE - 0.001;
 
-pub const GRAVITY: f32 = 25.0 * HIRES_SCALE;
+pub const GRAVITY: f32 = 25.0;
 pub const FRIC_GROUND: f32 = 0.15;
 
 // Values for air taken from http://www-mdp.eng.cam.ac.uk/web/library/enginfo/aerothermal_dvd_only/aero/atmos/atmos.html
@@ -41,9 +34,9 @@ pub const HUMAN_DENSITY: f32 = 990.0; // value we use to make humanoids gently f
 pub const MIN_RECOMMENDED_RAYON_THREADS: usize = 2;
 pub const MIN_RECOMMENDED_TOKIO_THREADS: usize = 2;
 
-pub const SOUND_TRAVEL_DIST_PER_VOLUME: f32 = 3.0 * HIRES_SCALE;
+pub const SOUND_TRAVEL_DIST_PER_VOLUME: f32 = 3.0;
 
-pub const TELEPORTER_RADIUS: f32 = 3. * HIRES_SCALE;
+pub const TELEPORTER_RADIUS: f32 = 3.;
 
 // Map settings
 pub const DAY_LENGTH_DEFAULT: f64 = 30.0;

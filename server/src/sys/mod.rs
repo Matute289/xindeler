@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod attunement;
 pub mod chunk_send;
 pub mod chunk_serialize;
 pub mod entity_sync;
@@ -46,6 +47,9 @@ pub fn add_server_systems(dispatch_builder: &mut DispatcherBuilder) {
     dispatch::<chunk_send::Sys>(dispatch_builder, &[]);
     dispatch::<item::Sys>(dispatch_builder, &[]);
     dispatch::<server_info::Sys>(dispatch_builder, &[]);
+    // Observes the loadout after inventory changes are applied; the D2c
+    // effect-gating consumer must run after this.
+    dispatch::<attunement::Sys>(dispatch_builder, &[]);
 }
 
 pub fn run_sync_systems(ecs: &mut specs::World) {

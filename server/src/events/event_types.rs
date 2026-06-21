@@ -10,10 +10,10 @@ pub use common::event::{
     InviteResponseEvent, KillEvent, KnockbackEvent, LandOnGroundEvent, MakeAdminEvent,
     MineBlockEvent, MountEvent, NpcInteractEvent, ParryHookEvent, PoiseChangeEvent, PossessEvent,
     ProcessTradeActionEvent, RegrowHeadEvent, RemoveLightEmitterEvent, RequestSiteInfoEvent,
-    RespawnEvent, SetBattleModeEvent, SetLanternEvent, SetPetStayEvent, ShockwaveEvent, ShootEvent,
-    SoundEvent, StartInteractionEvent, StartTeleportingEvent, SummonBeamPillarsEvent, TamePetEvent,
-    TeleportToEvent, TeleportToPositionEvent, ThrowEvent, ToggleSpriteLightEvent, TransformEvent,
-    UpdateCharacterDataEvent, UpdateMapMarkerEvent,
+    RespawnEvent, SetAbilityCooldownEvent, SetBattleModeEvent, SetLanternEvent, SetPetStayEvent,
+    ShockwaveEvent, ShootEvent, SoundEvent, StartInteractionEvent, StartTeleportingEvent,
+    SummonBeamPillarsEvent, TamePetEvent, TeleportToEvent, TeleportToPositionEvent, ThrowEvent,
+    ToggleSpriteLightEvent, TransformEvent, UpdateCharacterDataEvent, UpdateMapMarkerEvent,
 };
 
 #[cfg(feature = "plugins")]
@@ -72,6 +72,7 @@ macro_rules! server_events {
             RequestSiteInfoEvent
             MineBlockEvent
             TeleportToEvent
+            SetAbilityCooldownEvent
             SoundEvent
             CreateSpriteEvent
             TamePetEvent
