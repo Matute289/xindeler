@@ -42,7 +42,7 @@ byteorder = "1.3.2"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 quinn = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
-hickory-resolver = { version = "0.25.2", features = [
+hickory-resolver = { version = "0.26.1", features = [
     "system-config",
     "tokio",
 ] }
@@ -68,7 +68,7 @@ common-i18n = { package = "veloren-common-i18n", path = "../common/i18n"}
 serde = { workspace = true, features = ["rc"], optional = true }
 ron = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
-rustyline = { version = "17", optional = true }
+rustyline = { version = "18", optional = true }
 ## logging
 common-frontend = { package = "veloren-common-frontend", path = "../common/frontend", optional = true }
 

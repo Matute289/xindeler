@@ -293,7 +293,9 @@ fn handle_main_events_cleared(
             static PERF_COUNTER: AtomicU32 = AtomicU32::new(0);
             let count = PERF_COUNTER.fetch_add(1, Ordering::Relaxed);
             if count.is_multiple_of(30) {
-                let dt = global_state.clock.dt();
+                // upstream split Clock::dt() into real_dt()/game_dt(); perf/FPS wants
+                // wall-clock
+                let dt = global_state.clock.real_dt();
                 let frame_ms = dt.as_millis() as u32;
                 let fps = 1000u32.checked_div(frame_ms).unwrap_or(0);
                 common::telemetry!("perf", fps, frame_ms);

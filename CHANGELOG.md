@@ -44,8 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sword dual wielding animation
 - Savannah guard huts
 - Added market stands and other small structures to villages
-
+- Added a custom conrod rich text widget to render in-line images
 - Added 5 new Firestaff abilities.
+- Server-side Prometheus metrics for entity deaths, locations, and causes of death
+- New river ambience
   
 ### Changed
 
@@ -57,8 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repairing items no longer costs resources.
 - Characters are now slightly taller
 - Parry no longer depends on armor
+- Mindflayer drops glowing remains with 25% chance
+- Quests now give larger coin rewards, and trader NPCs have higher amounts of coins to be able to afford to pay for the larger quest rewards
 
 ### Removed
+
 - Removed Firestaff ability upgrades.
 
 ### Fixed
@@ -67,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chat command autocomplete now works correctly again.
 - Resources in spots are now tracked by rtsim.
 - Fix Orientation of Wildskin Drum's Thumbnail
+- Fast river sfx
 
 ## [0.18.0] - 2026-01-23
 
