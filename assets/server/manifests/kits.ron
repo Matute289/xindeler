@@ -5,6 +5,7 @@
     // or the test-harness roster.
     "test-attunement": [
         (Item("common.items.debug.test_attunement_ring"), 1),
+        (Item("common.items.debug.test_attunement_ring_2"), 1),
     ],
     "debug": [
         (Item("common.items.debug.admin_black_hole"),1),

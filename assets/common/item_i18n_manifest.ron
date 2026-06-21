@@ -2332,6 +2332,9 @@
             "common.items.debug.test_attunement_ring",
         ): "armor-misc-ring-test_attunement_ring",
         Simple(
+            "common.items.debug.test_attunement_ring_2",
+        ): "armor-misc-ring-test_attunement_ring_2",
+        Simple(
             "common.items.debug.glider",
         ): "other-glider-vroom-debug",
         Simple(
