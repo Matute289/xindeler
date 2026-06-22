@@ -1478,6 +1478,9 @@ fn handle_ability(
                         data.hardcore,
                     )
                     && ability.requirements_paid(data, update)
+                    // BL-36: an antimagic field blocks magic abilities (those with a
+                    // magic `source`); physical + innate abilities (source: None) pass.
+                    && !(data.stats.disable_magic && ability.ability_meta().source.is_some())
             })
     {
         // TODO: Change requirements_paid to requirements_met, and then pay requirements

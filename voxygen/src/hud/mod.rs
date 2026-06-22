@@ -5644,6 +5644,8 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::Crippled => imgs.debuff_crippled_0,
         // BL-03: reuse the slow-debuff icon for difficult terrain (placeholder art).
         BuffKind::DifficultTerrain => imgs.debuff_crippled_0,
+        // BL-36: reuse the cursed/dark icon for antimagic (placeholder art).
+        BuffKind::Antimagic => imgs.debuff_cursed_0,
         BuffKind::Frozen => imgs.debuff_frozen_0,
         BuffKind::Wet => imgs.debuff_wet_0,
         BuffKind::Ensnared => imgs.debuff_ensnared_0,
