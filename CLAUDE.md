@@ -168,6 +168,14 @@ vehicle / item). Keep this list current: when you finish or add work, update the
 The board `tasks/00-task-board.md` is the per-task source of truth; this backlog is the program-level
 roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 
+**Multi-session backlog — keep in sync.** This backlog is **shared and grows from multiple sessions**:
+other sessions add `BL-NN` rows here (and design docs) as new mechanics / game needs surface. So
+**`git pull` / re-sync `development` periodically** — at minimum before starting any new task and after
+each merge — so you work against the current backlog and don't duplicate or collide. (Standard flow
+already does `git fetch && git reset --hard origin/development` when starting new work after a merge;
+do it on resume too.) When you add work, add the `BL-NN` row here **and** its detail in `docs/design/`,
+then re-sort by score.
+
 ### Scoring rubric (so new items score consistently)
 `Score = Value + Leverage + (6 − Effort)` → range 2–16, **higher = do sooner**.
 - **Value (V) 1-5** — gameplay/project impact.
