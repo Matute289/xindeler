@@ -6126,7 +6126,8 @@ fn build_buff(
             | BuffKind::Charmed
             | BuffKind::Hollowtouched
             | BuffKind::DifficultTerrain
-            | BuffKind::FreedomOfMovement => {
+            | BuffKind::FreedomOfMovement
+            | BuffKind::Antimagic => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {

@@ -1,0 +1,24 @@
+// BL-36: Antimagic Field — an indiscriminate zone (AuraTarget::All) that applies the
+// Antimagic debuff to everyone inside (caster + allies + enemies). While affected, magic
+// abilities can't be cast and attuned magic-item effects go mundane; physical/innate
+// abilities are unaffected. The buff re-applies while inside and lapses ~2s after leaving.
+BasicAura(
+    buildup_duration: 0.6,
+    cast_duration: 0.8,
+    recover_duration: 0.4,
+    targets: All,
+    auras: [
+        (
+            kind: Antimagic,
+            strength: 1.0,
+            duration: Some(2),
+            category: Magical,
+        ),
+    ],
+    aura_duration: Some(10.0),
+    range: 8.0,
+    energy_cost: 100.0,
+    scales_with_combo: false,
+    specifier: None,
+    meta: (school: Some(Abjuration), source: Some(Arcane), cooldown: Some(30.0)),
+)

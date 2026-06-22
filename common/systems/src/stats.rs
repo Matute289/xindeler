@@ -89,14 +89,17 @@ impl<'a> System<'a> for Sys {
                 health.update_internal_integer_maximum(new_max);
             }
 
-            // Calculates energy scaling from stats and inventory
+            // Calculates energy scaling from stats and inventory. BL-36: an
+            // antimagic field makes attuned magic-item effects mundane, so the
+            // attunement-gated energy bonus is dropped while `disable_magic`.
+            let attuned = if stat.disable_magic {
+                None
+            } else {
+                read_data.attuned_items.get(entity)
+            };
             let energy_mods = StatsModifier {
                 add_mod: stat.max_energy_modifiers.add_mod
-                    + combat::compute_max_energy_mod(
-                        inventory,
-                        read_data.attuned_items.get(entity),
-                        &read_data.msm,
-                    ),
+                    + combat::compute_max_energy_mod(inventory, attuned, &read_data.msm),
                 mult_mod: stat.max_energy_modifiers.mult_mod,
             };
 

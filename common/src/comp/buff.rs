@@ -279,6 +279,11 @@ pub enum BuffKind {
     /// `MovementSpeed(1.0 - strength)`, so strength 0.5 = half speed. Delivered
     /// by an aura (spell / terrain / weather); negated by `FreedomOfMovement`.
     DifficultTerrain,
+    /// Antimagic field (BL-36): inside the zone, magic abilities can't be cast
+    /// and attuned magic-item effects are suppressed (physical/innate abilities
+    /// unaffected). Indiscriminate — applied to all in the zone.
+    /// `DisableMagic`.
+    Antimagic,
     // =================
     //      COMPLEX
     // =================
@@ -364,7 +369,8 @@ impl BuffKind {
             | BuffKind::Terrified
             | BuffKind::Charmed
             | BuffKind::Hollowtouched
-            | BuffKind::DifficultTerrain => BuffDescriptor::SimpleNegative,
+            | BuffKind::DifficultTerrain
+            | BuffKind::Antimagic => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -555,6 +561,8 @@ impl BuffKind {
             BuffKind::FreedomOfMovement => {
                 vec![BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)]
             },
+            // BL-36: antimagic — suppress magic casting + attuned magic-item effects.
+            BuffKind::Antimagic => vec![BuffEffect::DisableMagic],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -1012,6 +1020,9 @@ pub enum BuffEffect {
     DeathEffect(StatEffect),
     /// Prevents use of auxiliary abilities
     DisableAuxiliaryAbilities,
+    /// Antimagic (BL-36): prevents activation of magic abilities and suppresses
+    /// attuned magic-item effects. Sets `Stats.disable_magic`.
+    DisableMagic,
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
@@ -1378,6 +1389,15 @@ pub mod tests {
             BuffEffect::MovementSpeed(s) if (*s - 0.5).abs() < f32::EPSILON
         )));
         assert!(!BuffKind::DifficultTerrain.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn antimagic_disables_magic() {
+        // BL-36: the antimagic debuff sets the disable-magic flag and nothing else.
+        let effects = BuffKind::Antimagic.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::DisableMagic));
+        assert!(!BuffKind::Antimagic.is_buff(), "should be a debuff");
     }
 
     #[test]

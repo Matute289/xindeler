@@ -98,6 +98,9 @@ buff-difficult_terrain = Difficult Terrain
     .desc = The ground fights every step — you move at reduced speed.
 buff-freedom_of_movement = Freedom of Movement
     .desc = You move unhindered, ignoring difficult terrain.
+## Antimagic (BL-36)
+buff-antimagic = Antimagic
+    .desc = Magic fails here — you cannot cast and your magic items lie dormant.
 ## Freeze
 buff-frozen = Frozen
     .desc = Your movements and attacks are slowed.

@@ -549,4 +549,19 @@
         description_i18n: "spell-time_ravage-desc",
         ability: "common.abilities.spells.axiomancy.time_ravage",
     ),
+    // --- Abjuration (BL-36) ---
+    (
+        id: "spells.abjuration.antimagic_field",
+        name_i18n: "spell-antimagic_field",
+        level: 6,
+        school: Some(Abjuration),
+        source: Arcane,
+        classes: [Mage],
+        cast_time: Action,
+        duration: Secs(10.0),
+        range: SelfOnly,
+        aoe: Some(Sphere(8.0)),
+        description_i18n: "spell-antimagic_field-desc",
+        ability: "common.abilities.spells.abjuration.antimagic_field",
+    ),
 ]

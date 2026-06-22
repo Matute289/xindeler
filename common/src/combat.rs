@@ -1870,6 +1870,13 @@ impl Damage {
         stats: Option<&Stats>,
         msm: &MaterialStatManifest,
     ) -> f32 {
+        // BL-36: an antimagic field makes attuned magic-item effects mundane, so
+        // attuned protection is dropped while the target has `disable_magic`.
+        let attuned = if stats.is_some_and(|s| s.disable_magic) {
+            None
+        } else {
+            attuned
+        };
         let protection = compute_protection(inventory, attuned, msm);
 
         let penetration = if let Some(damage) = damage {

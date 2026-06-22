@@ -98,6 +98,11 @@ pub struct Stats {
     /// This creates effects when the entity is killed
     pub effects_on_death: Vec<StatEffect>,
     pub disable_auxiliary_abilities: bool,
+    /// Antimagic (BL-36): when set, magic abilities (those with an
+    /// `AbilityMeta` `source`) can't be activated and attuned magic-item
+    /// effects are suppressed. Physical/innate abilities are unaffected.
+    /// Set each tick by `BuffEffect::DisableMagic`.
+    pub disable_magic: bool,
     pub crowd_control_resistance: f32,
     pub item_effect_reduction: f32,
     /// This modifies attacks that target this entity
@@ -131,6 +136,7 @@ impl Stats {
             effects_on_damaged: Vec::new(),
             effects_on_death: Vec::new(),
             disable_auxiliary_abilities: false,
+            disable_magic: false,
             crowd_control_resistance: 0.0,
             item_effect_reduction: 1.0,
             attacked_modifications: Vec::new(),
