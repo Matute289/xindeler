@@ -75,6 +75,12 @@ pub enum BuffKind {
     /// Increases movement and attack speed Strength scales strength of both
     /// effects linearly. 0.5 is a 50% increase, 1.0 is a 100% increase.
     Hastened,
+    /// Immunity to `DifficultTerrain` (BL-03) — "freedom of movement", granted
+    /// by an item / spell / class (e.g. a Ranger at home in the wilds). No
+    /// other effect. Reactive immunity: it strips the re-applied debuff
+    /// each tick via the existing `BuffImmunity` model (same as
+    /// Frozen→Chilled).
+    FreedomOfMovement,
     /// Increases resistance to incoming poise, and poise damage dealt as health
     /// is lost.
     /// Strength scales the resistance non-linearly. 0.5 provides 50%, 1.0
@@ -278,10 +284,6 @@ pub enum BuffKind {
     // =================
     /// Changed into another body.
     Polymorphed,
-    /// Immunity to `DifficultTerrain` (BL-03) — "freedom of movement", granted
-    /// by an item / spell / class (e.g. a Ranger at home in the wilds). No
-    /// other effect; classified positive.
-    FreedomOfMovement,
 }
 
 /// Tells a little more about the buff kind than simple buff/debuff
@@ -543,7 +545,9 @@ impl BuffKind {
                 BuffEffect::BuffImmunity(BuffKind::Burning),
             ],
             BuffKind::Ensnared => vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))],
-            // BL-03: linear slow so strength 0.5 = exactly half speed (tunable per zone).
+            // BL-03: linear slow so strength 0.5 = exactly half speed (tunable per
+            // zone). Intended strength range is [0, 1); strength >= 1.0 floors at a
+            // full root (clamped), so authors who want a root should use Rooted/Ensnared.
             BuffKind::DifficultTerrain => {
                 vec![BuffEffect::MovementSpeed((1.0 - data.strength).max(0.0))]
             },
