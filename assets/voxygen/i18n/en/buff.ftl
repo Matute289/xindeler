@@ -93,6 +93,11 @@ buff-burn = On Fire
 ## Crippled
 buff-crippled = Crippled
     .desc = Your movement is crippled as your legs are heavily injured.
+## Difficult Terrain (BL-03)
+buff-difficult_terrain = Difficult Terrain
+    .desc = The ground fights every step — you move at reduced speed.
+buff-freedom_of_movement = Freedom of Movement
+    .desc = You move unhindered, ignoring difficult terrain.
 ## Freeze
 buff-frozen = Frozen
     .desc = Your movements and attacks are slowed.

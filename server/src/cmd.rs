@@ -6124,7 +6124,9 @@ fn build_buff(
             | BuffKind::SepticShot
             | BuffKind::Terrified
             | BuffKind::Charmed
-            | BuffKind::Hollowtouched => {
+            | BuffKind::Hollowtouched
+            | BuffKind::DifficultTerrain
+            | BuffKind::FreedomOfMovement => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {
