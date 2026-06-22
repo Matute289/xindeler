@@ -136,7 +136,8 @@ pub fn apply_racial_traits(stats: &mut Stats, species: Species) {
 }
 
 /// Level at which growth accelerates, and the slope multiplier past it, so the
-/// last levels feel epic (BL-01 spec §7 Q2). Tunable.
+/// last `MAX_CHARACTER_LEVEL - LEVEL_ACCEL_START` levels feel epic (BL-01 spec
+/// §7 Q2). Tunable; the two constants move together with `MAX_CHARACTER_LEVEL`.
 pub const LEVEL_ACCEL_START: u16 = 50;
 pub const LEVEL_ACCEL_FACTOR: f32 = 2.5;
 
@@ -168,7 +169,8 @@ pub struct ClassAttributes {
     /// Fraction added to `attack_damage_modifier` per level (e.g. 0.005 =
     /// +0.5%/level), applied multiplicatively.
     pub per_level_damage: f32,
-    /// Flat per-class energy-reward tier (caster sustain).
+    /// Per-class multiplier on `energy_reward_modifier` (caster sustain tier);
+    /// flat per class, not scaled by level.
     pub energy_reward_mult: f32,
 }
 
