@@ -154,3 +154,65 @@ Custom profiles in the workspace `Cargo.toml`:
 - `dev` (default): opt-level=2, debug assertions on — faster iteration than a true debug build.
 - `release`: opt-level=3, full LTO, `panic=abort`.
 - `no_overflow`: Used in world-gen crates to skip overflow checks for performance.
+
+## 📋 Project Backlog (scored & prioritized)
+
+**This is the master list of all pending work — the single always-present roadmap.** It is
+intentionally **high-level (epics)**: it does NOT contain each spec/plan/task, instead every
+record **references** the design docs (in the private `docs/design/` repo) that cover it. As we
+build, MORE epics get added here (new mechanics, and content per class / race / weapon / monster /
+vehicle / item). Keep this list current: when you finish or add work, update the row + score.
+
+**Detail lives in the design repo** (`docs/design/`): specs `specs/`, plans `plans/`, task boards
+`tasks/00-task-board.md` + `tasks/NN-*.md`, emerged-workstreams `2026-06-21-emerged-workstreams.md`.
+The board `tasks/00-task-board.md` is the per-task source of truth; this backlog is the program-level
+roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
+
+### Scoring rubric (so new items score consistently)
+`Score = Value + Leverage + (6 − Effort)` → range 2–16, **higher = do sooner**.
+- **Value (V) 1-5** — gameplay/project impact.
+- **Leverage (L) 0-5** — how much it unblocks other work (foundational = high).
+- **Effort (E) 1-5** — 1 ≈ days, 3 ≈ weeks, 5 ≈ months.
+- **Status:** ✅ done · 🔵 in-progress · ⚪ pending · 🔒 blocked (dep) · 🟣 deferred.
+
+### Backlog (sorted by priority score)
+
+| ID | Epic / pending work | Area | V | L | E | Score | Status | Refs (docs/design) |
+|----|---------------------|------|---|---|---|-------|--------|--------------------|
+| BL-01 | **Per-class attribute structure + per-level scaling** (each class' HP/energy/stats profile; Mage energy-max grows with level → high-circle spells castable without nerfing costs) | Progression | 5 | 5 | 4 | **12** | ⚪ | emerged-workstreams WS-1; tasks 01,03 |
+| BL-02 | **Content factory**: harden (tests/render_ron) → pilot → scale (Workflow) → install in `.claude/` | Tooling | 4 | 4 | 3 | **11** | 🔵 | specs content-factory-design; tasks/12 |
+| BL-03 | **Difficult-terrain mechanic** (persistent zone = half move-speed + immunity by race/item/spell; reusable for spells/terrain/weather) | Magic/World | 3 | 4 | 2 | **11** | ⚪ | emerged WS-3; tasks/13 |
+| BL-04 | **Classes-wave**: +7 `ClassKind` (Sorcerer/Warlock/Bard/Paladin/Druid/Ranger/Monk) + Mystic/Psionic + persistence + skill trees | Classes | 5 | 5 | 5 | **11** | 🔒 | tasks/03; specs magic-system-v2, classes-races; content-adaptation §5 |
+| BL-05 | **Deferred spell riders** (forced-move, restrain, shared-fate, reaction/banish, random-table, prone, rapid-aging, melee-drain, multi-tick AoE, reflect, conditional-detonate, stun, anti-tp, blind/deafen, bleed-mark) | Magic | 4 | 4 | 4 | **10** | ⚪ | emerged WS-6; tasks/13 |
+| BL-06 | **Populate the 4 implemented class trees** (Warrior/Mage/Cleric/Rogue skills + kit grants) | Classes | 4 | 3 | 3 | **10** | ⚪ | tasks/03,04,11 §5.2 |
+| BL-07 | **Item content render** (1.825 items → `ItemKind` RON; flat-stat cores first) | Content | 5 | 3 | 5 | **9** | 🔒 | tasks/11,12 (blocked on CA-P0 decisions) |
+| BL-08 | **Spellbook/compendium UI consumer** + tool-slot wiring (`ability_set_manifest`) + i18n backfill (3 old v2 spells) + HUD cooldown/attune-progress bars | Magic/UI | 3 | 2 | 3 | **8** | ⚪ | comp/spell.rs; tasks/13 |
+| BL-09 | **In-game verification checks** (need Matías in client: magic-v2 casters, CLS-11 `/set_class`, EQ-B8 tooltip, attunement, new spells) | QA | 3 | 0 | 1 | **8** | ⚪ | tasks/00 "Pending in-game checks" |
+| BL-10 | **HP-cost-per-second (upkeep) mechanic** (replaces interim one-shot on Sanguine Surge / Crimson Apotheosis) | Magic | 2 | 1 | 2 | **7** | ⚪ | emerged WS-2; tasks/13 |
+| BL-11 | **Bloodsworn (Bloodhunter) class** (warrior+blood-mage hybrid, Hemomancy ≤ circle 5) + Warlock; re-gate Hemomancy off `[Mage]` | Classes | 3 | 2 | 4 | **7** | 🔒 | emerged WS-5; tasks/03 (dep BL-04/01) |
+| BL-12 | **Race passives → the 6 playable species** (mine traits; no new bodies) | Races | 2 | 2 | 3 | **7** | ⚪ | tasks/11 §5.2 |
+| BL-13 | **World difficulty zones** (level bands, NPC class mapping; planes Phase-4 deferred) | World | 3 | 2 | 4 | **7** | ⚪ | tasks/05 |
+| BL-14 | **IP depuration remaining** (arcanist leaves + roster + scrub ~28 tokens → denylist) | Lore/IP | 2 | 2 | 3 | **7** | 🔵 | tasks/14 |
+| BL-15 | **Project AURORA** (NPC social sim: relationships, memory, families, orgs, economy, dynamic quests — 35 tasks) | Sim | 4 | 2 | 5 | **7** | ⚪ | tasks/08 |
+| BL-16 | **Project ORACLE** (world director: events, story arcs, monster ecosystem, climate, narrative — 17 tasks) | Sim | 4 | 2 | 5 | **7** | ⚪ | tasks/09 |
+| BL-17 | **Refactor M2** (class→starting-weapon whitelist → single source in `comp/class.rs`) | Cleanup | 1 | 1 | 1 | **7** | ⚪ | tasks/00 backlog; PR #22 |
+| BL-18 | **Attunement persistence** (session-only → DB migration) | Items | 3 | 1 | 3 | **7** | 🟣 | tasks/13 |
+| BL-19 | **Readable scroll/book `ItemKind` + spell transcription system** (circle↔level, arcane ink, gold/time) | Magic/Items | 3 | 2 | 4 | **7** | ⚪ | tasks/13; specs spell-transcription |
+| BL-20 | **Feats / optionalfeature → class skills** (invocations/maneuvers/metamagic/infusions/…) | Classes | 2 | 2 | 4 | **6** | 🔒 | tasks/11 §5.2 (dep classes-wave) |
+| BL-21 | **Lore Canon Wave D residuals + open set-pieces** + rewrite the stale `06` board | Lore | 2 | 1 | 3 | **6** | ⚪ | tasks/06; session-notes |
+| BL-22 | **Weapons / armor / consumables content render** (file-11 waves) | Content | 3 | 1 | 4 | **6** | 🔒 | tasks/11 (dep CA-P0) |
+| BL-23 | **Magic-v2 P4 residuals** (M1 Innate index→key persistence migration; P4.15) | Magic | 2 | 1 | 3 | **6** | 🟣 | tasks/04 |
+| BL-24 | **ENG-D3 charges + ENG-D4 wondrous spell-attach** (item mechanics) | Items | 2 | 1 | 3 | **6** | ⚪ | tasks/13 |
+| BL-25 | **Engine improvements remaining** (tracy cells; ENG-5 captures; ENG-8/9 phase gate) | Engine | 2 | 1 | 3 | **6** | 🔵 | tasks/07 |
+| BL-26 | **Counterspell / dispel** (magic Phase E) | Magic | 2 | 1 | 4 | **5** | 🟣 | tasks/13 |
+| BL-27 | **Axiomancy utility mechanics** (luck token, object-anchor, extradimensional item-stash) | Magic | 1 | 1 | 3 | **5** | ⚪ | emerged WS-4; tasks/13 |
+| BL-28 | **Client release pipeline** (desktop packaging + Airshipper, self-hosted runner on VPS) | Infra | 3 | 0 | 4 | **5** | 🟣 | CLAUDE.md "Releases & CI" (defer → first client release) |
+| BL-29 | **Optional rules adoptions** (Firearms / Fear & Horror / Hero Points / Injuries…) | Content | 1 | 0 | 3 | **4** | ⚪ | tasks/11 §6 |
+| BL-30 | **Vehicles / mounts / ships system** (no system exists) | Systems | 2 | 0 | 5 | **3** | ⚪ | tasks/11 §3.2 (out-of-scope today) |
+| BL-31 | **Backgrounds system** (no system exists) | Systems | 1 | 0 | 4 | **3** | ⚪ | tasks/11 §5.2 |
+
+**🟣 Deferred to v2 (not scheduled):** Terrain resolution / smooth-terrain — see `docs/design/DEFERRED-TO-V2.md`.
+
+> **Growth:** new content (each class, race, weapon, monster, vehicle, item) and each new mechanic
+> gets a new `BL-NN` row here, scored with the rubric, with its specs/plans/tasks created in
+> `docs/design/` and referenced in the Refs column.
