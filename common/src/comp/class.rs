@@ -6,7 +6,7 @@ use specs::{Component, DerefFlaggedStorage, VecStorage};
 
 use crate::{
     assets::{AssetExt, Ron},
-    comp::{Stats, body::humanoid::Species},
+    comp::{Stats, body::humanoid::Species, skillset::MAX_CHARACTER_LEVEL},
 };
 
 #[derive(
@@ -135,6 +135,89 @@ pub fn apply_racial_traits(stats: &mut Stats, species: Species) {
     racial_traits(species).apply(stats);
 }
 
+/// Level at which growth accelerates, and the slope multiplier past it, so the
+/// last `MAX_CHARACTER_LEVEL - LEVEL_ACCEL_START` levels feel epic (BL-01 spec
+/// §7 Q2). Tunable; the two constants move together with `MAX_CHARACTER_LEVEL`.
+pub const LEVEL_ACCEL_START: u16 = 50;
+pub const LEVEL_ACCEL_FACTOR: f32 = 2.5;
+
+/// Total growth contributed by `per_level` at character `level`: linear up to
+/// `LEVEL_ACCEL_START`, then `LEVEL_ACCEL_FACTOR`× per level beyond it. `level`
+/// is clamped to `1..=MAX_CHARACTER_LEVEL`.
+pub fn level_scaled(per_level: f32, level: u16) -> f32 {
+    let level = level.clamp(1, MAX_CHARACTER_LEVEL);
+    let linear = level.min(LEVEL_ACCEL_START).saturating_sub(1) as f32;
+    let accelerated = level.saturating_sub(LEVEL_ACCEL_START) as f32;
+    per_level * (linear + LEVEL_ACCEL_FACTOR * accelerated)
+}
+
+/// Per-class attribute scaling (BL-01,
+/// `specs/2026-06-21-class-attributes-scaling-design.md`). A **permanent**
+/// modifier re-applied each tick right after `Stats::reset_temp_modifiers`
+/// (mirrors [`RacialTraits`]); needs no persistence because character level is
+/// derived. `base_*` = L1 offset over the body base; `per_level_*` = slope
+/// (accelerated past L50 via [`level_scaled`]). Damage is a small per-level
+/// baseline only — gear + skills stay the dominant power (Diablo 4 / WoW
+/// model).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct ClassAttributes {
+    pub base_health: f32,
+    pub per_level_health: f32,
+    pub base_energy: f32,
+    pub per_level_energy: f32,
+    /// Fraction added to `attack_damage_modifier` per level (e.g. 0.005 =
+    /// +0.5%/level), applied multiplicatively.
+    pub per_level_damage: f32,
+    /// Per-class multiplier on `energy_reward_modifier` (caster sustain tier);
+    /// flat per class, not scaled by level.
+    pub energy_reward_mult: f32,
+}
+
+impl Default for ClassAttributes {
+    fn default() -> Self {
+        Self {
+            base_health: 0.0,
+            per_level_health: 0.0,
+            base_energy: 0.0,
+            per_level_energy: 0.0,
+            per_level_damage: 0.0,
+            energy_reward_mult: 1.0,
+        }
+    }
+}
+
+impl ClassAttributes {
+    /// Applies this class' scaling onto freshly-reset stats at character
+    /// `level`. Must run right after `Stats::reset_temp_modifiers` so it stacks
+    /// with buffs + racial passives (spec §6/§7.1).
+    pub fn apply(self, stats: &mut Stats, level: u16) {
+        stats.max_health_modifiers.add_mod +=
+            self.base_health + level_scaled(self.per_level_health, level);
+        stats.max_energy_modifiers.add_mod +=
+            self.base_energy + level_scaled(self.per_level_energy, level);
+        stats.attack_damage_modifier *= 1.0 + level_scaled(self.per_level_damage, level);
+        stats.energy_reward_modifier *= self.energy_reward_mult;
+    }
+}
+
+/// Per-class attributes for `class` (one cache read). Do NOT call per-entity in
+/// tick systems — hoist [`class_attributes_manifest`] once per run.
+pub fn class_attributes(class: ClassKind) -> ClassAttributes {
+    class_attributes_manifest()
+        .0
+        .get(&class)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// One manifest read for per-tick consumers (mirrors
+/// [`racial_traits_manifest`]).
+pub fn class_attributes_manifest()
+-> crate::assets::AssetReadGuard<Ron<HashMap<ClassKind, ClassAttributes>>> {
+    Ron::<HashMap<ClassKind, ClassAttributes>>::load_expect("common.class.class_attributes").read()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +268,48 @@ mod tests {
         let before = stats.attack_damage_modifier;
         apply_racial_traits(&mut stats, Species::Orc);
         assert!(stats.attack_damage_modifier > before);
+    }
+
+    #[test]
+    fn level_scaled_is_linear_then_accelerates() {
+        assert_eq!(level_scaled(10.0, 1), 0.0); // L1 = no growth
+        assert_eq!(level_scaled(10.0, 50), 490.0); // 10 * 49 (linear)
+        assert_eq!(level_scaled(10.0, 60), 740.0); // 10 * (49 + 2.5*10) — epic last 10
+        assert_eq!(level_scaled(10.0, 0), 0.0); // clamp low
+        assert_eq!(level_scaled(10.0, 100), 740.0); // clamp to L60
+    }
+
+    #[test]
+    fn class_attributes_apply_per_class() {
+        use crate::comp::Stats;
+        let body = crate::comp::Body::Humanoid(crate::comp::humanoid::Body::random());
+
+        // Mage L60: energy add = 30 + 7*(49+25) = 548; HP add = 0 + 4*74 = 296.
+        let mut mage = Stats::empty(body);
+        class_attributes(ClassKind::Mage).apply(&mut mage, 60);
+        assert_eq!(mage.max_energy_modifiers.add_mod, 548.0);
+        assert_eq!(mage.max_health_modifiers.add_mod, 296.0);
+        assert!(mage.attack_damage_modifier > 1.0); // per-level damage baseline
+        assert!((mage.energy_reward_modifier - 1.4).abs() < f32::EPSILON);
+
+        // Warrior L1: HP add = base 40; energy stays tiny.
+        let mut warrior1 = Stats::empty(body);
+        class_attributes(ClassKind::Warrior).apply(&mut warrior1, 1);
+        assert_eq!(warrior1.max_health_modifiers.add_mod, 40.0);
+        // Warrior L60 energy = 0 + 2*74 = 148 (can't spam high-circle spells).
+        let mut warrior60 = Stats::empty(body);
+        class_attributes(ClassKind::Warrior).apply(&mut warrior60, 60);
+        assert_eq!(warrior60.max_energy_modifiers.add_mod, 148.0);
+        // Warrior is far tankier than Mage at L60.
+        assert!(warrior60.max_health_modifiers.add_mod > mage.max_health_modifiers.add_mod);
+        // ...and the Mage has far more energy.
+        assert!(mage.max_energy_modifiers.add_mod > warrior60.max_energy_modifiers.add_mod);
+
+        // Adventurer (legacy default) = neutral no-op.
+        let mut adv = Stats::empty(body);
+        class_attributes(ClassKind::Adventurer).apply(&mut adv, 60);
+        assert_eq!(adv.max_energy_modifiers.add_mod, 0.0);
+        assert_eq!(adv.max_health_modifiers.add_mod, 0.0);
+        assert_eq!(adv.attack_damage_modifier, 1.0);
     }
 }
