@@ -212,7 +212,7 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 | BL-23 | **Magic-v2 P4 residuals** (M1 Innate index→key persistence migration; P4.15) | Magic | 2 | 1 | 3 | **6** | 🟣 | tasks/04 |
 | BL-24 | **ENG-D3 charges + ENG-D4 wondrous spell-attach** (item mechanics) | Items | 2 | 1 | 3 | **6** | ⚪ | tasks/13 |
 | BL-25 | **Engine improvements remaining** (tracy cells; ENG-5 captures; ENG-8/9 phase gate) | Engine | 2 | 1 | 3 | **6** | 🔵 | tasks/07 |
-| BL-40 | **Rename `veloren-*` → `xindeler-*`** (crates/bins/refs; NOT assets) ⚠️ raises upstream-merge conflict surface — do post-sync, scripted | Infra/Cleanup | 2 | 1 | 3 | **6** | ⚪ | backlog-additions §BL-40 |
+| BL-40 | **Rename `veloren-*` → `xindeler-*`** (crates/bins/refs; NOT assets) ⚠️ raises upstream-merge conflict surface. Explore a `veloren→xindeler` **mapping script** applied automatically during each pull/merge (custom merge-driver / rename-on-a-raw-branch / sed-fastmod) so **"Veloren" disappears from Xindeler's code without breaking upstream-sync** | Infra/Cleanup | 2 | 1 | 3 | **6** | ⚪ | backlog-additions §BL-40 |
 | BL-41 | **Elves have no beard** in PC creation (hide beard option for elf) | Client/UI | 1 | 0 | 1 | **6** | ⚪ | backlog-additions §BL-41 |
 | BL-42 | **Battle PITS** (dedicated PvP arenas 1v1 / 2v2 / 3v3 / 6v6 / 12v12 / 25v25) | PvP/World | 4 | 1 | 5 | **6** | ⚪ | backlog-additions §BL-42 (dep BL-32) |
 | BL-26 | **Counterspell / dispel** (magic Phase E) | Magic | 2 | 1 | 4 | **5** | 🟣 | tasks/13 |
