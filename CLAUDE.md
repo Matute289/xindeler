@@ -210,7 +210,7 @@ then re-sort by score.
 | BL-19 | **Readable scroll/book `ItemKind` + spell transcription system** (circle↔level, arcane ink, gold/time) | Magic/Items | 3 | 2 | 4 | **7** | ⚪ | tasks/13; specs spell-transcription |
 | BL-34 | **Username + character-name validation** (server-side anti-offensive filter) + character-name **uniqueness** | Server/Moderation | 3 | 1 | 3 | **7** | ⚪ | backlog-additions §BL-34 |
 | BL-35 | **Xindeler Admin Panel** (web, mobile-first: `xindeler-manage` deploy/start/stop/logs/ban/warn/broadcast/email + AURORA/ORACLE control + `xindeler-health-check` port 14004) | Infra/Web | 4 | 2 | 5 | **7** | ⚪ | backlog-additions §BL-35; admin-guide.md (AI parts dep BL-15/16) |
-| BL-36 | **Antimagic fields / spells** (zone suppresses casting + nullifies magic items → mundane) | Magic | 3 | 2 | 4 | **7** | ⚪ | backlog-additions §BL-36 (shares zone w/ BL-03) |
+| BL-36 | **Antimagic fields / spells** (zone suppresses casting + nullifies magic items → mundane) | Magic | 3 | 2 | 4 | **7** | ✅ | DONE (PR #69): `Antimagic` BuffKind + `DisableMagic`; magic-only cast gate; attuned item effects mundane; `Antimagic Field` spell. specs/2026-06-22-antimagic-field. Pending: tool-slot wiring (BL-08), full stat-nullification (phase 2), zone shapes (cone/cylinder/dome) |
 | BL-37 | **Sidekicks** (mercenary/honor NPC allies; AI + obey orders unless suicidal; party ≤6) | NPC/Sim | 4 | 2 | 5 | **7** | ⚪ | backlog-additions §BL-37 (dep BL-15) |
 | BL-38 | **Consumable restrictions** (by race/class/level via `ItemRequirements`) | Items | 2 | 1 | 2 | **7** | ⚪ | backlog-additions §BL-38; eq-restrictions PR #24 |
 | BL-39 | **Bug-report system re-apply** (VPS changes) + rename → `xindeler-bug-report` | Infra | 2 | 0 | 1 | **7** | ⚪ | backlog-additions §BL-39 |
