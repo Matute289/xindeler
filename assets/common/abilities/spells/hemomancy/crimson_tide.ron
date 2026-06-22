@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): multi-tick zone (single-pulse interim, damage bumped).
 GroundAoe(
     energy_cost: 162.0,
     buildup_duration: 0.85,

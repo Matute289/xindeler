@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): prone-on-hit.
 BasicRanged(
     energy_cost: 0,
     buildup_duration: 0.4,

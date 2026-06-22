@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): slow / difficult-terrain zone.
 GroundAoe(
     energy_cost: 70.0,
     buildup_duration: 0.5,

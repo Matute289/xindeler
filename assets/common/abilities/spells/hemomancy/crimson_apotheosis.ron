@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): per-second HP upkeep + damage-aura (one-shot hp_cost interim).
 SelfBuff(
     buildup_duration: 1.1,
     cast_duration: 0.2,
@@ -7,5 +8,5 @@ SelfBuff(
         BuffDesc(kind: Regeneration, data: BuffData(strength: 2.0, duration: Some(60.0))),
     ],
     energy_cost: 225,
-    meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(60.0), hp_cost: Some(9.0)),
+    meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(60.0), hp_cost: Some(30.0)),
 )

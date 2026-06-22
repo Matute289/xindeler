@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): melee life-drain (heal caster on hit).
 BasicMelee(
     energy_cost: 70,
     buildup_duration: 0.55,

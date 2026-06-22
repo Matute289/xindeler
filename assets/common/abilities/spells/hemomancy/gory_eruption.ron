@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): conditional detonate on a bleeding/branded target (currently unconditional).
 Explosion(
     energy_cost: 98,
     buildup_duration: 0.7,

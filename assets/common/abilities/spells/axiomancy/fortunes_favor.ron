@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): stored single-use luck (reroll token) — NO-OP placeholder.
 SelfBuff(
     buildup_duration: 0.6,
     cast_duration: 0.2,

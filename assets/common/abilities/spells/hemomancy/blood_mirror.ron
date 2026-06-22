@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): damage reflect (modeled as damage reduction interim).
 SelfBuff(
     buildup_duration: 0.65,
     cast_duration: 0.2,

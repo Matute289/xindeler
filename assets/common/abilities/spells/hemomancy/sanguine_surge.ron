@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): per-second HP upkeep (one-shot hp_cost interim).
 SelfBuff(
     buildup_duration: 0.75,
     cast_duration: 0.2,
@@ -6,5 +7,5 @@ SelfBuff(
         BuffDesc(kind: Frenzied, data: BuffData(strength: 0.25, duration: Some(45.0))),
     ],
     energy_cost: 116,
-    meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(30.0), hp_cost: Some(7.0)),
+    meta: (school: Some(Hemomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(30.0), hp_cost: Some(20.0)),
 )

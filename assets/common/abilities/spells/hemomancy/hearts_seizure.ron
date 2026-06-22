@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): stun on hit.
 ChargedRanged(
     energy_cost: 162,
     energy_drain: 0,

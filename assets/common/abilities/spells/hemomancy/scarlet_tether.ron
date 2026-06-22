@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): shared-fate: redirect a share of damage taken.
 BasicRanged(
     energy_cost: 83,
     buildup_duration: 0.6,

@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): rapid-aging debuff (frail + slow).
 ChargedRanged(
     energy_cost: 266,
     energy_drain: 0,

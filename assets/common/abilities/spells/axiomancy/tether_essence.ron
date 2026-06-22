@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): shared-fate link between two creatures.
 BasicRanged(
     energy_cost: 191,
     buildup_duration: 0.95,

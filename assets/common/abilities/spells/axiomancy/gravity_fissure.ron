@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): drag toward the line (forced movement).
 BasicBeam(
     buildup_duration: 0.85,
     recover_duration: 0.55,

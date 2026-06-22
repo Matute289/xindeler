@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): escalating bleed scaling (base Bleeding buff applied).
 ChargedRanged(
     energy_cost: 98,
     energy_drain: 0,

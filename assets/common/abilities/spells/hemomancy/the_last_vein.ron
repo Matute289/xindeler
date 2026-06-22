@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): self-heal for a share of total AoE damage dealt.
 GroundAoe(
     energy_cost: 266.0,
     buildup_duration: 1.2,

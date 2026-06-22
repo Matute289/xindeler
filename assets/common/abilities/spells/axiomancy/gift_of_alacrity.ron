@@ -1,3 +1,4 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): initiative buff (modeled as Hastened interim).
 SelfBuff(
     buildup_duration: 0.5,
     cast_duration: 0.2,
