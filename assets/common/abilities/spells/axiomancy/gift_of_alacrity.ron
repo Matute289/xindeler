@@ -1,0 +1,11 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): initiative buff (modeled as Hastened interim).
+SelfBuff(
+    buildup_duration: 0.5,
+    cast_duration: 0.2,
+    recover_duration: 0.35,
+    buffs: [
+        BuffDesc(kind: Hastened, data: BuffData(strength: 0.1, duration: Some(300.0))),
+    ],
+    energy_cost: 70,
+    meta: (school: Some(Axiomancy), subschool: Some(Chronomancy), form: Some(Divination), source: Some(Arcane), cooldown: Some(30.0)),
+)

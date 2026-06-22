@@ -1,0 +1,17 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): pull-to-centre forced movement.
+GroundAoe(
+    energy_cost: 116.0,
+    buildup_duration: 0.75,
+    delay: 0.5,
+    recover_duration: 0.5,
+    max_range: 36.0,
+    radius: 6.0,
+    min_falloff: 0.4,
+    damage: 62,
+    poise: 15,
+    knockback: (strength: 12, direction: Towards),
+    dodgeable: Roll,
+    reagent: Some(Purple),
+    rooted_cast: false,
+    meta: (school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Evocation), source: Some(Arcane), cooldown: Some(20.0)),
+)

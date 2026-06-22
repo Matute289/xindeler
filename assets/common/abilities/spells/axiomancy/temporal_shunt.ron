@@ -1,0 +1,20 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): reaction: brief banish / negate the foe's action.
+ChargedRanged(
+    energy_cost: 137,
+    energy_drain: 0,
+    idle_drain: 0,
+    projectile: (
+        kind: Pointed,
+        attack: Some((damage: 1)),
+        scaled: Some((damage: 40, knockback: Some(5), energy: Some(5))),
+    ),
+    buildup_duration: 0.9,
+    charge_duration: 0.4,
+    recover_duration: 0.4,
+    projectile_body: Object(BoltFire),
+    projectile_light: None,
+    initial_projectile_speed: 40.0,
+    scaled_projectile_speed: 90.0,
+    move_speed: 0.5,
+    meta: (school: Some(Axiomancy), subschool: Some(Chronomancy), form: Some(Transmutation), source: Some(Arcane), cooldown: Some(24.0)),
+)

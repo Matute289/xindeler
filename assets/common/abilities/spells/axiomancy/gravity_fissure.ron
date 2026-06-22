@@ -1,0 +1,17 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): drag toward the line (forced movement).
+BasicBeam(
+    buildup_duration: 0.85,
+    recover_duration: 0.55,
+    beam_duration: 3,
+    damage: 23.0,
+    tick_rate: 3.0,
+    range: 30.0,
+    max_angle: 5.0,
+    damage_effect: None,
+    energy_regen: 0,
+    energy_drain: 162,
+    move_efficiency: 0.3,
+    ori_rate: 0.3,
+    specifier: Gravewarden,
+    meta: (school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Evocation), source: Some(Arcane), cooldown: Some(30.0)),
+)

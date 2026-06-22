@@ -1,0 +1,10 @@
+SelfBuff(
+    buildup_duration: 0.5,
+    cast_duration: 0.2,
+    recover_duration: 0.35,
+    buffs: [
+        BuffDesc(kind: ProtectingWard, data: BuffData(strength: 0.15, duration: Some(60.0))),
+    ],
+    energy_cost: 70,
+    meta: (school: Some(Hemomancy), form: Some(Abjuration), source: Some(Arcane), cooldown: Some(16.0), hp_cost: Some(3.0)),
+)

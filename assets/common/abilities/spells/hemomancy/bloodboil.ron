@@ -1,0 +1,16 @@
+GroundAoe(
+    energy_cost: 83.0,
+    buildup_duration: 0.6,
+    delay: 0.5,
+    recover_duration: 0.4,
+    max_range: 20.0,
+    radius: 3.0,
+    min_falloff: 0.4,
+    damage: 22,
+    poise: 15,
+    knockback: (strength: 10, direction: Away),
+    dodgeable: Roll,
+    reagent: Some(Red),
+    rooted_cast: false,
+    meta: (school: Some(Hemomancy), form: Some(Evocation), source: Some(Arcane), cooldown: Some(18.0), hp_cost: Some(4.0)),
+)

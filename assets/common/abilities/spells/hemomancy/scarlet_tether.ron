@@ -1,0 +1,14 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): shared-fate: redirect a share of damage taken.
+BasicRanged(
+    energy_cost: 83,
+    buildup_duration: 0.6,
+    recover_duration: 0.4,
+    projectile: (
+        kind: Explosive(radius: 1.5, min_falloff: 0.5, reagent: Some(Red), terrain: None),
+        attack: Some((damage: 14, energy: Some(5))),
+    ),
+    projectile_body: Object(BoltFire),
+    projectile_speed: 60.0,
+    num_projectiles: Value(1),
+    meta: (school: Some(Hemomancy), form: Some(Necromancy), source: Some(Arcane), cooldown: Some(18.0), hp_cost: Some(4.0)),
+)
