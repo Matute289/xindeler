@@ -5613,6 +5613,8 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::ProtectingWard => imgs.buff_dmg_red_0,
         BuffKind::Frenzied => imgs.buff_frenzy_0,
         BuffKind::Hastened => imgs.buff_haste_0,
+        // BL-03: reuse the haste/movement icon for freedom of movement (placeholder art).
+        BuffKind::FreedomOfMovement => imgs.buff_haste_0,
         BuffKind::Fortitude => imgs.buff_fortitude_0,
         BuffKind::Reckless => imgs.buff_reckless,
         BuffKind::Flame => imgs.buff_flame,
@@ -5640,6 +5642,8 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::Cursed => imgs.debuff_cursed_0,
         BuffKind::Burning => imgs.debuff_burning_0,
         BuffKind::Crippled => imgs.debuff_crippled_0,
+        // BL-03: reuse the slow-debuff icon for difficult terrain (placeholder art).
+        BuffKind::DifficultTerrain => imgs.debuff_crippled_0,
         BuffKind::Frozen => imgs.debuff_frozen_0,
         BuffKind::Wet => imgs.debuff_wet_0,
         BuffKind::Ensnared => imgs.debuff_ensnared_0,

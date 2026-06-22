@@ -269,11 +269,19 @@ pub enum BuffKind {
     /// applied by every Beyond-tainted Necromancy cast via
     /// AbilityMeta.init_event.
     Hollowtouched,
+    /// Difficult terrain (BL-03): movement slowed while inside the zone —
+    /// `MovementSpeed(1.0 - strength)`, so strength 0.5 = half speed. Delivered
+    /// by an aura (spell / terrain / weather); negated by `FreedomOfMovement`.
+    DifficultTerrain,
     // =================
     //      COMPLEX
     // =================
     /// Changed into another body.
     Polymorphed,
+    /// Immunity to `DifficultTerrain` (BL-03) — "freedom of movement", granted
+    /// by an item / spell / class (e.g. a Ranger at home in the wilds). No
+    /// other effect; classified positive.
+    FreedomOfMovement,
 }
 
 /// Tells a little more about the buff kind than simple buff/debuff
@@ -332,7 +340,8 @@ impl BuffKind {
             | BuffKind::Heartseeker
             | BuffKind::EagleEye
             | BuffKind::ArdentHunter
-            | BuffKind::SepticShot => BuffDescriptor::SimplePositive,
+            | BuffKind::SepticShot
+            | BuffKind::FreedomOfMovement => BuffDescriptor::SimplePositive,
             BuffKind::Bleeding
             | BuffKind::Cursed
             | BuffKind::Burning
@@ -352,7 +361,8 @@ impl BuffKind {
             | BuffKind::ArdentHunted
             | BuffKind::Terrified
             | BuffKind::Charmed
-            | BuffKind::Hollowtouched => BuffDescriptor::SimpleNegative,
+            | BuffKind::Hollowtouched
+            | BuffKind::DifficultTerrain => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -533,6 +543,14 @@ impl BuffKind {
                 BuffEffect::BuffImmunity(BuffKind::Burning),
             ],
             BuffKind::Ensnared => vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))],
+            // BL-03: linear slow so strength 0.5 = exactly half speed (tunable per zone).
+            BuffKind::DifficultTerrain => {
+                vec![BuffEffect::MovementSpeed((1.0 - data.strength).max(0.0))]
+            },
+            // BL-03: "freedom of movement" — only negates difficult terrain.
+            BuffKind::FreedomOfMovement => {
+                vec![BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)]
+            },
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -1345,6 +1363,29 @@ pub mod tests {
             DestInfo::default(),
             None,
         )
+    }
+
+    #[test]
+    fn difficult_terrain_halves_speed_at_half_strength() {
+        // BL-03: linear slow, strength 0.5 -> exactly half move speed.
+        let effects = BuffKind::DifficultTerrain.effects(&BuffData::new(0.5, None), None);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            BuffEffect::MovementSpeed(s) if (*s - 0.5).abs() < f32::EPSILON
+        )));
+        assert!(!BuffKind::DifficultTerrain.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn freedom_of_movement_grants_difficult_terrain_immunity() {
+        // BL-03: the immunity source negates DifficultTerrain and nothing else.
+        let effects = BuffKind::FreedomOfMovement.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects[0],
+            BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)
+        ));
+        assert!(BuffKind::FreedomOfMovement.is_buff(), "should be positive");
     }
 
     #[test]

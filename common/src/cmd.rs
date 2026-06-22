@@ -189,6 +189,8 @@ lazy_static! {
             BuffKind::Terrified => "terrified",
             BuffKind::Charmed => "charmed",
             BuffKind::Hollowtouched => "hollowtouched",
+            BuffKind::DifficultTerrain => "difficult_terrain",
+            BuffKind::FreedomOfMovement => "freedom_of_movement",
         };
         let mut buff_parser = HashMap::new();
         for kind in BuffKind::iter() {
