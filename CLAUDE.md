@@ -185,9 +185,11 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 | BL-04 | **Classes-wave**: +7 `ClassKind` (Sorcerer/Warlock/Bard/Paladin/Druid/Ranger/Monk) + Mystic/Psionic + persistence + skill trees | Classes | 5 | 5 | 5 | **11** | 🔒 | tasks/03; specs magic-system-v2, classes-races; content-adaptation §5 |
 | BL-05 | **Deferred spell riders** (forced-move, restrain, shared-fate, reaction/banish, random-table, prone, rapid-aging, melee-drain, multi-tick AoE, reflect, conditional-detonate, stun, anti-tp, blind/deafen, bleed-mark) | Magic | 4 | 4 | 4 | **10** | ⚪ | emerged WS-6; tasks/13 |
 | BL-06 | **Populate the 4 implemented class trees** (Warrior/Mage/Cleric/Rogue skills + kit grants) | Classes | 4 | 3 | 3 | **10** | ⚪ | tasks/03,04,11 §5.2 |
+| BL-32 | **Player parties up to 25** (raise group cap; key for RIDE events + Battle PITS) | Social | 4 | 3 | 3 | **10** | ⚪ | backlog-additions §BL-32; comp/group.rs |
 | BL-07 | **Item content render** (1.825 items → `ItemKind` RON; flat-stat cores first) | Content | 5 | 3 | 5 | **9** | 🔒 | tasks/11,12 (blocked on CA-P0 decisions) |
 | BL-08 | **Spellbook/compendium UI consumer** + tool-slot wiring (`ability_set_manifest`) + i18n backfill (3 old v2 spells) + HUD cooldown/attune-progress bars | Magic/UI | 3 | 2 | 3 | **8** | ⚪ | comp/spell.rs; tasks/13 |
 | BL-09 | **In-game verification checks** (need Matías in client: magic-v2 casters, CLS-11 `/set_class`, EQ-B8 tooltip, attunement, new spells) | QA | 3 | 0 | 1 | **8** | ⚪ | tasks/00 "Pending in-game checks" |
+| BL-33 | **Alignment system** (Good/Neutral/Evil × Lawful/Neutral/Chaotic for PCs & NPCs; enriches underworld/factions, feeds AURORA) | Systems/Sim | 3 | 3 | 4 | **8** | ⚪ | backlog-additions §BL-33 (feeds BL-15) |
 | BL-10 | **HP-cost-per-second (upkeep) mechanic** (replaces interim one-shot on Sanguine Surge / Crimson Apotheosis) | Magic | 2 | 1 | 2 | **7** | ⚪ | emerged WS-2; tasks/13 |
 | BL-11 | **Bloodsworn (Bloodhunter) class** (warrior+blood-mage hybrid, Hemomancy ≤ circle 5) + Warlock; re-gate Hemomancy off `[Mage]` | Classes | 3 | 2 | 4 | **7** | 🔒 | emerged WS-5; tasks/03 (dep BL-04/01) |
 | BL-12 | **Race passives → the 6 playable species** (mine traits; no new bodies) | Races | 2 | 2 | 3 | **7** | ⚪ | tasks/11 §5.2 |
@@ -198,15 +200,27 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 | BL-17 | **Refactor M2** (class→starting-weapon whitelist → single source in `comp/class.rs`) | Cleanup | 1 | 1 | 1 | **7** | ⚪ | tasks/00 backlog; PR #22 |
 | BL-18 | **Attunement persistence** (session-only → DB migration) | Items | 3 | 1 | 3 | **7** | 🟣 | tasks/13 |
 | BL-19 | **Readable scroll/book `ItemKind` + spell transcription system** (circle↔level, arcane ink, gold/time) | Magic/Items | 3 | 2 | 4 | **7** | ⚪ | tasks/13; specs spell-transcription |
+| BL-34 | **Username + character-name validation** (server-side anti-offensive filter) + character-name **uniqueness** | Server/Moderation | 3 | 1 | 3 | **7** | ⚪ | backlog-additions §BL-34 |
+| BL-35 | **Xindeler Admin Panel** (web, mobile-first: `xindeler-manage` deploy/start/stop/logs/ban/warn/broadcast/email + AURORA/ORACLE control + `xindeler-health-check` port 14004) | Infra/Web | 4 | 2 | 5 | **7** | ⚪ | backlog-additions §BL-35; admin-guide.md (AI parts dep BL-15/16) |
+| BL-36 | **Antimagic fields / spells** (zone suppresses casting + nullifies magic items → mundane) | Magic | 3 | 2 | 4 | **7** | ⚪ | backlog-additions §BL-36 (shares zone w/ BL-03) |
+| BL-37 | **Sidekicks** (mercenary/honor NPC allies; AI + obey orders unless suicidal; party ≤6) | NPC/Sim | 4 | 2 | 5 | **7** | ⚪ | backlog-additions §BL-37 (dep BL-15) |
+| BL-38 | **Consumable restrictions** (by race/class/level via `ItemRequirements`) | Items | 2 | 1 | 2 | **7** | ⚪ | backlog-additions §BL-38; eq-restrictions PR #24 |
+| BL-39 | **Bug-report system re-apply** (VPS changes) + rename → `xindeler-bug-report` | Infra | 2 | 0 | 1 | **7** | ⚪ | backlog-additions §BL-39 |
 | BL-20 | **Feats / optionalfeature → class skills** (invocations/maneuvers/metamagic/infusions/…) | Classes | 2 | 2 | 4 | **6** | 🔒 | tasks/11 §5.2 (dep classes-wave) |
 | BL-21 | **Lore Canon Wave D residuals + open set-pieces** + rewrite the stale `06` board | Lore | 2 | 1 | 3 | **6** | ⚪ | tasks/06; session-notes |
 | BL-22 | **Weapons / armor / consumables content render** (file-11 waves) | Content | 3 | 1 | 4 | **6** | 🔒 | tasks/11 (dep CA-P0) |
 | BL-23 | **Magic-v2 P4 residuals** (M1 Innate index→key persistence migration; P4.15) | Magic | 2 | 1 | 3 | **6** | 🟣 | tasks/04 |
 | BL-24 | **ENG-D3 charges + ENG-D4 wondrous spell-attach** (item mechanics) | Items | 2 | 1 | 3 | **6** | ⚪ | tasks/13 |
 | BL-25 | **Engine improvements remaining** (tracy cells; ENG-5 captures; ENG-8/9 phase gate) | Engine | 2 | 1 | 3 | **6** | 🔵 | tasks/07 |
+| BL-40 | **Rename `veloren-*` → `xindeler-*`** (crates/bins/refs; NOT assets) ⚠️ raises upstream-merge conflict surface — do post-sync, scripted | Infra/Cleanup | 2 | 1 | 3 | **6** | ⚪ | backlog-additions §BL-40 |
+| BL-41 | **Elves have no beard** in PC creation (hide beard option for elf) | Client/UI | 1 | 0 | 1 | **6** | ⚪ | backlog-additions §BL-41 |
+| BL-42 | **Battle PITS** (dedicated PvP arenas 1v1 / 2v2 / 3v3 / 6v6 / 12v12 / 25v25) | PvP/World | 4 | 1 | 5 | **6** | ⚪ | backlog-additions §BL-42 (dep BL-32) |
 | BL-26 | **Counterspell / dispel** (magic Phase E) | Magic | 2 | 1 | 4 | **5** | 🟣 | tasks/13 |
 | BL-27 | **Axiomancy utility mechanics** (luck token, object-anchor, extradimensional item-stash) | Magic | 1 | 1 | 3 | **5** | ⚪ | emerged WS-4; tasks/13 |
 | BL-28 | **Client release pipeline** (desktop packaging + Airshipper, self-hosted runner on VPS) | Infra | 3 | 0 | 4 | **5** | 🟣 | CLAUDE.md "Releases & CI" (defer → first client release) |
+| BL-43 | **Deck of Many Things** (random-effect-table item) | Items/Magic | 2 | 1 | 4 | **5** | ⚪ | backlog-additions §BL-43 (dep BL-05) |
+| BL-44 | **Animal companion** (attachment bar; spirit/magical by class/subclass) | NPC/Classes | 3 | 1 | 5 | **5** | ⚪ | backlog-additions §BL-44 (dep BL-37, BL-04) |
+| BL-45 | **Mate easter egg** (serve & drink an Argentine mate) | Content | 1 | 0 | 2 | **5** | ⚪ | backlog-additions §BL-45 |
 | BL-29 | **Optional rules adoptions** (Firearms / Fear & Horror / Hero Points / Injuries…) | Content | 1 | 0 | 3 | **4** | ⚪ | tasks/11 §6 |
 | BL-30 | **Vehicles / mounts / ships system** (no system exists) | Systems | 2 | 0 | 5 | **3** | ⚪ | tasks/11 §3.2 (out-of-scope today) |
 | BL-31 | **Backgrounds system** (no system exists) | Systems | 1 | 0 | 4 | **3** | ⚪ | tasks/11 §5.2 |
@@ -216,3 +230,30 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 > **Growth:** new content (each class, race, weapon, monster, vehicle, item) and each new mechanic
 > gets a new `BL-NN` row here, scored with the rubric, with its specs/plans/tasks created in
 > `docs/design/` and referenced in the Refs column.
+
+### Dependencies & parallel tracks
+
+**Dependency edges (X → Y = X needs Y first):**
+- BL-04 (classes-wave) → BL-01 (per-class attributes). BL-11 (Bloodsworn) → BL-01 + BL-04.
+  BL-44 (animal companion) → BL-04 (subclasses) + BL-37. BL-20 (feats) → BL-04.
+- BL-07 / BL-22 (content render) → BL-02 (content factory). 
+- BL-36 (antimagic field) shares the **persistent-zone** infra with BL-03 (difficult-terrain) — do BL-03 first.
+- BL-43 (Deck of Many Things) → BL-05 (random-effect-table rider).
+- BL-08 / BL-10 / BL-23 → the magic engine already merged; BL-26 (counterspell) is independent magic.
+- BL-16 (ORACLE) builds on BL-15 (AURORA). BL-33 (alignment), BL-37 (sidekicks), and BL-35's AI
+  section all feed/await **BL-15 AURORA** (+ BL-16 for ORACLE-review).
+- BL-42 (Battle PITS) → BL-32 (parties). 
+- BL-40 (rename) is coupled to the **upstream-sync** cycle — run it right after a sync, scripted.
+
+**Parallel tracks (independent; can advance concurrently):**
+- **A · Progression/Classes:** BL-01 → BL-04 → {BL-11, BL-06, BL-20, BL-44}.
+- **B · Magic mechanics:** BL-03 → BL-36; BL-05 → BL-43; plus BL-10, BL-18, BL-19, BL-24, BL-26 (mostly independent of A).
+- **C · Content & tooling:** BL-02 → {BL-07, BL-22}; BL-08.
+- **D · Simulation:** BL-15 (AURORA) → BL-16 (ORACLE) → integrate BL-33, BL-37.
+- **E · Social/PvP:** BL-32 → BL-42.
+- **F · Infra/Ops:** BL-35 (server-mgmt + health-check parts startable now; AI parts after D), BL-39, BL-40, BL-28, BL-25.
+- **G · Quick wins (parallel anytime, low effort):** BL-09, BL-17, BL-38, BL-41, BL-45, BL-21, BL-12.
+
+**Suggested starting set (high score, no blockers, parallelizable):** BL-01 (track A), BL-03 (track B),
+BL-02 (track C), BL-32 (track E), plus quick wins BL-41 / BL-38 / BL-09. AURORA (BL-15) is the gate for
+most of the Sim/NPC work, so starting it early unblocks BL-16/33/37/44 and the admin-panel AI section.
