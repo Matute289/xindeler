@@ -187,7 +187,7 @@ then re-sort by score.
 
 | ID | Epic / pending work | Area | V | L | E | Score | Status | Refs (docs/design) |
 |----|---------------------|------|---|---|---|-------|--------|--------------------|
-| BL-01 | **Per-class attribute structure + per-level scaling** (each class' HP/energy/stats profile; Mage energy-max grows with level → high-circle spells castable without nerfing costs) | Progression | 5 | 5 | 4 | **12** | ⚪ | emerged-workstreams WS-1; tasks 01,03 |
+| BL-01 | **Per-class attribute structure + per-level scaling** (each class' HP/energy/stats profile; Mage energy-max grows with level → high-circle spells castable without nerfing costs) | Progression | 5 | 5 | 4 | **12** | ✅ | DONE (PR #63 + #64 cache). specs/2026-06-21-class-attributes-scaling; tasks/16. Pending: in-game smoke (BL-09); poise tier deferred; extend RON rows w/ BL-04 |
 | BL-02 | **Content factory**: harden (tests/render_ron) → pilot → scale (Workflow) → install in `.claude/` | Tooling | 4 | 4 | 3 | **11** | 🔵 | specs content-factory-design; tasks/12 |
 | BL-03 | **Difficult-terrain mechanic** (persistent zone = half move-speed + immunity by race/item/spell; reusable for spells/terrain/weather) | Magic/World | 3 | 4 | 2 | **11** | ⚪ | emerged WS-3; tasks/13 |
 | BL-04 | **Classes-wave**: +7 `ClassKind` (Sorcerer/Warlock/Bard/Paladin/Druid/Ranger/Monk) + Mystic/Psionic + persistence + skill trees | Classes | 5 | 5 | 5 | **11** | 🔒 | tasks/03; specs magic-system-v2, classes-races; content-adaptation §5 |
