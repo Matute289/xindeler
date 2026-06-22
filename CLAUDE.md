@@ -211,6 +211,7 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 | BL-22 | **Weapons / armor / consumables content render** (file-11 waves) | Content | 3 | 1 | 4 | **6** | 🔒 | tasks/11 (dep CA-P0) |
 | BL-23 | **Magic-v2 P4 residuals** (M1 Innate index→key persistence migration; P4.15) | Magic | 2 | 1 | 3 | **6** | 🟣 | tasks/04 |
 | BL-24 | **ENG-D3 charges + ENG-D4 wondrous spell-attach** (item mechanics) | Items | 2 | 1 | 3 | **6** | ⚪ | tasks/13 |
+| BL-46 | **New weapon types (`ToolKind`)** (Mace/Whip/Sling/Firearm/Trident/Flail/Sickle/Morningstar/War-Pick; enum + ability sets + anims/icons + skill-tree; sheets keep the real type meanwhile) | Weapons/Engine | 2 | 2 | 4 | **6** | ⚪ | emerged WS-7; imports/missing-weapon-types |
 | BL-25 | **Engine improvements remaining** (tracy cells; ENG-5 captures; ENG-8/9 phase gate) | Engine | 2 | 1 | 3 | **6** | 🔵 | tasks/07 |
 | BL-40 | **Rename `veloren-*` → `xindeler-*`** (crates/bins/refs; NOT assets) ⚠️ raises upstream-merge conflict surface. Explore a `veloren→xindeler` **mapping script** applied automatically during each pull/merge (custom merge-driver / rename-on-a-raw-branch / sed-fastmod) so **"Veloren" disappears from Xindeler's code without breaking upstream-sync** | Infra/Cleanup | 2 | 1 | 3 | **6** | ⚪ | backlog-additions §BL-40 |
 | BL-41 | **Elves have no beard** in PC creation (hide beard option for elf) | Client/UI | 1 | 0 | 1 | **6** | ⚪ | backlog-additions §BL-41 |
@@ -247,7 +248,7 @@ roll-up. Always read `docs/design/session-notes.md` + `agenda.md` on resume.
 
 **Parallel tracks (independent; can advance concurrently):**
 - **A · Progression/Classes:** BL-01 → BL-04 → {BL-11, BL-06, BL-20, BL-44}.
-- **B · Magic mechanics:** BL-03 → BL-36; BL-05 → BL-43; plus BL-10, BL-18, BL-19, BL-24, BL-26 (mostly independent of A).
+- **B · Magic mechanics:** BL-03 → BL-36; BL-05 → BL-43; plus BL-10, BL-18, BL-19, BL-24, BL-26, BL-46 (new weapon ToolKinds) (mostly independent of A).
 - **C · Content & tooling:** BL-02 → {BL-07, BL-22}; BL-08.
 - **D · Simulation:** BL-15 (AURORA) → BL-16 (ORACLE) → integrate BL-33, BL-37.
 - **E · Social/PvP:** BL-32 → BL-42.
