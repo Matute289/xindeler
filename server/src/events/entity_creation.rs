@@ -124,6 +124,7 @@ pub fn handle_create_npc(server: &mut Server, ev: CreateNpcEvent) -> EcsEntity {
         body,
         mut agent,
         alignment,
+        ethos,
         scale,
         anchor,
         loot,
@@ -152,6 +153,14 @@ pub fn handle_create_npc(server: &mut Server, ev: CreateNpcEvent) -> EcsEntity {
     }
 
     let entity = entity.with(alignment);
+
+    // BL-33: NPCs carry a moral alignment (humanoids get one seeded from their
+    // AI alignment; non-agents get None). Feeds AURORA.
+    let entity = if let Some(ethos) = ethos {
+        entity.with(ethos)
+    } else {
+        entity
+    };
 
     let entity = if let Some(agent) = agent {
         entity.with(agent)

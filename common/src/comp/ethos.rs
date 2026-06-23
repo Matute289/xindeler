@@ -3,6 +3,7 @@
 //! (Wild/Enemy/Npc/Tame/…). `Ethos` is held as two **scores** so it can drift
 //! with a character's deeds; the discrete 9-box is derived from them.
 //! See `docs/design/specs/2026-06-22-alignment-system-design.md`.
+use super::Alignment;
 use serde::{Deserialize, Serialize};
 use specs::{Component, DerefFlaggedStorage, VecStorage};
 
@@ -89,6 +90,23 @@ impl Ethos {
         }
     }
 
+    /// Seed a moral alignment from an NPC's AI-faction [`Alignment`] (BL-33
+    /// Phase 2): a coarse default for spawned NPCs until an explicit per-config
+    /// value or (later) AURORA drift refines it. Beasts/objects with no moral
+    /// agency map to True Neutral.
+    pub fn from_ai_alignment(alignment: Alignment) -> Self {
+        match alignment {
+            // Hostiles — bandits, cultists, monsters.
+            Alignment::Enemy => Self::from_box(Order::Neutral, Moral::Evil),
+            // Friendly townsfolk — villagers, guards, merchants.
+            Alignment::Npc => Self::from_box(Order::Lawful, Moral::Good),
+            // Beasts, pets, tamed creatures, passive objects: no moral agency.
+            Alignment::Wild | Alignment::Tame | Alignment::Owned(_) | Alignment::Passive => {
+                Self::default()
+            },
+        }
+    }
+
     /// Drift the alignment by a deed (BL-33 §6.2), clamped to `[-BOUND,
     /// BOUND]`.
     pub fn nudge(&mut self, d_good_evil: i16, d_law_chaos: i16) {
@@ -132,6 +150,21 @@ mod tests {
             let e = Ethos::from_box(order, moral);
             assert_eq!(e.alignment(), (order, moral));
         }
+    }
+
+    #[test]
+    fn from_ai_alignment_seeds_sensible_boxes() {
+        assert_eq!(
+            Ethos::from_ai_alignment(Alignment::Enemy).moral(),
+            Moral::Evil
+        );
+        let townsfolk = Ethos::from_ai_alignment(Alignment::Npc);
+        assert_eq!(
+            (townsfolk.order(), townsfolk.moral()),
+            (Order::Lawful, Moral::Good)
+        );
+        // Beasts have no moral agency.
+        assert_eq!(Ethos::from_ai_alignment(Alignment::Wild), Ethos::default());
     }
 
     #[test]

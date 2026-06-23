@@ -3723,6 +3723,7 @@ pub fn transform_entity(
             agent,
             loot,
             alignment: _,
+            ethos: _,
             pos: _,
             pets,
             rider,
