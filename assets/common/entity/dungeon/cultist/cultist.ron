@@ -3,6 +3,8 @@
     name: Translate("name-custom-dungeon-cultist-cultist"),
     body: RandomWith("humanoid"),
     alignment: Alignment(Enemy),
+    // BL-33: organised fanatics — Lawful Evil (overrides the Enemy-derived default).
+    ethos: Some((Lawful, Evil)),
     loot: LootTable("common.loot_tables.dungeon.cultist.enemy"),
     inventory: (
         loadout: Inline((
