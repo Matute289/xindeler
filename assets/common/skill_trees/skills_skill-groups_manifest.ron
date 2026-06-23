@@ -133,4 +133,15 @@
     Class(Mage): [],
     Class(Cleric): [],
     Class(Rogue): [],
+    // Classes-wave (BL-04): empty trees now; populated per-class in BL-06.
+    Class(Barbarian): [],
+    Class(Sorcerer): [],
+    Class(Warlock): [],
+    Class(Bard): [],
+    Class(Paladin): [],
+    Class(Druid): [],
+    Class(Ranger): [],
+    Class(Monk): [],
+    Class(Artificer): [],
+    Class(BloodSlayer): [],
 }

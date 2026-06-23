@@ -437,6 +437,32 @@ pub fn apply_db_item_properties(item: &mut comp::Item, properties: &DatabaseItem
 
 #[cfg(test)]
 pub mod tests {
+    /// BL-04: every `ClassKind` must survive both persistence converters in both
+    /// directions, so a new variant can't silently drop from one (the guard the
+    /// `ClassKind::ALL` doc-comment promises).
+    #[test]
+    fn class_persistence_round_trips_for_every_class() {
+        use common::comp::{class::ClassKind, skillset::SkillGroupKind};
+        for class in ClassKind::ALL {
+            // CharacterClass converter (both directions).
+            assert_eq!(
+                super::db_string_to_class(&super::class_to_db_string(class)),
+                class,
+                "class_to_db_string round-trip failed for {class:?}"
+            );
+            // Skill-group converter (both directions) — Adventurer has no class
+            // tree and intentionally panics, so skip it.
+            if class != ClassKind::Adventurer {
+                let group = SkillGroupKind::Class(class);
+                assert_eq!(
+                    super::db_string_to_skill_group(&super::skill_group_to_db_string(group)),
+                    group,
+                    "skill_group_to_db_string round-trip failed for {class:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_default_item_properties() {
         use super::DatabaseItemProperties;
