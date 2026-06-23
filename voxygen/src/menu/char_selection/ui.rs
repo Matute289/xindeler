@@ -25,7 +25,13 @@ use client::{Client, ServerInfo};
 use common::{
     LoadoutBuilder,
     character::{CharacterId, CharacterItem, MAX_CHARACTERS_PER_PLAYER, MAX_NAME_LENGTH},
-    comp::{self, Inventory, Item, class::ClassKind, humanoid, inventory::slot::EquipSlot},
+    comp::{
+        self, Inventory, Item,
+        class::ClassKind,
+        ethos::{Ethos, Moral, Order},
+        humanoid,
+        inventory::slot::EquipSlot,
+    },
     map::Marker,
     resources::Time,
     terrain::TerrainChunkSize,
@@ -177,6 +183,7 @@ pub enum Event {
         hardcore: bool,
         start_site: Option<SiteId>,
         class: ClassKind,
+        ethos: Ethos,
     },
     EditCharacter {
         alias: String,
@@ -211,11 +218,15 @@ enum Mode {
         mainhand: Option<&'static str>,
         offhand: Option<&'static str>,
         class: ClassKind,
+        /// BL-33: the starting moral alignment chosen at creation.
+        ethos: Ethos,
 
         body_type_buttons: [button::State; 2],
         species_buttons: [button::State; 6],
         class_buttons: [button::State; 4],
         tool_buttons: [button::State; 6],
+        ethos_moral_buttons: [button::State; 3],
+        ethos_order_buttons: [button::State; 3],
         sliders: Sliders,
         hardcore_enabled: bool,
         left_scroll: scrollable::State,
@@ -316,10 +327,13 @@ impl Mode {
             mainhand,
             offhand,
             class: ClassKind::Warrior,
+            ethos: Ethos::default(),
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             class_buttons: Default::default(),
             tool_buttons: Default::default(),
+            ethos_moral_buttons: Default::default(),
+            ethos_order_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
             left_scroll: Default::default(),
@@ -352,10 +366,13 @@ impl Mode {
             mainhand: None,
             offhand: None,
             class: ClassKind::Adventurer,
+            ethos: Ethos::default(),
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             class_buttons: Default::default(),
             tool_buttons: Default::default(),
+            ethos_moral_buttons: Default::default(),
+            ethos_order_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
             left_scroll: Default::default(),
@@ -423,6 +440,8 @@ enum Message {
     BodyType(humanoid::BodyType),
     Species(humanoid::Species),
     Class(ClassKind),
+    EthosMoral(Moral),
+    EthosOrder(Order),
     Tool((Option<&'static str>, Option<&'static str>)),
     RandomizeCharacter,
     HardcoreEnabled(bool),
@@ -1049,12 +1068,15 @@ impl Controls {
                 mainhand,
                 offhand: _,
                 class,
+                ethos,
                 left_scroll,
                 right_scroll,
                 body_type_buttons,
                 species_buttons,
                 class_buttons,
                 tool_buttons,
+                ethos_moral_buttons,
+                ethos_order_buttons,
                 sliders,
                 hardcore_enabled,
                 name_input,
@@ -1629,6 +1651,83 @@ impl Controls {
                 .max_width(200)
                 .padding(5);
 
+                // BL-33: starting moral-alignment picker (Finish step). Two
+                // labelled rows — Good/Neutral/Evil and Lawful/Neutral/Chaotic —
+                // highlighted like the class buttons (text-colour only, so the
+                // grid never reflows). The pick is only a starting point; deeds
+                // drift it in-game.
+                let [moral_good_btn, moral_neutral_btn, moral_evil_btn] = ethos_moral_buttons;
+                let [order_lawful_btn, order_neutral_btn, order_chaotic_btn] = ethos_order_buttons;
+                let ethos_button_style = |selected: bool| {
+                    if selected {
+                        style::button::Style::new(imgs.button)
+                            .hover_image(imgs.button_hover)
+                            .press_image(imgs.button_press)
+                            .text_color(Color::from_rgb(0.93, 0.78, 0.28))
+                    } else {
+                        button_style
+                    }
+                };
+                let ethos_section = Column::with_children(vec![
+                    Text::new(i18n.get_msg("char_selection-alignment").into_owned())
+                        .size(fonts.cyri.scale(18))
+                        .into(),
+                    Row::with_children(vec![
+                        neat_button(
+                            moral_good_btn,
+                            i18n.get_msg("char_selection-ethos_good").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.moral() == Moral::Good),
+                            Some(Message::EthosMoral(Moral::Good)),
+                        ),
+                        neat_button(
+                            moral_neutral_btn,
+                            i18n.get_msg("char_selection-ethos_neutral").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.moral() == Moral::Neutral),
+                            Some(Message::EthosMoral(Moral::Neutral)),
+                        ),
+                        neat_button(
+                            moral_evil_btn,
+                            i18n.get_msg("char_selection-ethos_evil").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.moral() == Moral::Evil),
+                            Some(Message::EthosMoral(Moral::Evil)),
+                        ),
+                    ])
+                    .height(Length::Units(26))
+                    .spacing(2)
+                    .into(),
+                    Row::with_children(vec![
+                        neat_button(
+                            order_lawful_btn,
+                            i18n.get_msg("char_selection-ethos_lawful").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.order() == Order::Lawful),
+                            Some(Message::EthosOrder(Order::Lawful)),
+                        ),
+                        neat_button(
+                            order_neutral_btn,
+                            i18n.get_msg("char_selection-ethos_neutral").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.order() == Order::Neutral),
+                            Some(Message::EthosOrder(Order::Neutral)),
+                        ),
+                        neat_button(
+                            order_chaotic_btn,
+                            i18n.get_msg("char_selection-ethos_chaotic").into_owned(),
+                            FILL_FRAC_ONE,
+                            ethos_button_style(ethos.order() == Order::Chaotic),
+                            Some(Message::EthosOrder(Order::Chaotic)),
+                        ),
+                    ])
+                    .height(Length::Units(26))
+                    .spacing(2)
+                    .into(),
+                ])
+                .align_items(Align::Center)
+                .spacing(2);
+
                 let hardcore_checkbox = if character_id.is_some() {
                     Row::new()
                 } else {
@@ -1712,7 +1811,9 @@ impl Controls {
                         CreationStep::Class => {
                             vec![step_title, class_section.into(), tool.into()]
                         },
-                        CreationStep::Finish => vec![step_title, hardcore_checkbox.into()],
+                        CreationStep::Finish => {
+                            vec![step_title, ethos_section.into(), hardcore_checkbox.into()]
+                        },
                     }
                 };
 
@@ -2241,6 +2342,7 @@ impl Controls {
                     mainhand,
                     offhand,
                     class,
+                    ethos,
                     start_site_idx,
                     ..
                 } = &self.mode
@@ -2252,6 +2354,7 @@ impl Controls {
                         body: comp::Body::Humanoid(*body),
                         hardcore: *hardcore_enabled,
                         class: *class,
+                        ethos: *ethos,
                         start_site: self
                             .possible_starting_sites
                             .get(start_site_idx.unwrap_or_default())
@@ -2314,6 +2417,16 @@ impl Controls {
                         // is supplied
                         Time(0.0),
                     );
+                }
+            },
+            Message::EthosMoral(moral) => {
+                if let Mode::CreateOrEdit { ethos, .. } = &mut self.mode {
+                    *ethos = Ethos::from_box(ethos.order(), moral);
+                }
+            },
+            Message::EthosOrder(order) => {
+                if let Mode::CreateOrEdit { ethos, .. } = &mut self.mode {
+                    *ethos = Ethos::from_box(order, ethos.moral());
                 }
             },
             Message::Tool(value) => {

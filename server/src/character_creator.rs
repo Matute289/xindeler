@@ -86,6 +86,7 @@ pub fn create_character(
     character_offhand: Option<String>,
     body: Body,
     character_class: ClassKind,
+    ethos: common::comp::Ethos,
     hardcore: bool,
     character_updater: &mut WriteExpect<'_, CharacterUpdater>,
     waypoint: Option<Waypoint>,
@@ -154,9 +155,9 @@ pub fn create_character(
         pets: Vec::new(),
         active_abilities: common::comp::ActiveAbilities::default_limited(BASE_ABILITY_LIMIT),
         map_marker,
-        // BL-33 Phase 2: new characters start True Neutral. The creation-time
-        // alignment pick (Phase 2 UI) will set this; deeds then drift it (P3).
-        ethos: common::comp::Ethos::default(),
+        // BL-33: the alignment chosen at character creation (defaults to True
+        // Neutral if the client sends it). Deeds then drift it in-game (P3).
+        ethos,
     });
     Ok(())
 }
