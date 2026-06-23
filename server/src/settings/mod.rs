@@ -229,7 +229,7 @@ impl Default for Settings {
             max_view_distance: Some(65),
             // BL-32: Xindeler parties up to 25 (RIDE events + Battle PITS). Still an
             // admin-tunable server setting; this is just the default for new servers.
-            max_player_group_size: 25,
+            max_player_group_size: 12,
             calendar_mode: CalendarMode::Auto,
             client_timeout: Duration::from_secs(40),
             max_player_for_kill_broadcast: None,
