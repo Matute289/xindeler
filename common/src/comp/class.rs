@@ -22,25 +22,58 @@ pub enum ClassKind {
     Mage,
     Cleric,
     Rogue,
+    // Classes-wave (BL-04). Skill trees empty until BL-06.
+    Barbarian,
+    Sorcerer,
+    Warlock,
+    Bard,
+    Paladin,
+    Druid,
+    Ranger,
+    Monk,
+    Artificer,
+    /// Blood-Hunter-pattern (ours): blood-rite hunter, practises Hemomancy
+    /// (≤ circle 5). "Bloodborne" was rejected (FromSoftware trademark).
+    BloodSlayer,
 }
 
 impl ClassKind {
     /// Every variant, including Adventurer. Single source of truth for
     /// enumeration — persistence round-trips and tests iterate this, so a
     /// new variant added here cannot silently fall out of any converter.
-    pub const ALL: [ClassKind; 5] = [
+    pub const ALL: [ClassKind; 15] = [
         ClassKind::Adventurer,
         ClassKind::Warrior,
         ClassKind::Mage,
         ClassKind::Cleric,
         ClassKind::Rogue,
+        ClassKind::Barbarian,
+        ClassKind::Sorcerer,
+        ClassKind::Warlock,
+        ClassKind::Bard,
+        ClassKind::Paladin,
+        ClassKind::Druid,
+        ClassKind::Ranger,
+        ClassKind::Monk,
+        ClassKind::Artificer,
+        ClassKind::BloodSlayer,
     ];
     /// Classes selectable at character creation (excludes Adventurer).
-    pub const PLAYABLE: [ClassKind; 4] = [
+    pub const PLAYABLE: [ClassKind; 14] = [
         ClassKind::Warrior,
         ClassKind::Mage,
         ClassKind::Cleric,
         ClassKind::Rogue,
+        ClassKind::Barbarian,
+        ClassKind::Sorcerer,
+        ClassKind::Warlock,
+        ClassKind::Bard,
+        ClassKind::Paladin,
+        ClassKind::Druid,
+        ClassKind::Ranger,
+        ClassKind::Monk,
+        ClassKind::Artificer,
+        ClassKind::BloodSlayer,
     ];
 
     pub fn is_playable(self) -> bool { !matches!(self, ClassKind::Adventurer) }
@@ -53,6 +86,16 @@ impl ClassKind {
             ClassKind::Mage => "mage",
             ClassKind::Cleric => "cleric",
             ClassKind::Rogue => "rogue",
+            ClassKind::Barbarian => "barbarian",
+            ClassKind::Sorcerer => "sorcerer",
+            ClassKind::Warlock => "warlock",
+            ClassKind::Bard => "bard",
+            ClassKind::Paladin => "paladin",
+            ClassKind::Druid => "druid",
+            ClassKind::Ranger => "ranger",
+            ClassKind::Monk => "monk",
+            ClassKind::Artificer => "artificer",
+            ClassKind::BloodSlayer => "blood_slayer",
         }
     }
 
@@ -245,7 +288,7 @@ mod tests {
         }
         // Adventurer is deliberately not re-pickable by keyword
         assert_eq!(ClassKind::from_keyword("adventurer"), None);
-        assert_eq!(ClassKind::from_keyword("paladin"), None);
+        assert_eq!(ClassKind::from_keyword("necromancer"), None);
     }
 
     #[test]

@@ -164,6 +164,16 @@ fn class_i18n_key(class: ClassKind) -> &'static str {
         ClassKind::Mage => "common-class-mage",
         ClassKind::Cleric => "common-class-cleric",
         ClassKind::Rogue => "common-class-rogue",
+        ClassKind::Barbarian => "common-class-barbarian",
+        ClassKind::Sorcerer => "common-class-sorcerer",
+        ClassKind::Warlock => "common-class-warlock",
+        ClassKind::Bard => "common-class-bard",
+        ClassKind::Paladin => "common-class-paladin",
+        ClassKind::Druid => "common-class-druid",
+        ClassKind::Ranger => "common-class-ranger",
+        ClassKind::Monk => "common-class-monk",
+        ClassKind::Artificer => "common-class-artificer",
+        ClassKind::BloodSlayer => "common-class-blood_slayer",
     }
 }
 
