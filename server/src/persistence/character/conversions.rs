@@ -790,6 +790,16 @@ pub fn convert_class_to_database(class: common::comp::CharacterClass) -> String 
     json_models::class_to_db_string(class.0)
 }
 
+/// BL-33: the two moral-alignment scores are stored verbatim; the discrete
+/// 9-box is derived in `comp::Ethos`. To-database is just reading the public
+/// fields, so no symmetric helper is needed.
+pub fn convert_ethos_from_database(good_evil: i16, law_chaos: i16) -> common::comp::Ethos {
+    common::comp::Ethos {
+        good_evil,
+        law_chaos,
+    }
+}
+
 /// NOTE: This does *not* return an error on failure, since we can partially
 /// recover from some failures.  Instead, it returns the error in the second
 /// return value; make sure to handle it if present!
@@ -951,4 +961,27 @@ pub fn convert_recipe_book_from_database_items(
     let recipe_book = RecipeBook::recipe_book_from_persistence(unique_groups);
 
     Ok((recipe_book, duplicate_recipes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::comp::{Moral, Order};
+
+    #[test]
+    fn ethos_persistence_scores_derive_the_box() {
+        // DB default (0,0) loads as True Neutral; a stored Lawful-Evil pair
+        // round-trips to the right discrete 9-box on load.
+        let neutral = convert_ethos_from_database(0, 0);
+        assert_eq!(
+            (neutral.order(), neutral.moral()),
+            (Order::Neutral, Moral::Neutral)
+        );
+
+        let lawful_evil = convert_ethos_from_database(-66, 66);
+        assert_eq!(
+            (lawful_evil.order(), lawful_evil.moral()),
+            (Order::Lawful, Moral::Evil)
+        );
+    }
 }

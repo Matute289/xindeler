@@ -1,7 +1,7 @@
 use crate::{persistence::character_updater, sys::SysScheduler};
 use common::{
     comp::{
-        ActiveAbilities, Alignment, Body, CharacterClass, Inventory, MapMarker, Presence,
+        ActiveAbilities, Alignment, Body, CharacterClass, Ethos, Inventory, MapMarker, Presence,
         PresenceKind, SkillSet, Stats, Waypoint,
         pet::{Pet, is_tameable},
     },
@@ -28,6 +28,7 @@ impl<'a> System<'a> for Sys {
         ReadStorage<'a, Stats>,
         ReadStorage<'a, ActiveAbilities>,
         ReadStorage<'a, CharacterClass>,
+        ReadStorage<'a, Ethos>,
         WriteExpect<'a, character_updater::CharacterUpdater>,
         Write<'a, SysScheduler<Self>>,
     );
@@ -51,6 +52,7 @@ impl<'a> System<'a> for Sys {
             stats,
             active_abilities,
             character_classes,
+            ethoses,
             mut updater,
             mut scheduler,
         ): Self::SystemData,
@@ -66,6 +68,7 @@ impl<'a> System<'a> for Sys {
                     &active_abilities,
                     map_markers.maybe(),
                     character_classes.maybe(),
+                    ethoses.maybe(),
                 )
                     .join()
                     .filter_map(
@@ -78,6 +81,7 @@ impl<'a> System<'a> for Sys {
                             active_abilities,
                             map_marker,
                             character_class,
+                            ethos,
                         )| match presence.kind {
                             PresenceKind::LoadingCharacter(_char_id) => {
                                 error!(
@@ -112,6 +116,7 @@ impl<'a> System<'a> for Sys {
                                     active_abilities.clone(),
                                     map_marker.cloned(),
                                     character_class.copied().unwrap_or_default(),
+                                    ethos.copied().unwrap_or_default(),
                                 ))
                             },
                             PresenceKind::Spectator | PresenceKind::Possessor => None,
