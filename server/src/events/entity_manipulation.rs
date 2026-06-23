@@ -633,6 +633,7 @@ pub struct DestroyEventData<'a> {
     poises: ReadStorage<'a, Poise>,
     groups: ReadStorage<'a, Group>,
     alignments: ReadStorage<'a, Alignment>,
+    ethos: WriteStorage<'a, comp::Ethos>,
     stats: ReadStorage<'a, Stats>,
     agents: ReadStorage<'a, Agent>,
     #[cfg(feature = "worldgen")]
@@ -666,10 +667,29 @@ impl ServerEvent for DestroyEvent {
             if !data.entities.is_alive(ev.entity) {
                 continue;
             }
+
             let mut outcomes = data.outcomes.emitter();
             if let Some(mut health) = data.healths.get_mut(ev.entity) {
                 if !health.is_dead {
                     health.is_dead = true;
+
+                    // BL-33 Phase 3: a player's deeds drift their moral
+                    // alignment. Killing a peaceful NPC pulls toward Evil;
+                    // slaying a hostile nudges slightly Good/Lawful. Only PCs
+                    // drift (NPC drift is AURORA-era); beasts/objects and
+                    // self-kills carry no moral weight, and PvP (victim has no
+                    // AI `Alignment`) is left to AURORA. Inside the `is_dead`
+                    // latch so a duplicate `Destroy` event can't double-apply.
+                    if let Some(killer) =
+                        ev.cause.by.and_then(|by| data.id_maps.uid_entity(by.uid()))
+                        && killer != ev.entity
+                        && data.players.contains(killer)
+                        && let Some(victim_alignment) = data.alignments.get(ev.entity).copied()
+                        && let Some((d_ge, d_lc)) = comp::Ethos::kill_drift(victim_alignment)
+                        && let Some(mut ethos) = data.ethos.get_mut(killer)
+                    {
+                        ethos.nudge(d_ge, d_lc);
+                    }
 
                     if let Some(pos) = data.positions.get(ev.entity).copied() {
                         data.entities_died_last_tick.0.push((ev.entity, pos));
