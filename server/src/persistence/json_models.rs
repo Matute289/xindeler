@@ -83,6 +83,16 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Class(ClassKind::Mage) => "Class Mage",
         Class(ClassKind::Cleric) => "Class Cleric",
         Class(ClassKind::Rogue) => "Class Rogue",
+        Class(ClassKind::Barbarian) => "Class Barbarian",
+        Class(ClassKind::Sorcerer) => "Class Sorcerer",
+        Class(ClassKind::Warlock) => "Class Warlock",
+        Class(ClassKind::Bard) => "Class Bard",
+        Class(ClassKind::Paladin) => "Class Paladin",
+        Class(ClassKind::Druid) => "Class Druid",
+        Class(ClassKind::Ranger) => "Class Ranger",
+        Class(ClassKind::Monk) => "Class Monk",
+        Class(ClassKind::Artificer) => "Class Artificer",
+        Class(ClassKind::BloodSlayer) => "Class BloodSlayer",
         // Adventurer has no class tree; a Class(Adventurer) group reaching
         // persistence is a bug, consistent with the unsupported-weapon arm.
         Class(ClassKind::Adventurer) => panic!(
@@ -125,6 +135,16 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Class Mage" => Class(ClassKind::Mage),
         "Class Cleric" => Class(ClassKind::Cleric),
         "Class Rogue" => Class(ClassKind::Rogue),
+        "Class Barbarian" => Class(ClassKind::Barbarian),
+        "Class Sorcerer" => Class(ClassKind::Sorcerer),
+        "Class Warlock" => Class(ClassKind::Warlock),
+        "Class Bard" => Class(ClassKind::Bard),
+        "Class Paladin" => Class(ClassKind::Paladin),
+        "Class Druid" => Class(ClassKind::Druid),
+        "Class Ranger" => Class(ClassKind::Ranger),
+        "Class Monk" => Class(ClassKind::Monk),
+        "Class Artificer" => Class(ClassKind::Artificer),
+        "Class BloodSlayer" => Class(ClassKind::BloodSlayer),
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
@@ -141,6 +161,16 @@ pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
         Mage => "Mage",
         Cleric => "Cleric",
         Rogue => "Rogue",
+        Barbarian => "Barbarian",
+        Sorcerer => "Sorcerer",
+        Warlock => "Warlock",
+        Bard => "Bard",
+        Paladin => "Paladin",
+        Druid => "Druid",
+        Ranger => "Ranger",
+        Monk => "Monk",
+        Artificer => "Artificer",
+        BloodSlayer => "BloodSlayer",
     }
     .to_string()
 }

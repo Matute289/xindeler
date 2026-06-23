@@ -73,6 +73,16 @@ common-class-mage = Mage
 common-class-cleric = Cleric
 common-class-rogue = Rogue
 common-class-adventurer = Adventurer
+common-class-barbarian = Barbarian
+common-class-sorcerer = Sorcerer
+common-class-warlock = Warlock
+common-class-bard = Bard
+common-class-paladin = Paladin
+common-class-druid = Druid
+common-class-ranger = Ranger
+common-class-monk = Monk
+common-class-artificer = Artificer
+common-class-blood_slayer = Blood Slayer
 
 ## Tools
 common-weapons-axe = Axe

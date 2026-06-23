@@ -75,6 +75,16 @@ fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<
         ClassKind::Mage => (Some(STARTER_STAFF), None),
         ClassKind::Cleric => (Some(STARTER_SCEPTRE), None),
         ClassKind::Rogue => (Some(STARTER_SWORDS), Some(STARTER_SWORDS)),
+        // Classes-wave (BL-04): the default mirrors the first server whitelist entry.
+        ClassKind::Barbarian => (Some(STARTER_AXE), None),
+        ClassKind::Sorcerer
+        | ClassKind::Warlock
+        | ClassKind::Bard
+        | ClassKind::Druid
+        | ClassKind::Artificer => (Some(STARTER_STAFF), None),
+        ClassKind::Paladin | ClassKind::BloodSlayer => (Some(STARTER_SWORD), None),
+        ClassKind::Ranger => (Some(STARTER_BOW), None),
+        ClassKind::Monk => (Some(STARTER_SWORDS), None),
     }
 }
 
@@ -1348,7 +1358,13 @@ impl Controls {
                             .spacing(1)
                             .into(),
                         ]),
-                        ClassKind::Mage => Column::with_children(vec![
+                        // BL-04: all staff-starter casters share the staff picker.
+                        ClassKind::Mage
+                        | ClassKind::Sorcerer
+                        | ClassKind::Warlock
+                        | ClassKind::Bard
+                        | ClassKind::Druid
+                        | ClassKind::Artificer => Column::with_children(vec![
                             icon_button_tooltip_opt(
                                 staff_button,
                                 *mainhand == Some(STARTER_STAFF),
@@ -1387,6 +1403,59 @@ impl Controls {
                                     Some(Message::Tool((Some(STARTER_BOW), None))),
                                     imgs.bow,
                                     "common-weapons-bow",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
+                            .into(),
+                        ]),
+                        // BL-04 classes-wave: pickers match each class' server whitelist.
+                        ClassKind::Paladin | ClassKind::BloodSlayer => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                sword_button,
+                                *mainhand == Some(STARTER_SWORD),
+                                Some(Message::Tool((Some(STARTER_SWORD), None))),
+                                imgs.sword,
+                                "common-weapons-greatsword",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Ranger => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                bow_button,
+                                *mainhand == Some(STARTER_BOW),
+                                Some(Message::Tool((Some(STARTER_BOW), None))),
+                                imgs.bow,
+                                "common-weapons-bow",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Monk => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                swords_button,
+                                *mainhand == Some(STARTER_SWORDS),
+                                Some(Message::Tool((Some(STARTER_SWORDS), None))),
+                                imgs.swords,
+                                "common-weapons-shortswords",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Barbarian => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    axe_button,
+                                    *mainhand == Some(STARTER_AXE),
+                                    Some(Message::Tool((Some(STARTER_AXE), None))),
+                                    imgs.axe,
+                                    "common-weapons-axe",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    hammer_button,
+                                    *mainhand == Some(STARTER_HAMMER),
+                                    Some(Message::Tool((Some(STARTER_HAMMER), None))),
+                                    imgs.hammer,
+                                    "common-weapons-hammer",
                                 )
                                 .into(),
                             ])
