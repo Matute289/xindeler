@@ -451,6 +451,7 @@ pub enum ServerChatCommand {
     ServerPhysics,
     SetBodyType,
     SetClass,
+    SetEthos,
     SetLevel,
     SetMotd,
     SetWaypoint,
@@ -937,6 +938,26 @@ impl ServerChatCommand {
                 Content::localized("command-set_class-desc"),
                 None,
             ),
+            ServerChatCommand::SetEthos => cmd(
+                vec![
+                    Enum(
+                        "moral",
+                        vec!["good".to_owned(), "neutral".to_owned(), "evil".to_owned()],
+                        Required,
+                    ),
+                    Enum(
+                        "order",
+                        vec![
+                            "lawful".to_owned(),
+                            "neutral".to_owned(),
+                            "chaotic".to_owned(),
+                        ],
+                        Required,
+                    ),
+                ],
+                Content::localized("command-set_ethos-desc"),
+                Some(Admin),
+            ),
             ServerChatCommand::SetLevel => cmd(
                 vec![Integer("level", 1, Required)],
                 Content::localized("command-set_level-desc"),
@@ -1275,6 +1296,7 @@ impl ServerChatCommand {
             ServerChatCommand::Say => "say",
             ServerChatCommand::ServerPhysics => "server_physics",
             ServerChatCommand::SetClass => "set_class",
+            ServerChatCommand::SetEthos => "set_ethos",
             ServerChatCommand::SetLevel => "set_level",
             ServerChatCommand::SetMotd => "set_motd",
             ServerChatCommand::SetBodyType => "set_body_type",
