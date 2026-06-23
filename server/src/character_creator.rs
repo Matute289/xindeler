@@ -154,6 +154,9 @@ pub fn create_character(
         pets: Vec::new(),
         active_abilities: common::comp::ActiveAbilities::default_limited(BASE_ABILITY_LIMIT),
         map_marker,
+        // BL-33 Phase 2: new characters start True Neutral. The creation-time
+        // alignment pick (Phase 2 UI) will set this; deeds then drift it (P3).
+        ethos: common::comp::Ethos::default(),
     });
     Ok(())
 }

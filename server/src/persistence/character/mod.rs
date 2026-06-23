@@ -15,7 +15,7 @@ use crate::{
             convert_active_abilities_from_database, convert_active_abilities_to_database,
             convert_body_from_database, convert_body_to_database_json,
             convert_character_from_database, convert_class_from_database,
-            convert_class_to_database, convert_hardcore_from_database,
+            convert_class_to_database, convert_ethos_from_database, convert_hardcore_from_database,
             convert_hardcore_to_database, convert_inventory_from_database_items,
             convert_items_to_database_items, convert_loadout_from_database_items,
             convert_recipe_book_from_database_items, convert_skill_groups_to_database,
@@ -149,7 +149,9 @@ pub fn load_character_data(
                 c.hardcore,
                 c.class,
                 b.variant,
-                b.body_data
+                b.body_data,
+                c.ethos_good_evil,
+                c.ethos_law_chaos
         FROM    character c
         JOIN    body b ON (c.character_id = b.body_id)
         WHERE   c.player_uuid = ?1
@@ -166,6 +168,8 @@ pub fn load_character_data(
                 waypoint: row.get(2)?,
                 hardcore: row.get(3)?,
                 class: row.get(4)?,
+                ethos_good_evil: row.get(7)?,
+                ethos_law_chaos: row.get(8)?,
             };
 
             let body_data = Body {
@@ -312,6 +316,10 @@ pub fn load_character_data(
             pets,
             active_abilities: convert_active_abilities_from_database(&ability_set_data),
             map_marker: char_map_marker,
+            ethos: convert_ethos_from_database(
+                character_data.ethos_good_evil,
+                character_data.ethos_law_chaos,
+            ),
         },
         UpdateCharacterMetadata {
             skill_set_persistence_load_error,
@@ -348,6 +356,9 @@ pub fn load_character_list(player_uuid_: &str, connection: &Connection) -> Chara
                 waypoint: row.get(2)?,
                 hardcore: row.get(3)?,
                 class: row.get(4)?,
+                // The character-list view doesn't surface alignment; defaulted.
+                ethos_good_evil: 0,
+                ethos_law_chaos: 0,
             })
         })?
         .map(|x| x.unwrap())
@@ -432,6 +443,7 @@ pub fn create_character(
         pets: _,
         active_abilities,
         map_marker,
+        ethos,
     } = persisted_components;
 
     // Fetch new entity IDs for character, inventory, loadout, overflow items, and
@@ -534,8 +546,10 @@ pub fn create_character(
                                alias,
                                waypoint,
                                hardcore,
-                               class)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                               class,
+                               ethos_good_evil,
+                               ethos_law_chaos)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
 
     stmt.execute([
@@ -545,6 +559,8 @@ pub fn create_character(
         &convert_waypoint_to_database_json(waypoint, map_marker),
         &convert_hardcore_to_database(hardcore),
         &convert_class_to_database(character_class),
+        &ethos.good_evil,
+        &ethos.law_chaos,
     ])?;
     drop(stmt);
 
@@ -1079,6 +1095,7 @@ pub fn update(
     active_abilities: comp::ability::ActiveAbilities,
     map_marker: Option<comp::MapMarker>,
     character_class: comp::CharacterClass,
+    ethos: comp::Ethos,
     transaction: &mut Transaction,
 ) -> Result<(), PersistenceError> {
     // Run pet persistence
@@ -1220,14 +1237,18 @@ pub fn update(
         "
         UPDATE  character
         SET     waypoint = ?1,
-                class = ?2
-        WHERE   character_id = ?3
+                class = ?2,
+                ethos_good_evil = ?3,
+                ethos_law_chaos = ?4
+        WHERE   character_id = ?5
     ",
     )?;
 
     let waypoint_count = stmt.execute([
         &db_waypoint as &dyn ToSql,
         &convert_class_to_database(character_class),
+        &ethos.good_evil,
+        &ethos.law_chaos,
         &char_id.0,
     ])?;
 

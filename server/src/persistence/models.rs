@@ -6,6 +6,8 @@ pub struct Character {
     pub waypoint: Option<String>,
     pub hardcore: i64,
     pub class: String,
+    pub ethos_good_evil: i16,
+    pub ethos_law_chaos: i16,
 }
 
 #[derive(Debug)]
