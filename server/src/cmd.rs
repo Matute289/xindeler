@@ -210,6 +210,7 @@ fn do_command(
         ServerChatCommand::ServerPhysics => handle_server_physics,
         ServerChatCommand::SetBodyType => handle_set_body_type,
         ServerChatCommand::SetClass => handle_set_class,
+        ServerChatCommand::SetEthos => handle_set_ethos,
         ServerChatCommand::SetLevel => handle_set_level,
         ServerChatCommand::SetMotd => handle_set_motd,
         ServerChatCommand::SetWaypoint => handle_set_waypoint,
@@ -5731,6 +5732,56 @@ fn handle_set_level(
         ServerGeneral::server_msg(
             ChatType::CommandInfo,
             Content::Plain(format!("Character level set to {level}.")),
+        ),
+    );
+    Ok(())
+}
+
+/// `/set_ethos <moral> <order>` — admin-only (BL-33): set a character's moral
+/// alignment (the 9-box). Server-authoritative: `needs_role: Admin` + a
+/// `real_role(..) == Admin` re-check.
+fn handle_set_ethos(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::ethos::{Ethos, Moral, Order};
+
+    let client_uuid = uuid(server, client, "client")?;
+    if !matches!(real_role(server, client_uuid, "client")?, AdminRole::Admin) {
+        return Err(Content::Plain(
+            "Only admins may use /set_ethos.".to_string(),
+        ));
+    }
+
+    let (moral_arg, order_arg) = parse_cmd_args!(args, String, String);
+    let moral = match moral_arg.as_deref() {
+        Some("good") => Moral::Good,
+        Some("neutral") => Moral::Neutral,
+        Some("evil") => Moral::Evil,
+        _ => return Err(action.help_content()),
+    };
+    let order = match order_arg.as_deref() {
+        Some("lawful") => Order::Lawful,
+        Some("neutral") => Order::Neutral,
+        Some("chaotic") => Order::Chaotic,
+        _ => return Err(action.help_content()),
+    };
+
+    server
+        .state
+        .ecs_mut()
+        .write_storage::<Ethos>()
+        .insert(target, Ethos::from_box(order, moral))
+        .map_err(|_| Content::Plain("Failed to set ethos on the target.".to_string()))?;
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!("Alignment set to {order:?} {moral:?}.")),
         ),
     );
     Ok(())

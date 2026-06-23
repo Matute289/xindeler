@@ -437,9 +437,9 @@ pub fn apply_db_item_properties(item: &mut comp::Item, properties: &DatabaseItem
 
 #[cfg(test)]
 pub mod tests {
-    /// BL-04: every `ClassKind` must survive both persistence converters in both
-    /// directions, so a new variant can't silently drop from one (the guard the
-    /// `ClassKind::ALL` doc-comment promises).
+    /// BL-04: every `ClassKind` must survive both persistence converters in
+    /// both directions, so a new variant can't silently drop from one (the
+    /// guard the `ClassKind::ALL` doc-comment promises).
     #[test]
     fn class_persistence_round_trips_for_every_class() {
         use common::comp::{class::ClassKind, skillset::SkillGroupKind};

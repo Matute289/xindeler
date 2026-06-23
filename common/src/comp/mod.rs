@@ -15,6 +15,7 @@ pub mod combo;
 pub mod compass;
 pub mod controller;
 mod energy;
+pub mod ethos;
 pub mod fluid_dynamics;
 pub mod gizmos;
 pub mod group;
@@ -82,6 +83,7 @@ pub use self::{
         InputKind, InventoryAction, InventoryEvent, InventoryManip, UtteranceKind,
     },
     energy::Energy,
+    ethos::{Ethos, Moral, Order},
     fluid_dynamics::Fluid,
     gizmos::GizmoSubscriber,
     group::Group,
