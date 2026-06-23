@@ -234,6 +234,8 @@ fn apply_spec(spec: &TestCharSpec, opt: &Opt, runtime: &Arc<Runtime>) -> Result<
             false,
             None,
             comp::class::ClassKind::Warrior,
+            // BL-33: bots start True Neutral.
+            comp::Ethos::default(),
         );
         client.load_character_list();
         guard = 0;

@@ -156,8 +156,9 @@ pub fn create_character(
         active_abilities: common::comp::ActiveAbilities::default_limited(BASE_ABILITY_LIMIT),
         map_marker,
         // BL-33: the alignment chosen at character creation (defaults to True
-        // Neutral if the client sends it). Deeds then drift it in-game (P3).
-        ethos,
+        // Neutral if the client sends it). Sanitised — never trust the wire
+        // value. Deeds then drift it in-game (P3).
+        ethos: ethos.clamped(),
     });
     Ok(())
 }
