@@ -37,6 +37,12 @@ pub struct Ethos {
 impl Ethos {
     /// Score clamp bound.
     pub const BOUND: i16 = 100;
+    /// Moral drift for slaying a hostile NPC — mildly Good and Lawful.
+    pub const KILL_HOSTILE_DRIFT: (i16, i16) = (5, 2);
+    /// Moral drift `(Δgood_evil, Δlaw_chaos)` a PC takes for killing a peaceful
+    /// NPC — a strong pull to Evil, a touch Chaotic. First-pass magnitude;
+    /// tuning deferred to telemetry / `game-balance-designer` (spec §6.2).
+    pub const KILL_INNOCENT_DRIFT: (i16, i16) = (-15, -5);
     /// Score a freshly-chosen non-Neutral axis starts at (creation).
     pub const START: i16 = 66;
     /// `|score| > THRESHOLD` ⇒ a non-Neutral axis.
@@ -107,6 +113,20 @@ impl Ethos {
         }
     }
 
+    /// The moral drift `(Δgood_evil, Δlaw_chaos)` a *kill* applies to the
+    /// killer, keyed on the victim's AI faction ([`Alignment`]) — BL-33 §6.2.
+    /// `None` for a morally-neutral kill (beasts, pets, tamed, objects).
+    pub fn kill_drift(victim: Alignment) -> Option<(i16, i16)> {
+        match victim {
+            // Peaceful folk — villagers, guards, merchants.
+            Alignment::Npc => Some(Self::KILL_INNOCENT_DRIFT),
+            // Hostiles — bandits, cultists, monsters.
+            Alignment::Enemy => Some(Self::KILL_HOSTILE_DRIFT),
+            // No moral weight.
+            Alignment::Wild | Alignment::Tame | Alignment::Owned(_) | Alignment::Passive => None,
+        }
+    }
+
     /// Drift the alignment by a deed (BL-33 §6.2), clamped to `[-BOUND,
     /// BOUND]`.
     pub fn nudge(&mut self, d_good_evil: i16, d_law_chaos: i16) {
@@ -165,6 +185,26 @@ mod tests {
         );
         // Beasts have no moral agency.
         assert_eq!(Ethos::from_ai_alignment(Alignment::Wild), Ethos::default());
+    }
+
+    #[test]
+    fn kill_drift_only_for_moral_victims() {
+        assert_eq!(
+            Ethos::kill_drift(Alignment::Npc),
+            Some(Ethos::KILL_INNOCENT_DRIFT)
+        );
+        assert_eq!(
+            Ethos::kill_drift(Alignment::Enemy),
+            Some(Ethos::KILL_HOSTILE_DRIFT)
+        );
+        assert_eq!(Ethos::kill_drift(Alignment::Wild), None);
+        // Enough innocent kills flip a True-Neutral PC to Evil.
+        let mut pc = Ethos::default();
+        for _ in 0..5 {
+            let (dge, dlc) = Ethos::kill_drift(Alignment::Npc).unwrap();
+            pc.nudge(dge, dlc);
+        }
+        assert_eq!(pc.moral(), Moral::Evil);
     }
 
     #[test]
