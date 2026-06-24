@@ -96,10 +96,11 @@ fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<
 }
 
 /// Like [`neat_button`], but with a FIXED-size centred label instead of the
-/// auto-scaling `FillText` — so buttons whose words differ in length still
-/// render their text at the same size (BL-33 alignment picker). Keeps the
-/// shared button image (uniform width, no stretch); selection is shown by gold
-/// text.
+/// auto-scaling `FillText`, and the button simply **fills its cell** (`width:
+/// Fill`) instead of taking an image-aspect-ratio width. Used by the BL-33
+/// alignment picker so a row of 3 buttons splits the width into equal thirds —
+/// every word renders at the same size, all buttons are the same width, and
+/// none overflow the panel. Selection is shown by gold text.
 fn fixed_label_button(
     state: &mut button::State,
     label: String,
@@ -120,17 +121,12 @@ fn fixed_label_button(
         .horizontal_alignment(HorizontalAlignment::Center)
         .vertical_alignment(VerticalAlignment::Center)
         .color(color);
-    let button = Button::new(state, text)
+    Button::new(state, text)
         .height(Length::Fill)
         .width(Length::Fill)
         .style(button_style)
-        .on_press(message);
-    let container = AspectRatioContainer::new(button);
-    let container = match button_style.active().0 {
-        Some((img, _)) => container.ratio_of_image(img),
-        None => container,
-    };
-    container.into()
+        .on_press(message)
+        .into()
 }
 
 // TODO: what does this comment mean?
@@ -1705,6 +1701,7 @@ impl Controls {
                 const ETHOS_TEXT: u16 = 20;
                 const ETHOS_ROW_H: u16 = 40;
                 const ETHOS_GAP: u16 = 8;
+                const ETHOS_ROW_W: u32 = 360;
                 let ethos_text = fonts.cyri.scale(ETHOS_TEXT);
                 let ethos_section = Column::with_children(vec![
                     Row::with_children(vec![
@@ -1767,7 +1764,11 @@ impl Controls {
                     .into(),
                 ])
                 .align_items(Align::Center)
-                .spacing(ETHOS_GAP);
+                .spacing(ETHOS_GAP)
+                // Cap the width so the 3 equal-thirds buttons stay a readable
+                // size and never overflow the panel (centred by the parent).
+                .width(Length::Fill)
+                .max_width(ETHOS_ROW_W);
 
                 let hardcore_checkbox = if character_id.is_some() {
                     Row::new()
