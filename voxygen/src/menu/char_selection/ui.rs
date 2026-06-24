@@ -1821,38 +1821,37 @@ impl Controls {
                         ClassKind::Rogue => "char_selection-class_rogue",
                         _ => "char_selection-class_warrior",
                     };
-                    let line = |s: String| -> Element<Message> {
-                        Text::new(s).size(fonts.cyri.scale(22)).into()
+                    let class_name = i18n.get_msg(class_key).into_owned();
+                    // A tidy key/value row: a muted, right-aligned label in a
+                    // fixed-width column so the values line up, then the value.
+                    let kv = |label_key: &str, value: String| -> Element<Message> {
+                        Row::with_children(vec![
+                            Text::new(i18n.get_msg(label_key).into_owned())
+                                .size(fonts.cyri.scale(20))
+                                .width(Length::Units(110))
+                                .horizontal_alignment(HorizontalAlignment::Right)
+                                .color(Color::from_rgb(0.65, 0.65, 0.65))
+                                .into(),
+                            Text::new(value)
+                                .size(fonts.cyri.scale(20))
+                                .color(TEXT_COLOR)
+                                .into(),
+                        ])
+                        .spacing(14)
+                        .align_items(Align::Center)
+                        .into()
                     };
                     Column::with_children(vec![
-                        line(
-                            i18n.get_msg_ctx("char_selection-summary_name", &i18n::fluent_args! {
-                                "name" => name.clone(),
-                            })
-                            .into_owned(),
+                        kv("char_selection-summary_label_name", name.clone()),
+                        kv(
+                            "char_selection-summary_label_race",
+                            format!("{:?}", body.species),
                         ),
-                        line(
-                            i18n.get_msg_ctx("char_selection-summary_race", &i18n::fluent_args! {
-                                "race" => format!("{:?}", body.species),
-                            })
-                            .into_owned(),
-                        ),
-                        line(
-                            i18n.get_msg_ctx("char_selection-summary_class", &i18n::fluent_args! {
-                                "class" => i18n.get_msg(class_key).into_owned(),
-                            })
-                            .into_owned(),
-                        ),
-                        line(
-                            i18n.get_msg_ctx(
-                                "char_selection-summary_alignment",
-                                &i18n::fluent_args! { "alignment" => alignment_str },
-                            )
-                            .into_owned(),
-                        ),
+                        kv("char_selection-summary_label_class", class_name),
+                        kv("char_selection-summary_label_alignment", alignment_str),
                     ])
-                    .align_items(Align::Center)
-                    .spacing(8)
+                    .align_items(Align::Start)
+                    .spacing(10)
                 };
 
                 const CHAR_DICE_SIZE: u16 = 50;
@@ -1916,9 +1915,13 @@ impl Controls {
                             vec![step_title, class_section.into(), tool.into()]
                         },
                         CreationStep::Alignment => vec![step_title, ethos_section.into()],
-                        CreationStep::Finish => {
-                            vec![step_title, summary.into(), hardcore_checkbox.into()]
-                        },
+                        CreationStep::Finish => vec![
+                            step_title,
+                            Space::new(Length::Fill, Length::Units(14)).into(),
+                            summary.into(),
+                            Space::new(Length::Fill, Length::Units(22)).into(),
+                            hardcore_checkbox.into(),
+                        ],
                     }
                 };
 
