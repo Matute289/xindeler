@@ -46,7 +46,8 @@ use crate::settings::Settings;
 //use ui::ice::widget;
 use iced::{
     Align, Button, Checkbox, Color, Column, Container, HorizontalAlignment, Length, Row,
-    Scrollable, Slider, Space, Text, TextInput, button, scrollable, slider, text_input,
+    Scrollable, Slider, Space, Text, TextInput, VerticalAlignment, button, scrollable, slider,
+    text_input,
 };
 use std::sync::Arc;
 use vek::{Rgba, Vec2};
@@ -92,6 +93,44 @@ fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<
         ClassKind::Ranger => (Some(STARTER_BOW), None),
         ClassKind::Monk => (Some(STARTER_SWORDS), None),
     }
+}
+
+/// Like [`neat_button`], but with a FIXED-size centred label instead of the
+/// auto-scaling `FillText` — so buttons whose words differ in length still
+/// render their text at the same size (BL-33 alignment picker). Keeps the
+/// shared button image (uniform width, no stretch); selection is shown by gold
+/// text.
+fn fixed_label_button(
+    state: &mut button::State,
+    label: String,
+    text_size: u16,
+    selected: bool,
+    button_style: style::button::Style,
+    message: Message,
+) -> Element<'_, Message> {
+    let color = if selected {
+        Color::from_rgb(0.93, 0.78, 0.28)
+    } else {
+        TEXT_COLOR
+    };
+    let text = Text::new(label)
+        .size(text_size)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .color(color);
+    let button = Button::new(state, text)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .style(button_style)
+        .on_press(message);
+    let container = AspectRatioContainer::new(button);
+    let container = match button_style.active().0 {
+        Some((img, _)) => container.ratio_of_image(img),
+        None => container,
+    };
+    container.into()
 }
 
 // TODO: what does this comment mean?
@@ -257,6 +296,7 @@ enum CreationStep {
     Body,
     Appearance,
     Class,
+    Alignment,
     Finish,
 }
 
@@ -265,7 +305,8 @@ impl CreationStep {
         match self {
             CreationStep::Body => CreationStep::Appearance,
             CreationStep::Appearance => CreationStep::Class,
-            CreationStep::Class => CreationStep::Finish,
+            CreationStep::Class => CreationStep::Alignment,
+            CreationStep::Alignment => CreationStep::Finish,
             CreationStep::Finish => CreationStep::Finish,
         }
     }
@@ -275,7 +316,8 @@ impl CreationStep {
             CreationStep::Body => CreationStep::Body,
             CreationStep::Appearance => CreationStep::Body,
             CreationStep::Class => CreationStep::Appearance,
-            CreationStep::Finish => CreationStep::Class,
+            CreationStep::Alignment => CreationStep::Class,
+            CreationStep::Finish => CreationStep::Alignment,
         }
     }
 
@@ -285,7 +327,8 @@ impl CreationStep {
             CreationStep::Body => 1,
             CreationStep::Appearance => 2,
             CreationStep::Class => 3,
-            CreationStep::Finish => 4,
+            CreationStep::Alignment => 4,
+            CreationStep::Finish => 5,
         }
     }
 }
@@ -1651,82 +1694,80 @@ impl Controls {
                 .max_width(200)
                 .padding(5);
 
-                // BL-33: starting moral-alignment picker (Finish step). Two
-                // labelled rows — Good/Neutral/Evil and Lawful/Neutral/Chaotic —
-                // highlighted like the class buttons (text-colour only, so the
-                // grid never reflows). The pick is only a starting point; deeds
-                // drift it in-game.
+                // BL-33: starting moral-alignment picker (its own wizard step).
+                // Two rows — Good/Neutral/Evil and Lawful/Neutral/Chaotic. Each
+                // button uses a FIXED-size centred label (not FillText) so every
+                // word renders at the same size, wrapped in the shared button
+                // image (uniform width, no distortion). Selection = gold text.
+                // The pick is only a starting point; deeds drift it in-game.
                 let [moral_good_btn, moral_neutral_btn, moral_evil_btn] = ethos_moral_buttons;
                 let [order_lawful_btn, order_neutral_btn, order_chaotic_btn] = ethos_order_buttons;
-                let ethos_button_style = |selected: bool| {
-                    if selected {
-                        style::button::Style::new(imgs.button)
-                            .hover_image(imgs.button_hover)
-                            .press_image(imgs.button_press)
-                            .text_color(Color::from_rgb(0.93, 0.78, 0.28))
-                    } else {
-                        button_style
-                    }
-                };
+                const ETHOS_TEXT: u16 = 20;
+                const ETHOS_ROW_H: u16 = 40;
+                const ETHOS_GAP: u16 = 8;
+                let ethos_text = fonts.cyri.scale(ETHOS_TEXT);
                 let ethos_section = Column::with_children(vec![
-                    Text::new(i18n.get_msg("char_selection-alignment").into_owned())
-                        .size(fonts.cyri.scale(18))
-                        .into(),
                     Row::with_children(vec![
-                        neat_button(
+                        fixed_label_button(
                             moral_good_btn,
                             i18n.get_msg("char_selection-ethos_good").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.moral() == Moral::Good),
-                            Some(Message::EthosMoral(Moral::Good)),
+                            ethos_text,
+                            ethos.moral() == Moral::Good,
+                            button_style,
+                            Message::EthosMoral(Moral::Good),
                         ),
-                        neat_button(
+                        fixed_label_button(
                             moral_neutral_btn,
                             i18n.get_msg("char_selection-ethos_neutral").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.moral() == Moral::Neutral),
-                            Some(Message::EthosMoral(Moral::Neutral)),
+                            ethos_text,
+                            ethos.moral() == Moral::Neutral,
+                            button_style,
+                            Message::EthosMoral(Moral::Neutral),
                         ),
-                        neat_button(
+                        fixed_label_button(
                             moral_evil_btn,
                             i18n.get_msg("char_selection-ethos_evil").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.moral() == Moral::Evil),
-                            Some(Message::EthosMoral(Moral::Evil)),
+                            ethos_text,
+                            ethos.moral() == Moral::Evil,
+                            button_style,
+                            Message::EthosMoral(Moral::Evil),
                         ),
                     ])
-                    .height(Length::Units(26))
-                    .spacing(2)
+                    .height(Length::Units(ETHOS_ROW_H))
+                    .spacing(ETHOS_GAP)
                     .into(),
                     Row::with_children(vec![
-                        neat_button(
+                        fixed_label_button(
                             order_lawful_btn,
                             i18n.get_msg("char_selection-ethos_lawful").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.order() == Order::Lawful),
-                            Some(Message::EthosOrder(Order::Lawful)),
+                            ethos_text,
+                            ethos.order() == Order::Lawful,
+                            button_style,
+                            Message::EthosOrder(Order::Lawful),
                         ),
-                        neat_button(
+                        fixed_label_button(
                             order_neutral_btn,
                             i18n.get_msg("char_selection-ethos_neutral").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.order() == Order::Neutral),
-                            Some(Message::EthosOrder(Order::Neutral)),
+                            ethos_text,
+                            ethos.order() == Order::Neutral,
+                            button_style,
+                            Message::EthosOrder(Order::Neutral),
                         ),
-                        neat_button(
+                        fixed_label_button(
                             order_chaotic_btn,
                             i18n.get_msg("char_selection-ethos_chaotic").into_owned(),
-                            FILL_FRAC_ONE,
-                            ethos_button_style(ethos.order() == Order::Chaotic),
-                            Some(Message::EthosOrder(Order::Chaotic)),
+                            ethos_text,
+                            ethos.order() == Order::Chaotic,
+                            button_style,
+                            Message::EthosOrder(Order::Chaotic),
                         ),
                     ])
-                    .height(Length::Units(26))
-                    .spacing(2)
+                    .height(Length::Units(ETHOS_ROW_H))
+                    .spacing(ETHOS_GAP)
                     .into(),
                 ])
                 .align_items(Align::Center)
-                .spacing(2);
+                .spacing(ETHOS_GAP);
 
                 let hardcore_checkbox = if character_id.is_some() {
                     Row::new()
@@ -1737,9 +1778,9 @@ impl Controls {
                             i18n.get_msg("char_selection-hardcore"),
                             Message::HardcoreEnabled,
                         )
-                        .size(32)
-                        .spacing(8)
-                        .text_size(24)
+                        .size(40)
+                        .spacing(10)
+                        .text_size(30)
                         .style(style::checkbox::Style::new(
                             imgs.icon_border,
                             self.imgs.hardcore,
@@ -1750,6 +1791,67 @@ impl Controls {
                         })
                         .into(),
                     ])
+                };
+
+                // BL-33: review summary for the final wizard step — a recap of
+                // everything chosen (name, race, class, alignment).
+                let summary = {
+                    let moral_key = match ethos.moral() {
+                        Moral::Good => "char_selection-ethos_good",
+                        Moral::Neutral => "char_selection-ethos_neutral",
+                        Moral::Evil => "char_selection-ethos_evil",
+                    };
+                    let order_key = match ethos.order() {
+                        Order::Lawful => "char_selection-ethos_lawful",
+                        Order::Neutral => "char_selection-ethos_neutral",
+                        Order::Chaotic => "char_selection-ethos_chaotic",
+                    };
+                    let alignment_str =
+                        if ethos.moral() == Moral::Neutral && ethos.order() == Order::Neutral {
+                            i18n.get_msg("char_selection-ethos_true_neutral")
+                                .into_owned()
+                        } else {
+                            format!("{} {}", i18n.get_msg(order_key), i18n.get_msg(moral_key))
+                        };
+                    // Creation only offers these four classes (the class step).
+                    let class_key = match class {
+                        ClassKind::Mage => "char_selection-class_mage",
+                        ClassKind::Cleric => "char_selection-class_cleric",
+                        ClassKind::Rogue => "char_selection-class_rogue",
+                        _ => "char_selection-class_warrior",
+                    };
+                    let line = |s: String| -> Element<Message> {
+                        Text::new(s).size(fonts.cyri.scale(22)).into()
+                    };
+                    Column::with_children(vec![
+                        line(
+                            i18n.get_msg_ctx("char_selection-summary_name", &i18n::fluent_args! {
+                                "name" => name.clone(),
+                            })
+                            .into_owned(),
+                        ),
+                        line(
+                            i18n.get_msg_ctx("char_selection-summary_race", &i18n::fluent_args! {
+                                "race" => format!("{:?}", body.species),
+                            })
+                            .into_owned(),
+                        ),
+                        line(
+                            i18n.get_msg_ctx("char_selection-summary_class", &i18n::fluent_args! {
+                                "class" => i18n.get_msg(class_key).into_owned(),
+                            })
+                            .into_owned(),
+                        ),
+                        line(
+                            i18n.get_msg_ctx(
+                                "char_selection-summary_alignment",
+                                &i18n::fluent_args! { "alignment" => alignment_str },
+                            )
+                            .into_owned(),
+                        ),
+                    ])
+                    .align_items(Align::Center)
+                    .spacing(8)
                 };
 
                 const CHAR_DICE_SIZE: u16 = 50;
@@ -1786,6 +1888,7 @@ impl Controls {
                         CreationStep::Body => "char_selection-step_body",
                         CreationStep::Appearance => "char_selection-step_appearance",
                         CreationStep::Class => "char_selection-step_class",
+                        CreationStep::Alignment => "char_selection-step_alignment",
                         CreationStep::Finish => "char_selection-step_finish",
                     };
                     let step_title: Element<Message> =
@@ -1811,8 +1914,9 @@ impl Controls {
                         CreationStep::Class => {
                             vec![step_title, class_section.into(), tool.into()]
                         },
+                        CreationStep::Alignment => vec![step_title, ethos_section.into()],
                         CreationStep::Finish => {
-                            vec![step_title, ethos_section.into(), hardcore_checkbox.into()]
+                            vec![step_title, summary.into(), hardcore_checkbox.into()]
                         },
                     }
                 };
