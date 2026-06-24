@@ -127,6 +127,15 @@ impl Ethos {
         }
     }
 
+    /// Both scores clamped into `[-BOUND, BOUND]`. Used to sanitise a
+    /// client-supplied alignment server-side (never trust the wire value).
+    pub fn clamped(self) -> Self {
+        Self {
+            good_evil: self.good_evil.clamp(-Self::BOUND, Self::BOUND),
+            law_chaos: self.law_chaos.clamp(-Self::BOUND, Self::BOUND),
+        }
+    }
+
     /// Drift the alignment by a deed (BL-33 §6.2), clamped to `[-BOUND,
     /// BOUND]`.
     pub fn nudge(&mut self, d_good_evil: i16, d_law_chaos: i16) {

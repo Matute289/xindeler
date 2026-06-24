@@ -1348,6 +1348,7 @@ impl Client {
         hardcore: bool,
         start_site: Option<SiteId>,
         class: comp::class::ClassKind,
+        ethos: comp::Ethos,
     ) {
         self.character_list.loading = true;
         self.send_msg(ClientGeneral::CreateCharacter {
@@ -1358,6 +1359,7 @@ impl Client {
             hardcore,
             start_site,
             class,
+            ethos,
         });
     }
 
