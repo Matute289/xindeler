@@ -35,5 +35,5 @@ sketch. If a claim depends on a path being hot, verify the caller first (Grep) i
 assuming. End with a 3-line verdict: merge as-is / merge with minors / needs work.
 
 Useful context: hot-path catalogue and measurement tooling are described in
-`.claude/skills/veloren-engine-perf/SKILL.md` and
+`.claude/skills/xindeler-engine-perf/SKILL.md` and
 `docs/design/specs/2026-06-10-engine-improvements-design.md`.

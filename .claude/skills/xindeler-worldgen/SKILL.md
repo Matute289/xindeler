@@ -1,9 +1,9 @@
 ---
-name: veloren-worldgen
+name: xindeler-worldgen
 description: Use when iterating on world generation, terrain, sites, rtsim civilization simulation, or procedural content — knows the generation pipeline and iteration workflow
 ---
 
-# veloren-worldgen
+# xindeler-worldgen
 
 ## Generation Pipeline (in order)
 

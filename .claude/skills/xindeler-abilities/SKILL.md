@@ -1,11 +1,11 @@
 ---
-name: veloren-abilities
+name: xindeler-abilities
 description: Use when creating spells, combat abilities, buffs, auras, or new magic schools — guides the RON ability pipeline, CharacterState implementation, and the magic spec
 ---
 
-# veloren-abilities
+# xindeler-abilities
 
-**REQUIRED:** Read `docs/design/specs/2026-06-10-magic-abilities-design.md` first. Invoke `veloren-dev` and `superpowers:test-driven-development` before coding.
+**REQUIRED:** Read `docs/design/specs/2026-06-10-magic-abilities-design.md` first. Invoke `xindeler-dev` and `superpowers:test-driven-development` before coding.
 
 ## The ability pipeline (end to end)
 
@@ -53,7 +53,7 @@ spec before writing Rust — most D&D-style effects are already expressible.
    `AbilitySpec`, with its `Skill` gate.
 4. `VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-common` — asset-loading tests
    (e.g. `AbilityMap` load) must pass; a typo'd RON fails here, not at runtime.
-5. In-game check via `veloren-run` (hot-reloading picks up RON edits in dev).
+5. In-game check via `xindeler-run` (hot-reloading picks up RON edits in dev).
 
 ## Steps for a new mechanic (Rust)
 

@@ -1,9 +1,9 @@
 ---
-name: veloren-debug
+name: xindeler-debug
 description: Use when investigating any bug or unexpected game behavior — provides ECS-aware debugging workflow before proposing fixes
 ---
 
-# veloren-debug
+# xindeler-debug
 
 **REQUIRED:** Invoke `superpowers:systematic-debugging` before proposing any fix.
 
@@ -116,5 +116,5 @@ After finding the root cause:
 1. Remove all temporary `debug!` / `warn!` instrumentation.
 2. Write a regression test if possible.
 3. Run `cargo check -p veloren-<affected-crate>` to verify it compiles.
-4. Use the `veloren-run` skill to do a full manual test.
-5. Use the `veloren-review` skill before committing.
+4. Use the `xindeler-run` skill to do a full manual test.
+5. Use the `xindeler-review` skill before committing.

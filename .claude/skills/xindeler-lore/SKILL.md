@@ -1,9 +1,9 @@
 ---
-name: veloren-lore
+name: xindeler-lore
 description: Use when writing lore content, naming deities/places/NPCs/items, or surfacing lore in game assets — enforces canon from docs/design/lore and the original-IP rules
 ---
 
-# veloren-lore
+# xindeler-lore
 
 **REQUIRED:** Read `docs/design/specs/2026-06-10-lore-cosmology-design.md` before
 writing any lore. Canon lives in `docs/design/lore/` (structure defined in that spec); the

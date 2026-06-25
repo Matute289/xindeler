@@ -1,11 +1,11 @@
 ---
-name: veloren-progression
+name: xindeler-progression
 description: Use when implementing character levels, classes, races, XP curves, skill trees, or equipment requirements — knows the SkillSet/persistence architecture and the progression specs
 ---
 
-# veloren-progression
+# xindeler-progression
 
-**REQUIRED:** Read the relevant design spec before coding. Invoke `veloren-dev` for general gameplay-change patterns and `superpowers:test-driven-development` before writing code.
+**REQUIRED:** Read the relevant design spec before coding. Invoke `xindeler-dev` for general gameplay-change patterns and `superpowers:test-driven-development` before writing code.
 
 ## Specs (read the one that owns your change)
 
@@ -33,10 +33,10 @@ description: Use when implementing character levels, classes, races, XP curves, 
 2. **Additive changes only** on upstream-owned files — new fields get `#[serde(default)]`, new RON fields optional; keeps upstream merges cheap.
 3. **No DB migration without a rollback note** in the PR description, and never edit an already-applied migration file.
 4. **Balance numbers** come from the `game-balance-designer` agent's tables, not ad-hoc constants. Tag new tunables with a comment pointing at the owning spec.
-5. After implementing, dispatch `ecs-design-reviewer` and run `veloren-review` before merge.
+5. After implementing, dispatch `ecs-design-reviewer` and run `xindeler-review` before merge.
 
 ## Test checklist
 
 - Unit tests in the owning crate (`VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-common`).
 - If persistence touched: round-trip test via `json_models` converters + fresh-character creation on a scratch DB.
-- In-game smoke via `veloren-run`; session analysis via `veloren-telemetry`.
+- In-game smoke via `xindeler-run`; session analysis via `xindeler-telemetry`.

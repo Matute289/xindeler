@@ -1,21 +1,23 @@
 ---
-name: veloren-oracle
+name: xindeler-oracle
 description: Use when implementing ORACLE world-director features — world events, story arcs, monster ecosystem, climate/astronomy, narrative, player legacy — knows the world-state/event-engine architecture and the ORACLE spec
 ---
 
-# veloren-oracle
+# xindeler-oracle
 
-**REQUIRED:** Read `docs/design/specs/2026-06-10-project-oracle-design.md` (the
-GDD/TDD) and identify the phase your change belongs to. Invoke `veloren-dev` and
-`superpowers:test-driven-development` before coding. For sim internals, dispatch the
-`sim-systems-engineer` agent.
+**REQUIRED:** Read `docs/design/specs/2026-06-10-project-oracle-design.md` (the GDD/TDD)
+**and `2026-06-24-oracle-design-addendum.md`** (gap-closure: politics/diplomacy, macro-economy +
+ORACLE↔AURORA seam, quest-opportunity generator, perception/intake pipeline, causal-graph + history
+API, religion/culture spread, event-scale, distributed track, revised 8↔11 phase map) and identify the
+phase your change belongs to. Invoke `xindeler-dev` and `superpowers:test-driven-development` before
+coding. For sim internals, dispatch the `sim-systems-engineer` agent (implement) and **`sim-design-reviewer`** (design/diff review).
 
 ## Division of labor (do not blur it)
 
 **ORACLE decides WHAT happens in the world** (events, arcs, ecosystem shifts, climate);
 **AURORA decides how inhabitants react** (`docs/design/specs/2026-06-10-project-aurora-design.md`).
 ORACLE publishes typed world facts; AURORA consumes them. If you're writing per-NPC
-reaction logic, you're in the wrong spec — use `veloren-aurora`.
+reaction logic, you're in the wrong spec — use `xindeler-aurora`.
 
 ## Architecture anchors
 

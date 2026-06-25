@@ -1,9 +1,9 @@
 ---
-name: veloren-dev
+name: xindeler-dev
 description: Use when implementing new gameplay mechanics, ECS components, systems, abilities, NPC behaviors, or admin commands — guides where to make changes and what to check
 ---
 
-# veloren-dev
+# xindeler-dev
 
 **REQUIRED:** Before writing any code, invoke `superpowers:test-driven-development`.
 
@@ -95,7 +95,7 @@ This is fast (~5-10s) and catches most errors before a full build.
 
 ## Step 5: Test In-Game
 
-Use the `veloren-run` skill to launch the game and test the feature manually.
+Use the `xindeler-run` skill to launch the game and test the feature manually.
 
 Useful in-game commands for testing:
 - `/give_item <item_path>` — spawn an item
