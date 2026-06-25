@@ -293,6 +293,11 @@ pub enum BuffKind {
     /// (`DisableAuxiliaryAbilities`). v1 is duration-based; wake-on-damage is a
     /// documented follow-up (spell-riders-engine spec §6 / tasks/13).
     Asleep,
+    /// Blinded (BL-05 rider): can't aim — outgoing attack damage is reduced by
+    /// `strength` (`AttackDamage(1 - strength)`), e.g. strength 0.5 = half
+    /// damage dealt. The action-combat analogue of "attack disadvantage";
+    /// vision occlusion is a deferred client-only effect.
+    Blinded,
     // =================
     //      COMPLEX
     // =================
@@ -381,7 +386,8 @@ impl BuffKind {
             | BuffKind::DifficultTerrain
             | BuffKind::Antimagic
             | BuffKind::Anchored
-            | BuffKind::Asleep => BuffDescriptor::SimpleNegative,
+            | BuffKind::Asleep
+            | BuffKind::Blinded => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -586,6 +592,8 @@ impl BuffKind {
                 BuffEffect::DisableAuxiliaryAbilities,
                 BuffEffect::AttackDamage(0.0),
             ],
+            // BL-05 rider: blinded — reduced outgoing attack damage (can't aim).
+            BuffKind::Blinded => vec![BuffEffect::AttackDamage((1.0 - data.strength).max(0.0))],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -1456,6 +1464,15 @@ pub mod tests {
                 .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d == 0.0))
         );
         assert!(!BuffKind::Asleep.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn blinded_reduces_attack_damage() {
+        // BL-05 rider: blind reduces outgoing damage by strength (0.5 -> half).
+        let effects = BuffKind::Blinded.effects(&BuffData::new(0.5, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::AttackDamage(d) if (d - 0.5).abs() < 1e-6));
+        assert!(!BuffKind::Blinded.is_buff(), "should be a debuff");
     }
 
     #[test]

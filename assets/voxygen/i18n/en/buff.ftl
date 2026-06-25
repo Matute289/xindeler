@@ -106,6 +106,8 @@ buff-anchored = Anchored
     .desc = A dimensional anchor holds you fast — you cannot teleport or blink.
 buff-asleep = Asleep
     .desc = You are sunk in magical sleep — unable to move or act.
+buff-blinded = Blinded
+    .desc = You cannot see to aim — your attacks deal reduced damage.
 ## Freeze
 buff-frozen = Frozen
     .desc = Your movements and attacks are slowed.

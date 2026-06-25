@@ -194,6 +194,7 @@ lazy_static! {
             BuffKind::Antimagic => "antimagic",
             BuffKind::Anchored => "anchored",
             BuffKind::Asleep => "asleep",
+            BuffKind::Blinded => "blinded",
         };
         let mut buff_parser = HashMap::new();
         for kind in BuffKind::iter() {
