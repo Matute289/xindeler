@@ -17,4 +17,13 @@
 
     // --- resistances / AoE mitigation (BL-52 P3, balance note §6) ---
     resist_soft_cap: 0.75, // typed elemental resist caps at 75% on AoE damage
+
+    // --- armor weight -> physical evasion (BL-52 P5, balance note §3) ---
+    // Weight derived from total armor protection: unarmored = +cap evasion,
+    // heavier armor lowers it toward the floor. evasion = clamp(cap - protection
+    // * per_protection - shield?, floor, cap).
+    gear_evasion_cap:   12.0,  // unarmored / cloth ceiling
+    gear_evasion_floor: -10.0, // full plate cannot drag below this
+    armor_evasion_per_protection: 0.3, // evasion lost per point of armor protection
+    shield_evasion_penalty: 2.0, // flat -evasion while a shield is equipped
 )

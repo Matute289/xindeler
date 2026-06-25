@@ -81,6 +81,19 @@ pub struct CombatTuning {
     /// when mitigating AoE damage, so stacking can't reach immunity. BL-52
     /// = 0.75.
     pub resist_soft_cap: f32,
+    /// Combat resolution (BL-52 P5): armor → physical evasion. Weight is
+    /// derived from total armor **protection** (Matías 2026-06-25): heavier
+    /// (more protective) armor lowers evasion; unarmored = max gear
+    /// evasion. Final armor evasion = `clamp(gear_evasion_cap −
+    /// total_protection · armor_evasion_per_protection − shield?,
+    /// gear_evasion_floor, gear_evasion_cap)`. Applies to the physical
+    /// to-hit only (magic uses `magic_evasion`).
+    pub gear_evasion_cap: f32,
+    pub gear_evasion_floor: f32,
+    pub armor_evasion_per_protection: f32,
+    /// Flat evasion penalty while a shield is equipped — a shield pays off via
+    /// block/mitigation, not dodge.
+    pub shield_evasion_penalty: f32,
 }
 
 impl Default for CombatTuning {
@@ -94,6 +107,10 @@ impl Default for CombatTuning {
             crit_chance_cap: 0.75,
             crit_precision_mult: 1.0,
             resist_soft_cap: 0.75,
+            gear_evasion_cap: 12.0,
+            gear_evasion_floor: -10.0,
+            armor_evasion_per_protection: 0.3,
+            shield_evasion_penalty: 2.0,
         }
     }
 }
@@ -416,9 +433,18 @@ impl Attack {
                     target.stats.map_or(0.0, |s| s.magic_evasion),
                 )
             } else {
+                // BL-52 P5: physical evasion = class/level + buffs (on `Stats`)
+                // plus the gear contribution derived from armor weight/shield.
+                let armor_evasion = compute_armor_evasion(
+                    target.inventory,
+                    target.attuned,
+                    target.stats,
+                    msm,
+                    combat_tuning,
+                );
                 (
                     attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy),
-                    target.stats.map_or(0.0, |s| s.evasion),
+                    target.stats.map_or(0.0, |s| s.evasion) + armor_evasion,
                 )
             };
             let hit_chance = (combat_tuning.base_hit + (accuracy - evasion) * combat_tuning.hit_k)
@@ -2598,6 +2624,47 @@ pub fn compute_protection(
     })
 }
 
+/// Combat resolution (BL-52 P5): the physical evasion contributed by worn gear.
+/// Weight is **derived from total armor protection** (Matías 2026-06-25):
+/// heavier (more protective) armor lowers evasion, an unarmored entity gets the
+/// `gear_evasion_cap`. A shield adds a flat penalty (it pays off via block, not
+/// dodge). Result is clamped to `[gear_evasion_floor, gear_evasion_cap]`.
+/// Computed at attack time (like
+/// `compute_protection`/`compute_precision_mult`), and applied only to the
+/// **physical** to-hit roll — magic uses `magic_evasion`.
+pub fn compute_armor_evasion(
+    inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
+    stats: Option<&Stats>,
+    msm: &MaterialStatManifest,
+    tuning: &CombatTuning,
+) -> f32 {
+    let Some(inventory) = inventory else {
+        return 0.0;
+    };
+    // BL-36: under an antimagic field attuned protection is mundane, so it counts
+    // toward neither DR (`compute_damage_reduction`) nor weight/evasion — keeps an
+    // attuned item's two defense layers coherent.
+    // TODO(perf): `compute_damage_reduction` also scans the target's gear (per
+    // damage instance); compute protection once per attack and thread it to both.
+    let attuned = if stats.is_some_and(|s| s.disable_magic) {
+        None
+    } else {
+        attuned
+    };
+    // Invincible armor (admin) reads as infinitely heavy → floored evasion.
+    let protection = compute_protection(Some(inventory), attuned, msm).unwrap_or(f32::INFINITY);
+    let from_protection =
+        tuning.gear_evasion_cap - protection * tuning.armor_evasion_per_protection;
+    let (mainhand, offhand) = get_weapon_kinds(inventory);
+    let shield = if mainhand == Some(ToolKind::Shield) || offhand == Some(ToolKind::Shield) {
+        tuning.shield_evasion_penalty
+    } else {
+        0.0
+    };
+    (from_protection - shield).clamp(tuning.gear_evasion_floor, tuning.gear_evasion_cap)
+}
+
 /// Computes the total resilience provided from armor. Is used to determine the
 /// reduction applied to poise damage received by an entity. None indicates that
 /// the armor equipped makes the entity invulnerable to poise damage.
@@ -2855,6 +2922,35 @@ mod combat_resolution_tests {
         assert!(t.crit_precision_mult > 0.0);
         // P3 resistance cap present + sane.
         assert!((t.resist_soft_cap - 0.75).abs() < 1e-6);
+        // P5 armor-evasion fields present + sane.
+        assert!(t.gear_evasion_floor < t.gear_evasion_cap);
+        assert!(t.armor_evasion_per_protection > 0.0);
+        assert!(t.shield_evasion_penalty >= 0.0);
+    }
+
+    // BL-52 P5: armor evasion is derived from total protection — unarmored hits
+    // the cap, heavy armor floors out, a shield subtracts a flat penalty.
+    #[test]
+    fn armor_evasion_from_protection() {
+        let t = CombatTuning::default();
+        // Mirrors `compute_armor_evasion` (protection → evasion + shield).
+        let armor_eva = |protection: f32, shield: bool| {
+            let from_protection = t.gear_evasion_cap - protection * t.armor_evasion_per_protection;
+            let s = if shield {
+                t.shield_evasion_penalty
+            } else {
+                0.0
+            };
+            (from_protection - s).clamp(t.gear_evasion_floor, t.gear_evasion_cap)
+        };
+        // Unarmored → capped at the ceiling (most evasive).
+        assert!((armor_eva(0.0, false) - t.gear_evasion_cap).abs() < 1e-6);
+        // Heavy armor (lots of protection) → floored (easiest to hit).
+        assert!((armor_eva(1000.0, false) - t.gear_evasion_floor).abs() < 1e-6);
+        // A shield always lowers evasion vs the same loadout without one.
+        assert!(armor_eva(20.0, true) < armor_eva(20.0, false));
+        // More protection is never more evasive.
+        assert!(armor_eva(40.0, false) <= armor_eva(10.0, false));
     }
 
     // BL-52 P2: the rolled crit chance is clamped to [floor, cap] — a zero-crit
