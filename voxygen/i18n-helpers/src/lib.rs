@@ -428,7 +428,9 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::Charmed
         | BuffKind::Hollowtouched
         | BuffKind::DifficultTerrain
-        | BuffKind::Antimagic => {
+        | BuffKind::Antimagic
+        | BuffKind::Anchored
+        | BuffKind::Asleep => {
             tracing::error!("Player was killed by a debuff that doesn't do damage!");
             "mysterious"
         },

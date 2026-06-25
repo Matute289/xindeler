@@ -337,6 +337,8 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::Hollowtouched => "buff-hollowtouched",
         BuffKind::DifficultTerrain => "buff-difficult_terrain",
         BuffKind::Antimagic => "buff-antimagic",
+        BuffKind::Anchored => "buff-anchored",
+        BuffKind::Asleep => "buff-asleep",
         // Neutral
         BuffKind::Polymorphed => "buff-polymorphed",
         // Positive
@@ -492,7 +494,9 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         | BuffKind::Hollowtouched
                         | BuffKind::DifficultTerrain
                         | BuffKind::FreedomOfMovement
-                        | BuffKind::Antimagic => Cow::Borrowed(""),
+                        | BuffKind::Antimagic
+                        | BuffKind::Anchored
+                        | BuffKind::Asleep => Cow::Borrowed(""),
                     };
 
                     write!(&mut description, "{}", buff_desc).unwrap();

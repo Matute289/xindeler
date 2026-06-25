@@ -52,8 +52,12 @@ impl CharacterBehavior for Data {
                     });
                 } else {
                     // Blinks to target location, defaults to 25 meters in front if no target
-                    // provided
-                    if let Some(input_attr) = self.static_data.ability_info.input_attr {
+                    // provided. BL-05: a dimensional anchor (`Stats.disable_teleport`,
+                    // from `BuffKind::Anchored`) makes the blink fizzle — buildup
+                    // completes but no teleport happens.
+                    if !data.stats.disable_teleport
+                        && let Some(input_attr) = self.static_data.ability_info.input_attr
+                    {
                         if let Some(target) = input_attr.target_entity {
                             output_events.emit_server(TeleportToEvent {
                                 entity: data.entity,

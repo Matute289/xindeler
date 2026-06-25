@@ -101,6 +101,11 @@ buff-freedom_of_movement = Freedom of Movement
 ## Antimagic (BL-36)
 buff-antimagic = Antimagic
     .desc = Magic fails here — you cannot cast and your magic items lie dormant.
+## Spell riders (BL-05)
+buff-anchored = Anchored
+    .desc = A dimensional anchor holds you fast — you cannot teleport or blink.
+buff-asleep = Asleep
+    .desc = You are sunk in magical sleep — unable to move or act.
 ## Freeze
 buff-frozen = Frozen
     .desc = Your movements and attacks are slowed.
