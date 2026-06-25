@@ -61,6 +61,13 @@ pub enum BuffKind {
     /// Raises maximum health.
     /// Strength should be the effect to max health.
     IncreaseMaxHealth,
+    /// Temp-HP / absorb shield (BL-05 RD-6). Grants an absorb pool equal to
+    /// `strength` that soaks incoming damage before real HP. The pool lives on
+    /// `Health.absorb` (set when this buff is added, cleared when removed); the
+    /// buff has no per-tick effect and persists (no timer) until the pool is
+    /// depleted, then it is removed. Same-kind re-apply refreshes
+    /// (take-higher).
+    Shielded,
     /// Makes you immune to attacks.
     /// Strength does not affect this buff.
     Invulnerability,
@@ -338,6 +345,7 @@ impl BuffKind {
             | BuffKind::ComboGeneration
             | BuffKind::IncreaseMaxEnergy
             | BuffKind::IncreaseMaxHealth
+            | BuffKind::Shielded
             | BuffKind::Invulnerability
             | BuffKind::ProtectingWard
             | BuffKind::Hastened
@@ -511,6 +519,9 @@ impl BuffKind {
                 value: data.strength,
                 kind: ModifierKind::Additive,
             }],
+            // BL-05 RD-6: no per-tick stat effect — the absorb pool is granted on
+            // buff-add (`Health.raise_absorb_to`) and depleted in `change_by`.
+            BuffKind::Shielded => Vec::new(),
             BuffKind::Invulnerability => vec![BuffEffect::DamageReduction(1.0)],
             BuffKind::ProtectingWard => vec![BuffEffect::DamageReduction(
                 // Causes non-linearity in effect strength, but necessary
@@ -1526,6 +1537,16 @@ pub mod tests {
             BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)
         ));
         assert!(BuffKind::FreedomOfMovement.is_buff(), "should be positive");
+    }
+
+    #[test]
+    fn shielded_is_a_positive_buff_with_no_tick_effect() {
+        // BL-05 RD-6: the absorb pool is granted on buff-add (server) and
+        // consumed in `Health::change_by`, so the buff itself has no per-tick
+        // effect; it's a positive marker buff.
+        let effects = BuffKind::Shielded.effects(&BuffData::new(30.0, None), None);
+        assert!(effects.is_empty());
+        assert!(BuffKind::Shielded.is_buff(), "should be positive");
     }
 
     #[test]

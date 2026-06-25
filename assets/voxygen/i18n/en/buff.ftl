@@ -52,6 +52,15 @@ buff-increase_max_health = Increase Max Health
                  by { $strength }.
                  Lasts for { $duration } seconds.
     }
+## Shield (temp-HP absorb, BL-05)
+buff-shielded = Shielded
+    .desc = A shield absorbs incoming damage before your health.
+    .stat = { $duration ->
+        [1] Absorbs { $strength } damage.
+            Lasts for { $duration } second.
+        *[other] Absorbs { $strength } damage.
+                 Lasts for { $duration } seconds.
+    }
 ## Energy Increase
 buff-increase_max_energy = Increase Max Energy
     .desc = Your maximum energy is increased.

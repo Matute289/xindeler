@@ -5647,6 +5647,8 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::ComboGeneration => imgs.buff_fury,
         BuffKind::IncreaseMaxEnergy => imgs.buff_energyplus_0,
         BuffKind::IncreaseMaxHealth => imgs.buff_healthplus_0,
+        // BL-05 RD-6: reuse the damage-reduction shield icon for the absorb buff.
+        BuffKind::Shielded => imgs.buff_dmg_red_0,
         BuffKind::Invulnerability => imgs.buff_invincibility_0,
         BuffKind::ProtectingWard => imgs.buff_dmg_red_0,
         BuffKind::Frenzied => imgs.buff_frenzy_0,

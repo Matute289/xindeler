@@ -273,7 +273,16 @@ impl ServerEvent for HealthChangeEvent {
                 }
 
                 // If the change amount was not zero
+                // BL-05 RD-6: track temp-HP absorb depletion across this change so
+                // the granting `Shielded` buff can be removed once the pool empties.
+                let had_absorb = health.absorb() > 0.0;
                 let changed = health.change_by(ev.change);
+                if had_absorb && health.absorb() <= 0.0 {
+                    emitters.emit(BuffEvent {
+                        entity: ev.entity,
+                        buff_change: buff::BuffChange::RemoveByKind(BuffKind::Shielded),
+                    });
+                }
                 if let Some(mut heads) = heads {
                     // We want some hp to be left for a headless body, so we divide by (max amount
                     // of heads + 2)
@@ -2561,18 +2570,26 @@ impl ServerEvent for BuffEvent {
         Read<'a, Time>,
         WriteStorage<'a, comp::Buffs>,
         ReadStorage<'a, Body>,
-        ReadStorage<'a, Health>,
+        // BL-05 RD-6: Health is written here to grant/clear the temp-HP absorb
+        // pool when a `Shielded` buff is added/removed.
+        WriteStorage<'a, Health>,
         ReadStorage<'a, Stats>,
         ReadStorage<'a, comp::Mass>,
     );
 
     fn handle(
         events: impl ExactSizeIterator<Item = Self>,
-        (time, mut buffs, bodies, healths, stats, masses): Self::SystemData<'_>,
+        (time, mut buffs, bodies, mut healths, stats, masses): Self::SystemData<'_>,
     ) {
         for ev in events {
             if let Some(mut buffs) = buffs.get_mut(ev.entity) {
                 use buff::BuffChange;
+                // BL-05 RD-6: invariant "absorb > 0 ⟺ a Shielded buff is active".
+                // The absorb pool is granted on Shielded-add below; here we clear
+                // it whenever *any* removal path (dispel, expiry, deplete, and
+                // crucially the death `RemoveByCategory`) drops the last Shielded
+                // buff — a single post-match check covers every arm uniformly.
+                let had_shield = buffs.buffs.values().any(|b| b.kind == BuffKind::Shielded);
                 match ev.buff_change {
                     BuffChange::Add(mut new_buff) => {
                         let immunity_by_buff = buffs
@@ -2649,6 +2666,15 @@ impl ServerEvent for BuffEvent {
                                 }
                             }
 
+                            // BL-05 RD-6: granting a Shielded buff fills the
+                            // temp-HP absorb pool (take-higher: a re-cast refreshes
+                            // rather than stacks; a future shield *kind* would add).
+                            if new_buff.kind == BuffKind::Shielded
+                                && let Some(mut health) = healths.get_mut(ev.entity)
+                            {
+                                health.raise_absorb_to(new_buff.data.strength);
+                            }
+
                             buffs.insert(new_buff, *time);
                         }
                     },
@@ -2713,6 +2739,15 @@ impl ServerEvent for BuffEvent {
                                 buff.end_time = buff.data.duration.map(|dur| Time(time.0 + dur.0));
                             })
                     },
+                }
+                // BL-05 RD-6: if this change dropped the last Shielded buff, empty
+                // the absorb pool so it can never linger without its grant (covers
+                // dispel/expiry/deplete and the on-death buff strip).
+                if had_shield
+                    && !buffs.buffs.values().any(|b| b.kind == BuffKind::Shielded)
+                    && let Some(mut health) = healths.get_mut(ev.entity)
+                {
+                    health.clear_absorb();
                 }
             }
         }

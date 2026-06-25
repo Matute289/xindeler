@@ -146,6 +146,7 @@ lazy_static! {
             BuffKind::ComboGeneration => "combo_generation",
             BuffKind::IncreaseMaxEnergy => "increase_max_energy",
             BuffKind::IncreaseMaxHealth => "increase_max_health",
+            BuffKind::Shielded => "shielded",
             BuffKind::Invulnerability => "invulnerability",
             BuffKind::ProtectingWard => "protecting_ward",
             BuffKind::Frenzied => "frenzied",
