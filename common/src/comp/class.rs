@@ -410,5 +410,9 @@ mod tests {
         assert!(mage.magic_accuracy > warrior.magic_accuracy);
         // Everyone crits at least a little at L60 (no dump stat).
         assert!(mage.crit_chance > 0.0);
+        // BL-52 P3 identity: the magic/physical to-hit split is meaningful — a
+        // caster leans on magic accuracy, a martial on physical.
+        assert!(mage.magic_accuracy > mage.accuracy);
+        assert!(warrior.accuracy > warrior.magic_accuracy);
     }
 }
