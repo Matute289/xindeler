@@ -784,7 +784,14 @@ impl BuffKind {
                 .with_requirement(CombatRequirement::AttackSource(AttackSource::Projectile)),
             )],
             BuffKind::Terrified => {
-                vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))]
+                // BL-05 Fear rider: slowed AND fights at a disadvantage. The
+                // flee behaviour lives in the agent AI (`is_terrified`); this
+                // reduces outgoing damage (up to ~30%) for when a feared foe is
+                // cornered and forced to fight. Magnitude is a placeholder.
+                vec![
+                    BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength)),
+                    BuffEffect::AttackDamage((1.0 - 0.3 * nn_scaling(data.strength)).max(0.0)),
+                ]
             },
             BuffKind::Charmed => vec![],
             BuffKind::Hollowtouched => vec![BuffEffect::MaxHealthModifier {
@@ -1473,6 +1480,23 @@ pub mod tests {
         assert_eq!(effects.len(), 1);
         assert!(matches!(effects[0], BuffEffect::AttackDamage(d) if (d - 0.5).abs() < 1e-6));
         assert!(!BuffKind::Blinded.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn terrified_slows_and_weakens() {
+        // BL-05 Fear rider: slows AND reduces outgoing damage (fights at a
+        // disadvantage when cornered); flee behaviour is in the agent AI.
+        let effects = BuffKind::Terrified.effects(&BuffData::new(1.0, None), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::MovementSpeed(s) if *s < 1.0))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d < 1.0))
+        );
     }
 
     #[test]
