@@ -384,6 +384,15 @@ impl ServerEvent for HealthChangeEvent {
                     },
                 });
             }
+
+            // BL-05 rider: any external attacking hit wakes a sleeping target
+            // (no threshold). RemoveByKind is a no-op if the target isn't asleep.
+            if ev.change.amount < 0.0 && ev.change.cause.is_some() {
+                emitters.emit(BuffEvent {
+                    entity: ev.entity,
+                    buff_change: buff::BuffChange::RemoveByKind(BuffKind::Asleep),
+                });
+            }
         }
     }
 }

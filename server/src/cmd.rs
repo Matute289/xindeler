@@ -6180,7 +6180,8 @@ fn build_buff(
             | BuffKind::FreedomOfMovement
             | BuffKind::Antimagic
             | BuffKind::Anchored
-            | BuffKind::Asleep => {
+            | BuffKind::Asleep
+            | BuffKind::Blinded => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {
