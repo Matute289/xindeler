@@ -1,0 +1,12 @@
+// Combat resolution tuning (BL-52) — single source of balance truth for the
+// probabilistic to-hit roll. Loaded (cached) in `Attack::apply_attack`.
+//   hit% = clamp(base_hit + (accuracy - evasion) * hit_k, hit_floor, hit_ceil)
+// Numbers: docs/design/balance/2026-06-25-combat-resolution-numbers.md (§1).
+// Later phases extend this asset (crit, resistances, armor-weight) — fields are
+// `#[serde(default)]` so partial assets stay forward/backward compatible.
+(
+    base_hit:  0.85, // hit% at equal accuracy/evasion
+    hit_k:     0.015, // +1.5% hit per net point of (accuracy - evasion)
+    hit_floor: 0.05, // never below 5% miss
+    hit_ceil:  1.0,  // optimal investment can reach a guaranteed hit
+)

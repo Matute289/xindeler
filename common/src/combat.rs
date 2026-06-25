@@ -49,6 +49,37 @@ pub enum GroupTarget {
     All,
 }
 
+/// Combat-resolution tuning (BL-52). Single source of balance truth for the
+/// probabilistic to-hit roll; loaded from `assets/common/combat_tuning.ron`
+/// (cached, mirrors how `MaterialStatManifest` is read in `apply_attack`).
+/// Later phases extend this asset with crit / resistance / armor-weight
+/// sections — `#[serde(default)]` keeps older/newer assets forward-compatible.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct CombatTuning {
+    /// Hit chance when attacker accuracy == target evasion.
+    pub base_hit: f32,
+    /// Hit chance gained per net point of (accuracy − evasion).
+    pub hit_k: f32,
+    /// Minimum hit chance — an outmatched/frightened attacker still lands this
+    /// often (BL-52 floor = 0.05).
+    pub hit_floor: f32,
+    /// Maximum hit chance — optimal investment can reach a guaranteed hit
+    /// (BL-52 ceil = 1.00).
+    pub hit_ceil: f32,
+}
+
+impl Default for CombatTuning {
+    fn default() -> Self {
+        Self {
+            base_hit: 0.85,
+            hit_k: 0.015,
+            hit_floor: 0.05,
+            hit_ceil: 1.00,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum StatEffectTarget {
     Attacker,
@@ -327,17 +358,49 @@ impl Attack {
             precision_mult,
         } = options;
 
+        // Combat resolution to-hit roll (BL-52). After active avoidance (the
+        // dodge/jump `target_dodging` below) but before damage, a hostile
+        // **single-target** attack may whiff entirely based on attacker
+        // `accuracy` vs target `evasion`:
+        //   hit% = clamp(base + (acc − eva)·k, floor, ceil)   (floor 0.05/ceil 1.0)
+        // A miss skips all damage and harmful effects (same gate as a dodge), so
+        // damage stays full on the blows that land. Rolled once per `apply_attack`
+        // (per blow/impact for melee/projectiles). **AoE never rolls** (Beam /
+        // Shockwave / Explosion / Arc / Pool) — by design it auto-hits the radius
+        // and is mitigated passively by resistances (P3), keeping the hot
+        // multi-target path RNG-free for raid/AvA scale. A beneficial in-group
+        // effect (e.g. an ally heal routed through an attack) is exempt below —
+        // accuracy only gates hostile outcomes.
+        let is_single_target = matches!(
+            attack_source,
+            AttackSource::Melee | AttackSource::Projectile
+        );
+        let attack_missed = is_single_target && {
+            let accuracy = attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy);
+            let evasion = target.stats.map_or(0.0, |s| s.evasion);
+            let tuning = Ron::<CombatTuning>::load_expect("common.combat_tuning");
+            let tuning = &tuning.read().0;
+            let hit_chance = (tuning.base_hit + (accuracy - evasion) * tuning.hit_k)
+                .clamp(tuning.hit_floor, tuning.hit_ceil);
+            rng.random::<f32>() >= hit_chance
+        };
+
         // target == OutOfGroup is basic heuristic that this
         // "attack" has negative effects.
         //
         // so if target dodges this "attack" or we don't want to harm target,
         // it should avoid such "damage" or effect
         let avoid_damage = |attack_damage: &AttackDamage| {
-            target_dodging
+            attack_missed
+                || target_dodging
                 || (!permit_pvp && matches!(attack_damage.target, Some(GroupTarget::OutOfGroup)))
         };
         let avoid_effect = |attack_effect: &AttackEffect| {
-            target_dodging
+            // A miss whiffs harmful effects but never an in-group beneficial one
+            // (ally heal/buff). `All`/`None`-targeted beneficial effects are not
+            // yet exempted — the full allied-100% rule lands in P3 (CR3.2).
+            (attack_missed && !matches!(attack_effect.target, Some(GroupTarget::InGroup)))
+                || target_dodging
                 || (!permit_pvp && matches!(attack_effect.target, Some(GroupTarget::OutOfGroup)))
         };
 
@@ -2617,5 +2680,72 @@ mod damage_kind_taxonomy_tests {
             ron::from_str::<DamageKind>("Energy").unwrap(),
             DamageKind::Energy
         );
+    }
+}
+
+#[cfg(test)]
+mod combat_resolution_tests {
+    use super::{AttackSource, CombatTuning};
+    use crate::assets::{AssetExt, Ron};
+
+    // BL-52: the to-hit roll is single-target only; AoE auto-hits and is
+    // mitigated by resistances (P3), so it must never enter the miss roll. This
+    // pins the `is_single_target` gate in `apply_attack`.
+    #[test]
+    fn only_single_target_sources_roll_to_hit() {
+        let single = |s| matches!(s, AttackSource::Melee | AttackSource::Projectile);
+        assert!(single(AttackSource::Melee));
+        assert!(single(AttackSource::Projectile));
+        for aoe in [
+            AttackSource::Beam,
+            AttackSource::GroundShockwave,
+            AttackSource::AirShockwave,
+            AttackSource::UndodgeableShockwave,
+            AttackSource::Explosion,
+            AttackSource::Arc,
+            AttackSource::Pool,
+        ] {
+            assert!(!single(aoe), "{aoe:?} is AoE and must not roll to-hit");
+        }
+    }
+
+    // Mirrors the to-hit math in `Attack::apply_attack` so the formula is unit-
+    // tested without a full attack setup (BL-52 §1).
+    fn hit_chance(t: &CombatTuning, accuracy: f32, evasion: f32) -> f32 {
+        (t.base_hit + (accuracy - evasion) * t.hit_k).clamp(t.hit_floor, t.hit_ceil)
+    }
+
+    #[test]
+    fn hit_formula_matches_balance_examples() {
+        let t = CombatTuning::default();
+        // Equal stats -> base 0.85.
+        assert!((hit_chance(&t, 30.0, 30.0) - 0.85).abs() < 1e-4);
+        // +8 advantage -> 0.97.
+        assert!((hit_chance(&t, 38.0, 30.0) - 0.97).abs() < 1e-4);
+        // Heavy dodge target -> 0.67.
+        assert!((hit_chance(&t, 30.0, 42.0) - 0.67).abs() < 1e-4);
+        // Big over-investment clamps to the 1.0 ceiling.
+        assert!((hit_chance(&t, 45.0, 25.0) - 1.0).abs() < 1e-4);
+        // Fear (-12 acc) vs equal evasion -> 0.67.
+        assert!((hit_chance(&t, 18.0, 30.0) - 0.67).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hit_chance_respects_floor_and_ceiling() {
+        let t = CombatTuning::default();
+        // Hopelessly outmatched still lands at least the 5% floor.
+        assert!((hit_chance(&t, 0.0, 1000.0) - t.hit_floor).abs() < 1e-6);
+        // Wildly over-invested never exceeds the 1.0 ceiling.
+        assert!((hit_chance(&t, 1000.0, 0.0) - t.hit_ceil).abs() < 1e-6);
+    }
+
+    #[test]
+    fn combat_tuning_asset_loads() {
+        // The shipped RON parses and carries the locked BL-52 constants.
+        let tuning = Ron::<CombatTuning>::load_expect("common.combat_tuning");
+        let t = &tuning.read().0;
+        assert!((t.base_hit - 0.85).abs() < 1e-6);
+        assert!((t.hit_floor - 0.05).abs() < 1e-6);
+        assert!((t.hit_ceil - 1.0).abs() < 1e-6);
     }
 }

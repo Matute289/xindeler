@@ -215,6 +215,19 @@ pub struct ClassAttributes {
     /// Per-class multiplier on `energy_reward_modifier` (caster sustain tier);
     /// flat per class, not scaled by level.
     pub energy_reward_mult: f32,
+    /// Combat resolution (BL-52). `base_*` = L1 value, `per_level_*` = slope
+    /// (accelerated past L50 via `level_scaled`, like HP/energy). Additive into
+    /// the matching `Stats` fields. Defaults 0.0 → Adventurer stays neutral.
+    pub base_accuracy: f32,
+    pub per_level_accuracy: f32,
+    pub base_evasion: f32,
+    pub per_level_evasion: f32,
+    pub base_crit: f32,
+    pub per_level_crit: f32,
+    pub base_magic_accuracy: f32,
+    pub per_level_magic_accuracy: f32,
+    pub base_magic_evasion: f32,
+    pub per_level_magic_evasion: f32,
 }
 
 impl Default for ClassAttributes {
@@ -226,6 +239,16 @@ impl Default for ClassAttributes {
             per_level_energy: 0.0,
             per_level_damage: 0.0,
             energy_reward_mult: 1.0,
+            base_accuracy: 0.0,
+            per_level_accuracy: 0.0,
+            base_evasion: 0.0,
+            per_level_evasion: 0.0,
+            base_crit: 0.0,
+            per_level_crit: 0.0,
+            base_magic_accuracy: 0.0,
+            per_level_magic_accuracy: 0.0,
+            base_magic_evasion: 0.0,
+            per_level_magic_evasion: 0.0,
         }
     }
 }
@@ -241,6 +264,14 @@ impl ClassAttributes {
             self.base_energy + level_scaled(self.per_level_energy, level);
         stats.attack_damage_modifier *= 1.0 + level_scaled(self.per_level_damage, level);
         stats.energy_reward_modifier *= self.energy_reward_mult;
+        // BL-52 combat resolution: same `level_scaled` curve as HP/energy.
+        stats.accuracy += self.base_accuracy + level_scaled(self.per_level_accuracy, level);
+        stats.evasion += self.base_evasion + level_scaled(self.per_level_evasion, level);
+        stats.crit_chance += self.base_crit + level_scaled(self.per_level_crit, level);
+        stats.magic_accuracy +=
+            self.base_magic_accuracy + level_scaled(self.per_level_magic_accuracy, level);
+        stats.magic_evasion +=
+            self.base_magic_evasion + level_scaled(self.per_level_magic_evasion, level);
     }
 }
 
@@ -354,5 +385,30 @@ mod tests {
         assert_eq!(adv.max_energy_modifiers.add_mod, 0.0);
         assert_eq!(adv.max_health_modifiers.add_mod, 0.0);
         assert_eq!(adv.attack_damage_modifier, 1.0);
+        assert_eq!(adv.accuracy, 0.0);
+        assert_eq!(adv.evasion, 0.0);
+    }
+
+    #[test]
+    fn class_attributes_apply_combat_resolution() {
+        // BL-52: accuracy/evasion/crit + magic_* scale per class via level_scaled.
+        use crate::comp::Stats;
+        let body = crate::comp::Body::Humanoid(crate::comp::humanoid::Body::random());
+
+        // Warrior L60 accuracy = 5 + 0.50*(49+25) = 42.
+        let mut warrior = Stats::empty(body);
+        class_attributes(ClassKind::Warrior).apply(&mut warrior, 60);
+        assert!((warrior.accuracy - 42.0).abs() < 1e-3);
+
+        // Rogue out-evades and out-crits the Warrior; Mage out-magics it.
+        let mut rogue = Stats::empty(body);
+        class_attributes(ClassKind::Rogue).apply(&mut rogue, 60);
+        let mut mage = Stats::empty(body);
+        class_attributes(ClassKind::Mage).apply(&mut mage, 60);
+        assert!(rogue.evasion > warrior.evasion);
+        assert!(rogue.crit_chance > warrior.crit_chance);
+        assert!(mage.magic_accuracy > warrior.magic_accuracy);
+        // Everyone crits at least a little at L60 (no dump stat).
+        assert!(mage.crit_chance > 0.0);
     }
 }

@@ -106,6 +106,17 @@ pub struct Stats {
     /// Dimensional anchor (BL-05): when set, teleport/blink abilities can't
     /// resolve. Set each tick by `BuffEffect::DisableTeleport`.
     pub disable_teleport: bool,
+    /// Combat resolution (BL-52) — per-tick to-hit/crit modifiers (not
+    /// persisted), sourced from class+level (`ClassAttributes`), gear and
+    /// buffs. Consumed in `Attack::apply_attack`. `accuracy`/`evasion` drive
+    /// the physical to-hit roll; `magic_*` the single-target spell roll
+    /// (P3); `crit_chance` the crit roll (P2; magnitude stays in
+    /// `precision_power`).
+    pub accuracy: f32,
+    pub evasion: f32,
+    pub magic_accuracy: f32,
+    pub magic_evasion: f32,
+    pub crit_chance: f32,
     pub crowd_control_resistance: f32,
     pub item_effect_reduction: f32,
     /// This modifies attacks that target this entity
@@ -141,6 +152,11 @@ impl Stats {
             disable_auxiliary_abilities: false,
             disable_magic: false,
             disable_teleport: false,
+            accuracy: 0.0,
+            evasion: 0.0,
+            magic_accuracy: 0.0,
+            magic_evasion: 0.0,
+            crit_chance: 0.0,
             crowd_control_resistance: 0.0,
             item_effect_reduction: 1.0,
             attacked_modifications: Vec::new(),
