@@ -786,11 +786,13 @@ impl BuffKind {
             BuffKind::Terrified => {
                 // BL-05 Fear rider: slowed AND fights at a disadvantage. The
                 // flee behaviour lives in the agent AI (`is_terrified`); this
-                // reduces outgoing damage (up to ~30%) for when a feared foe is
-                // cornered and forced to fight. Magnitude is a placeholder.
+                // models the disadvantage as a higher *miss* chance — a feared
+                // foe forced to fight keeps full damage on the blows that land,
+                // it just whiffs far more often (up to ~50%). Magnitude is a
+                // placeholder.
                 vec![
                     BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength)),
-                    BuffEffect::AttackDamage((1.0 - 0.3 * nn_scaling(data.strength)).max(0.0)),
+                    BuffEffect::AttackMissChance((0.5 * nn_scaling(data.strength)).min(1.0)),
                 ]
             },
             BuffKind::Charmed => vec![],
@@ -1064,6 +1066,10 @@ pub enum BuffEffect {
     /// Dimensional anchor (BL-05): prevents teleport/blink. Sets
     /// `Stats.disable_teleport`.
     DisableTeleport,
+    /// Fear (BL-05): probability in `0.0..=1.0` that an attack made by the
+    /// buffed entity whiffs entirely (full damage when it lands, just more
+    /// misses). Sets `Stats.attack_miss_chance`.
+    AttackMissChance(f32),
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
@@ -1483,9 +1489,10 @@ pub mod tests {
     }
 
     #[test]
-    fn terrified_slows_and_weakens() {
-        // BL-05 Fear rider: slows AND reduces outgoing damage (fights at a
-        // disadvantage when cornered); flee behaviour is in the agent AI.
+    fn terrified_slows_and_misses() {
+        // BL-05 Fear rider: slows AND raises the attacker's miss chance (fights
+        // at a disadvantage when cornered — same damage, more whiffs); flee
+        // behaviour is in the agent AI.
         let effects = BuffKind::Terrified.effects(&BuffData::new(1.0, None), None);
         assert!(
             effects
@@ -1495,7 +1502,7 @@ pub mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d < 1.0))
+                .any(|e| matches!(e, BuffEffect::AttackMissChance(c) if *c > 0.0 && *c <= 1.0))
         );
     }
 

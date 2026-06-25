@@ -106,6 +106,11 @@ pub struct Stats {
     /// Dimensional anchor (BL-05): when set, teleport/blink abilities can't
     /// resolve. Set each tick by `BuffEffect::DisableTeleport`.
     pub disable_teleport: bool,
+    /// Fear (BL-05): probability in `0.0..=1.0` that an attack made by this
+    /// entity whiffs entirely (no damage, no effects) — same damage when it
+    /// connects, just more misses. Rolled per attack in `Attack::apply_attack`.
+    /// Set each tick by `BuffEffect::AttackMissChance`.
+    pub attack_miss_chance: f32,
     pub crowd_control_resistance: f32,
     pub item_effect_reduction: f32,
     /// This modifies attacks that target this entity
@@ -141,6 +146,7 @@ impl Stats {
             disable_auxiliary_abilities: false,
             disable_magic: false,
             disable_teleport: false,
+            attack_miss_chance: 0.0,
             crowd_control_resistance: 0.0,
             item_effect_reduction: 1.0,
             attacked_modifications: Vec::new(),

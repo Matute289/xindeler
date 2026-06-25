@@ -327,17 +327,29 @@ impl Attack {
             precision_mult,
         } = options;
 
+        // Fear (BL-05): a frightened attacker may whiff. Rolled once per
+        // `apply_attack` against `Stats.attack_miss_chance` (set by the
+        // `Terrified` buff) — i.e. per blow/impact for melee/projectiles, and
+        // per damage tick for sustained beams/pools (same granularity the
+        // dodge check already uses). A miss skips all damage and effects, like
+        // a dodge, so damage stays full on the blows that do land.
+        let attack_missed = attacker.and_then(|a| a.stats).is_some_and(|s| {
+            s.attack_miss_chance > 0.0 && rng.random::<f32>() < s.attack_miss_chance
+        });
+
         // target == OutOfGroup is basic heuristic that this
         // "attack" has negative effects.
         //
         // so if target dodges this "attack" or we don't want to harm target,
         // it should avoid such "damage" or effect
         let avoid_damage = |attack_damage: &AttackDamage| {
-            target_dodging
+            attack_missed
+                || target_dodging
                 || (!permit_pvp && matches!(attack_damage.target, Some(GroupTarget::OutOfGroup)))
         };
         let avoid_effect = |attack_effect: &AttackEffect| {
-            target_dodging
+            attack_missed
+                || target_dodging
                 || (!permit_pvp && matches!(attack_effect.target, Some(GroupTarget::OutOfGroup)))
         };
 

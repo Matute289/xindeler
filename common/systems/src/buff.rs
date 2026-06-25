@@ -911,6 +911,11 @@ fn execute_effect(
         BuffEffect::DisableAuxiliaryAbilities => stat.disable_auxiliary_abilities = true,
         BuffEffect::DisableMagic => stat.disable_magic = true,
         BuffEffect::DisableTeleport => stat.disable_teleport = true,
+        BuffEffect::AttackMissChance(chance) => {
+            // Stacking miss-chance sources combine as independent probabilities
+            // (1 - product of hit chances) and stay clamped to `0.0..=1.0`.
+            stat.attack_miss_chance = 1.0 - (1.0 - stat.attack_miss_chance) * (1.0 - *chance);
+        },
         BuffEffect::CrowdControlResistance(ccr) => {
             stat.crowd_control_resistance += ccr;
         },
