@@ -77,6 +77,10 @@ pub struct CombatTuning {
     /// (reuses the precision system; final bonus = damage·this·(precision_power
     /// − 1)). BL-52 = 1.0 (a rolled crit lands at full precision).
     pub crit_precision_mult: f32,
+    /// Combat resolution (BL-52 P3): hard cap on typed elemental resistance
+    /// when mitigating AoE damage, so stacking can't reach immunity. BL-52
+    /// = 0.75.
+    pub resist_soft_cap: f32,
 }
 
 impl Default for CombatTuning {
@@ -89,6 +93,7 @@ impl Default for CombatTuning {
             crit_chance_floor: 0.03,
             crit_chance_cap: 0.75,
             crit_precision_mult: 1.0,
+            resist_soft_cap: 0.75,
         }
     }
 }
@@ -547,6 +552,28 @@ impl Attack {
 
             let damage_reduction =
                 Attack::compute_damage_reduction(attacker.as_ref(), target, damage.damage, msm);
+
+            // BL-52 P3: AoE damage is mitigated passively by the target's typed
+            // elemental resistance — the AoE counterpart to single-target evasion
+            // (AoE never rolls to-hit, so this is its only stat mitigation, on top
+            // of armor DR). Physical kinds return 0 here and rely on the existing
+            // `damage_reduction` only (no double-count). Single-target damage is
+            // gated by the to-hit roll instead, so it is NOT resistance-mitigated.
+            // Resistance composes with armor DR as independent layers, soft-capped
+            // so stacking can't reach immunity.
+            let damage_reduction = if is_single_target {
+                damage_reduction
+            } else {
+                // Floor at 0 so a (currently nonexistent) negative resistance
+                // can't silently *amplify* AoE damage — element vulnerability, if
+                // ever wanted, should be its own deliberate mechanic, not a
+                // side effect of subtraction. Cap so stacking can't reach immunity.
+                let resist = target
+                    .stats
+                    .map_or(0.0, |s| s.aoe_resistance(damage.damage.kind))
+                    .clamp(0.0, combat_tuning.resist_soft_cap);
+                1.0 - (1.0 - damage_reduction) * (1.0 - resist)
+            };
 
             let block_damage_decrement = Attack::compute_block_damage_decrement(
                 self.blockable,
@@ -2749,7 +2776,7 @@ mod damage_kind_taxonomy_tests {
 
 #[cfg(test)]
 mod combat_resolution_tests {
-    use super::{AttackSource, CombatTuning};
+    use super::{AttackSource, CombatTuning, DamageKind};
     use crate::assets::{AssetExt, Ron};
 
     // BL-52: the to-hit roll is single-target only; AoE auto-hits and is
@@ -2816,6 +2843,8 @@ mod combat_resolution_tests {
         assert!((t.crit_chance_cap - 0.75).abs() < 1e-6);
         assert!(t.crit_chance_floor < t.crit_chance_cap);
         assert!(t.crit_precision_mult > 0.0);
+        // P3 resistance cap present + sane.
+        assert!((t.resist_soft_cap - 0.75).abs() < 1e-6);
     }
 
     // BL-52 P2: the rolled crit chance is clamped to [floor, cap] — a zero-crit
@@ -2828,5 +2857,44 @@ mod combat_resolution_tests {
         assert!((clamp(0.0) - t.crit_chance_floor).abs() < 1e-6);
         assert!((clamp(1.0) - t.crit_chance_cap).abs() < 1e-6);
         assert!((clamp(0.30) - 0.30).abs() < 1e-6);
+    }
+
+    // BL-52 P3: AoE elemental resistance maps each damage kind to its channel;
+    // physical kinds use armor DR only (return 0 here, no double-count).
+    #[test]
+    fn aoe_resistance_maps_damage_kinds() {
+        use crate::comp::Stats;
+        let body = crate::comp::Body::Humanoid(crate::comp::humanoid::Body::random());
+        let mut s = Stats::empty(body);
+        s.resist_fire = 0.4;
+        s.resist_frost = 0.3;
+        s.resist_poison = 0.2;
+        s.resist_magic = 0.1;
+        assert!((s.aoe_resistance(DamageKind::Fire) - 0.4).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Cold) - 0.3).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Poison) - 0.2).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Acid) - 0.2).abs() < 1e-6); // acid → poison
+        assert!((s.aoe_resistance(DamageKind::Lightning) - 0.1).abs() < 1e-6); // → magic
+        assert!((s.aoe_resistance(DamageKind::Energy) - 0.1).abs() < 1e-6); // legacy → magic
+        // Physical kinds are handled by armor DR, not this layer.
+        assert_eq!(s.aoe_resistance(DamageKind::Piercing), 0.0);
+        assert_eq!(s.aoe_resistance(DamageKind::Slashing), 0.0);
+        assert_eq!(s.aoe_resistance(DamageKind::Crushing), 0.0);
+    }
+
+    // BL-52 P3: AoE mitigation composes armor DR and resistance as independent
+    // layers, with resistance soft-capped so stacking can't reach immunity.
+    #[test]
+    fn aoe_resistance_composes_and_caps() {
+        let cap = CombatTuning::default().resist_soft_cap;
+        let combine = |dr: f32, resist: f32| 1.0 - (1.0 - dr) * (1.0 - resist.clamp(0.0, cap));
+        // No resist → unchanged DR.
+        assert!((combine(0.25, 0.0) - 0.25).abs() < 1e-6);
+        // 50% DR + 50% resist → 75% total (independent layers).
+        assert!((combine(0.5, 0.5) - 0.75).abs() < 1e-6);
+        // Resist above the cap is clamped: 0% DR + 0.95 resist → 0.75 total.
+        assert!((combine(0.0, 0.95) - cap).abs() < 1e-6);
+        // Negative resist is floored at 0 — never amplifies AoE damage.
+        assert!((combine(0.25, -0.5) - 0.25).abs() < 1e-6);
     }
 }

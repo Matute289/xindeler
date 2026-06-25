@@ -3,9 +3,25 @@ use serde::{Deserialize, Serialize};
 use specs::{Component, DerefFlaggedStorage};
 use std::{error::Error, fmt};
 
-use crate::combat::{AttackEffect, AttackedModification, CombatRequirement, StatEffect};
+use crate::combat::{
+    AttackEffect, AttackedModification, CombatRequirement, DamageKind, StatEffect,
+};
 
 use super::Body;
+
+/// Combat resolution (BL-52 P3): the typed elemental resistance channels that
+/// mitigate **area** damage (the AoE counterpart to single-target evasion;
+/// physical damage is mitigated by the existing armor `damage_reduction`, so it
+/// is deliberately not a channel here — no double-count). Used by
+/// `BuffEffect::Resistance` and content/gear sources.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResistKind {
+    Fire,
+    Frost,
+    Poison,
+    /// Catch-all for arcane / non-physical magic damage.
+    Magic,
+}
 
 #[derive(Debug)]
 #[expect(dead_code)] // TODO: remove once trade sim hits master
@@ -117,6 +133,15 @@ pub struct Stats {
     pub magic_accuracy: f32,
     pub magic_evasion: f32,
     pub crit_chance: f32,
+    /// Combat resolution (BL-52 P3) — typed elemental resistance (fraction in
+    /// `0.0..`), reset per tick like the other modifiers. Mitigates **AoE**
+    /// damage of the matching kind in `apply_attack` (soft-capped); physical
+    /// AoE uses the existing `damage_reduction` instead. Set by
+    /// `BuffEffect::Resistance` (+ gear/content later).
+    pub resist_fire: f32,
+    pub resist_frost: f32,
+    pub resist_poison: f32,
+    pub resist_magic: f32,
     pub crowd_control_resistance: f32,
     pub item_effect_reduction: f32,
     /// This modifies attacks that target this entity
@@ -157,6 +182,10 @@ impl Stats {
             magic_accuracy: 0.0,
             magic_evasion: 0.0,
             crit_chance: 0.0,
+            resist_fire: 0.0,
+            resist_frost: 0.0,
+            resist_poison: 0.0,
+            resist_magic: 0.0,
             crowd_control_resistance: 0.0,
             item_effect_reduction: 1.0,
             attacked_modifications: Vec::new(),
@@ -168,6 +197,39 @@ impl Stats {
     /// Creates an empty `Stats` instance - used during character loading from
     /// the database
     pub fn empty(body: Body) -> Self { Self::new(Content::dummy(), body) }
+
+    /// Combat resolution (BL-52 P3): the elemental resistance fraction that
+    /// mitigates **AoE** damage of `kind`. Physical kinds return 0.0 — they are
+    /// handled by the existing armor `damage_reduction`, not this layer (avoids
+    /// double-counting). The legacy generic `Energy` and the other non-physical
+    /// kinds fold into the catch-all `resist_magic`.
+    pub fn aoe_resistance(&self, kind: DamageKind) -> f32 {
+        match kind {
+            DamageKind::Fire => self.resist_fire,
+            DamageKind::Cold => self.resist_frost,
+            DamageKind::Poison | DamageKind::Acid => self.resist_poison,
+            DamageKind::Energy
+            | DamageKind::Force
+            | DamageKind::Lightning
+            | DamageKind::Necrotic
+            | DamageKind::Psychic
+            | DamageKind::Radiant
+            | DamageKind::Thunder => self.resist_magic,
+            // Physical: mitigated by `damage_reduction`, not the elemental layer.
+            DamageKind::Piercing | DamageKind::Slashing | DamageKind::Crushing => 0.0,
+        }
+    }
+
+    /// Adds to the elemental resistance channel `kind` (used by
+    /// `BuffEffect::Resistance`; gear/content later).
+    pub fn add_resistance(&mut self, kind: ResistKind, amount: f32) {
+        match kind {
+            ResistKind::Fire => self.resist_fire += amount,
+            ResistKind::Frost => self.resist_frost += amount,
+            ResistKind::Poison => self.resist_poison += amount,
+            ResistKind::Magic => self.resist_magic += amount,
+        }
+    }
 
     /// Resets temporary modifiers to default values
     pub fn reset_temp_modifiers(&mut self) {
