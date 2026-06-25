@@ -61,6 +61,8 @@ pub struct NpcBuilder {
     pub body: comp::Body,
     pub agent: Option<comp::Agent>,
     pub alignment: comp::Alignment,
+    /// Moral alignment (BL-33). `None` for entities with no moral agency.
+    pub ethos: Option<comp::Ethos>,
     pub scale: comp::Scale,
     pub anchor: Option<comp::Anchor>,
     pub loot: LootSpec<String>,
@@ -84,6 +86,7 @@ impl NpcBuilder {
             body,
             agent: None,
             alignment,
+            ethos: None,
             scale: comp::Scale(1.0),
             anchor: None,
             loot: LootSpec::Nothing,
@@ -120,6 +123,11 @@ impl NpcBuilder {
 
     pub fn with_agent(mut self, agent: impl Into<Option<comp::Agent>>) -> Self {
         self.agent = agent.into();
+        self
+    }
+
+    pub fn with_ethos(mut self, ethos: impl Into<Option<comp::Ethos>>) -> Self {
+        self.ethos = ethos.into();
         self
     }
 
@@ -240,6 +248,7 @@ pub struct UpdateCharacterDataEvent {
         Vec<(comp::Pet, comp::Body, comp::Stats)>,
         comp::ActiveAbilities,
         Option<comp::MapMarker>,
+        comp::Ethos,
     ),
     pub metadata: UpdateCharacterMetadata,
 }

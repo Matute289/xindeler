@@ -52,6 +52,15 @@ buff-increase_max_health = Increase Max Health
                  by { $strength }.
                  Lasts for { $duration } seconds.
     }
+## Shield (temp-HP absorb, BL-05)
+buff-shielded = Shielded
+    .desc = A shield absorbs incoming damage before your health.
+    .stat = { $duration ->
+        [1] Absorbs { $strength } damage.
+            Lasts for { $duration } second.
+        *[other] Absorbs { $strength } damage.
+                 Lasts for { $duration } seconds.
+    }
 ## Energy Increase
 buff-increase_max_energy = Increase Max Energy
     .desc = Your maximum energy is increased.
@@ -93,6 +102,21 @@ buff-burn = On Fire
 ## Crippled
 buff-crippled = Crippled
     .desc = Your movement is crippled as your legs are heavily injured.
+## Difficult Terrain (BL-03)
+buff-difficult_terrain = Difficult Terrain
+    .desc = The ground fights every step — you move at reduced speed.
+buff-freedom_of_movement = Freedom of Movement
+    .desc = You move unhindered, ignoring difficult terrain.
+## Antimagic (BL-36)
+buff-antimagic = Antimagic
+    .desc = Magic fails here — you cannot cast and your magic items lie dormant.
+## Spell riders (BL-05)
+buff-anchored = Anchored
+    .desc = A dimensional anchor holds you fast — you cannot teleport or blink.
+buff-asleep = Asleep
+    .desc = You are sunk in magical sleep — unable to move or act.
+buff-blinded = Blinded
+    .desc = You cannot see to aim — your attacks deal reduced damage.
 ## Freeze
 buff-frozen = Frozen
     .desc = Your movements and attacks are slowed.

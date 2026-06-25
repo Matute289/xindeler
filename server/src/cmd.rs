@@ -210,6 +210,8 @@ fn do_command(
         ServerChatCommand::ServerPhysics => handle_server_physics,
         ServerChatCommand::SetBodyType => handle_set_body_type,
         ServerChatCommand::SetClass => handle_set_class,
+        ServerChatCommand::SetEthos => handle_set_ethos,
+        ServerChatCommand::SetLevel => handle_set_level,
         ServerChatCommand::SetMotd => handle_set_motd,
         ServerChatCommand::SetWaypoint => handle_set_waypoint,
         ServerChatCommand::Ship => handle_spawn_ship,
@@ -234,6 +236,7 @@ fn do_command(
         ServerChatCommand::Wiring => handle_spawn_wiring,
         ServerChatCommand::Whitelist => handle_whitelist,
         ServerChatCommand::World => handle_world,
+        ServerChatCommand::MakeTestChar => handle_make_test_char,
         ServerChatCommand::MakeVolume => handle_make_volume,
         ServerChatCommand::Location => handle_location,
         ServerChatCommand::CreateLocation => handle_create_location,
@@ -5682,6 +5685,199 @@ fn handle_set_class(
     Ok(())
 }
 
+/// `/set_level <level>` — admin-only test tool: set the target's character
+/// level instantly (no grinding) by adjusting the General skill group's earned
+/// XP. Server-authoritative: gated by `needs_role: Admin` AND re-checked here
+/// via `real_role(..) == Admin` so players can never invoke it.
+fn handle_set_level(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::skillset::MAX_CHARACTER_LEVEL;
+
+    // Defense in depth beyond `needs_role`: re-verify against the authoritative
+    // admin source (same pattern as `adminify`).
+    let client_uuid = uuid(server, client, "client")?;
+    if !matches!(real_role(server, client_uuid, "client")?, AdminRole::Admin) {
+        return Err(Content::Plain(
+            "Only admins may use /set_level.".to_string(),
+        ));
+    }
+
+    let level = parse_cmd_args!(args, u16).ok_or_else(|| action.help_content())?;
+    if !(1..=MAX_CHARACTER_LEVEL).contains(&level) {
+        return Err(Content::Plain(format!(
+            "Level must be between 1 and {MAX_CHARACTER_LEVEL}."
+        )));
+    }
+
+    if let Some(mut skill_set) = server
+        .state
+        .ecs_mut()
+        .write_storage::<comp::SkillSet>()
+        .get_mut(target)
+    {
+        skill_set.set_level(level);
+    } else {
+        return Err(Content::Plain(
+            "Target has no skill set to set a level on.".to_string(),
+        ));
+    }
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!("Character level set to {level}.")),
+        ),
+    );
+    Ok(())
+}
+
+/// `/set_ethos <moral> <order>` — admin-only (BL-33): set a character's moral
+/// alignment (the 9-box). Server-authoritative: `needs_role: Admin` + a
+/// `real_role(..) == Admin` re-check.
+fn handle_set_ethos(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::ethos::{Ethos, Moral, Order};
+
+    let client_uuid = uuid(server, client, "client")?;
+    if !matches!(real_role(server, client_uuid, "client")?, AdminRole::Admin) {
+        return Err(Content::Plain(
+            "Only admins may use /set_ethos.".to_string(),
+        ));
+    }
+
+    let (moral_arg, order_arg) = parse_cmd_args!(args, String, String);
+    let moral = match moral_arg.as_deref() {
+        Some("good") => Moral::Good,
+        Some("neutral") => Moral::Neutral,
+        Some("evil") => Moral::Evil,
+        _ => return Err(action.help_content()),
+    };
+    let order = match order_arg.as_deref() {
+        Some("lawful") => Order::Lawful,
+        Some("neutral") => Order::Neutral,
+        Some("chaotic") => Order::Chaotic,
+        _ => return Err(action.help_content()),
+    };
+
+    server
+        .state
+        .ecs_mut()
+        .write_storage::<Ethos>()
+        .insert(target, Ethos::from_box(order, moral))
+        .map_err(|_| Content::Plain("Failed to set ethos on the target.".to_string()))?;
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!("Alignment set to {order:?} {moral:?}.")),
+        ),
+    );
+    Ok(())
+}
+
+/// `/make_test_char <level> [class] [kit]` — admin-only test tool: configure
+/// the target character in one shot (level + optional class + optional kit),
+/// reusing existing building blocks. Race/species is a character-creation
+/// attribute (set at creation / via the test harness), not changed here.
+/// Server-authoritative: `needs_role: Admin` + a `real_role(..) == Admin`
+/// re-check.
+fn handle_make_test_char(
+    server: &mut Server,
+    client: EcsEntity,
+    target: EcsEntity,
+    args: Vec<String>,
+    action: &ServerChatCommand,
+) -> CmdResult<()> {
+    use common::comp::{
+        class::{CharacterClass, ClassKind},
+        skillset::{MAX_CHARACTER_LEVEL, SkillGroupKind},
+    };
+
+    let client_uuid = uuid(server, client, "client")?;
+    if !matches!(real_role(server, client_uuid, "client")?, AdminRole::Admin) {
+        return Err(Content::Plain(
+            "Only admins may use /make_test_char.".to_string(),
+        ));
+    }
+
+    let (level, class_arg, kit_arg) = parse_cmd_args!(args, u16, String, String);
+    let level = level.ok_or_else(|| action.help_content())?;
+    if !(1..=MAX_CHARACTER_LEVEL).contains(&level) {
+        return Err(Content::Plain(format!(
+            "Level must be between 1 and {MAX_CHARACTER_LEVEL}."
+        )));
+    }
+
+    // 1. Level — reuse SkillSet::set_level (ATC-A1).
+    if let Some(mut skill_set) = server
+        .state
+        .ecs_mut()
+        .write_storage::<comp::SkillSet>()
+        .get_mut(target)
+    {
+        skill_set.set_level(level);
+    } else {
+        return Err(Content::Plain("Target has no skill set.".to_string()));
+    }
+
+    // 2. Class (optional) — force-set for testing (no one-time legacy guard) and
+    //    unlock its skill tree.
+    let class = if let Some(class_arg) = class_arg {
+        let class =
+            ClassKind::from_keyword(class_arg.to_lowercase().as_str()).ok_or_else(|| {
+                Content::Plain(format!(
+                    "Unknown class '{class_arg}'. Options: warrior, mage, cleric, rogue."
+                ))
+            })?;
+        let _ = server
+            .state
+            .ecs_mut()
+            .write_storage::<CharacterClass>()
+            .insert(target, CharacterClass(class));
+        if let Some(mut skill_set) = server
+            .state
+            .ecs_mut()
+            .write_storage::<comp::SkillSet>()
+            .get_mut(target)
+        {
+            skill_set.unlock_skill_group(SkillGroupKind::Class(class));
+        }
+        Some(class)
+    } else {
+        None
+    };
+
+    // 3. Kit (optional) — delegate to the existing kit handler.
+    if let Some(kit_name) = kit_arg.clone() {
+        handle_kit(server, client, target, vec![kit_name], action)?;
+    }
+
+    server.notify_client(
+        client,
+        ServerGeneral::server_msg(
+            ChatType::CommandInfo,
+            Content::Plain(format!(
+                "Test character configured: level {level}{}{}.",
+                class.map_or(String::new(), |c| format!(", class {c:?}")),
+                kit_arg.map_or(String::new(), |k| format!(", kit {k}")),
+            )),
+        ),
+    );
+    Ok(())
+}
+
 fn handle_unban(
     server: &mut Server,
     client: EcsEntity,
@@ -5937,6 +6133,7 @@ fn build_buff(
             | BuffKind::ComboGeneration
             | BuffKind::IncreaseMaxEnergy
             | BuffKind::IncreaseMaxHealth
+            | BuffKind::Shielded
             | BuffKind::Invulnerability
             | BuffKind::ProtectingWard
             | BuffKind::Hastened
@@ -5979,7 +6176,13 @@ fn build_buff(
             | BuffKind::SepticShot
             | BuffKind::Terrified
             | BuffKind::Charmed
-            | BuffKind::Hollowtouched => {
+            | BuffKind::Hollowtouched
+            | BuffKind::DifficultTerrain
+            | BuffKind::FreedomOfMovement
+            | BuffKind::Antimagic
+            | BuffKind::Anchored
+            | BuffKind::Asleep
+            | BuffKind::Blinded => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {

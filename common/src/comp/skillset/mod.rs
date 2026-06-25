@@ -234,9 +234,37 @@ impl SkillGroup {
 /// manipulating assigned skills and skill groups including unlocking skills,
 /// refunding skills etc.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "SkillSetMeta")]
 pub struct SkillSet {
     skill_groups: HashMap<SkillGroupKind, SkillGroup>,
     skills: HashMap<Skill, u16>,
+    /// Cached derived character level (see [`SkillSet::character_level`]).
+    /// Recomputed whenever a skill group's lifetime `earned_exp` changes, and
+    /// rebuilt from XP on deserialize. NEVER persisted or sent over the wire
+    /// (`#[serde(skip)]`) — the level is always derived, so it can't desync.
+    #[serde(skip)]
+    character_level: u16,
+}
+
+/// Deserialization shadow for [`SkillSet`]: carries only the persisted/synced
+/// fields. The derived `character_level` cache is rebuilt from XP via `From`,
+/// so it never has to be trusted from the wire or disk.
+#[derive(Deserialize)]
+struct SkillSetMeta {
+    skill_groups: HashMap<SkillGroupKind, SkillGroup>,
+    skills: HashMap<Skill, u16>,
+}
+
+impl From<SkillSetMeta> for SkillSet {
+    fn from(meta: SkillSetMeta) -> Self {
+        let mut skill_set = SkillSet {
+            skill_groups: meta.skill_groups,
+            skills: meta.skills,
+            character_level: 0,
+        };
+        skill_set.recompute_character_level();
+        skill_set
+    }
 }
 
 impl Component for SkillSet {
@@ -252,12 +280,16 @@ impl Default for SkillSet {
         let mut skill_group = Self {
             skill_groups: HashMap::new(),
             skills: SkillSet::initial_skills(),
+            character_level: 0,
         };
 
         // Insert default skill groups
         skill_group.unlock_skill_group(SkillGroupKind::General);
         skill_group.unlock_skill_group(SkillGroupKind::Weapon(ToolKind::Pick));
 
+        // No XP yet — derive the level-1 baseline (unlocking groups doesn't
+        // touch earned_exp, so a single recompute here suffices).
+        skill_group.recompute_character_level();
         skill_group
     }
 }
@@ -283,7 +315,11 @@ impl SkillSet {
         let mut skillset = SkillSet {
             skill_groups,
             skills: SkillSet::initial_skills(),
+            character_level: 0,
         };
+        // Lifetime XP is fixed by the restored skill groups and is never mutated
+        // below (skill unlocking only spends SP), so derive the cache once here.
+        skillset.recompute_character_level();
         let mut persistence_load_error = None;
 
         // Class skill groups are granted directly (unlock_skill_group at creation /
@@ -391,7 +427,10 @@ impl SkillSet {
     /// earned, returns the number of earned skill points in the skill group.
     pub fn add_experience(&mut self, skill_group_kind: SkillGroupKind, amount: u32) -> Option<u16> {
         if let Some(skill_group) = self.skill_group_mut(skill_group_kind) {
-            skill_group.add_experience(amount)
+            let earned_sp = skill_group.add_experience(amount);
+            // Lifetime XP just grew → refresh the derived-level cache.
+            self.recompute_character_level();
+            earned_sp
         } else {
             warn!("Tried to add experience to a skill group that player does not have");
             None
@@ -409,8 +448,49 @@ impl SkillSet {
     }
 
     /// Derived character level (1..=MAX_CHARACTER_LEVEL). Not persisted —
-    /// always computed from lifetime XP so it can never desync.
-    pub fn character_level(&self) -> u16 { level_from_total_exp(self.total_earned_exp()) }
+    /// always derived from lifetime XP so it can never desync. Returns the
+    /// cached value (maintained by [`SkillSet::recompute_character_level`] on
+    /// every `earned_exp` mutation), so callers on the tick path pay no fold.
+    pub fn character_level(&self) -> u16 { self.character_level }
+
+    /// Recompute the cached derived character level from lifetime XP. Must be
+    /// called after any change to a skill group's `earned_exp`; this is the
+    /// only place [`SkillSet::character_level`] is folded.
+    fn recompute_character_level(&mut self) {
+        self.character_level = level_from_total_exp(self.total_earned_exp());
+    }
+
+    /// Set the character's derived level by adjusting the **General** skill
+    /// group's earned XP so `total_earned_exp()` equals
+    /// `total_exp_for_level(level)` (clamped to `1..=MAX_CHARACTER_LEVEL`).
+    /// Intended for admin/test setup (the `/set_level` command). Other
+    /// skill groups' earned XP is preserved — if it already exceeds the
+    /// target the resulting level may be higher. Spent exp on the General
+    /// group is preserved; the remainder becomes available to spend.
+    pub fn set_level(&mut self, level: u16) {
+        let level = level.clamp(1, MAX_CHARACTER_LEVEL);
+        let target = total_exp_for_level(level);
+        let general = SkillGroupKind::General;
+        let general_earned = self
+            .skill_groups
+            .get(&general)
+            .map_or(0, |sg| sg.earned_exp);
+        let other_earned = self.total_earned_exp().saturating_sub(general_earned);
+        let new_general_earned = target.saturating_sub(other_earned);
+        if let Some(sg) = self.skill_groups.get_mut(&general) {
+            // Never drop earned_exp below what's already been spent on skill points:
+            // doing so would make `spent_exp()` silently shrink while the unlocked
+            // skills + earned_sp remain, desyncing the live component from its
+            // persisted form (a forced respec on relog). Floor at `spent` instead —
+            // a down-level request below that floor just can't go lower (rare; the
+            // General tree has no purchasable skills in v1, so spent is normally 0).
+            let spent = sg.spent_exp();
+            sg.earned_exp = new_general_earned.max(spent);
+            sg.available_exp = sg.earned_exp - spent;
+        }
+        // General-group earned_exp changed → refresh the derived-level cache.
+        self.recompute_character_level();
+    }
 
     /// Gets the available experience for a particular skill group
     pub fn available_experience(&self, skill_group: SkillGroupKind) -> u32 {
@@ -706,6 +786,127 @@ mod character_level_tests {
                 assert_eq!(level_from_total_exp(xp - 1), level - 1);
             }
         }
+    }
+
+    #[test]
+    fn set_level_sets_character_level() {
+        for level in [1u16, 10, 52, 60] {
+            let mut skill_set = SkillSet::default();
+            skill_set.set_level(level);
+            assert_eq!(
+                skill_set.character_level(),
+                level,
+                "set_level({level}) should yield character_level()=={level}"
+            );
+        }
+    }
+
+    #[test]
+    fn character_level_cache_matches_derived_after_experience_gain() {
+        let mut skill_set = SkillSet::default();
+        // Fresh skillset: cached field is the level-1 baseline, not the u16 default.
+        assert_eq!(skill_set.character_level, 1);
+
+        // Cross a few level boundaries via the public add-experience path.
+        skill_set.add_experience(SkillGroupKind::General, LEVEL_XP_BASE * 9);
+        assert!(
+            skill_set.character_level > 1,
+            "cache should have advanced past level 1"
+        );
+        // The cached field must equal a fresh derivation from lifetime XP.
+        assert_eq!(
+            skill_set.character_level,
+            level_from_total_exp(skill_set.total_earned_exp()),
+            "cached level desynced from total_earned_exp"
+        );
+        // And the public accessor must return the cached field.
+        assert_eq!(skill_set.character_level(), skill_set.character_level);
+    }
+
+    #[test]
+    fn character_level_cache_populated_on_load_from_database() {
+        // Simulate a persisted General group carrying lifetime XP for ~level 4.
+        let kind = SkillGroupKind::General;
+        let mut sg = SkillGroup::new(kind);
+        sg.earned_exp = LEVEL_XP_BASE * 9;
+        sg.available_exp = sg.earned_exp;
+        let mut groups = HashMap::new();
+        groups.insert(kind, sg);
+
+        let (skill_set, _err) = SkillSet::load_from_database(groups, HashMap::new());
+        assert!(
+            skill_set.character_level > 1,
+            "load should have derived the persisted level, not left the default"
+        );
+        assert_eq!(
+            skill_set.character_level,
+            level_from_total_exp(skill_set.total_earned_exp()),
+        );
+    }
+
+    #[test]
+    fn character_level_cache_repopulated_after_deserialize() {
+        // SkillSet is network-synced via serde; the cache is never sent over the
+        // wire (#[serde(skip)]) and must be rebuilt from XP on deserialize.
+        let mut skill_set = SkillSet::default();
+        skill_set.add_experience(SkillGroupKind::General, LEVEL_XP_BASE * 9);
+        let expected = skill_set.character_level;
+        assert!(expected > 1);
+
+        let encoded = ron::to_string(&skill_set).expect("serialize");
+        // The cache must not ride along the wire/disk — it's rebuilt from XP.
+        assert!(
+            !encoded.contains("character_level"),
+            "derived level leaked into the serialized form"
+        );
+        let restored: SkillSet = ron::from_str(&encoded).expect("deserialize");
+        assert_eq!(
+            restored.character_level, expected,
+            "cache not rebuilt on deserialize"
+        );
+        assert_eq!(restored.character_level(), expected);
+    }
+
+    #[test]
+    fn set_level_clamps_out_of_range() {
+        let mut over = SkillSet::default();
+        over.set_level(100);
+        assert_eq!(over.character_level(), MAX_CHARACTER_LEVEL);
+
+        let mut under = SkillSet::default();
+        under.set_level(0);
+        assert_eq!(under.character_level(), 1);
+    }
+
+    #[test]
+    fn set_level_downlevel_never_corrupts_spent_exp() {
+        // Simulate a General group with spent exp (earned 5000, available 1000 →
+        // spent 4000), as if skill points had been bought.
+        let mut ss = SkillSet::default();
+        {
+            let sg = ss
+                .skill_groups
+                .get_mut(&SkillGroupKind::General)
+                .expect("General always exists");
+            sg.earned_exp = 5000;
+            sg.available_exp = 1000;
+        }
+        assert_eq!(ss.skill_groups[&SkillGroupKind::General].spent_exp(), 4000);
+
+        // Down-level to 1 (target total exp 0): earned must floor at spent, not
+        // drop below it (which would silently shrink spent_exp → respec on relog).
+        ss.set_level(1);
+        let sg = &ss.skill_groups[&SkillGroupKind::General];
+        assert!(
+            sg.earned_exp >= sg.available_exp,
+            "earned >= available invariant"
+        );
+        assert_eq!(
+            sg.spent_exp(),
+            4000,
+            "spent exp preserved (no silent respec)"
+        );
+        assert_eq!(sg.earned_exp, 4000, "floored at spent, never below");
     }
 }
 

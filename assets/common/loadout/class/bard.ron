@@ -1,0 +1,10 @@
+// Mage starting outfit: full purple linen robes (set protection 10, Common).
+#![enable(implicit_some)]
+(
+    chest: Item("common.items.armor.cloth_purple.chest"),
+    legs: Item("common.items.armor.cloth_purple.pants"),
+    belt: Item("common.items.armor.cloth_purple.belt"),
+    feet: Item("common.items.armor.cloth_purple.foot"),
+    gloves: Item("common.items.armor.cloth_purple.hand"),
+    shoulders: Item("common.items.armor.cloth_purple.shoulder"),
+)

@@ -1373,7 +1373,7 @@ impl Renderer {
     ) {
         let quad_index_length = vert_length / 4 * 6;
 
-        #[expect(clippy::collapsible_match)]
+        #[allow(clippy::collapsible_match)]
         match V::QUADS_INDEX {
             Some(wgpu::IndexFormat::Uint16) => {
                 // Make sure the global quad index buffer is large enough

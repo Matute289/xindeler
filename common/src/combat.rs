@@ -49,6 +49,72 @@ pub enum GroupTarget {
     All,
 }
 
+/// Combat-resolution tuning (BL-52). Single source of balance truth for the
+/// probabilistic to-hit roll; loaded from `assets/common/combat_tuning.ron`
+/// (cached, mirrors how `MaterialStatManifest` is read in `apply_attack`).
+/// Later phases extend this asset with crit / resistance / armor-weight
+/// sections — `#[serde(default)]` keeps older/newer assets forward-compatible.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct CombatTuning {
+    /// Hit chance when attacker accuracy == target evasion.
+    pub base_hit: f32,
+    /// Hit chance gained per net point of (accuracy − evasion).
+    pub hit_k: f32,
+    /// Minimum hit chance — an outmatched/frightened attacker still lands this
+    /// often (BL-52 floor = 0.05).
+    pub hit_floor: f32,
+    /// Maximum hit chance — optimal investment can reach a guaranteed hit
+    /// (BL-52 ceil = 1.00).
+    pub hit_ceil: f32,
+    /// Minimum rolled crit chance — every attacker can crit at least this often
+    /// (no dead stat). BL-52 floor = 0.03.
+    pub crit_chance_floor: f32,
+    /// Maximum rolled crit chance (guaranteed positional crits bypass it).
+    /// BL-52 cap = 0.75.
+    pub crit_chance_cap: f32,
+    /// Precision magnitude applied when a random `crit_chance` roll succeeds
+    /// (reuses the precision system; final bonus = damage·this·(precision_power
+    /// − 1)). BL-52 = 1.0 (a rolled crit lands at full precision).
+    pub crit_precision_mult: f32,
+    /// Combat resolution (BL-52 P3): hard cap on typed elemental resistance
+    /// when mitigating AoE damage, so stacking can't reach immunity. BL-52
+    /// = 0.75.
+    pub resist_soft_cap: f32,
+    /// Combat resolution (BL-52 P5): armor → physical evasion. Weight is
+    /// derived from total armor **protection** (Matías 2026-06-25): heavier
+    /// (more protective) armor lowers evasion; unarmored = max gear
+    /// evasion. Final armor evasion = `clamp(gear_evasion_cap −
+    /// total_protection · armor_evasion_per_protection − shield?,
+    /// gear_evasion_floor, gear_evasion_cap)`. Applies to the physical
+    /// to-hit only (magic uses `magic_evasion`).
+    pub gear_evasion_cap: f32,
+    pub gear_evasion_floor: f32,
+    pub armor_evasion_per_protection: f32,
+    /// Flat evasion penalty while a shield is equipped — a shield pays off via
+    /// block/mitigation, not dodge.
+    pub shield_evasion_penalty: f32,
+}
+
+impl Default for CombatTuning {
+    fn default() -> Self {
+        Self {
+            base_hit: 0.85,
+            hit_k: 0.015,
+            hit_floor: 0.05,
+            hit_ceil: 1.00,
+            crit_chance_floor: 0.03,
+            crit_chance_cap: 0.75,
+            crit_precision_mult: 1.0,
+            resist_soft_cap: 0.75,
+            gear_evasion_cap: 12.0,
+            gear_evasion_floor: -10.0,
+            armor_evasion_per_protection: 0.3,
+            shield_evasion_penalty: 2.0,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum StatEffectTarget {
     Attacker,
@@ -318,6 +384,11 @@ impl Attack {
     ) -> bool {
         // TODO: Maybe move this higher and pass it as argument into this function?
         let msm = &MaterialStatManifest::load().read();
+        // BL-52 combat-resolution tuning — one cached read per attack (mirrors
+        // `msm` above), reused by the to-hit and crit rolls below.
+        let combat_tuning = &Ron::<CombatTuning>::load_expect("common.combat_tuning")
+            .read()
+            .0;
 
         let AttackOptions {
             target_dodging,
@@ -327,17 +398,86 @@ impl Attack {
             precision_mult,
         } = options;
 
+        // Combat resolution to-hit roll (BL-52). After active avoidance (the
+        // dodge/jump `target_dodging` below) but before damage, a hostile
+        // **single-target** attack may whiff entirely based on attacker
+        // `accuracy` vs target `evasion`:
+        //   hit% = clamp(base + (acc − eva)·k, floor, ceil)   (floor 0.05/ceil 1.0)
+        // A miss skips all damage and harmful effects (same gate as a dodge), so
+        // damage stays full on the blows that land. Rolled once per `apply_attack`
+        // (per blow/impact for melee/projectiles). **AoE never rolls** (Beam /
+        // Shockwave / Explosion / Arc / Pool) — by design it auto-hits the radius
+        // and is mitigated passively by resistances (P3), keeping the hot
+        // multi-target path RNG-free for raid/AvA scale. A beneficial in-group
+        // effect (e.g. an ally heal routed through an attack) is exempt below —
+        // accuracy only gates hostile outcomes.
+        let is_single_target = matches!(
+            attack_source,
+            AttackSource::Melee | AttackSource::Projectile
+        );
+        // BL-52 P3: a magic ability (one carrying an `AbilityMeta` `source`, the
+        // same signal the BL-36 antimagic gate uses) rolls the caster's *magic*
+        // accuracy against the target's *magic* evasion; physical attacks use the
+        // physical pair. A missed single-target spell fizzles — the same no-op as
+        // a physical miss (no damage, no harmful effects; in-group beneficial
+        // effects like ally heals stay exempt in `avoid_effect` below).
+        let is_magic = self
+            .ability_info
+            .is_some_and(|ai| ai.ability_meta.source.is_some());
+        let attack_missed = is_single_target && {
+            let (accuracy, evasion) = if is_magic {
+                (
+                    attacker
+                        .and_then(|a| a.stats)
+                        .map_or(0.0, |s| s.magic_accuracy),
+                    target.stats.map_or(0.0, |s| s.magic_evasion),
+                )
+            } else {
+                // BL-52 P5: physical evasion = class/level + buffs (on `Stats`)
+                // plus the gear contribution derived from armor weight/shield.
+                let armor_evasion = compute_armor_evasion(
+                    target.inventory,
+                    target.attuned,
+                    target.stats,
+                    msm,
+                    combat_tuning,
+                );
+                (
+                    attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy),
+                    target.stats.map_or(0.0, |s| s.evasion) + armor_evasion,
+                )
+            };
+            let hit_chance = (combat_tuning.base_hit + (accuracy - evasion) * combat_tuning.hit_k)
+                .clamp(combat_tuning.hit_floor, combat_tuning.hit_ceil);
+            rng.random::<f32>() >= hit_chance
+        };
+        // BL-52 P4: surface the whiff with a floating "Miss" over the target —
+        // but never over an in-group ally (mirrors the `avoid_effect` beneficial
+        // exemption, so a future single-target ally ability can't show a
+        // contradictory "Miss" while its beneficial effect still lands).
+        if attack_missed && !matches!(target_group, GroupTarget::InGroup) {
+            emit_outcome(Outcome::Miss {
+                pos: target.pos,
+                target: target.uid,
+            });
+        }
+
         // target == OutOfGroup is basic heuristic that this
         // "attack" has negative effects.
         //
         // so if target dodges this "attack" or we don't want to harm target,
         // it should avoid such "damage" or effect
         let avoid_damage = |attack_damage: &AttackDamage| {
-            target_dodging
+            attack_missed
+                || target_dodging
                 || (!permit_pvp && matches!(attack_damage.target, Some(GroupTarget::OutOfGroup)))
         };
         let avoid_effect = |attack_effect: &AttackEffect| {
-            target_dodging
+            // A miss whiffs harmful effects but never an in-group beneficial one
+            // (ally heal/buff). `All`/`None`-targeted beneficial effects are not
+            // yet exempted — the full allied-100% rule lands in P3 (CR3.2).
+            (attack_missed && !matches!(attack_effect.target, Some(GroupTarget::InGroup)))
+                || target_dodging
                 || (!permit_pvp && matches!(attack_effect.target, Some(GroupTarget::OutOfGroup)))
         };
 
@@ -386,6 +526,34 @@ impl Attack {
             (None, None) => None,
         };
 
+        // BL-52 unified critical. Positional/conditional precision (flank,
+        // backstab, target poised, `ImminentCritical`, precision-vulnerability)
+        // already fired above and folds in as a guaranteed crit. If none did,
+        // roll the attacker's `crit_chance` for a random crit. Magnitude reuses
+        // the existing precision system (`precision_power`), per the locked Q4
+        // decision. Single-target only and only on a landed blow — keeping the
+        // AoE hot path RNG-free (AoE crit would re-add per-target rolls). The
+        // `crit_chance_floor` gives every attacker a small baseline crit (no dead
+        // stat); the cap bounds rolled crits (guaranteed positional crits bypass
+        // it as today). NOTE: the finer "side-flank = +chance / backstab =
+        // guaranteed" split (balance note §5) is deferred — positional precision
+        // stays deterministic here to avoid refactoring the shared upstream
+        // precision path.
+        let precision_mult = precision_mult.or_else(|| {
+            if is_single_target && !attack_missed {
+                let crit_chance = attacker
+                    .and_then(|a| a.stats)
+                    .map_or(0.0, |s| s.crit_chance)
+                    .clamp(
+                        combat_tuning.crit_chance_floor,
+                        combat_tuning.crit_chance_cap,
+                    );
+                (rng.random::<f32>() < crit_chance).then_some(combat_tuning.crit_precision_mult)
+            } else {
+                None
+            }
+        });
+
         let precision_power = self.precision_multiplier
             * attacker
                 .and_then(|a| a.stats)
@@ -420,6 +588,28 @@ impl Attack {
 
             let damage_reduction =
                 Attack::compute_damage_reduction(attacker.as_ref(), target, damage.damage, msm);
+
+            // BL-52 P3: AoE damage is mitigated passively by the target's typed
+            // elemental resistance — the AoE counterpart to single-target evasion
+            // (AoE never rolls to-hit, so this is its only stat mitigation, on top
+            // of armor DR). Physical kinds return 0 here and rely on the existing
+            // `damage_reduction` only (no double-count). Single-target damage is
+            // gated by the to-hit roll instead, so it is NOT resistance-mitigated.
+            // Resistance composes with armor DR as independent layers, soft-capped
+            // so stacking can't reach immunity.
+            let damage_reduction = if is_single_target {
+                damage_reduction
+            } else {
+                // Floor at 0 so a (currently nonexistent) negative resistance
+                // can't silently *amplify* AoE damage — element vulnerability, if
+                // ever wanted, should be its own deliberate mechanic, not a
+                // side effect of subtraction. Cap so stacking can't reach immunity.
+                let resist = target
+                    .stats
+                    .map_or(0.0, |s| s.aoe_resistance(damage.damage.kind))
+                    .clamp(0.0, combat_tuning.resist_soft_cap);
+                1.0 - (1.0 - damage_reduction) * (1.0 - resist)
+            };
 
             let block_damage_decrement = Attack::compute_block_damage_decrement(
                 self.blockable,
@@ -1870,6 +2060,17 @@ impl Damage {
         stats: Option<&Stats>,
         msm: &MaterialStatManifest,
     ) -> f32 {
+        // BL-36: an antimagic field makes attuned magic-item effects mundane, so
+        // attuned protection is dropped while the target has `disable_magic`.
+        // This covers every damage path (all callers route here); the standalone
+        // `compute_protection` invincibility check is a rare attuned combo left to
+        // a follow-up. The 3rd attunement-gated path (item-granted abilities) is
+        // already covered — those are magic, so the cast gate blocks them.
+        let attuned = if stats.is_some_and(|s| s.disable_magic) {
+            None
+        } else {
+            attuned
+        };
         let protection = compute_protection(inventory, attuned, msm);
 
         let penetration = if let Some(damage) = damage {
@@ -2423,6 +2624,47 @@ pub fn compute_protection(
     })
 }
 
+/// Combat resolution (BL-52 P5): the physical evasion contributed by worn gear.
+/// Weight is **derived from total armor protection** (Matías 2026-06-25):
+/// heavier (more protective) armor lowers evasion, an unarmored entity gets the
+/// `gear_evasion_cap`. A shield adds a flat penalty (it pays off via block, not
+/// dodge). Result is clamped to `[gear_evasion_floor, gear_evasion_cap]`.
+/// Computed at attack time (like
+/// `compute_protection`/`compute_precision_mult`), and applied only to the
+/// **physical** to-hit roll — magic uses `magic_evasion`.
+pub fn compute_armor_evasion(
+    inventory: Option<&Inventory>,
+    attuned: Option<&AttunedItems>,
+    stats: Option<&Stats>,
+    msm: &MaterialStatManifest,
+    tuning: &CombatTuning,
+) -> f32 {
+    let Some(inventory) = inventory else {
+        return 0.0;
+    };
+    // BL-36: under an antimagic field attuned protection is mundane, so it counts
+    // toward neither DR (`compute_damage_reduction`) nor weight/evasion — keeps an
+    // attuned item's two defense layers coherent.
+    // TODO(perf): `compute_damage_reduction` also scans the target's gear (per
+    // damage instance); compute protection once per attack and thread it to both.
+    let attuned = if stats.is_some_and(|s| s.disable_magic) {
+        None
+    } else {
+        attuned
+    };
+    // Invincible armor (admin) reads as infinitely heavy → floored evasion.
+    let protection = compute_protection(Some(inventory), attuned, msm).unwrap_or(f32::INFINITY);
+    let from_protection =
+        tuning.gear_evasion_cap - protection * tuning.armor_evasion_per_protection;
+    let (mainhand, offhand) = get_weapon_kinds(inventory);
+    let shield = if mainhand == Some(ToolKind::Shield) || offhand == Some(ToolKind::Shield) {
+        tuning.shield_evasion_penalty
+    } else {
+        0.0
+    };
+    (from_protection - shield).clamp(tuning.gear_evasion_floor, tuning.gear_evasion_cap)
+}
+
 /// Computes the total resilience provided from armor. Is used to determine the
 /// reduction applied to poise damage received by an entity. None indicates that
 /// the armor equipped makes the entity invulnerable to poise damage.
@@ -2606,5 +2848,159 @@ mod damage_kind_taxonomy_tests {
             ron::from_str::<DamageKind>("Energy").unwrap(),
             DamageKind::Energy
         );
+    }
+}
+
+#[cfg(test)]
+mod combat_resolution_tests {
+    use super::{AttackSource, CombatTuning, DamageKind};
+    use crate::assets::{AssetExt, Ron};
+
+    // BL-52: the to-hit roll is single-target only; AoE auto-hits and is
+    // mitigated by resistances (P3), so it must never enter the miss roll. This
+    // pins the `is_single_target` gate in `apply_attack`.
+    #[test]
+    fn only_single_target_sources_roll_to_hit() {
+        let single = |s| matches!(s, AttackSource::Melee | AttackSource::Projectile);
+        assert!(single(AttackSource::Melee));
+        assert!(single(AttackSource::Projectile));
+        for aoe in [
+            AttackSource::Beam,
+            AttackSource::GroundShockwave,
+            AttackSource::AirShockwave,
+            AttackSource::UndodgeableShockwave,
+            AttackSource::Explosion,
+            AttackSource::Arc,
+            AttackSource::Pool,
+        ] {
+            assert!(!single(aoe), "{aoe:?} is AoE and must not roll to-hit");
+        }
+    }
+
+    // Mirrors the to-hit math in `Attack::apply_attack` so the formula is unit-
+    // tested without a full attack setup (BL-52 §1).
+    fn hit_chance(t: &CombatTuning, accuracy: f32, evasion: f32) -> f32 {
+        (t.base_hit + (accuracy - evasion) * t.hit_k).clamp(t.hit_floor, t.hit_ceil)
+    }
+
+    #[test]
+    fn hit_formula_matches_balance_examples() {
+        let t = CombatTuning::default();
+        // Equal stats -> base 0.85.
+        assert!((hit_chance(&t, 30.0, 30.0) - 0.85).abs() < 1e-4);
+        // +8 advantage -> 0.97.
+        assert!((hit_chance(&t, 38.0, 30.0) - 0.97).abs() < 1e-4);
+        // Heavy dodge target -> 0.67.
+        assert!((hit_chance(&t, 30.0, 42.0) - 0.67).abs() < 1e-4);
+        // Big over-investment clamps to the 1.0 ceiling.
+        assert!((hit_chance(&t, 45.0, 25.0) - 1.0).abs() < 1e-4);
+        // Fear (-12 acc) vs equal evasion -> 0.67.
+        assert!((hit_chance(&t, 18.0, 30.0) - 0.67).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hit_chance_respects_floor_and_ceiling() {
+        let t = CombatTuning::default();
+        // Hopelessly outmatched still lands at least the 5% floor.
+        assert!((hit_chance(&t, 0.0, 1000.0) - t.hit_floor).abs() < 1e-6);
+        // Wildly over-invested never exceeds the 1.0 ceiling.
+        assert!((hit_chance(&t, 1000.0, 0.0) - t.hit_ceil).abs() < 1e-6);
+    }
+
+    #[test]
+    fn combat_tuning_asset_loads() {
+        // The shipped RON parses and carries the locked BL-52 constants.
+        let tuning = Ron::<CombatTuning>::load_expect("common.combat_tuning");
+        let t = &tuning.read().0;
+        assert!((t.base_hit - 0.85).abs() < 1e-6);
+        assert!((t.hit_floor - 0.05).abs() < 1e-6);
+        assert!((t.hit_ceil - 1.0).abs() < 1e-6);
+        // P2 crit fields present + sane.
+        assert!((t.crit_chance_floor - 0.03).abs() < 1e-6);
+        assert!((t.crit_chance_cap - 0.75).abs() < 1e-6);
+        assert!(t.crit_chance_floor < t.crit_chance_cap);
+        assert!(t.crit_precision_mult > 0.0);
+        // P3 resistance cap present + sane.
+        assert!((t.resist_soft_cap - 0.75).abs() < 1e-6);
+        // P5 armor-evasion fields present + sane.
+        assert!(t.gear_evasion_floor < t.gear_evasion_cap);
+        assert!(t.armor_evasion_per_protection > 0.0);
+        assert!(t.shield_evasion_penalty >= 0.0);
+    }
+
+    // BL-52 P5: armor evasion is derived from total protection — unarmored hits
+    // the cap, heavy armor floors out, a shield subtracts a flat penalty.
+    #[test]
+    fn armor_evasion_from_protection() {
+        let t = CombatTuning::default();
+        // Mirrors `compute_armor_evasion` (protection → evasion + shield).
+        let armor_eva = |protection: f32, shield: bool| {
+            let from_protection = t.gear_evasion_cap - protection * t.armor_evasion_per_protection;
+            let s = if shield {
+                t.shield_evasion_penalty
+            } else {
+                0.0
+            };
+            (from_protection - s).clamp(t.gear_evasion_floor, t.gear_evasion_cap)
+        };
+        // Unarmored → capped at the ceiling (most evasive).
+        assert!((armor_eva(0.0, false) - t.gear_evasion_cap).abs() < 1e-6);
+        // Heavy armor (lots of protection) → floored (easiest to hit).
+        assert!((armor_eva(1000.0, false) - t.gear_evasion_floor).abs() < 1e-6);
+        // A shield always lowers evasion vs the same loadout without one.
+        assert!(armor_eva(20.0, true) < armor_eva(20.0, false));
+        // More protection is never more evasive.
+        assert!(armor_eva(40.0, false) <= armor_eva(10.0, false));
+    }
+
+    // BL-52 P2: the rolled crit chance is clamped to [floor, cap] — a zero-crit
+    // attacker still crits at the floor, an over-stacked one never exceeds the
+    // cap (guaranteed positional crits bypass this path).
+    #[test]
+    fn crit_chance_clamps_to_floor_and_cap() {
+        let t = CombatTuning::default();
+        let clamp = |c: f32| c.clamp(t.crit_chance_floor, t.crit_chance_cap);
+        assert!((clamp(0.0) - t.crit_chance_floor).abs() < 1e-6);
+        assert!((clamp(1.0) - t.crit_chance_cap).abs() < 1e-6);
+        assert!((clamp(0.30) - 0.30).abs() < 1e-6);
+    }
+
+    // BL-52 P3: AoE elemental resistance maps each damage kind to its channel;
+    // physical kinds use armor DR only (return 0 here, no double-count).
+    #[test]
+    fn aoe_resistance_maps_damage_kinds() {
+        use crate::comp::Stats;
+        let body = crate::comp::Body::Humanoid(crate::comp::humanoid::Body::random());
+        let mut s = Stats::empty(body);
+        s.resist_fire = 0.4;
+        s.resist_frost = 0.3;
+        s.resist_poison = 0.2;
+        s.resist_magic = 0.1;
+        assert!((s.aoe_resistance(DamageKind::Fire) - 0.4).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Cold) - 0.3).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Poison) - 0.2).abs() < 1e-6);
+        assert!((s.aoe_resistance(DamageKind::Acid) - 0.2).abs() < 1e-6); // acid → poison
+        assert!((s.aoe_resistance(DamageKind::Lightning) - 0.1).abs() < 1e-6); // → magic
+        assert!((s.aoe_resistance(DamageKind::Energy) - 0.1).abs() < 1e-6); // legacy → magic
+        // Physical kinds are handled by armor DR, not this layer.
+        assert_eq!(s.aoe_resistance(DamageKind::Piercing), 0.0);
+        assert_eq!(s.aoe_resistance(DamageKind::Slashing), 0.0);
+        assert_eq!(s.aoe_resistance(DamageKind::Crushing), 0.0);
+    }
+
+    // BL-52 P3: AoE mitigation composes armor DR and resistance as independent
+    // layers, with resistance soft-capped so stacking can't reach immunity.
+    #[test]
+    fn aoe_resistance_composes_and_caps() {
+        let cap = CombatTuning::default().resist_soft_cap;
+        let combine = |dr: f32, resist: f32| 1.0 - (1.0 - dr) * (1.0 - resist.clamp(0.0, cap));
+        // No resist → unchanged DR.
+        assert!((combine(0.25, 0.0) - 0.25).abs() < 1e-6);
+        // 50% DR + 50% resist → 75% total (independent layers).
+        assert!((combine(0.5, 0.5) - 0.75).abs() < 1e-6);
+        // Resist above the cap is clamped: 0% DR + 0.95 resist → 0.75 total.
+        assert!((combine(0.0, 0.95) - cap).abs() < 1e-6);
+        // Negative resist is floored at 0 — never amplifies AoE damage.
+        assert!((combine(0.25, -0.5) - 0.25).abs() < 1e-6);
     }
 }

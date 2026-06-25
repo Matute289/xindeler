@@ -146,6 +146,7 @@ lazy_static! {
             BuffKind::ComboGeneration => "combo_generation",
             BuffKind::IncreaseMaxEnergy => "increase_max_energy",
             BuffKind::IncreaseMaxHealth => "increase_max_health",
+            BuffKind::Shielded => "shielded",
             BuffKind::Invulnerability => "invulnerability",
             BuffKind::ProtectingWard => "protecting_ward",
             BuffKind::Frenzied => "frenzied",
@@ -189,6 +190,12 @@ lazy_static! {
             BuffKind::Terrified => "terrified",
             BuffKind::Charmed => "charmed",
             BuffKind::Hollowtouched => "hollowtouched",
+            BuffKind::DifficultTerrain => "difficult_terrain",
+            BuffKind::FreedomOfMovement => "freedom_of_movement",
+            BuffKind::Antimagic => "antimagic",
+            BuffKind::Anchored => "anchored",
+            BuffKind::Asleep => "asleep",
+            BuffKind::Blinded => "blinded",
         };
         let mut buff_parser = HashMap::new();
         for kind in BuffKind::iter() {
@@ -419,6 +426,7 @@ pub enum ServerChatCommand {
     MakeBlock,
     MakeNpc,
     MakeSprite,
+    MakeTestChar,
     MakeVolume,
     Motd,
     Mount,
@@ -447,6 +455,8 @@ pub enum ServerChatCommand {
     ServerPhysics,
     SetBodyType,
     SetClass,
+    SetEthos,
+    SetLevel,
     SetMotd,
     SetWaypoint,
     Ship,
@@ -932,6 +942,31 @@ impl ServerChatCommand {
                 Content::localized("command-set_class-desc"),
                 None,
             ),
+            ServerChatCommand::SetEthos => cmd(
+                vec![
+                    Enum(
+                        "moral",
+                        vec!["good".to_owned(), "neutral".to_owned(), "evil".to_owned()],
+                        Required,
+                    ),
+                    Enum(
+                        "order",
+                        vec![
+                            "lawful".to_owned(),
+                            "neutral".to_owned(),
+                            "chaotic".to_owned(),
+                        ],
+                        Required,
+                    ),
+                ],
+                Content::localized("command-set_ethos-desc"),
+                Some(Admin),
+            ),
+            ServerChatCommand::SetLevel => cmd(
+                vec![Integer("level", 1, Required)],
+                Content::localized("command-set_level-desc"),
+                Some(Admin),
+            ),
             ServerChatCommand::SetMotd => cmd(
                 vec![Any("locale", Optional), Message(Optional)],
                 Content::localized("command-set_motd-desc"),
@@ -1102,6 +1137,23 @@ impl ServerChatCommand {
                 Content::localized("command-world-desc"),
                 None,
             ),
+            ServerChatCommand::MakeTestChar => cmd(
+                vec![
+                    Integer("level", 1, Required),
+                    Enum(
+                        "class",
+                        // Single source of truth — don't hardcode the class list.
+                        crate::comp::class::ClassKind::PLAYABLE
+                            .iter()
+                            .map(|c| c.keyword().to_owned())
+                            .collect(),
+                        Optional,
+                    ),
+                    Enum("kit", KITS.to_vec(), Optional),
+                ],
+                Content::localized("command-make_test_char-desc"),
+                Some(Admin),
+            ),
             ServerChatCommand::MakeVolume => cmd(
                 vec![Integer("size", 15, Optional)],
                 Content::localized("command-make_volume-desc"),
@@ -1248,6 +1300,8 @@ impl ServerChatCommand {
             ServerChatCommand::Say => "say",
             ServerChatCommand::ServerPhysics => "server_physics",
             ServerChatCommand::SetClass => "set_class",
+            ServerChatCommand::SetEthos => "set_ethos",
+            ServerChatCommand::SetLevel => "set_level",
             ServerChatCommand::SetMotd => "set_motd",
             ServerChatCommand::SetBodyType => "set_body_type",
             ServerChatCommand::Ship => "ship",
@@ -1273,6 +1327,7 @@ impl ServerChatCommand {
             ServerChatCommand::Wiring => "wiring",
             ServerChatCommand::Whitelist => "whitelist",
             ServerChatCommand::World => "world",
+            ServerChatCommand::MakeTestChar => "make_test_char",
             ServerChatCommand::MakeVolume => "make_volume",
             ServerChatCommand::Location => "location",
             ServerChatCommand::CreateLocation => "create_location",

@@ -704,6 +704,7 @@ impl StateExt for State {
             pets,
             active_abilities,
             map_marker,
+            ethos,
         } = components;
 
         if let Some(player_uid) = self.read_component_copied::<Uid>(entity) {
@@ -745,6 +746,7 @@ impl StateExt for State {
             self.write_component_ignore_entity_dead(entity, Poise::new(body));
             self.write_component_ignore_entity_dead(entity, stats);
             self.write_component_ignore_entity_dead(entity, character_class);
+            self.write_component_ignore_entity_dead(entity, ethos);
             self.write_component_ignore_entity_dead(entity, active_abilities);
             self.write_component_ignore_entity_dead(entity, comp::AbilityCooldowns::default());
             // Grant the racial innate ability by species (magic-abilities plan Task 14).

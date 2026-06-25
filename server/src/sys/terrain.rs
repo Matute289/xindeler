@@ -422,6 +422,7 @@ pub struct NpcData {
     pub agent: Option<comp::Agent>,
     pub body: comp::Body,
     pub alignment: comp::Alignment,
+    pub ethos: Option<comp::Ethos>,
     pub scale: comp::Scale,
     pub loot: LootSpec<String>,
     pub pets: Vec<(NpcData, Vec3<f32>)>,
@@ -449,6 +450,7 @@ impl SpawnEntityData {
             has_agency,
             agent_mark,
             alignment,
+            ethos,
             no_flee,
             idle_wander_factor,
             aggro_range_multiplier,
@@ -561,6 +563,13 @@ impl SpawnEntityData {
             agent
         };
 
+        // BL-33: use the explicit per-config alignment if set, else seed
+        // humanoids from their AI faction; non-humanoids stay unaligned.
+        let ethos = ethos.or_else(|| {
+            matches!(body, comp::Body::Humanoid(_))
+                .then(|| comp::Ethos::from_ai_alignment(alignment))
+        });
+
         SpawnEntityData::Npc(NpcData {
             pos: Pos(pos),
             stats,
@@ -571,6 +580,7 @@ impl SpawnEntityData {
             agent,
             body,
             alignment,
+            ethos,
             scale: comp::Scale(scale),
             loot,
             pets: {
@@ -626,6 +636,7 @@ impl NpcData {
             agent,
             body,
             alignment,
+            ethos,
             scale,
             loot,
             pets,
@@ -636,6 +647,7 @@ impl NpcData {
 
         (
             NpcBuilder::new(stats, body, alignment)
+                .with_ethos(ethos)
                 .with_skill_set(skill_set)
                 .with_health(health)
                 .with_poise(poise)

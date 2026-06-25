@@ -25,7 +25,13 @@ use client::{Client, ServerInfo};
 use common::{
     LoadoutBuilder,
     character::{CharacterId, CharacterItem, MAX_CHARACTERS_PER_PLAYER, MAX_NAME_LENGTH},
-    comp::{self, Inventory, Item, class::ClassKind, humanoid, inventory::slot::EquipSlot},
+    comp::{
+        self, Inventory, Item,
+        class::ClassKind,
+        ethos::{Ethos, Moral, Order},
+        humanoid,
+        inventory::slot::EquipSlot,
+    },
     map::Marker,
     resources::Time,
     terrain::TerrainChunkSize,
@@ -40,7 +46,8 @@ use crate::settings::Settings;
 //use ui::ice::widget;
 use iced::{
     Align, Button, Checkbox, Color, Column, Container, HorizontalAlignment, Length, Row,
-    Scrollable, Slider, Space, Text, TextInput, button, scrollable, slider, text_input,
+    Scrollable, Slider, Space, Text, TextInput, VerticalAlignment, button, scrollable, slider,
+    text_input,
 };
 use std::sync::Arc;
 use vek::{Rgba, Vec2};
@@ -75,7 +82,51 @@ fn default_starter_for_class(class: ClassKind) -> (Option<&'static str>, Option<
         ClassKind::Mage => (Some(STARTER_STAFF), None),
         ClassKind::Cleric => (Some(STARTER_SCEPTRE), None),
         ClassKind::Rogue => (Some(STARTER_SWORDS), Some(STARTER_SWORDS)),
+        // Classes-wave (BL-04): the default mirrors the first server whitelist entry.
+        ClassKind::Barbarian => (Some(STARTER_AXE), None),
+        ClassKind::Sorcerer
+        | ClassKind::Warlock
+        | ClassKind::Bard
+        | ClassKind::Druid
+        | ClassKind::Artificer => (Some(STARTER_STAFF), None),
+        ClassKind::Paladin | ClassKind::BloodSlayer => (Some(STARTER_SWORD), None),
+        ClassKind::Ranger => (Some(STARTER_BOW), None),
+        ClassKind::Monk => (Some(STARTER_SWORDS), None),
     }
+}
+
+/// Like [`neat_button`], but with a FIXED-size centred label instead of the
+/// auto-scaling `FillText`, and the button simply **fills its cell** (`width:
+/// Fill`) instead of taking an image-aspect-ratio width. Used by the BL-33
+/// alignment picker so a row of 3 buttons splits the width into equal thirds —
+/// every word renders at the same size, all buttons are the same width, and
+/// none overflow the panel. Selection is shown by gold text.
+fn fixed_label_button(
+    state: &mut button::State,
+    label: String,
+    text_size: u16,
+    selected: bool,
+    button_style: style::button::Style,
+    message: Message,
+) -> Element<'_, Message> {
+    let color = if selected {
+        Color::from_rgb(0.93, 0.78, 0.28)
+    } else {
+        TEXT_COLOR
+    };
+    let text = Text::new(label)
+        .size(text_size)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .color(color);
+    Button::new(state, text)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .style(button_style)
+        .on_press(message)
+        .into()
 }
 
 // TODO: what does this comment mean?
@@ -167,6 +218,7 @@ pub enum Event {
         hardcore: bool,
         start_site: Option<SiteId>,
         class: ClassKind,
+        ethos: Ethos,
     },
     EditCharacter {
         alias: String,
@@ -201,11 +253,15 @@ enum Mode {
         mainhand: Option<&'static str>,
         offhand: Option<&'static str>,
         class: ClassKind,
+        /// BL-33: the starting moral alignment chosen at creation.
+        ethos: Ethos,
 
         body_type_buttons: [button::State; 2],
         species_buttons: [button::State; 6],
         class_buttons: [button::State; 4],
         tool_buttons: [button::State; 6],
+        ethos_moral_buttons: [button::State; 3],
+        ethos_order_buttons: [button::State; 3],
         sliders: Sliders,
         hardcore_enabled: bool,
         left_scroll: scrollable::State,
@@ -236,6 +292,7 @@ enum CreationStep {
     Body,
     Appearance,
     Class,
+    Alignment,
     Finish,
 }
 
@@ -244,7 +301,8 @@ impl CreationStep {
         match self {
             CreationStep::Body => CreationStep::Appearance,
             CreationStep::Appearance => CreationStep::Class,
-            CreationStep::Class => CreationStep::Finish,
+            CreationStep::Class => CreationStep::Alignment,
+            CreationStep::Alignment => CreationStep::Finish,
             CreationStep::Finish => CreationStep::Finish,
         }
     }
@@ -254,7 +312,8 @@ impl CreationStep {
             CreationStep::Body => CreationStep::Body,
             CreationStep::Appearance => CreationStep::Body,
             CreationStep::Class => CreationStep::Appearance,
-            CreationStep::Finish => CreationStep::Class,
+            CreationStep::Alignment => CreationStep::Class,
+            CreationStep::Finish => CreationStep::Alignment,
         }
     }
 
@@ -264,7 +323,8 @@ impl CreationStep {
             CreationStep::Body => 1,
             CreationStep::Appearance => 2,
             CreationStep::Class => 3,
-            CreationStep::Finish => 4,
+            CreationStep::Alignment => 4,
+            CreationStep::Finish => 5,
         }
     }
 }
@@ -306,10 +366,13 @@ impl Mode {
             mainhand,
             offhand,
             class: ClassKind::Warrior,
+            ethos: Ethos::default(),
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             class_buttons: Default::default(),
             tool_buttons: Default::default(),
+            ethos_moral_buttons: Default::default(),
+            ethos_order_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
             left_scroll: Default::default(),
@@ -342,10 +405,13 @@ impl Mode {
             mainhand: None,
             offhand: None,
             class: ClassKind::Adventurer,
+            ethos: Ethos::default(),
             body_type_buttons: Default::default(),
             species_buttons: Default::default(),
             class_buttons: Default::default(),
             tool_buttons: Default::default(),
+            ethos_moral_buttons: Default::default(),
+            ethos_order_buttons: Default::default(),
             sliders: Default::default(),
             hardcore_enabled: false,
             left_scroll: Default::default(),
@@ -413,6 +479,8 @@ enum Message {
     BodyType(humanoid::BodyType),
     Species(humanoid::Species),
     Class(ClassKind),
+    EthosMoral(Moral),
+    EthosOrder(Order),
     Tool((Option<&'static str>, Option<&'static str>)),
     RandomizeCharacter,
     HardcoreEnabled(bool),
@@ -1039,12 +1107,15 @@ impl Controls {
                 mainhand,
                 offhand: _,
                 class,
+                ethos,
                 left_scroll,
                 right_scroll,
                 body_type_buttons,
                 species_buttons,
                 class_buttons,
                 tool_buttons,
+                ethos_moral_buttons,
+                ethos_order_buttons,
                 sliders,
                 hardcore_enabled,
                 name_input,
@@ -1348,7 +1419,13 @@ impl Controls {
                             .spacing(1)
                             .into(),
                         ]),
-                        ClassKind::Mage => Column::with_children(vec![
+                        // BL-04: all staff-starter casters share the staff picker.
+                        ClassKind::Mage
+                        | ClassKind::Sorcerer
+                        | ClassKind::Warlock
+                        | ClassKind::Bard
+                        | ClassKind::Druid
+                        | ClassKind::Artificer => Column::with_children(vec![
                             icon_button_tooltip_opt(
                                 staff_button,
                                 *mainhand == Some(STARTER_STAFF),
@@ -1387,6 +1464,59 @@ impl Controls {
                                     Some(Message::Tool((Some(STARTER_BOW), None))),
                                     imgs.bow,
                                     "common-weapons-bow",
+                                )
+                                .into(),
+                            ])
+                            .spacing(1)
+                            .into(),
+                        ]),
+                        // BL-04 classes-wave: pickers match each class' server whitelist.
+                        ClassKind::Paladin | ClassKind::BloodSlayer => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                sword_button,
+                                *mainhand == Some(STARTER_SWORD),
+                                Some(Message::Tool((Some(STARTER_SWORD), None))),
+                                imgs.sword,
+                                "common-weapons-greatsword",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Ranger => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                bow_button,
+                                *mainhand == Some(STARTER_BOW),
+                                Some(Message::Tool((Some(STARTER_BOW), None))),
+                                imgs.bow,
+                                "common-weapons-bow",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Monk => Column::with_children(vec![
+                            icon_button_tooltip_opt(
+                                swords_button,
+                                *mainhand == Some(STARTER_SWORDS),
+                                Some(Message::Tool((Some(STARTER_SWORDS), None))),
+                                imgs.swords,
+                                "common-weapons-shortswords",
+                            )
+                            .into(),
+                        ]),
+                        ClassKind::Barbarian => Column::with_children(vec![
+                            Row::with_children(vec![
+                                icon_button_tooltip_opt(
+                                    axe_button,
+                                    *mainhand == Some(STARTER_AXE),
+                                    Some(Message::Tool((Some(STARTER_AXE), None))),
+                                    imgs.axe,
+                                    "common-weapons-axe",
+                                )
+                                .into(),
+                                icon_button_tooltip_opt(
+                                    hammer_button,
+                                    *mainhand == Some(STARTER_HAMMER),
+                                    Some(Message::Tool((Some(STARTER_HAMMER), None))),
+                                    imgs.hammer,
+                                    "common-weapons-hammer",
                                 )
                                 .into(),
                             ])
@@ -1560,6 +1690,86 @@ impl Controls {
                 .max_width(200)
                 .padding(5);
 
+                // BL-33: starting moral-alignment picker (its own wizard step).
+                // Two rows — Good/Neutral/Evil and Lawful/Neutral/Chaotic. Each
+                // button uses a FIXED-size centred label (not FillText) so every
+                // word renders at the same size, wrapped in the shared button
+                // image (uniform width, no distortion). Selection = gold text.
+                // The pick is only a starting point; deeds drift it in-game.
+                let [moral_good_btn, moral_neutral_btn, moral_evil_btn] = ethos_moral_buttons;
+                let [order_lawful_btn, order_neutral_btn, order_chaotic_btn] = ethos_order_buttons;
+                const ETHOS_TEXT: u16 = 20;
+                const ETHOS_ROW_H: u16 = 40;
+                const ETHOS_GAP: u16 = 8;
+                const ETHOS_ROW_W: u32 = 360;
+                let ethos_text = fonts.cyri.scale(ETHOS_TEXT);
+                let ethos_section = Column::with_children(vec![
+                    Row::with_children(vec![
+                        fixed_label_button(
+                            moral_good_btn,
+                            i18n.get_msg("char_selection-ethos_good").into_owned(),
+                            ethos_text,
+                            ethos.moral() == Moral::Good,
+                            button_style,
+                            Message::EthosMoral(Moral::Good),
+                        ),
+                        fixed_label_button(
+                            moral_neutral_btn,
+                            i18n.get_msg("char_selection-ethos_neutral").into_owned(),
+                            ethos_text,
+                            ethos.moral() == Moral::Neutral,
+                            button_style,
+                            Message::EthosMoral(Moral::Neutral),
+                        ),
+                        fixed_label_button(
+                            moral_evil_btn,
+                            i18n.get_msg("char_selection-ethos_evil").into_owned(),
+                            ethos_text,
+                            ethos.moral() == Moral::Evil,
+                            button_style,
+                            Message::EthosMoral(Moral::Evil),
+                        ),
+                    ])
+                    .height(Length::Units(ETHOS_ROW_H))
+                    .spacing(ETHOS_GAP)
+                    .into(),
+                    Row::with_children(vec![
+                        fixed_label_button(
+                            order_lawful_btn,
+                            i18n.get_msg("char_selection-ethos_lawful").into_owned(),
+                            ethos_text,
+                            ethos.order() == Order::Lawful,
+                            button_style,
+                            Message::EthosOrder(Order::Lawful),
+                        ),
+                        fixed_label_button(
+                            order_neutral_btn,
+                            i18n.get_msg("char_selection-ethos_neutral").into_owned(),
+                            ethos_text,
+                            ethos.order() == Order::Neutral,
+                            button_style,
+                            Message::EthosOrder(Order::Neutral),
+                        ),
+                        fixed_label_button(
+                            order_chaotic_btn,
+                            i18n.get_msg("char_selection-ethos_chaotic").into_owned(),
+                            ethos_text,
+                            ethos.order() == Order::Chaotic,
+                            button_style,
+                            Message::EthosOrder(Order::Chaotic),
+                        ),
+                    ])
+                    .height(Length::Units(ETHOS_ROW_H))
+                    .spacing(ETHOS_GAP)
+                    .into(),
+                ])
+                .align_items(Align::Center)
+                .spacing(ETHOS_GAP)
+                // Cap the width so the 3 equal-thirds buttons stay a readable
+                // size and never overflow the panel (centred by the parent).
+                .width(Length::Fill)
+                .max_width(ETHOS_ROW_W);
+
                 let hardcore_checkbox = if character_id.is_some() {
                     Row::new()
                 } else {
@@ -1569,9 +1779,9 @@ impl Controls {
                             i18n.get_msg("char_selection-hardcore"),
                             Message::HardcoreEnabled,
                         )
-                        .size(32)
-                        .spacing(8)
-                        .text_size(24)
+                        .size(40)
+                        .spacing(10)
+                        .text_size(30)
                         .style(style::checkbox::Style::new(
                             imgs.icon_border,
                             self.imgs.hardcore,
@@ -1582,6 +1792,66 @@ impl Controls {
                         })
                         .into(),
                     ])
+                };
+
+                // BL-33: review summary for the final wizard step — a recap of
+                // everything chosen (name, race, class, alignment).
+                let summary = {
+                    let moral_key = match ethos.moral() {
+                        Moral::Good => "char_selection-ethos_good",
+                        Moral::Neutral => "char_selection-ethos_neutral",
+                        Moral::Evil => "char_selection-ethos_evil",
+                    };
+                    let order_key = match ethos.order() {
+                        Order::Lawful => "char_selection-ethos_lawful",
+                        Order::Neutral => "char_selection-ethos_neutral",
+                        Order::Chaotic => "char_selection-ethos_chaotic",
+                    };
+                    let alignment_str =
+                        if ethos.moral() == Moral::Neutral && ethos.order() == Order::Neutral {
+                            i18n.get_msg("char_selection-ethos_true_neutral")
+                                .into_owned()
+                        } else {
+                            format!("{} {}", i18n.get_msg(order_key), i18n.get_msg(moral_key))
+                        };
+                    // Creation only offers these four classes (the class step).
+                    let class_key = match class {
+                        ClassKind::Mage => "char_selection-class_mage",
+                        ClassKind::Cleric => "char_selection-class_cleric",
+                        ClassKind::Rogue => "char_selection-class_rogue",
+                        _ => "char_selection-class_warrior",
+                    };
+                    let class_name = i18n.get_msg(class_key).into_owned();
+                    // A tidy key/value row: a muted, right-aligned label in a
+                    // fixed-width column so the values line up, then the value.
+                    let kv = |label_key: &str, value: String| -> Element<Message> {
+                        Row::with_children(vec![
+                            Text::new(i18n.get_msg(label_key).into_owned())
+                                .size(fonts.cyri.scale(20))
+                                .width(Length::Units(110))
+                                .horizontal_alignment(HorizontalAlignment::Right)
+                                .color(Color::from_rgb(0.65, 0.65, 0.65))
+                                .into(),
+                            Text::new(value)
+                                .size(fonts.cyri.scale(20))
+                                .color(TEXT_COLOR)
+                                .into(),
+                        ])
+                        .spacing(14)
+                        .align_items(Align::Center)
+                        .into()
+                    };
+                    Column::with_children(vec![
+                        kv("char_selection-summary_label_name", name.clone()),
+                        kv(
+                            "char_selection-summary_label_race",
+                            format!("{:?}", body.species),
+                        ),
+                        kv("char_selection-summary_label_class", class_name),
+                        kv("char_selection-summary_label_alignment", alignment_str),
+                    ])
+                    .align_items(Align::Start)
+                    .spacing(10)
                 };
 
                 const CHAR_DICE_SIZE: u16 = 50;
@@ -1618,6 +1888,7 @@ impl Controls {
                         CreationStep::Body => "char_selection-step_body",
                         CreationStep::Appearance => "char_selection-step_appearance",
                         CreationStep::Class => "char_selection-step_class",
+                        CreationStep::Alignment => "char_selection-step_alignment",
                         CreationStep::Finish => "char_selection-step_finish",
                     };
                     let step_title: Element<Message> =
@@ -1643,7 +1914,14 @@ impl Controls {
                         CreationStep::Class => {
                             vec![step_title, class_section.into(), tool.into()]
                         },
-                        CreationStep::Finish => vec![step_title, hardcore_checkbox.into()],
+                        CreationStep::Alignment => vec![step_title, ethos_section.into()],
+                        CreationStep::Finish => vec![
+                            step_title,
+                            Space::new(Length::Fill, Length::Units(14)).into(),
+                            summary.into(),
+                            Space::new(Length::Fill, Length::Units(22)).into(),
+                            hardcore_checkbox.into(),
+                        ],
                     }
                 };
 
@@ -2172,6 +2450,7 @@ impl Controls {
                     mainhand,
                     offhand,
                     class,
+                    ethos,
                     start_site_idx,
                     ..
                 } = &self.mode
@@ -2183,6 +2462,7 @@ impl Controls {
                         body: comp::Body::Humanoid(*body),
                         hardcore: *hardcore_enabled,
                         class: *class,
+                        ethos: *ethos,
                         start_site: self
                             .possible_starting_sites
                             .get(start_site_idx.unwrap_or_default())
@@ -2245,6 +2525,16 @@ impl Controls {
                         // is supplied
                         Time(0.0),
                     );
+                }
+            },
+            Message::EthosMoral(moral) => {
+                if let Mode::CreateOrEdit { ethos, .. } = &mut self.mode {
+                    *ethos = Ethos::from_box(ethos.order(), moral);
+                }
+            },
+            Message::EthosOrder(order) => {
+                if let Mode::CreateOrEdit { ethos, .. } = &mut self.mode {
+                    *ethos = Ethos::from_box(order, ethos.moral());
                 }
             },
             Message::Tool(value) => {

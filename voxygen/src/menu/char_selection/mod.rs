@@ -138,9 +138,10 @@ impl PlayState for CharSelectionState {
                         hardcore,
                         start_site,
                         class,
+                        ethos,
                     } => {
                         self.client.borrow_mut().create_character(
-                            alias, mainhand, offhand, body, hardcore, start_site, class,
+                            alias, mainhand, offhand, body, hardcore, start_site, class, ethos,
                         );
                     },
                     ui::Event::EditCharacter {

@@ -49,6 +49,11 @@ pub struct Health {
     /// Maximum is the amount of health the entity has after temporary modifiers
     /// are considered
     maximum: u32,
+    /// Temp-HP / absorb pool (BL-05 RD-6). Scaled like `current`. Incoming
+    /// damage is soaked here first; only the overflow reaches real HP. Not real
+    /// HP: it is not refilled by healing and does not count toward `maximum`.
+    /// Granted by the `Shielded` buff (set on buff-add); removed when depleted.
+    absorb: u32,
     /// The last change to health
     pub last_change: HealthChange,
     pub is_dead: bool,
@@ -88,6 +93,23 @@ impl Health {
 
     /// Returns the maximum value of health casted to a float
     pub fn maximum(&self) -> f32 { self.maximum as f32 / Self::SCALING_FACTOR_FLOAT }
+
+    /// Returns the current temp-HP / absorb pool (BL-05 RD-6).
+    pub fn absorb(&self) -> f32 { self.absorb as f32 / Self::SCALING_FACTOR_FLOAT }
+
+    /// Raises the absorb pool to at least `amount` (BL-05 RD-6). Take-higher so
+    /// re-applying the same shield refreshes rather than stacks (same-kind
+    /// no-stack); a future second shield *kind* would instead add. Clamped to
+    /// the valid scaled range.
+    pub fn raise_absorb_to(&mut self, amount: f32) {
+        let scaled = (amount.max(0.0) * Self::SCALING_FACTOR_FLOAT)
+            .min(Self::MAX_SCALED_HEALTH as f32) as u32;
+        self.absorb = self.absorb.max(scaled);
+    }
+
+    /// Clears the absorb pool (BL-05 RD-6) — used when the granting buff is
+    /// removed/dispelled.
+    pub fn clear_absorb(&mut self) { self.absorb = 0; }
 
     /// Returns the fraction of health an entity has remaining
     pub fn fraction(&self) -> f32 { self.current() / self.maximum().max(1.0) }
@@ -139,6 +161,7 @@ impl Health {
             current: health,
             base_max: health,
             maximum: health,
+            absorb: 0,
             last_change: HealthChange {
                 amount: 0.0,
                 by: None,
@@ -155,7 +178,18 @@ impl Health {
     }
 
     /// Returns a boolean if the delta was not zero.
-    pub fn change_by(&mut self, change: HealthChange) -> bool {
+    pub fn change_by(&mut self, mut change: HealthChange) -> bool {
+        // BL-05 RD-6: a damaging change is soaked by the absorb (temp-HP) pool
+        // first; only the overflow reaches real HP. Positive changes (healing)
+        // bypass the pool entirely — temp-HP is separate from real HP.
+        if change.amount < 0.0 && self.absorb > 0 {
+            let damage = -change.amount;
+            let soaked = damage.min(self.absorb());
+            self.absorb = self
+                .absorb
+                .saturating_sub((soaked * Self::SCALING_FACTOR_FLOAT) as u32);
+            change.amount += soaked;
+        }
         let prev_health = i64::from(self.current);
         self.current = (((self.current() + change.amount).clamp(0.0, f32::from(Self::MAX_HEALTH))
             * Self::SCALING_FACTOR_FLOAT) as u32)
@@ -236,6 +270,7 @@ impl Health {
             current: 0,
             base_max: 0,
             maximum: 0,
+            absorb: 0,
             last_change: HealthChange {
                 amount: 0.0,
                 by: None,
@@ -400,5 +435,54 @@ mod tests {
 
         assert!(!health.damage_contributors.contains_key(&damage_contrib1));
         assert!(health.damage_contributors.contains_key(&damage_contrib2));
+    }
+
+    fn damage(amount: f32) -> HealthChange {
+        HealthChange {
+            amount,
+            time: Time(0.0),
+            by: None,
+            cause: None,
+            precise: false,
+            instance: rand::random(),
+        }
+    }
+
+    // BL-05 RD-6: damage is soaked by the absorb pool first; only the overflow
+    // reaches real HP, and healing never refills the pool.
+    #[test]
+    fn absorb_soaks_damage_before_health() {
+        let mut health = Health::empty();
+        health.maximum = 100 * Health::SCALING_FACTOR_INT;
+        health.current = health.maximum;
+        health.raise_absorb_to(30.0);
+        assert_eq!(health.absorb(), 30.0);
+
+        // 20 damage: fully soaked, HP untouched, 10 absorb left.
+        health.change_by(damage(-20.0));
+        assert_eq!(health.current(), 100.0);
+        assert_eq!(health.absorb(), 10.0);
+
+        // 25 damage: 10 soaked, 15 hits HP, absorb depleted.
+        health.change_by(damage(-25.0));
+        assert_eq!(health.absorb(), 0.0);
+        assert_eq!(health.current(), 85.0);
+
+        // Healing does not refill the absorb pool.
+        health.change_by(damage(10.0));
+        assert_eq!(health.absorb(), 0.0);
+        assert_eq!(health.current(), 95.0);
+    }
+
+    #[test]
+    fn raise_absorb_is_take_higher_and_clearable() {
+        let mut health = Health::empty();
+        health.raise_absorb_to(20.0);
+        health.raise_absorb_to(10.0); // lower → ignored (take-higher)
+        assert_eq!(health.absorb(), 20.0);
+        health.raise_absorb_to(50.0); // higher → refreshes
+        assert_eq!(health.absorb(), 50.0);
+        health.clear_absorb();
+        assert_eq!(health.absorb(), 0.0);
     }
 }

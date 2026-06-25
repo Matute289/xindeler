@@ -28,6 +28,22 @@ fn valid_starter_items(class: ClassKind) -> &'static [[Option<&'static str>; 2]]
             ],
             [Some("common.items.weapons.bow.starter"), None],
         ],
+        // Classes-wave (BL-04): valid existing starters by archetype; thematic
+        // implements (tome/instrument/quarterstaff) come with BL-06.
+        ClassKind::Barbarian => &[[Some("common.items.weapons.axe.starter_axe"), None], [
+            Some("common.items.weapons.hammer.starter_hammer"),
+            None,
+        ]],
+        ClassKind::Sorcerer
+        | ClassKind::Warlock
+        | ClassKind::Bard
+        | ClassKind::Druid
+        | ClassKind::Artificer => &[[Some("common.items.weapons.staff.starter_staff"), None]],
+        ClassKind::Paladin | ClassKind::BloodSlayer => {
+            &[[Some("common.items.weapons.sword.starter"), None]]
+        },
+        ClassKind::Ranger => &[[Some("common.items.weapons.bow.starter"), None]],
+        ClassKind::Monk => &[[Some("common.items.weapons.sword_1h.starter"), None]],
     }
 }
 
@@ -38,6 +54,16 @@ fn class_kit_item(class: ClassKind) -> &'static str {
         ClassKind::Adventurer | ClassKind::Warrior => "common.items.consumable.potion_minor",
         ClassKind::Mage | ClassKind::Rogue => "common.items.consumable.potion_agility",
         ClassKind::Cleric => "common.items.consumable.potion_med",
+        // Classes-wave (BL-04).
+        ClassKind::Sorcerer
+        | ClassKind::Warlock
+        | ClassKind::Bard
+        | ClassKind::Druid
+        | ClassKind::Artificer => "common.items.consumable.potion_minor",
+        ClassKind::Ranger | ClassKind::Monk => "common.items.consumable.potion_agility",
+        ClassKind::Barbarian | ClassKind::Paladin | ClassKind::BloodSlayer => {
+            "common.items.consumable.potion_med"
+        },
     }
 }
 
@@ -60,6 +86,7 @@ pub fn create_character(
     character_offhand: Option<String>,
     body: Body,
     character_class: ClassKind,
+    ethos: common::comp::Ethos,
     hardcore: bool,
     character_updater: &mut WriteExpect<'_, CharacterUpdater>,
     waypoint: Option<Waypoint>,
@@ -128,6 +155,10 @@ pub fn create_character(
         pets: Vec::new(),
         active_abilities: common::comp::ActiveAbilities::default_limited(BASE_ABILITY_LIMIT),
         map_marker,
+        // BL-33: the alignment chosen at character creation (defaults to True
+        // Neutral if the client sends it). Sanitised — never trust the wire
+        // value. Deeds then drift it in-game (P3).
+        ethos: ethos.clamped(),
     });
     Ok(())
 }

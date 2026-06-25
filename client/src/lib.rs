@@ -1348,6 +1348,7 @@ impl Client {
         hardcore: bool,
         start_site: Option<SiteId>,
         class: comp::class::ClassKind,
+        ethos: comp::Ethos,
     ) {
         self.character_list.loading = true;
         self.send_msg(ClientGeneral::CreateCharacter {
@@ -1358,6 +1359,7 @@ impl Client {
             hardcore,
             start_site,
             class,
+            ethos,
         });
     }
 
@@ -3507,7 +3509,7 @@ impl Client {
         // Replace chunks with empty chunks to save memory
         let to_clear = terrain
             .iter()
-            .filter_map(|(key, chunk)| (chunk.sub_chunks_len() != 0).then(|| key))
+            .filter_map(|(key, chunk)| (chunk.sub_chunks_len() != 0).then_some(key))
             .collect::<Vec<_>>();
         to_clear.into_iter().for_each(|key| {
             terrain.insert(key, Arc::clone(&empty));
@@ -3521,19 +3523,19 @@ impl Client {
         }
 
         // 6) Update the server about the player's physics attributes.
-        if self.presence.is_some() {
-            if let (Some(pos), Some(vel), Some(ori)) = (
+        if self.presence.is_some()
+            && let (Some(pos), Some(vel), Some(ori)) = (
                 self.state.read_storage().get(self.entity()).cloned(),
                 self.state.read_storage().get(self.entity()).cloned(),
                 self.state.read_storage().get(self.entity()).cloned(),
-            ) {
-                self.in_game_stream.send(ClientGeneral::PlayerPhysics {
-                    pos,
-                    vel,
-                    ori,
-                    force_counter: self.force_update_counter,
-                })?;
-            }
+            )
+        {
+            self.in_game_stream.send(ClientGeneral::PlayerPhysics {
+                pos,
+                vel,
+                ori,
+                force_counter: self.force_update_counter,
+            })?;
         }
 
         // 7) Finish the tick, pass control back to the frontend.

@@ -4,7 +4,7 @@ use crate::{
         CombatBuffStrength, CombatEffect, CombatModification, CombatRequirement, ScalingKind,
         StatEffect, StatEffectTarget,
     },
-    comp::{Mass, Stats, aura::AuraKey, tool::ToolKind},
+    comp::{Mass, Stats, aura::AuraKey, stats::ResistKind, tool::ToolKind},
     link::DynWeakLinkHandle,
     match_some,
     resources::{Secs, Time},
@@ -61,6 +61,13 @@ pub enum BuffKind {
     /// Raises maximum health.
     /// Strength should be the effect to max health.
     IncreaseMaxHealth,
+    /// Temp-HP / absorb shield (BL-05 RD-6). Grants an absorb pool equal to
+    /// `strength` that soaks incoming damage before real HP. The pool lives on
+    /// `Health.absorb` (set when this buff is added, cleared when removed); the
+    /// buff has no per-tick effect and persists (no timer) until the pool is
+    /// depleted, then it is removed. Same-kind re-apply refreshes
+    /// (take-higher).
+    Shielded,
     /// Makes you immune to attacks.
     /// Strength does not affect this buff.
     Invulnerability,
@@ -75,6 +82,12 @@ pub enum BuffKind {
     /// Increases movement and attack speed Strength scales strength of both
     /// effects linearly. 0.5 is a 50% increase, 1.0 is a 100% increase.
     Hastened,
+    /// Immunity to `DifficultTerrain` (BL-03) — "freedom of movement", granted
+    /// by an item / spell / class (e.g. a Ranger at home in the wilds). No
+    /// other effect. Reactive immunity: it strips the re-applied debuff
+    /// each tick via the existing `BuffImmunity` model (same as
+    /// Frozen→Chilled).
+    FreedomOfMovement,
     /// Increases resistance to incoming poise, and poise damage dealt as health
     /// is lost.
     /// Strength scales the resistance non-linearly. 0.5 provides 50%, 1.0
@@ -269,6 +282,29 @@ pub enum BuffKind {
     /// applied by every Beyond-tainted Necromancy cast via
     /// AbilityMeta.init_event.
     Hollowtouched,
+    /// Difficult terrain (BL-03): movement slowed while inside the zone —
+    /// `MovementSpeed(1.0 - strength)`, so strength 0.5 = half speed. Delivered
+    /// by an aura (spell / terrain / weather); negated by `FreedomOfMovement`.
+    DifficultTerrain,
+    /// Antimagic field (BL-36): inside the zone, magic abilities can't be cast
+    /// and attuned magic-item effects are suppressed (physical/innate abilities
+    /// unaffected). Indiscriminate — applied to all in the zone.
+    /// `DisableMagic`.
+    Antimagic,
+    /// Dimensional anchor (BL-05 rider): the bearer can't teleport/blink while
+    /// it lasts (e.g. "Immovable Object" / anti-teleport zones). Sets
+    /// `DisableTeleport`. Other movement is unaffected.
+    Anchored,
+    /// Magical sleep (BL-05 rider): the bearer is incapacitated — can't move
+    /// (`MovementSpeed(0)`) and can't use auxiliary abilities
+    /// (`DisableAuxiliaryAbilities`). v1 is duration-based; wake-on-damage is a
+    /// documented follow-up (spell-riders-engine spec §6 / tasks/13).
+    Asleep,
+    /// Blinded (BL-05 rider): can't aim — outgoing attack damage is reduced by
+    /// `strength` (`AttackDamage(1 - strength)`), e.g. strength 0.5 = half
+    /// damage dealt. The action-combat analogue of "attack disadvantage";
+    /// vision occlusion is a deferred client-only effect.
+    Blinded,
     // =================
     //      COMPLEX
     // =================
@@ -309,6 +345,7 @@ impl BuffKind {
             | BuffKind::ComboGeneration
             | BuffKind::IncreaseMaxEnergy
             | BuffKind::IncreaseMaxHealth
+            | BuffKind::Shielded
             | BuffKind::Invulnerability
             | BuffKind::ProtectingWard
             | BuffKind::Hastened
@@ -332,7 +369,8 @@ impl BuffKind {
             | BuffKind::Heartseeker
             | BuffKind::EagleEye
             | BuffKind::ArdentHunter
-            | BuffKind::SepticShot => BuffDescriptor::SimplePositive,
+            | BuffKind::SepticShot
+            | BuffKind::FreedomOfMovement => BuffDescriptor::SimplePositive,
             BuffKind::Bleeding
             | BuffKind::Cursed
             | BuffKind::Burning
@@ -352,7 +390,12 @@ impl BuffKind {
             | BuffKind::ArdentHunted
             | BuffKind::Terrified
             | BuffKind::Charmed
-            | BuffKind::Hollowtouched => BuffDescriptor::SimpleNegative,
+            | BuffKind::Hollowtouched
+            | BuffKind::DifficultTerrain
+            | BuffKind::Antimagic
+            | BuffKind::Anchored
+            | BuffKind::Asleep
+            | BuffKind::Blinded => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -476,6 +519,9 @@ impl BuffKind {
                 value: data.strength,
                 kind: ModifierKind::Additive,
             }],
+            // BL-05 RD-6: no per-tick stat effect — the absorb pool is granted on
+            // buff-add (`Health.raise_absorb_to`) and depleted in `change_by`.
+            BuffKind::Shielded => Vec::new(),
             BuffKind::Invulnerability => vec![BuffEffect::DamageReduction(1.0)],
             BuffKind::ProtectingWard => vec![BuffEffect::DamageReduction(
                 // Causes non-linearity in effect strength, but necessary
@@ -533,6 +579,32 @@ impl BuffKind {
                 BuffEffect::BuffImmunity(BuffKind::Burning),
             ],
             BuffKind::Ensnared => vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))],
+            // BL-03: linear slow so strength 0.5 = exactly half speed (tunable per
+            // zone). Intended strength range is [0, 1); strength >= 1.0 floors at a
+            // full root (clamped), so authors who want a root should use Rooted/Ensnared.
+            BuffKind::DifficultTerrain => {
+                vec![BuffEffect::MovementSpeed((1.0 - data.strength).max(0.0))]
+            },
+            // BL-03: "freedom of movement" — only negates difficult terrain.
+            BuffKind::FreedomOfMovement => {
+                vec![BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)]
+            },
+            // BL-36: antimagic — suppress magic casting + attuned magic-item effects.
+            BuffKind::Antimagic => vec![BuffEffect::DisableMagic],
+            // BL-05 rider: dimensional anchor — block teleport/blink only.
+            BuffKind::Anchored => vec![BuffEffect::DisableTeleport],
+            // BL-05 rider: magical sleep — incapacitate. No movement, no
+            // auxiliary abilities, and zero outgoing attack damage (the engine
+            // has no "disable all abilities" primitive, so AttackDamage(0.0)
+            // neuters the still-usable primary/secondary while asleep). v1 is
+            // duration-based; wake-on-damage is RD-3 (tasks/13).
+            BuffKind::Asleep => vec![
+                BuffEffect::MovementSpeed(0.0),
+                BuffEffect::DisableAuxiliaryAbilities,
+                BuffEffect::AttackDamage(0.0),
+            ],
+            // BL-05 rider: blinded — reduced outgoing attack damage (can't aim).
+            BuffKind::Blinded => vec![BuffEffect::AttackDamage((1.0 - data.strength).max(0.0))],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -723,7 +795,16 @@ impl BuffKind {
                 .with_requirement(CombatRequirement::AttackSource(AttackSource::Projectile)),
             )],
             BuffKind::Terrified => {
-                vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))]
+                // BL-05 Fear rider, redesigned on the BL-52 combat-resolution
+                // engine: slowed AND fights at a disadvantage. The flee behaviour
+                // lives in the agent AI (`is_terrified`); the disadvantage is a
+                // flat **−accuracy** (more misses, same damage when it lands) —
+                // not a damage cut. −12 acc ≈ −18% hit vs an equal-evasion target
+                // (balance note §8); scales with buff strength.
+                vec![
+                    BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength)),
+                    BuffEffect::Accuracy(-12.0 * nn_scaling(data.strength)),
+                ]
             },
             BuffKind::Charmed => vec![],
             BuffKind::Hollowtouched => vec![BuffEffect::MaxHealthModifier {
@@ -990,6 +1071,26 @@ pub enum BuffEffect {
     DeathEffect(StatEffect),
     /// Prevents use of auxiliary abilities
     DisableAuxiliaryAbilities,
+    /// Antimagic (BL-36): prevents activation of magic abilities and suppresses
+    /// attuned magic-item effects. Sets `Stats.disable_magic`.
+    DisableMagic,
+    /// Dimensional anchor (BL-05): prevents teleport/blink. Sets
+    /// `Stats.disable_teleport`.
+    DisableTeleport,
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// physical to-hit accuracy (negative = harder to land, e.g. Fear). Sets
+    /// `Stats.accuracy`.
+    Accuracy(f32),
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// evasion (harder to be hit). Sets `Stats.evasion`.
+    Evasion(f32),
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// critical-hit chance. Sets `Stats.crit_chance`.
+    CritChance(f32),
+    /// Combat resolution (BL-52 P3): adds to a typed elemental resistance
+    /// channel (fraction), mitigating incoming **AoE** damage of that element.
+    /// Sets the matching `Stats.resist_*`.
+    Resistance(ResistKind, f32),
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
@@ -1345,6 +1446,107 @@ pub mod tests {
             DestInfo::default(),
             None,
         )
+    }
+
+    #[test]
+    fn difficult_terrain_halves_speed_at_half_strength() {
+        // BL-03: linear slow, strength 0.5 -> exactly half move speed.
+        let effects = BuffKind::DifficultTerrain.effects(&BuffData::new(0.5, None), None);
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            BuffEffect::MovementSpeed(s) if (*s - 0.5).abs() < f32::EPSILON
+        )));
+        assert!(!BuffKind::DifficultTerrain.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn antimagic_disables_magic() {
+        // BL-36: the antimagic debuff sets the disable-magic flag and nothing else.
+        let effects = BuffKind::Antimagic.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::DisableMagic));
+        assert!(!BuffKind::Antimagic.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn anchored_disables_teleport_only() {
+        // BL-05 rider: anchor sets the disable-teleport flag and nothing else.
+        let effects = BuffKind::Anchored.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::DisableTeleport));
+        assert!(!BuffKind::Anchored.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn asleep_incapacitates() {
+        // BL-05 rider: sleep roots (MovementSpeed 0) + locks auxiliary abilities.
+        let effects = BuffKind::Asleep.effects(&BuffData::new(1.0, None), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::MovementSpeed(s) if *s == 0.0))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::DisableAuxiliaryAbilities))
+        );
+        // Can't deal damage while asleep (no "disable all abilities" primitive).
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d == 0.0))
+        );
+        assert!(!BuffKind::Asleep.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn blinded_reduces_attack_damage() {
+        // BL-05 rider: blind reduces outgoing damage by strength (0.5 -> half).
+        let effects = BuffKind::Blinded.effects(&BuffData::new(0.5, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::AttackDamage(d) if (d - 0.5).abs() < 1e-6));
+        assert!(!BuffKind::Blinded.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn terrified_slows_and_lowers_accuracy() {
+        // BL-05 Fear rider on the BL-52 engine: slows AND lowers accuracy
+        // (fights at a disadvantage — more misses, same damage); flee behaviour
+        // is in the agent AI.
+        let effects = BuffKind::Terrified.effects(&BuffData::new(1.0, None), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::MovementSpeed(s) if *s < 1.0))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::Accuracy(a) if *a < 0.0))
+        );
+    }
+
+    #[test]
+    fn freedom_of_movement_grants_difficult_terrain_immunity() {
+        // BL-03: the immunity source negates DifficultTerrain and nothing else.
+        let effects = BuffKind::FreedomOfMovement.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects[0],
+            BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)
+        ));
+        assert!(BuffKind::FreedomOfMovement.is_buff(), "should be positive");
+    }
+
+    #[test]
+    fn shielded_is_a_positive_buff_with_no_tick_effect() {
+        // BL-05 RD-6: the absorb pool is granted on buff-add (server) and
+        // consumed in `Health::change_by`, so the buff itself has no per-tick
+        // effect; it's a positive marker buff.
+        let effects = BuffKind::Shielded.effects(&BuffData::new(30.0, None), None);
+        assert!(effects.is_empty());
+        assert!(BuffKind::Shielded.is_buff(), "should be positive");
     }
 
     #[test]

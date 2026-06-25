@@ -164,6 +164,16 @@ fn class_i18n_key(class: ClassKind) -> &'static str {
         ClassKind::Mage => "common-class-mage",
         ClassKind::Cleric => "common-class-cleric",
         ClassKind::Rogue => "common-class-rogue",
+        ClassKind::Barbarian => "common-class-barbarian",
+        ClassKind::Sorcerer => "common-class-sorcerer",
+        ClassKind::Warlock => "common-class-warlock",
+        ClassKind::Bard => "common-class-bard",
+        ClassKind::Paladin => "common-class-paladin",
+        ClassKind::Druid => "common-class-druid",
+        ClassKind::Ranger => "common-class-ranger",
+        ClassKind::Monk => "common-class-monk",
+        ClassKind::Artificer => "common-class-artificer",
+        ClassKind::BloodSlayer => "common-class-blood_slayer",
     }
 }
 
@@ -279,6 +289,7 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::ComboGeneration => "buff-combo_generation",
         BuffKind::IncreaseMaxHealth => "buff-increase_max_health",
         BuffKind::IncreaseMaxEnergy => "buff-increase_max_energy",
+        BuffKind::Shielded => "buff-shielded",
         BuffKind::Invulnerability => "buff-invulnerability",
         BuffKind::ProtectingWard => "buff-protectingward",
         BuffKind::Frenzied => "buff-frenzied",
@@ -325,8 +336,15 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::Terrified => "buff-terrified",
         BuffKind::Charmed => "buff-charmed",
         BuffKind::Hollowtouched => "buff-hollowtouched",
+        BuffKind::DifficultTerrain => "buff-difficult_terrain",
+        BuffKind::Antimagic => "buff-antimagic",
+        BuffKind::Anchored => "buff-anchored",
+        BuffKind::Asleep => "buff-asleep",
+        BuffKind::Blinded => "buff-blinded",
         // Neutral
         BuffKind::Polymorphed => "buff-polymorphed",
+        // Positive
+        BuffKind::FreedomOfMovement => "buff-freedom_of_movement",
     }
 }
 
@@ -407,7 +425,8 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         },
                         // Show buff strength
                         BuffKind::IncreaseMaxEnergy
-                        | BuffKind::IncreaseMaxHealth => {
+                        | BuffKind::IncreaseMaxHealth
+                        | BuffKind::Shielded => {
                             let key = buff_key(buff.kind);
                             i18n.get_attr_ctx(key, "stat", &i18n::fluent_args! {
                                 "strength" => format_float(strength),
@@ -475,7 +494,13 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         | BuffKind::SepticShot
                         | BuffKind::Terrified
                         | BuffKind::Charmed
-                        | BuffKind::Hollowtouched => Cow::Borrowed(""),
+                        | BuffKind::Hollowtouched
+                        | BuffKind::DifficultTerrain
+                        | BuffKind::FreedomOfMovement
+                        | BuffKind::Antimagic
+                        | BuffKind::Anchored
+                        | BuffKind::Asleep
+                        | BuffKind::Blinded => Cow::Borrowed(""),
                     };
 
                     write!(&mut description, "{}", buff_desc).unwrap();

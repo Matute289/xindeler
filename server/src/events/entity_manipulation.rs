@@ -273,7 +273,16 @@ impl ServerEvent for HealthChangeEvent {
                 }
 
                 // If the change amount was not zero
+                // BL-05 RD-6: track temp-HP absorb depletion across this change so
+                // the granting `Shielded` buff can be removed once the pool empties.
+                let had_absorb = health.absorb() > 0.0;
                 let changed = health.change_by(ev.change);
+                if had_absorb && health.absorb() <= 0.0 {
+                    emitters.emit(BuffEvent {
+                        entity: ev.entity,
+                        buff_change: buff::BuffChange::RemoveByKind(BuffKind::Shielded),
+                    });
+                }
                 if let Some(mut heads) = heads {
                     // We want some hp to be left for a headless body, so we divide by (max amount
                     // of heads + 2)
@@ -382,6 +391,15 @@ impl ServerEvent for HealthChangeEvent {
                         any_required: vec![BuffCategory::Concentration],
                         none_required: vec![],
                     },
+                });
+            }
+
+            // BL-05 rider: any external attacking hit wakes a sleeping target
+            // (no threshold). RemoveByKind is a no-op if the target isn't asleep.
+            if ev.change.amount < 0.0 && ev.change.cause.is_some() {
+                emitters.emit(BuffEvent {
+                    entity: ev.entity,
+                    buff_change: buff::BuffChange::RemoveByKind(BuffKind::Asleep),
                 });
             }
         }
@@ -633,6 +651,7 @@ pub struct DestroyEventData<'a> {
     poises: ReadStorage<'a, Poise>,
     groups: ReadStorage<'a, Group>,
     alignments: ReadStorage<'a, Alignment>,
+    ethos: WriteStorage<'a, comp::Ethos>,
     stats: ReadStorage<'a, Stats>,
     agents: ReadStorage<'a, Agent>,
     #[cfg(feature = "worldgen")]
@@ -666,10 +685,29 @@ impl ServerEvent for DestroyEvent {
             if !data.entities.is_alive(ev.entity) {
                 continue;
             }
+
             let mut outcomes = data.outcomes.emitter();
             if let Some(mut health) = data.healths.get_mut(ev.entity) {
                 if !health.is_dead {
                     health.is_dead = true;
+
+                    // BL-33 Phase 3: a player's deeds drift their moral
+                    // alignment. Killing a peaceful NPC pulls toward Evil;
+                    // slaying a hostile nudges slightly Good/Lawful. Only PCs
+                    // drift (NPC drift is AURORA-era); beasts/objects and
+                    // self-kills carry no moral weight, and PvP (victim has no
+                    // AI `Alignment`) is left to AURORA. Inside the `is_dead`
+                    // latch so a duplicate `Destroy` event can't double-apply.
+                    if let Some(killer) =
+                        ev.cause.by.and_then(|by| data.id_maps.uid_entity(by.uid()))
+                        && killer != ev.entity
+                        && data.players.contains(killer)
+                        && let Some(victim_alignment) = data.alignments.get(ev.entity).copied()
+                        && let Some((d_ge, d_lc)) = comp::Ethos::kill_drift(victim_alignment)
+                        && let Some(mut ethos) = data.ethos.get_mut(killer)
+                    {
+                        ethos.nudge(d_ge, d_lc);
+                    }
 
                     if let Some(pos) = data.positions.get(ev.entity).copied() {
                         data.entities_died_last_tick.0.push((ev.entity, pos));
@@ -2532,18 +2570,26 @@ impl ServerEvent for BuffEvent {
         Read<'a, Time>,
         WriteStorage<'a, comp::Buffs>,
         ReadStorage<'a, Body>,
-        ReadStorage<'a, Health>,
+        // BL-05 RD-6: Health is written here to grant/clear the temp-HP absorb
+        // pool when a `Shielded` buff is added/removed.
+        WriteStorage<'a, Health>,
         ReadStorage<'a, Stats>,
         ReadStorage<'a, comp::Mass>,
     );
 
     fn handle(
         events: impl ExactSizeIterator<Item = Self>,
-        (time, mut buffs, bodies, healths, stats, masses): Self::SystemData<'_>,
+        (time, mut buffs, bodies, mut healths, stats, masses): Self::SystemData<'_>,
     ) {
         for ev in events {
             if let Some(mut buffs) = buffs.get_mut(ev.entity) {
                 use buff::BuffChange;
+                // BL-05 RD-6: invariant "absorb > 0 ⟺ a Shielded buff is active".
+                // The absorb pool is granted on Shielded-add below; here we clear
+                // it whenever *any* removal path (dispel, expiry, deplete, and
+                // crucially the death `RemoveByCategory`) drops the last Shielded
+                // buff — a single post-match check covers every arm uniformly.
+                let had_shield = buffs.buffs.values().any(|b| b.kind == BuffKind::Shielded);
                 match ev.buff_change {
                     BuffChange::Add(mut new_buff) => {
                         let immunity_by_buff = buffs
@@ -2620,6 +2666,15 @@ impl ServerEvent for BuffEvent {
                                 }
                             }
 
+                            // BL-05 RD-6: granting a Shielded buff fills the
+                            // temp-HP absorb pool (take-higher: a re-cast refreshes
+                            // rather than stacks; a future shield *kind* would add).
+                            if new_buff.kind == BuffKind::Shielded
+                                && let Some(mut health) = healths.get_mut(ev.entity)
+                            {
+                                health.raise_absorb_to(new_buff.data.strength);
+                            }
+
                             buffs.insert(new_buff, *time);
                         }
                     },
@@ -2684,6 +2739,15 @@ impl ServerEvent for BuffEvent {
                                 buff.end_time = buff.data.duration.map(|dur| Time(time.0 + dur.0));
                             })
                     },
+                }
+                // BL-05 RD-6: if this change dropped the last Shielded buff, empty
+                // the absorb pool so it can never linger without its grant (covers
+                // dispel/expiry/deplete and the on-death buff strip).
+                if had_shield
+                    && !buffs.buffs.values().any(|b| b.kind == BuffKind::Shielded)
+                    && let Some(mut health) = healths.get_mut(ev.entity)
+                {
+                    health.clear_absorb();
                 }
             }
         }
@@ -3723,6 +3787,7 @@ pub fn transform_entity(
             agent,
             loot,
             alignment: _,
+            ethos: _,
             pos: _,
             pets,
             rider,

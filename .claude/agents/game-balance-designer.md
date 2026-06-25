@@ -26,7 +26,7 @@ Ground rules:
    in `assets/common/entity/`, weapon stats in `assets/common/items/weapons/`) rather
    than assuming.
 5. When real data exists, prefer it: telemetry JSONL from playtests (see
-   `.claude/skills/veloren-telemetry/SKILL.md`) beats theory — state which you used.
+   `.claude/skills/xindeler-telemetry/SKILL.md`) beats theory — state which you used.
 6. Flag any number that requires new code (e.g. a curve shape the current formula can't
    express) as a spec-change request rather than silently redefining it.
 

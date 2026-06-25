@@ -71,6 +71,9 @@ pub struct ReadData<'a> {
     alignments: ReadStorage<'a, Alignment>,
     players: ReadStorage<'a, Player>,
     masses: ReadStorage<'a, Mass>,
+    // BL-01: per-class + per-level permanent attribute scaling (applied with racial passives).
+    character_classes: ReadStorage<'a, common::comp::CharacterClass>,
+    skill_sets: ReadStorage<'a, common::comp::SkillSet>,
 }
 
 #[derive(Default)]
@@ -152,6 +155,8 @@ impl<'a> System<'a> for Sys {
         // Racial passives manifest: one cache access per system run (hot-reloads
         // between runs); per-entity asset-cache hits are banned in tick paths.
         let racial_traits = common::comp::class::racial_traits_manifest();
+        // BL-01 per-class scaling manifest: one cache access per system run.
+        let class_attributes = common::comp::class::class_attributes_manifest();
         let buff_join = (
             &read_data.entities,
             &read_data.buffs,
@@ -526,6 +531,20 @@ impl<'a> System<'a> for Sys {
                     .copied()
                     .unwrap_or_default()
                     .apply(&mut stat);
+
+                // BL-01: permanent per-class + per-level scaling, same tick slot
+                // as racial passives (derived level → no persistence).
+                if let (Some(character_class), Some(skill_set)) = (
+                    read_data.character_classes.get(entity),
+                    read_data.skill_sets.get(entity),
+                ) {
+                    class_attributes
+                        .0
+                        .get(&character_class.0)
+                        .copied()
+                        .unwrap_or_default()
+                        .apply(&mut stat, skill_set.character_level());
+                }
             }
 
             let mut body_override = None;
@@ -890,6 +909,12 @@ fn execute_effect(
         BuffEffect::DamagedEffect(effect) => stat.effects_on_damaged.push(effect.clone()),
         BuffEffect::DeathEffect(effect) => stat.effects_on_death.push(effect.clone()),
         BuffEffect::DisableAuxiliaryAbilities => stat.disable_auxiliary_abilities = true,
+        BuffEffect::DisableMagic => stat.disable_magic = true,
+        BuffEffect::DisableTeleport => stat.disable_teleport = true,
+        BuffEffect::Accuracy(acc) => stat.accuracy += *acc,
+        BuffEffect::Evasion(eva) => stat.evasion += *eva,
+        BuffEffect::CritChance(cc) => stat.crit_chance += *cc,
+        BuffEffect::Resistance(kind, amount) => stat.add_resistance(*kind, *amount),
         BuffEffect::CrowdControlResistance(ccr) => {
             stat.crowd_control_resistance += ccr;
         },

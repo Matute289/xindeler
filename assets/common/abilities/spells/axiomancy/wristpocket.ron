@@ -1,0 +1,9 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): extradimensional item stash — NO-OP placeholder.
+SelfBuff(
+    buildup_duration: 0.6,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [],
+    energy_cost: 83,
+    meta: (school: Some(Axiomancy), subschool: Some(Gravimancy), form: Some(Conjuration), source: Some(Arcane), cooldown: Some(6.0)),
+)

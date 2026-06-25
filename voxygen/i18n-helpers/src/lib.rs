@@ -382,6 +382,7 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::ComboGeneration
         | BuffKind::IncreaseMaxEnergy
         | BuffKind::IncreaseMaxHealth
+        | BuffKind::Shielded
         | BuffKind::Invulnerability
         | BuffKind::ProtectingWard
         | BuffKind::Frenzied
@@ -406,7 +407,8 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::Heartseeker
         | BuffKind::EagleEye
         | BuffKind::ArdentHunter
-        | BuffKind::SepticShot => {
+        | BuffKind::SepticShot
+        | BuffKind::FreedomOfMovement => {
             tracing::error!("Player was killed by a positive buff!");
             "mysterious"
         },
@@ -425,7 +427,12 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::ArdentHunted
         | BuffKind::Terrified
         | BuffKind::Charmed
-        | BuffKind::Hollowtouched => {
+        | BuffKind::Hollowtouched
+        | BuffKind::DifficultTerrain
+        | BuffKind::Antimagic
+        | BuffKind::Anchored
+        | BuffKind::Asleep
+        | BuffKind::Blinded => {
             tracing::error!("Player was killed by a debuff that doesn't do damage!");
             "mysterious"
         },

@@ -23,6 +23,7 @@ macro_rules! synced_components {
             body: Body,
             hardcore: Hardcore,
             character_class: CharacterClass,
+            ethos: Ethos,
             stats: Stats,
             buffs: Buffs,
             auras: Auras,
@@ -140,6 +141,10 @@ impl NetSync for Hardcore {
 }
 
 impl NetSync for CharacterClass {
+    const SYNC_FROM: SyncFrom = SyncFrom::AnyEntity;
+}
+
+impl NetSync for Ethos {
     const SYNC_FROM: SyncFrom = SyncFrom::AnyEntity;
 }
 

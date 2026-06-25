@@ -83,6 +83,7 @@ pub enum ClientGeneral {
         hardcore: bool,
         start_site: Option<SiteId>,
         class: comp::class::ClassKind,
+        ethos: comp::Ethos,
     },
     DeleteCharacter(CharacterId),
     EditCharacter {

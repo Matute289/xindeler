@@ -123,3 +123,7 @@ graphify-out/
 docs/design/
 # legacy lore path — guard against accidental public commits
 docs/lore/
+
+# Admin test-harness rosters (real ones are local; example is committed)
+roster.ron
+client/roster.ron

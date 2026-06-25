@@ -5,7 +5,7 @@ use crate::{
     calendar::Calendar,
     combat::{DeathEffects, RiderEffects, StatEffect},
     comp::{
-        Alignment, Body, Item, agent, humanoid,
+        Alignment, Body, Ethos, Item, Moral, Order, agent, humanoid,
         inventory::loadout_builder::{LoadoutBuilder, LoadoutSpec},
         misc::PortalData,
     },
@@ -134,6 +134,12 @@ pub struct EntityConfig {
     /// Alignment, can be Uninit
     pub alignment: AlignmentMark,
 
+    /// Moral alignment (BL-33), as a `(Order, Moral)` 9-box pair, e.g.
+    /// `Some((Lawful, Evil))`. When unset, humanoids derive a coarse default
+    /// from `alignment` (the AI faction) at spawn; non-humanoids get none.
+    #[serde(default)]
+    pub ethos: Option<(Order, Moral)>,
+
     /// Parameterises agent behaviour
     #[serde(default)]
     pub agent: AgentConfig,
@@ -212,6 +218,8 @@ pub enum SpecialEntity {
 pub struct EntityInfo {
     pub pos: Vec3<f32>,
     pub alignment: Alignment,
+    /// Moral alignment (BL-33); `None` until resolved at spawn.
+    pub ethos: Option<Ethos>,
     /// Parameterises agent behaviour
     pub has_agency: bool,
     pub agent_mark: Option<agent::Mark>,
@@ -257,6 +265,7 @@ impl EntityInfo {
         Self {
             pos,
             alignment: Alignment::Wild,
+            ethos: None,
 
             has_agency: true,
             agent_mark: None,
@@ -314,6 +323,7 @@ impl EntityInfo {
             name,
             body,
             alignment,
+            ethos,
             agent,
             inventory,
             loot,
@@ -355,6 +365,11 @@ impl EntityInfo {
 
         if let AlignmentMark::Alignment(alignment) = alignment {
             self = self.with_alignment(alignment);
+        }
+
+        // BL-33: explicit per-config moral alignment; otherwise resolved at spawn.
+        if let Some((order, moral)) = ethos {
+            self = self.with_ethos(Ethos::from_box(order, moral));
         }
 
         self = self.with_loot_drop(loot);
@@ -492,6 +507,12 @@ impl EntityInfo {
     #[must_use]
     pub fn with_alignment(mut self, alignment: Alignment) -> Self {
         self.alignment = alignment;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ethos(mut self, ethos: Ethos) -> Self {
+        self.ethos = Some(ethos);
         self
     }
 
@@ -813,6 +834,7 @@ pub mod tests {
             meta,
             death_effects,
             alignment: _, // can't fail if serialized, it's a boring enum
+            ethos: _,
             rider_effects: _,
             scale,
             agent: _,

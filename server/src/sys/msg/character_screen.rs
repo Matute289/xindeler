@@ -182,6 +182,7 @@ impl Sys {
                 #[cfg(not(feature = "worldgen"))]
                     start_site: _,
                 class,
+                ethos,
             } => {
                 if censor.check(&alias) {
                     debug!(?alias, "denied alias as it contained a banned word");
@@ -229,6 +230,7 @@ impl Sys {
                         offhand.clone(),
                         body,
                         class,
+                        ethos,
                         hardcore,
                         character_updater,
                         waypoint,

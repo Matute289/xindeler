@@ -248,7 +248,13 @@ fn activate_aura(
                 )
             };
 
-            conditions_held && (kind.is_buff() || allow_friendly_fire || permit_pvp())
+            // A debuff aura that explicitly targets `All` is intentionally
+            // indiscriminate (e.g. BL-36 antimagic field) — it applies to the
+            // caster, allies and enemies alike, bypassing the usual debuff PvP
+            // gate. GroupOf/NotGroupOf debuffs still require permit_pvp.
+            let indiscriminate = matches!(aura.target, AuraTarget::All);
+            conditions_held
+                && (kind.is_buff() || allow_friendly_fire || indiscriminate || permit_pvp())
         },
         AuraKind::FriendlyFire => true,
         AuraKind::ForcePvP => {

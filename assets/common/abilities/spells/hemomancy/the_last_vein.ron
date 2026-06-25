@@ -1,0 +1,17 @@
+// rider deferred to file 13 (content-adaptation §4.3/§7): self-heal for a share of total AoE damage dealt.
+GroundAoe(
+    energy_cost: 266.0,
+    buildup_duration: 1.2,
+    delay: 0.5,
+    recover_duration: 0.75,
+    max_range: 50.0,
+    radius: 12.0,
+    min_falloff: 0.4,
+    damage: 270,
+    poise: 15,
+    knockback: (strength: 10, direction: Away),
+    dodgeable: Roll,
+    reagent: Some(Red),
+    rooted_cast: false,
+    meta: (school: Some(Hemomancy), form: Some(Necromancy), source: Some(Arcane), cooldown: Some(74.0), hp_cost: Some(22.0)),
+)

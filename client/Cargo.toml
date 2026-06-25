@@ -87,3 +87,7 @@ required-features = ["bin_bot"]
 [[bin]]
 name = "swarm"
 required-features = ["bin_bot", "tick_network"]
+
+[[bin]]
+name = "test_harness"
+required-features = ["bin_bot", "tick_network"]

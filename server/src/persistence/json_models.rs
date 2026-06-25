@@ -83,6 +83,16 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Class(ClassKind::Mage) => "Class Mage",
         Class(ClassKind::Cleric) => "Class Cleric",
         Class(ClassKind::Rogue) => "Class Rogue",
+        Class(ClassKind::Barbarian) => "Class Barbarian",
+        Class(ClassKind::Sorcerer) => "Class Sorcerer",
+        Class(ClassKind::Warlock) => "Class Warlock",
+        Class(ClassKind::Bard) => "Class Bard",
+        Class(ClassKind::Paladin) => "Class Paladin",
+        Class(ClassKind::Druid) => "Class Druid",
+        Class(ClassKind::Ranger) => "Class Ranger",
+        Class(ClassKind::Monk) => "Class Monk",
+        Class(ClassKind::Artificer) => "Class Artificer",
+        Class(ClassKind::BloodSlayer) => "Class BloodSlayer",
         // Adventurer has no class tree; a Class(Adventurer) group reaching
         // persistence is a bug, consistent with the unsupported-weapon arm.
         Class(ClassKind::Adventurer) => panic!(
@@ -125,6 +135,16 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Class Mage" => Class(ClassKind::Mage),
         "Class Cleric" => Class(ClassKind::Cleric),
         "Class Rogue" => Class(ClassKind::Rogue),
+        "Class Barbarian" => Class(ClassKind::Barbarian),
+        "Class Sorcerer" => Class(ClassKind::Sorcerer),
+        "Class Warlock" => Class(ClassKind::Warlock),
+        "Class Bard" => Class(ClassKind::Bard),
+        "Class Paladin" => Class(ClassKind::Paladin),
+        "Class Druid" => Class(ClassKind::Druid),
+        "Class Ranger" => Class(ClassKind::Ranger),
+        "Class Monk" => Class(ClassKind::Monk),
+        "Class Artificer" => Class(ClassKind::Artificer),
+        "Class BloodSlayer" => Class(ClassKind::BloodSlayer),
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
@@ -141,6 +161,16 @@ pub fn class_to_db_string(class: comp::class::ClassKind) -> String {
         Mage => "Mage",
         Cleric => "Cleric",
         Rogue => "Rogue",
+        Barbarian => "Barbarian",
+        Sorcerer => "Sorcerer",
+        Warlock => "Warlock",
+        Bard => "Bard",
+        Paladin => "Paladin",
+        Druid => "Druid",
+        Ranger => "Ranger",
+        Monk => "Monk",
+        Artificer => "Artificer",
+        BloodSlayer => "BloodSlayer",
     }
     .to_string()
 }
@@ -407,6 +437,32 @@ pub fn apply_db_item_properties(item: &mut comp::Item, properties: &DatabaseItem
 
 #[cfg(test)]
 pub mod tests {
+    /// BL-04: every `ClassKind` must survive both persistence converters in
+    /// both directions, so a new variant can't silently drop from one (the
+    /// guard the `ClassKind::ALL` doc-comment promises).
+    #[test]
+    fn class_persistence_round_trips_for_every_class() {
+        use common::comp::{class::ClassKind, skillset::SkillGroupKind};
+        for class in ClassKind::ALL {
+            // CharacterClass converter (both directions).
+            assert_eq!(
+                super::db_string_to_class(&super::class_to_db_string(class)),
+                class,
+                "class_to_db_string round-trip failed for {class:?}"
+            );
+            // Skill-group converter (both directions) — Adventurer has no class
+            // tree and intentionally panics, so skip it.
+            if class != ClassKind::Adventurer {
+                let group = SkillGroupKind::Class(class);
+                assert_eq!(
+                    super::db_string_to_skill_group(&super::skill_group_to_db_string(group)),
+                    group,
+                    "skill_group_to_db_string round-trip failed for {class:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_default_item_properties() {
         use super::DatabaseItemProperties;
