@@ -67,6 +67,16 @@ pub struct CombatTuning {
     /// Maximum hit chance — optimal investment can reach a guaranteed hit
     /// (BL-52 ceil = 1.00).
     pub hit_ceil: f32,
+    /// Minimum rolled crit chance — every attacker can crit at least this often
+    /// (no dead stat). BL-52 floor = 0.03.
+    pub crit_chance_floor: f32,
+    /// Maximum rolled crit chance (guaranteed positional crits bypass it).
+    /// BL-52 cap = 0.75.
+    pub crit_chance_cap: f32,
+    /// Precision magnitude applied when a random `crit_chance` roll succeeds
+    /// (reuses the precision system; final bonus = damage·this·(precision_power
+    /// − 1)). BL-52 = 1.0 (a rolled crit lands at full precision).
+    pub crit_precision_mult: f32,
 }
 
 impl Default for CombatTuning {
@@ -76,6 +86,9 @@ impl Default for CombatTuning {
             hit_k: 0.015,
             hit_floor: 0.05,
             hit_ceil: 1.00,
+            crit_chance_floor: 0.03,
+            crit_chance_cap: 0.75,
+            crit_precision_mult: 1.0,
         }
     }
 }
@@ -349,6 +362,11 @@ impl Attack {
     ) -> bool {
         // TODO: Maybe move this higher and pass it as argument into this function?
         let msm = &MaterialStatManifest::load().read();
+        // BL-52 combat-resolution tuning — one cached read per attack (mirrors
+        // `msm` above), reused by the to-hit and crit rolls below.
+        let combat_tuning = &Ron::<CombatTuning>::load_expect("common.combat_tuning")
+            .read()
+            .0;
 
         let AttackOptions {
             target_dodging,
@@ -378,10 +396,8 @@ impl Attack {
         let attack_missed = is_single_target && {
             let accuracy = attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy);
             let evasion = target.stats.map_or(0.0, |s| s.evasion);
-            let tuning = Ron::<CombatTuning>::load_expect("common.combat_tuning");
-            let tuning = &tuning.read().0;
-            let hit_chance = (tuning.base_hit + (accuracy - evasion) * tuning.hit_k)
-                .clamp(tuning.hit_floor, tuning.hit_ceil);
+            let hit_chance = (combat_tuning.base_hit + (accuracy - evasion) * combat_tuning.hit_k)
+                .clamp(combat_tuning.hit_floor, combat_tuning.hit_ceil);
             rng.random::<f32>() >= hit_chance
         };
 
@@ -448,6 +464,34 @@ impl Attack {
             (Some(a), None) | (None, Some(a)) => Some(a),
             (None, None) => None,
         };
+
+        // BL-52 unified critical. Positional/conditional precision (flank,
+        // backstab, target poised, `ImminentCritical`, precision-vulnerability)
+        // already fired above and folds in as a guaranteed crit. If none did,
+        // roll the attacker's `crit_chance` for a random crit. Magnitude reuses
+        // the existing precision system (`precision_power`), per the locked Q4
+        // decision. Single-target only and only on a landed blow — keeping the
+        // AoE hot path RNG-free (AoE crit would re-add per-target rolls). The
+        // `crit_chance_floor` gives every attacker a small baseline crit (no dead
+        // stat); the cap bounds rolled crits (guaranteed positional crits bypass
+        // it as today). NOTE: the finer "side-flank = +chance / backstab =
+        // guaranteed" split (balance note §5) is deferred — positional precision
+        // stays deterministic here to avoid refactoring the shared upstream
+        // precision path.
+        let precision_mult = precision_mult.or_else(|| {
+            if is_single_target && !attack_missed {
+                let crit_chance = attacker
+                    .and_then(|a| a.stats)
+                    .map_or(0.0, |s| s.crit_chance)
+                    .clamp(
+                        combat_tuning.crit_chance_floor,
+                        combat_tuning.crit_chance_cap,
+                    );
+                (rng.random::<f32>() < crit_chance).then_some(combat_tuning.crit_precision_mult)
+            } else {
+                None
+            }
+        });
 
         let precision_power = self.precision_multiplier
             * attacker
@@ -2747,5 +2791,22 @@ mod combat_resolution_tests {
         assert!((t.base_hit - 0.85).abs() < 1e-6);
         assert!((t.hit_floor - 0.05).abs() < 1e-6);
         assert!((t.hit_ceil - 1.0).abs() < 1e-6);
+        // P2 crit fields present + sane.
+        assert!((t.crit_chance_floor - 0.03).abs() < 1e-6);
+        assert!((t.crit_chance_cap - 0.75).abs() < 1e-6);
+        assert!(t.crit_chance_floor < t.crit_chance_cap);
+        assert!(t.crit_precision_mult > 0.0);
+    }
+
+    // BL-52 P2: the rolled crit chance is clamped to [floor, cap] — a zero-crit
+    // attacker still crits at the floor, an over-stacked one never exceeds the
+    // cap (guaranteed positional crits bypass this path).
+    #[test]
+    fn crit_chance_clamps_to_floor_and_cap() {
+        let t = CombatTuning::default();
+        let clamp = |c: f32| c.clamp(t.crit_chance_floor, t.crit_chance_cap);
+        assert!((clamp(0.0) - t.crit_chance_floor).abs() < 1e-6);
+        assert!((clamp(1.0) - t.crit_chance_cap).abs() < 1e-6);
+        assert!((clamp(0.30) - 0.30).abs() < 1e-6);
     }
 }

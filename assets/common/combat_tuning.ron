@@ -9,4 +9,9 @@
     hit_k:     0.015, // +1.5% hit per net point of (accuracy - evasion)
     hit_floor: 0.05, // never below 5% miss
     hit_ceil:  1.0,  // optimal investment can reach a guaranteed hit
+
+    // --- crit (BL-52 P2, balance note §5) ---
+    crit_chance_floor:  0.03, // everyone crits at least 3% (no dead stat)
+    crit_chance_cap:    0.75, // rolled crits cap at 75% (positional crits bypass)
+    crit_precision_mult: 1.0, // rolled crit lands at full precision magnitude
 )
