@@ -284,6 +284,15 @@ pub enum BuffKind {
     /// unaffected). Indiscriminate — applied to all in the zone.
     /// `DisableMagic`.
     Antimagic,
+    /// Dimensional anchor (BL-05 rider): the bearer can't teleport/blink while
+    /// it lasts (e.g. "Immovable Object" / anti-teleport zones). Sets
+    /// `DisableTeleport`. Other movement is unaffected.
+    Anchored,
+    /// Magical sleep (BL-05 rider): the bearer is incapacitated — can't move
+    /// (`MovementSpeed(0)`) and can't use auxiliary abilities
+    /// (`DisableAuxiliaryAbilities`). v1 is duration-based; wake-on-damage is a
+    /// documented follow-up (spell-riders-engine spec §6 / tasks/13).
+    Asleep,
     // =================
     //      COMPLEX
     // =================
@@ -370,7 +379,9 @@ impl BuffKind {
             | BuffKind::Charmed
             | BuffKind::Hollowtouched
             | BuffKind::DifficultTerrain
-            | BuffKind::Antimagic => BuffDescriptor::SimpleNegative,
+            | BuffKind::Antimagic
+            | BuffKind::Anchored
+            | BuffKind::Asleep => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -563,6 +574,13 @@ impl BuffKind {
             },
             // BL-36: antimagic — suppress magic casting + attuned magic-item effects.
             BuffKind::Antimagic => vec![BuffEffect::DisableMagic],
+            // BL-05 rider: dimensional anchor — block teleport/blink only.
+            BuffKind::Anchored => vec![BuffEffect::DisableTeleport],
+            // BL-05 rider: magical sleep — incapacitate (no move, no aux abilities).
+            BuffKind::Asleep => vec![
+                BuffEffect::MovementSpeed(0.0),
+                BuffEffect::DisableAuxiliaryAbilities,
+            ],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -1023,6 +1041,9 @@ pub enum BuffEffect {
     /// Antimagic (BL-36): prevents activation of magic abilities and suppresses
     /// attuned magic-item effects. Sets `Stats.disable_magic`.
     DisableMagic,
+    /// Dimensional anchor (BL-05): prevents teleport/blink. Sets
+    /// `Stats.disable_teleport`.
+    DisableTeleport,
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
@@ -1398,6 +1419,32 @@ pub mod tests {
         assert_eq!(effects.len(), 1);
         assert!(matches!(effects[0], BuffEffect::DisableMagic));
         assert!(!BuffKind::Antimagic.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn anchored_disables_teleport_only() {
+        // BL-05 rider: anchor sets the disable-teleport flag and nothing else.
+        let effects = BuffKind::Anchored.effects(&BuffData::new(1.0, None), None);
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], BuffEffect::DisableTeleport));
+        assert!(!BuffKind::Anchored.is_buff(), "should be a debuff");
+    }
+
+    #[test]
+    fn asleep_incapacitates() {
+        // BL-05 rider: sleep roots (MovementSpeed 0) + locks auxiliary abilities.
+        let effects = BuffKind::Asleep.effects(&BuffData::new(1.0, None), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::MovementSpeed(s) if *s == 0.0))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::DisableAuxiliaryAbilities))
+        );
+        assert!(!BuffKind::Asleep.is_buff(), "should be a debuff");
     }
 
     #[test]

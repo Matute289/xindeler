@@ -910,6 +910,7 @@ fn execute_effect(
         BuffEffect::DeathEffect(effect) => stat.effects_on_death.push(effect.clone()),
         BuffEffect::DisableAuxiliaryAbilities => stat.disable_auxiliary_abilities = true,
         BuffEffect::DisableMagic => stat.disable_magic = true,
+        BuffEffect::DisableTeleport => stat.disable_teleport = true,
         BuffEffect::CrowdControlResistance(ccr) => {
             stat.crowd_control_resistance += ccr;
         },

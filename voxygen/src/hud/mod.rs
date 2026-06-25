@@ -5646,6 +5646,10 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::DifficultTerrain => imgs.debuff_crippled_0,
         // BL-36: reuse the cursed/dark icon for antimagic (placeholder art).
         BuffKind::Antimagic => imgs.debuff_cursed_0,
+        // BL-05: placeholder art — anchor reuses frozen (rooted-in-place),
+        // sleep reuses the crippled/slow icon.
+        BuffKind::Anchored => imgs.debuff_frozen_0,
+        BuffKind::Asleep => imgs.debuff_crippled_0,
         BuffKind::Frozen => imgs.debuff_frozen_0,
         BuffKind::Wet => imgs.debuff_wet_0,
         BuffKind::Ensnared => imgs.debuff_ensnared_0,
