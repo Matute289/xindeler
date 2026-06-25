@@ -97,6 +97,13 @@ pub enum Outcome {
         parry: bool,
         uid: Uid,
     },
+    /// Combat resolution (BL-52 P4): a single-target attack missed (the to-hit
+    /// roll failed). Drives a floating "Miss" indicator over the target.
+    /// Carries no damage — it is the visible counterpart of a whiff.
+    Miss {
+        pos: Vec3<f32>,
+        target: Uid,
+    },
     PoiseChange {
         pos: Vec3<f32>,
         state: PoiseState,
@@ -227,6 +234,7 @@ impl Outcome {
             | Outcome::HealthChange { pos, .. }
             | Outcome::Death { pos, .. }
             | Outcome::Block { pos, .. }
+            | Outcome::Miss { pos, .. }
             | Outcome::PoiseChange { pos, .. }
             | Outcome::GroundSlam { pos }
             | Outcome::FlashFreeze { pos }
