@@ -382,6 +382,7 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::ComboGeneration
         | BuffKind::IncreaseMaxEnergy
         | BuffKind::IncreaseMaxHealth
+        | BuffKind::Shielded
         | BuffKind::Invulnerability
         | BuffKind::ProtectingWard
         | BuffKind::Frenzied

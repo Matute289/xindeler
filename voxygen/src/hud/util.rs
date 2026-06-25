@@ -289,6 +289,7 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::ComboGeneration => "buff-combo_generation",
         BuffKind::IncreaseMaxHealth => "buff-increase_max_health",
         BuffKind::IncreaseMaxEnergy => "buff-increase_max_energy",
+        BuffKind::Shielded => "buff-shielded",
         BuffKind::Invulnerability => "buff-invulnerability",
         BuffKind::ProtectingWard => "buff-protectingward",
         BuffKind::Frenzied => "buff-frenzied",
@@ -424,7 +425,8 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         },
                         // Show buff strength
                         BuffKind::IncreaseMaxEnergy
-                        | BuffKind::IncreaseMaxHealth => {
+                        | BuffKind::IncreaseMaxHealth
+                        | BuffKind::Shielded => {
                             let key = buff_key(buff.kind);
                             i18n.get_attr_ctx(key, "stat", &i18n::fluent_args! {
                                 "strength" => format_float(strength),
