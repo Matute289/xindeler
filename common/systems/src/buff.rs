@@ -914,6 +914,7 @@ fn execute_effect(
         BuffEffect::Accuracy(acc) => stat.accuracy += *acc,
         BuffEffect::Evasion(eva) => stat.evasion += *eva,
         BuffEffect::CritChance(cc) => stat.crit_chance += *cc,
+        BuffEffect::Resistance(kind, amount) => stat.add_resistance(*kind, *amount),
         BuffEffect::CrowdControlResistance(ccr) => {
             stat.crowd_control_resistance += ccr;
         },

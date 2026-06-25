@@ -14,4 +14,7 @@
     crit_chance_floor:  0.03, // everyone crits at least 3% (no dead stat)
     crit_chance_cap:    0.75, // rolled crits cap at 75% (positional crits bypass)
     crit_precision_mult: 1.0, // rolled crit lands at full precision magnitude
+
+    // --- resistances / AoE mitigation (BL-52 P3, balance note §6) ---
+    resist_soft_cap: 0.75, // typed elemental resist caps at 75% on AoE damage
 )

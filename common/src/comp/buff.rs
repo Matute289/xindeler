@@ -4,7 +4,7 @@ use crate::{
         CombatBuffStrength, CombatEffect, CombatModification, CombatRequirement, ScalingKind,
         StatEffect, StatEffectTarget,
     },
-    comp::{Mass, Stats, aura::AuraKey, tool::ToolKind},
+    comp::{Mass, Stats, aura::AuraKey, stats::ResistKind, tool::ToolKind},
     link::DynWeakLinkHandle,
     match_some,
     resources::{Secs, Time},
@@ -1076,6 +1076,10 @@ pub enum BuffEffect {
     /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
     /// critical-hit chance. Sets `Stats.crit_chance`.
     CritChance(f32),
+    /// Combat resolution (BL-52 P3): adds to a typed elemental resistance
+    /// channel (fraction), mitigating incoming **AoE** damage of that element.
+    /// Sets the matching `Stats.resist_*`.
+    Resistance(ResistKind, f32),
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
