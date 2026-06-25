@@ -68,6 +68,7 @@ widget_ids! {
         // HP-Bar
         hp_alignment,
         hp_filling,
+        hp_absorb,
         hp_decayed,
         hp_txt_bg,
         hp_txt,
@@ -594,6 +595,38 @@ impl<'a> Skillbar<'a> {
                 .color(Some(health_col))
                 .top_left_with_margins_on(state.ids.hp_alignment, 0.0, 0.0)
                 .set(state.ids.hp_filling, ui);
+
+            // BL-05 RD-6b: temp-HP / absorb shield drawn on top of the HP fill.
+            // The shield segment sits after current HP in a distinct colour;
+            // when it would fill past the end of the bar (overshield) the whole
+            // segment turns blue. NOTE: Veloren's HP fill is green, so the shield
+            // uses cyan (not green) to contrast — tune the two consts to taste.
+            let absorb = self.health.absorb() as f64;
+            if absorb > 0.0 && !is_downed {
+                let max_hp = f64::from(self.health.maximum()).max(1.0);
+                let absorb_pct = absorb / max_hp * 100.0;
+                let hp_pct = hp_percentage.clamp(0.0, 100.0);
+                let overshield = hp_pct + absorb_pct > 100.0;
+                // Visible portion of the shield within the bar (after the HP).
+                let absorb_width = ((hp_pct + absorb_pct).min(100.0) - hp_pct).max(0.0);
+                const SHIELD_COLOR: Color = Color::Rgba(0.36, 0.78, 0.95, 1.0); // cyan
+                const SHIELD_OVERFLOW_COLOR: Color = Color::Rgba(0.16, 0.40, 0.95, 1.0); // blue
+                if absorb_width > 0.0 {
+                    Image::new(self.imgs.bar_content)
+                        .w_h(480.0 * absorb_width / 100.0, 18.0)
+                        .color(Some(if overshield {
+                            SHIELD_OVERFLOW_COLOR
+                        } else {
+                            SHIELD_COLOR
+                        }))
+                        .top_left_with_margins_on(
+                            state.ids.hp_alignment,
+                            0.0,
+                            480.0 * hp_pct / 100.0,
+                        )
+                        .set(state.ids.hp_absorb, ui);
+                }
+            }
 
             if decayed_health > 0.0 {
                 let decay_bar_len = 480.0 * decayed_health;
