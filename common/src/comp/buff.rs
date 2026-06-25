@@ -576,10 +576,15 @@ impl BuffKind {
             BuffKind::Antimagic => vec![BuffEffect::DisableMagic],
             // BL-05 rider: dimensional anchor — block teleport/blink only.
             BuffKind::Anchored => vec![BuffEffect::DisableTeleport],
-            // BL-05 rider: magical sleep — incapacitate (no move, no aux abilities).
+            // BL-05 rider: magical sleep — incapacitate. No movement, no
+            // auxiliary abilities, and zero outgoing attack damage (the engine
+            // has no "disable all abilities" primitive, so AttackDamage(0.0)
+            // neuters the still-usable primary/secondary while asleep). v1 is
+            // duration-based; wake-on-damage is RD-3 (tasks/13).
             BuffKind::Asleep => vec![
                 BuffEffect::MovementSpeed(0.0),
                 BuffEffect::DisableAuxiliaryAbilities,
+                BuffEffect::AttackDamage(0.0),
             ],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
@@ -1443,6 +1448,12 @@ pub mod tests {
             effects
                 .iter()
                 .any(|e| matches!(e, BuffEffect::DisableAuxiliaryAbilities))
+        );
+        // Can't deal damage while asleep (no "disable all abilities" primitive).
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d == 0.0))
         );
         assert!(!BuffKind::Asleep.is_buff(), "should be a debuff");
     }
