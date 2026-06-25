@@ -12,6 +12,9 @@ pub struct HpFloater {
     pub info: HealthChangeInfo,
     // Used for randomly offsetting
     pub rand: f32,
+    // BL-52 P4: a "miss" floater (the to-hit roll failed) — renders the "Miss"
+    // text instead of a damage number; `info.amount` is 0.
+    pub miss: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct HpFloaterList {

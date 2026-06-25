@@ -114,7 +114,7 @@ use common::{
     consts::{MAX_NPCINTERACT_RANGE, MAX_PICKUP_RANGE},
     link::Is,
     mounting::{Mount, Rider, VolumePos},
-    outcome::Outcome,
+    outcome::{HealthChangeInfo, Outcome},
     recipe::RecipeBookManifest,
     resources::{BattleMode, Secs, Time},
     rtsim,
@@ -1716,7 +1716,9 @@ impl Hud {
                             .abs()
                             .clamp(Health::HEALTH_EPSILON, health.maximum() * 1.25)
                             / health.maximum();
-                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
+                        let hp_dmg_text = if floater.miss {
+                            i18n.get_msg("hud-sct-miss").to_string()
+                        } else if floater.info.amount.abs() < 0.1 {
                             String::new()
                         } else if global_state.settings.interface.sct_damage_rounding
                             && floater.info.amount.abs() >= 1.0
@@ -1778,7 +1780,10 @@ impl Hud {
                         Text::new(&hp_dmg_text)
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
-                            .color(if floater.info.amount < 0.0 {
+                            .color(if floater.miss {
+                                // BL-52 P4: neutral grey for a miss.
+                                Color::Rgba(0.8, 0.8, 0.8, hp_fade)
+                            } else if floater.info.amount < 0.0 {
                                 Color::Rgba(font_col.r, font_col.g, font_col.b, hp_fade)
                             } else {
                                 Color::Rgba(0.1, 1.0, 0.1, hp_fade)
@@ -2602,7 +2607,9 @@ impl Hud {
                             .abs()
                             .clamp(Health::HEALTH_EPSILON, health.map_or(1.0, |h| h.maximum()))
                             / health.map_or(1.0, |h| h.maximum());
-                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
+                        let hp_dmg_text = if floater.miss {
+                            i18n.get_msg("hud-sct-miss").to_string()
+                        } else if floater.info.amount.abs() < 0.1 {
                             String::new()
                         } else if global_state.settings.interface.sct_damage_rounding
                             && floater.info.amount.abs() >= 1.0
@@ -2651,7 +2658,7 @@ impl Hud {
                         Text::new(&hp_dmg_text)
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
-                            .color(if floater.info.amount < 0.0 {
+                            .color(if floater.miss || floater.info.amount < 0.0 {
                                 Color::Rgba(0.0, 0.0, 0.0, fade)
                             } else {
                                 Color::Rgba(0.0, 0.0, 0.0, 1.0)
@@ -2663,7 +2670,11 @@ impl Hud {
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
                             .x_y(x, y)
-                            .color(if floater.info.amount < 0.0 {
+                            .color(if floater.miss {
+                                // BL-52 P4: a miss is neutral grey and fades out
+                                // (not heal-green / non-fading).
+                                Color::Rgba(0.8, 0.8, 0.8, fade)
+                            } else if floater.info.amount < 0.0 {
                                 Color::Rgba(font_col.r, font_col.g, font_col.b, fade)
                             } else {
                                 Color::Rgba(0.1, 1.0, 0.1, 1.0)
@@ -5533,10 +5544,37 @@ impl Hud {
                                     jump_timer: 0.0,
                                     info: *info,
                                     rand: rand::random(),
+                                    miss: false,
                                 });
                             },
                         }
                     }
+                }
+            },
+            // BL-52 P4: a missed single-target attack → a floating "Miss" over
+            // the target, reusing the SCT floater pipeline (text branched on
+            // `miss` at render). Only shown for the attacker or the target, like
+            // damage floaters.
+            Outcome::Miss { target, .. } => {
+                let ecs = client.state().ecs();
+                let mut hp_floater_lists = ecs.write_storage::<HpFloaterList>();
+                if let Some(entity) = ecs.entity_from_uid(*target)
+                    && let Some(floater_list) = hp_floater_lists.get_mut(entity)
+                {
+                    floater_list.floaters.push(HpFloater {
+                        timer: 0.0,
+                        jump_timer: 0.0,
+                        info: HealthChangeInfo {
+                            amount: 0.0,
+                            precise: false,
+                            target: *target,
+                            by: None,
+                            cause: None,
+                            instance: rand::random(),
+                        },
+                        rand: rand::random(),
+                        miss: true,
+                    });
                 }
             },
 

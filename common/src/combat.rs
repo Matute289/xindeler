@@ -425,6 +425,16 @@ impl Attack {
                 .clamp(combat_tuning.hit_floor, combat_tuning.hit_ceil);
             rng.random::<f32>() >= hit_chance
         };
+        // BL-52 P4: surface the whiff with a floating "Miss" over the target —
+        // but never over an in-group ally (mirrors the `avoid_effect` beneficial
+        // exemption, so a future single-target ally ability can't show a
+        // contradictory "Miss" while its beneficial effect still lands).
+        if attack_missed && !matches!(target_group, GroupTarget::InGroup) {
+            emit_outcome(Outcome::Miss {
+                pos: target.pos,
+                target: target.uid,
+            });
+        }
 
         // target == OutOfGroup is basic heuristic that this
         // "attack" has negative effects.
