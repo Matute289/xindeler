@@ -1,12 +1,12 @@
 ---
-name: veloren-aurora
+name: xindeler-aurora
 description: Use when implementing AURORA social-simulation features — NPC relationships, memories, families, organizations, economy, dynamic quests — knows the rtsim architecture and the AURORA spec
 ---
 
-# veloren-aurora
+# xindeler-aurora
 
 **REQUIRED:** Read `docs/design/specs/2026-06-10-project-aurora-design.md` (the
-GDD/TDD) and locate which AURORA phase your change belongs to. Invoke `veloren-dev` for
+GDD/TDD) and locate which AURORA phase your change belongs to. Invoke `xindeler-dev` for
 ECS patterns and `superpowers:test-driven-development` before coding. For rtsim-heavy
 work, dispatch the `sim-systems-engineer` agent.
 
@@ -45,5 +45,5 @@ work, dispatch the `sim-systems-engineer` agent.
 ## Verification
 
 - Unit + sim tests in `rtsim` crate; long-run soak via headless `veloren-server-cli` —
-  watch rtsim tick time in telemetry (`veloren-telemetry` skill).
+  watch rtsim tick time in telemetry (`xindeler-telemetry` skill).
 - Dispatch `rust-perf-reviewer` on any change inside the rtsim tick.

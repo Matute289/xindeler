@@ -1,9 +1,9 @@
 ---
-name: veloren-run
+name: xindeler-run
 description: Use when launching the Veloren game client or server — knows the correct env vars, features, hot-reload behavior, and cargo aliases
 ---
 
-# veloren-run
+# xindeler-run
 
 ## Pre-requisites
 

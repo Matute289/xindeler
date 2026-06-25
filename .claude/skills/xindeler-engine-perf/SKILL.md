@@ -1,9 +1,9 @@
 ---
-name: veloren-engine-perf
+name: xindeler-engine-perf
 description: Use when profiling, optimizing, or reviewing performance/memory-safety of engine code — tracy workflow, criterion benches, unsafe policy, hot-path catalogue
 ---
 
-# veloren-engine-perf
+# xindeler-engine-perf
 
 **REQUIRED:** Read `docs/design/specs/2026-06-10-engine-improvements-design.md`
 before optimizing anything. Rule zero: **measure first** — no optimization PR without a
@@ -18,7 +18,7 @@ before/after measurement attached.
 | GPU | `wgpu-profiler` integration (`voxygen/src/render/renderer/mod.rs:~169`) |
 | ECS system timings | `SysMetrics`/`PhysicsMetrics` (`common/ecs/src/metrics.rs`) |
 | Criterion benches | Exist in common (chonk/color/loot), voxygen (meshing), world (cave/site/tree), network — `cargo bench -p <crate>` |
-| Telemetry | fork's `telemetry!` + JSONL sinks (`veloren-telemetry` skill to analyze) |
+| Telemetry | fork's `telemetry!` + JSONL sinks (`xindeler-telemetry` skill to analyze) |
 
 ## Hot-path catalogue (where perf work pays)
 

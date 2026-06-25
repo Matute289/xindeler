@@ -1,5 +1,5 @@
 ---
-name: veloren-telemetry
+name: xindeler-telemetry
 description: Use when the user asks you to analyze what happened in a game session, debug in-game behavior, review game state after a test, or investigate a bug using telemetry logs. Teaches you how to locate, parse, and interpret the telemetry logs produced by the logging-verbose build.
 ---
 

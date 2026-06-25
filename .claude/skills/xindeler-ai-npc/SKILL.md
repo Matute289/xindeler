@@ -1,13 +1,13 @@
 ---
 name: xindeler-ai-npc
-description: Use when building the generative-AI NPC layer for AURORA — automating NPC persona/dialogue/voice generation (offline, baked) and the optional live STT→LLM→TTS conversation tier. Covers tool choices (Claude, ElevenLabs MCP, self-hosted faster-whisper/LLaMA), the offline-bake-vs-live-tier architecture, and the AURORA invariants. For the core social-sim use veloren-aurora.
+description: Use when building the generative-AI NPC layer for AURORA — automating NPC persona/dialogue/voice generation (offline, baked) and the optional live STT→LLM→TTS conversation tier. Covers tool choices (Claude, ElevenLabs MCP, self-hosted faster-whisper/LLaMA), the offline-bake-vs-live-tier architecture, and the AURORA invariants. For the core social-sim use xindeler-aurora.
 ---
 
 # xindeler-ai-npc
 
 The generative-AI NPC layer of **AURORA**. Design: `docs/design/specs/2026-06-24-aurora-generative-npc-design.md`
 (companion of the core `2026-06-10-project-aurora-design.md`); tasks `tasks/23`. Pair with
-**veloren-aurora** (the rtsim social sim) and delegate persona writing to the **`npc-persona-writer`** agent.
+**xindeler-aurora** (the rtsim social sim) and delegate persona writing to the **`npc-persona-writer`** agent.
 
 ## Non-negotiables (inherited from AURORA — never break)
 1. **No LLM in the tick path.** Tier 1 is fully baked; Tier 2 is async/off-tick, cached, with a
@@ -41,11 +41,11 @@ The generative-AI NPC layer of **AURORA**. Design: `docs/design/specs/2026-06-24
 4. Voice: ElevenLabs MCP (`generate_audio`/`list_voices`/`create_voice`) → per-NPC clips → assets
    (binary → **VPS-LFS**). Add a `voxygen` audio path + mouth/emote sync.
 
-## Where it lives in code (with veloren-aurora)
+## Where it lives in code (with xindeler-aurora)
 NPC persona/memory: `rtsim/src/data/npc.rs`, `common/src/rtsim.rs`. Dialogue: `common/src/rtsim.rs`
 (`DialogueKind`) + `rtsim/src/rule/npc_ai/dialogue.rs`. Voice/audio: `voxygen/src/audio/`. RAG corpus:
 `docs/design/lore/`.
 
 ## Reviews
-`sim-systems-engineer` (rtsim), `game-architecture-reviewer` (content-as-data, not code), `veloren-review`.
-In-game smoke via `veloren-run`.
+`sim-systems-engineer` (rtsim), `game-architecture-reviewer` (content-as-data, not code), `xindeler-review`.
+In-game smoke via `xindeler-run`.

@@ -1,13 +1,13 @@
 ---
 name: xindeler-worldmap
-description: Use when authoring or editing Xindeler's hand-designed world maps — the Highlands continent (terrain, coastline, rivers, biomes, swamps, pinned cities/towns, caves) and, later, the plane maps. Covers the lore→heightmap→.bin→import→site-pin→biome/cave→map-asset pipeline. For generic procedural worldgen internals use veloren-worldgen instead.
+description: Use when authoring or editing Xindeler's hand-designed world maps — the Highlands continent (terrain, coastline, rivers, biomes, swamps, pinned cities/towns, caves) and, later, the plane maps. Covers the lore→heightmap→.bin→import→site-pin→biome/cave→map-asset pipeline. For generic procedural worldgen internals use xindeler-worldgen instead.
 ---
 
 # xindeler-worldmap
 
 Authoring Xindeler's **designed** maps on top of Veloren's procedural worldgen. The design lives in
 `docs/design/specs/2026-06-24-xindeler-worldmap-design.md` (+ plan + `tasks/21`). For the procedural
-pipeline internals, pair with the **veloren-worldgen** skill. Delegate map layout/cartography to the
+pipeline internals, pair with the **xindeler-worldgen** skill. Delegate map layout/cartography to the
 **`worldmap-cartographer`** agent.
 
 ## The big idea
@@ -58,9 +58,9 @@ boceto.jpg`.
    Document every `world/` edit for the next `GitlabMasterMerger` sync.
 2. **Binary map assets → VPS-LFS**, never GitHub (see CLAUDE.md LFS policy).
 3. **Iterate**: erosion reshapes an imported heightmap — expect several author→verify passes (fly the
-   area, `/tp`, or the airship). Use `veloren-run` to launch; capture logs.
+   area, `/tp`, or the airship). Use `xindeler-run` to launch; capture logs.
 4. **Lore is the source of truth** — geography leaves in `docs/design/lore/80-geography/`. New
-   geography facts get a lore leaf first (`veloren-lore`), then the map.
+   geography facts get a lore leaf first (`xindeler-lore`), then the map.
 5. **V1 = Highlands only.** Other continents + plane maps + the plane-travel engine are V2+.
 
 ## Workflow
@@ -69,4 +69,4 @@ boceto.jpg`.
 3. Add/extend the `AuthoredSitePin` config; pin canon sites; check markers.
 4. Bias biomes/forests/swamps; tune caves; re-verify.
 5. Regenerate the map asset; confirm markers + names.
-6. Reviews: `game-architecture-reviewer`, `rust-perf-reviewer`, `veloren-review`. Smoke = BL-09.
+6. Reviews: `game-architecture-reviewer`, `rust-perf-reviewer`, `xindeler-review`. Smoke = BL-09.

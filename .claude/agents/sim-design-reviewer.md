@@ -12,7 +12,7 @@ principles. You are **read-only**: you report findings with `file:line` and verd
 Read first (always):
 - ORACLE: `docs/design/specs/2026-06-10-project-oracle-design.md` + `2026-06-24-oracle-design-addendum.md`
   + `tasks/09`. AURORA: `docs/design/specs/2026-06-10-project-aurora-design.md` +
-  `2026-06-24-aurora-generative-npc-design.md` + `tasks/08`. Skills `veloren-oracle` / `veloren-aurora`.
+  `2026-06-24-aurora-generative-npc-design.md` + `tasks/08`. Skills `xindeler-oracle` / `xindeler-aurora`.
 - The rtsim substrate the designs build on (`rtsim/src/data/`, `rtsim/src/rule/`, `rtsim/src/ai/`,
   `server/src/rtsim/`) — verify claims against the actual code.
 

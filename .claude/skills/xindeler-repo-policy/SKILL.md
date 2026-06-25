@@ -1,5 +1,5 @@
 ---
-name: veloren-repo-policy
+name: xindeler-repo-policy
 description: Use when committing, pushing, merging, opening a PR, creating branches, or saving/writing any documentation (specs, plans, task boards, brainstorm output, lore) in this repo — before running the git/gh command, not after
 ---
 

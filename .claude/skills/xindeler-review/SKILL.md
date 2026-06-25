@@ -1,9 +1,9 @@
 ---
-name: veloren-review
+name: xindeler-review
 description: Use before merging any branch — runs CI lint checks, verifies ECS patterns, then invokes superpowers code review
 ---
 
-# veloren-review
+# xindeler-review
 
 **Run this skill before every merge to main.** It does not modify code — only verifies and reports.
 
