@@ -911,6 +911,9 @@ fn execute_effect(
         BuffEffect::DisableAuxiliaryAbilities => stat.disable_auxiliary_abilities = true,
         BuffEffect::DisableMagic => stat.disable_magic = true,
         BuffEffect::DisableTeleport => stat.disable_teleport = true,
+        BuffEffect::Accuracy(acc) => stat.accuracy += *acc,
+        BuffEffect::Evasion(eva) => stat.evasion += *eva,
+        BuffEffect::CritChance(cc) => stat.crit_chance += *cc,
         BuffEffect::CrowdControlResistance(ccr) => {
             stat.crowd_control_resistance += ccr;
         },

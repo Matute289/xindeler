@@ -784,13 +784,15 @@ impl BuffKind {
                 .with_requirement(CombatRequirement::AttackSource(AttackSource::Projectile)),
             )],
             BuffKind::Terrified => {
-                // BL-05 Fear rider: slowed AND fights at a disadvantage. The
-                // flee behaviour lives in the agent AI (`is_terrified`); this
-                // reduces outgoing damage (up to ~30%) for when a feared foe is
-                // cornered and forced to fight. Magnitude is a placeholder.
+                // BL-05 Fear rider, redesigned on the BL-52 combat-resolution
+                // engine: slowed AND fights at a disadvantage. The flee behaviour
+                // lives in the agent AI (`is_terrified`); the disadvantage is a
+                // flat **−accuracy** (more misses, same damage when it lands) —
+                // not a damage cut. −12 acc ≈ −18% hit vs an equal-evasion target
+                // (balance note §8); scales with buff strength.
                 vec![
                     BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength)),
-                    BuffEffect::AttackDamage((1.0 - 0.3 * nn_scaling(data.strength)).max(0.0)),
+                    BuffEffect::Accuracy(-12.0 * nn_scaling(data.strength)),
                 ]
             },
             BuffKind::Charmed => vec![],
@@ -1064,6 +1066,16 @@ pub enum BuffEffect {
     /// Dimensional anchor (BL-05): prevents teleport/blink. Sets
     /// `Stats.disable_teleport`.
     DisableTeleport,
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// physical to-hit accuracy (negative = harder to land, e.g. Fear). Sets
+    /// `Stats.accuracy`.
+    Accuracy(f32),
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// evasion (harder to be hit). Sets `Stats.evasion`.
+    Evasion(f32),
+    /// Combat resolution (BL-52): flat additive modifier to the buffed entity's
+    /// critical-hit chance. Sets `Stats.crit_chance`.
+    CritChance(f32),
     /// Reduces duration of crowd control debuffs
     CrowdControlResistance(f32),
     /// Reduces the strength or duration of item buff
@@ -1483,9 +1495,10 @@ pub mod tests {
     }
 
     #[test]
-    fn terrified_slows_and_weakens() {
-        // BL-05 Fear rider: slows AND reduces outgoing damage (fights at a
-        // disadvantage when cornered); flee behaviour is in the agent AI.
+    fn terrified_slows_and_lowers_accuracy() {
+        // BL-05 Fear rider on the BL-52 engine: slows AND lowers accuracy
+        // (fights at a disadvantage — more misses, same damage); flee behaviour
+        // is in the agent AI.
         let effects = BuffKind::Terrified.effects(&BuffData::new(1.0, None), None);
         assert!(
             effects
@@ -1495,7 +1508,7 @@ pub mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, BuffEffect::AttackDamage(d) if *d < 1.0))
+                .any(|e| matches!(e, BuffEffect::Accuracy(a) if *a < 0.0))
         );
     }
 
