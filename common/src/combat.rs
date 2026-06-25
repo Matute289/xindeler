@@ -393,9 +393,29 @@ impl Attack {
             attack_source,
             AttackSource::Melee | AttackSource::Projectile
         );
+        // BL-52 P3: a magic ability (one carrying an `AbilityMeta` `source`, the
+        // same signal the BL-36 antimagic gate uses) rolls the caster's *magic*
+        // accuracy against the target's *magic* evasion; physical attacks use the
+        // physical pair. A missed single-target spell fizzles — the same no-op as
+        // a physical miss (no damage, no harmful effects; in-group beneficial
+        // effects like ally heals stay exempt in `avoid_effect` below).
+        let is_magic = self
+            .ability_info
+            .is_some_and(|ai| ai.ability_meta.source.is_some());
         let attack_missed = is_single_target && {
-            let accuracy = attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy);
-            let evasion = target.stats.map_or(0.0, |s| s.evasion);
+            let (accuracy, evasion) = if is_magic {
+                (
+                    attacker
+                        .and_then(|a| a.stats)
+                        .map_or(0.0, |s| s.magic_accuracy),
+                    target.stats.map_or(0.0, |s| s.magic_evasion),
+                )
+            } else {
+                (
+                    attacker.and_then(|a| a.stats).map_or(0.0, |s| s.accuracy),
+                    target.stats.map_or(0.0, |s| s.evasion),
+                )
+            };
             let hit_chance = (combat_tuning.base_hit + (accuracy - evasion) * combat_tuning.hit_k)
                 .clamp(combat_tuning.hit_floor, combat_tuning.hit_ceil);
             rng.random::<f32>() >= hit_chance
