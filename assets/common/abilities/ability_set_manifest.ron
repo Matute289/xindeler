@@ -1498,4 +1498,47 @@
         secondary: Simple(None, "common.abilities.innate.draugr"),
         abilities: [],
     )),
+    // Class active abilities (BL-06 P2a/P2b). Granted via AbilityPool::for_character.
+    // Signature (index 0) + capstone (index 1) per proof class; indices are stable
+    // and append-only. Capstone stubs are inert until P2b populates full RONs.
+    Custom("class.warrior.rally"): AbilitySet((
+        primary: Simple(Some(Warrior(Rally)), "common.abilities.class.warrior.rally"),
+        secondary: Simple(Some(Warrior(Rally)), "common.abilities.class.warrior.rally"),
+        abilities: [],
+    )),
+    Custom("class.warrior.onslaught"): AbilitySet((
+        primary: Simple(Some(Warrior(Onslaught)), "common.abilities.class.warrior.onslaught"),
+        secondary: Simple(Some(Warrior(Onslaught)), "common.abilities.class.warrior.onslaught"),
+        abilities: [],
+    )),
+    Custom("class.mage.arcanesurge"): AbilitySet((
+        primary: Simple(Some(Mage(ArcaneSurge)), "common.abilities.class.mage.arcanesurge"),
+        secondary: Simple(Some(Mage(ArcaneSurge)), "common.abilities.class.mage.arcanesurge"),
+        abilities: [],
+    )),
+    Custom("class.mage.arcanemastery"): AbilitySet((
+        primary: Simple(Some(Mage(ArcaneMastery)), "common.abilities.class.mage.arcanemastery"),
+        secondary: Simple(Some(Mage(ArcaneMastery)), "common.abilities.class.mage.arcanemastery"),
+        abilities: [],
+    )),
+    Custom("class.cleric.mendinglight"): AbilitySet((
+        primary: Simple(Some(Cleric(MendingLight)), "common.abilities.class.cleric.mendinglight"),
+        secondary: Simple(Some(Cleric(MendingLight)), "common.abilities.class.cleric.mendinglight"),
+        abilities: [],
+    )),
+    Custom("class.cleric.radiantchannel"): AbilitySet((
+        primary: Simple(Some(Cleric(RadiantChannel)), "common.abilities.class.cleric.radiantchannel"),
+        secondary: Simple(Some(Cleric(RadiantChannel)), "common.abilities.class.cleric.radiantchannel"),
+        abilities: [],
+    )),
+    Custom("class.rogue.ambush"): AbilitySet((
+        primary: Simple(Some(Rogue(Ambush)), "common.abilities.class.rogue.ambush"),
+        secondary: Simple(Some(Rogue(Ambush)), "common.abilities.class.rogue.ambush"),
+        abilities: [],
+    )),
+    Custom("class.rogue.vanish"): AbilitySet((
+        primary: Simple(Some(Rogue(Vanish)), "common.abilities.class.rogue.vanish"),
+        secondary: Simple(Some(Rogue(Vanish)), "common.abilities.class.rogue.vanish"),
+        abilities: [],
+    )),
 })
