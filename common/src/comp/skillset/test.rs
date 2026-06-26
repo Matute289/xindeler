@@ -160,3 +160,122 @@ fn class_skill_modifiers_manifest_integrity() {
         );
     }
 }
+
+// ---- BL-06 P2b: Q5 capstone synergy ----
+
+#[cfg(test)]
+mod capstone_synergy_tests {
+    use super::*;
+    use crate::{
+        comp::{
+            CharacterAbility,
+            buff::{BuffData, BuffKind},
+            skillset::skills::{RogueSkill, WarriorSkill},
+        },
+        states::self_buff::BuffDesc,
+    };
+
+    /// Build a minimal `SelfBuff` ability with one `BuffDesc` of known
+    /// strength.
+    fn self_buff_with_strength(strength: f32) -> CharacterAbility {
+        CharacterAbility::SelfBuff {
+            buildup_duration: 0.1,
+            cast_duration: 0.1,
+            recover_duration: 0.1,
+            buffs: vec![BuffDesc {
+                kind: BuffKind::Hastened,
+                data: BuffData::new(strength, Some(crate::resources::Secs(5.0))),
+            }],
+            use_raw_buff_strength: false,
+            buff_cat: None,
+            energy_cost: 0.0,
+            enforced_limit: true,
+            combo_cost: 0,
+            combo_scaling: None,
+            meta: Default::default(),
+            specifier: None,
+        }
+    }
+
+    /// Warrior Onslaught: with BrutalEdge at level 3, strength scales by
+    /// 1.0 + 0.08 * 3 = 1.24.
+    #[test]
+    fn onslaught_synergy_scales_with_brutal_edge() {
+        let mut skillset = SkillSet::default();
+        skillset
+            .skills
+            .insert(Skill::Warrior(WarriorSkill::BrutalEdge), 3);
+
+        let ability = self_buff_with_strength(1.0);
+        let result = ability.adjusted_by_class_synergy(&skillset, "class.warrior.onslaught");
+
+        if let CharacterAbility::SelfBuff { buffs, .. } = result {
+            let strength = buffs[0].data.strength;
+            assert!(
+                (strength - 1.24).abs() < 1e-5,
+                "expected 1.24, got {strength}"
+            );
+        } else {
+            panic!("expected SelfBuff variant");
+        }
+    }
+
+    /// With no BrutalEdge unlocked (rank 0), scale = 1.0 — no bonus.
+    #[test]
+    fn onslaught_synergy_zero_rank_no_bonus() {
+        let skillset = SkillSet::default();
+        let ability = self_buff_with_strength(1.0);
+        let result = ability.adjusted_by_class_synergy(&skillset, "class.warrior.onslaught");
+
+        if let CharacterAbility::SelfBuff { buffs, .. } = result {
+            let strength = buffs[0].data.strength;
+            assert!(
+                (strength - 1.0).abs() < 1e-5,
+                "expected 1.0 (no bonus), got {strength}"
+            );
+        } else {
+            panic!("expected SelfBuff variant");
+        }
+    }
+
+    /// Rogue Vanish: with DeadlyPrecision at level 2, strength scales by
+    /// 1.0 + 0.08 * 2 = 1.16.
+    #[test]
+    fn vanish_synergy_scales_with_deadly_precision() {
+        let mut skillset = SkillSet::default();
+        skillset
+            .skills
+            .insert(Skill::Rogue(RogueSkill::DeadlyPrecision), 2);
+
+        let ability = self_buff_with_strength(1.0);
+        let result = ability.adjusted_by_class_synergy(&skillset, "class.rogue.vanish");
+
+        if let CharacterAbility::SelfBuff { buffs, .. } = result {
+            let strength = buffs[0].data.strength;
+            assert!(
+                (strength - 1.16).abs() < 1e-5,
+                "expected 1.16, got {strength}"
+            );
+        } else {
+            panic!("expected SelfBuff variant");
+        }
+    }
+
+    /// An unknown ability_id leaves the ability unchanged (no synergy applied).
+    #[test]
+    fn unknown_id_leaves_strength_unchanged() {
+        let skillset = SkillSet::default();
+        let ability = self_buff_with_strength(2.5);
+        let result = ability.adjusted_by_class_synergy(&skillset, "class.warrior.rally");
+
+        if let CharacterAbility::SelfBuff { buffs, .. } = result {
+            let strength = buffs[0].data.strength;
+            assert!(
+                (strength - 2.5).abs() < 1e-5,
+                "expected 2.5 (unchanged), got {strength}"
+            );
+        } else {
+            panic!("expected SelfBuff variant");
+        }
+    }
+}

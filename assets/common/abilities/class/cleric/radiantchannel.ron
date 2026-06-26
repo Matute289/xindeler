@@ -1,11 +1,24 @@
-// BL-06 — Cleric capstone "Radiant Channel" (P2b). Placeholder RON so the pool key
-// resolves to something inert until P2b wires up the full ability.
-// Gated on Cleric(RadiantChannel) which nobody has yet; harmless until P2b.
-SelfBuff(
-    buildup_duration: 0.1,
-    cast_duration: 0.1,
-    recover_duration: 0.1,
-    buffs: [],
-    energy_cost: 0,
-    meta: (),
+// BL-06 — Cleric capstone "Radiant Channel": strong group heal-over-time.
+// NOTE: aura/HoT heals do not yet scale with heal_power (P1b only wired
+// CombatEffect::Heal); heal_power-for-auras is a follow-up.
+// TODO (later): add the smite-pulse-vs-undead AoE component; v1 is the HoT only.
+BasicAura(
+    buildup_duration: 0.5,
+    cast_duration: 0.3,
+    recover_duration: 0.5,
+    targets: InGroup,
+    auras: [
+        (
+            kind: Regeneration,
+            strength: 2.0,
+            duration: Some(12),
+            category: Magical,
+        ),
+    ],
+    aura_duration: Some(1.0),
+    range: 20.0,
+    energy_cost: 35.0,
+    scales_with_combo: false,
+    specifier: Some(HealingAura),
+    meta: (cooldown: Some(60.0)),
 )

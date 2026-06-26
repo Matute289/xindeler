@@ -1,11 +1,14 @@
-// BL-06 — Rogue capstone "Vanish" (P2b). Placeholder RON so the pool key resolves
-// to something inert until P2b wires up the full ability.
-// Gated on Rogue(Vanish) which nobody has yet; harmless until P2b.
+// BL-06 — Rogue capstone "Vanish": burst mobility escape. Q5 synergy: buff
+// strength scales with Deadly Precision rank. NOTE: true evasion/stealth +
+// guaranteed-precision is a follow-up (no positive-evasion BuffKind exists yet;
+// stealth is BL-51) — v1 is a strong Hastened mobility window.
 SelfBuff(
     buildup_duration: 0.1,
     cast_duration: 0.1,
-    recover_duration: 0.1,
-    buffs: [],
-    energy_cost: 0,
-    meta: (),
+    recover_duration: 0.2,
+    buffs: [
+        BuffDesc(kind: Hastened, data: BuffData(strength: 0.4, duration: Some(5.0))),
+    ],
+    energy_cost: 15,
+    meta: (cooldown: Some(45.0)),
 )
