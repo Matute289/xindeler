@@ -4723,7 +4723,7 @@ fn handle_skill_point(
 }
 
 fn parse_skill_tree(skill_tree: &str) -> CmdResult<comp::skillset::SkillGroupKind> {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind};
     match skill_tree {
         "general" => Ok(SkillGroupKind::General),
         "sword" => Ok(SkillGroupKind::Weapon(ToolKind::Sword)),
@@ -4733,6 +4733,11 @@ fn parse_skill_tree(skill_tree: &str) -> CmdResult<comp::skillset::SkillGroupKin
         "staff" => Ok(SkillGroupKind::Weapon(ToolKind::Staff)),
         "sceptre" => Ok(SkillGroupKind::Weapon(ToolKind::Sceptre)),
         "mining" => Ok(SkillGroupKind::Weapon(ToolKind::Pick)),
+        // BL-06 class trees (proof slice) — `/skill_point <class> <n>` for testing.
+        "warrior" => Ok(SkillGroupKind::Class(ClassKind::Warrior)),
+        "mage" => Ok(SkillGroupKind::Class(ClassKind::Mage)),
+        "cleric" => Ok(SkillGroupKind::Class(ClassKind::Cleric)),
+        "rogue" => Ok(SkillGroupKind::Class(ClassKind::Rogue)),
         _ => Err(Content::localized_with_args(
             "command-invalid-skill-group",
             [("group", skill_tree)],
