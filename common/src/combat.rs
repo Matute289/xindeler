@@ -578,9 +578,23 @@ impl Attack {
 
         let mut is_applied = false;
         let mut accumulated_damage = 0.0;
-        let damage_modifier = attacker
-            .and_then(|a| a.stats)
-            .map_or(1.0, |s| s.attack_damage_modifier);
+        // BL-06 (Q2/Q3): `spell_power` is a dedicated magic-damage channel that
+        // multiplies outgoing damage ONLY for magic-source attacks (the same
+        // `is_magic` signal used for the to-hit roll), so caster damage passives
+        // never leak onto physical weapon swings. Physical attacks use the global
+        // `attack_damage_modifier` alone.
+        let damage_modifier = attacker.and_then(|a| a.stats).map_or(1.0, |s| {
+            if is_magic {
+                s.attack_damage_modifier * s.spell_power
+            } else {
+                s.attack_damage_modifier
+            }
+        });
+        // BL-06 (Q2): the heal *source's* `heal_power` scales `CombatEffect::Heal`
+        // output (the target is usually an ally). Buff/aura regen (a separate path
+        // in common-systems) is deliberately NOT scaled yet — a follow-up if a
+        // HoT-healer passive ever wants it.
+        let heal_power = attacker.and_then(|a| a.stats).map_or(1.0, |s| s.heal_power);
         for damage in self
             .damages
             .iter()
@@ -842,7 +856,7 @@ impl Attack {
                         },
                         CombatEffect::Heal(h) => {
                             let change = HealthChange {
-                                amount: *h * strength_modifier,
+                                amount: *h * strength_modifier * heal_power,
                                 by: attacker.map(|a| a.into()),
                                 cause: None,
                                 time,

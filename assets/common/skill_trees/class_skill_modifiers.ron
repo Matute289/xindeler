@@ -9,9 +9,11 @@
 // RadiantChannel/Ambush/Vanish) are NOT listed here — they unlock abilities, not
 // passive stats (P2). Magnitudes are placeholders pending the balance pass.
 //
-// NOTE: SpellPotency / Overcharge / SmitingStrikes currently ride AttackDamage;
-// P1b adds `spell_power`/`heal_power` + magic-source gating and P2 re-points the
-// caster-damage entries (Q2/Q3 from the worksheet).
+// CASTER DAMAGE (Q2/Q3): SpellPotency / Overcharge / SmitingStrikes use
+// `SpellPower`, a magic-only channel applied to spell-source damage in
+// apply_attack — so they buff spells/smites but never weapon swings.
+// The `AttackDamage` (global, physical+magic) channel is now unused here but
+// kept for future physical-damage passives (e.g. a Warrior offense node).
 //
 // CONVENTION: MaxHealth/MaxEnergy here are %-MULTIPLICATIVE per level (skills
 // scale your pool), whereas the per-class ClassAttributes layer adds a FLAT base
@@ -31,14 +33,14 @@
     // ---------- Mage ----------
     Mage(FocusedMind): [(MaxEnergy, 0.05)],
     Mage(TrueAim): [(MagicAccuracy, 0.03)],
-    Mage(SpellPotency): [(AttackDamage, 0.04)],
+    Mage(SpellPotency): [(SpellPower, 0.04)],
     Mage(PyromanticAttunement): [(ResistFire, 0.04)],
     Mage(CryomanticAttunement): [(ResistFrost, 0.04)],
     Mage(QuickCasting): [(RecoverySpeed, 0.04)],
     Mage(PenetratingMagic): [(CritChance, 0.02)],
     Mage(WardedSkin): [(ResistMagic, 0.03)],
     Mage(ManaEfficiency): [(EnergyReward, 0.06)],
-    Mage(Overcharge): [(AttackDamage, 0.10), (PrecisionMult, 0.10)],
+    Mage(Overcharge): [(SpellPower, 0.10), (PrecisionMult, 0.10)],
     // ---------- Cleric ----------
     Cleric(FaithfulVigor): [(MaxHealth, 0.04)],
     Cleric(DevoutFocus): [(MaxEnergy, 0.05)],
@@ -47,7 +49,7 @@
     Cleric(SteadfastFaith): [(CrowdControlResistance, 0.05)],
     Cleric(PurifyingGrace): [(ResistPoison, 0.04)],
     Cleric(DivineConduit): [(EnergyReward, 0.06)],
-    Cleric(SmitingStrikes): [(AttackDamage, 0.04)],
+    Cleric(SmitingStrikes): [(SpellPower, 0.04)],
     Cleric(ArmorOfFaith): [(DamageReduction, 0.02)],
     Cleric(Aegis): [(DamageReduction, 0.05)],
     // ---------- Rogue ----------

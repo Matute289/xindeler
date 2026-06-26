@@ -148,6 +148,16 @@ pub struct Stats {
     pub attacked_modifications: Vec<AttackedModification>,
     pub precision_power_mult: f32,
     pub knockback_mult: f32,
+    /// BL-06 (Q2) — dedicated caster channels, per-tick (not persisted),
+    /// multiplicative (1.0 = no change). `spell_power` scales **magic-source**
+    /// outgoing damage only (gated by the `is_magic` ability signal in
+    /// `apply_attack`), so caster damage passives don't leak onto weapon swings
+    /// (Q3). `heal_power` scales healing the entity does
+    /// (`CombatEffect::Heal`). Kept separate from `attack_damage_modifier`
+    /// so a smiter Cleric and a pure healer scale independently; folds
+    /// cleanly into BL-53 later.
+    pub spell_power: f32,
+    pub heal_power: f32,
 }
 
 impl Stats {
@@ -191,6 +201,8 @@ impl Stats {
             attacked_modifications: Vec::new(),
             precision_power_mult: 1.0,
             knockback_mult: 1.0,
+            spell_power: 1.0,
+            heal_power: 1.0,
         }
     }
 

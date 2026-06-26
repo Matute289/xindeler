@@ -65,6 +65,39 @@ fn class_passive_raises_stats_field() {
 }
 
 #[test]
+fn caster_passives_use_spell_power_channel() {
+    use crate::comp::{Body, Stats, body::humanoid, skills::MageSkill};
+
+    let body = Body::Humanoid(humanoid::Body::iter().next().expect("a humanoid body"));
+    let mut skillset = SkillSet::default();
+    // SpellPotency is re-pointed to the magic-only `spell_power` channel (Q2/Q3)
+    // so it must NOT touch the global physical `attack_damage_modifier`.
+    skillset
+        .skills
+        .insert(Skill::Mage(MageSkill::SpellPotency), 3);
+
+    let mut stats = Stats::empty(body);
+    let attack_before = stats.attack_damage_modifier;
+    skillset.apply_class_passives(&mut stats);
+    // SpellPotency = +0.04 spell_power per level; level 3 → *= 1.12.
+    assert!((stats.spell_power - 1.12).abs() < 1e-5);
+    assert_eq!(
+        stats.attack_damage_modifier, attack_before,
+        "caster damage passive must not leak onto physical attack_damage_modifier",
+    );
+}
+
+#[test]
+fn heal_power_passive_applies() {
+    use crate::comp::{Stats, body::humanoid, skills::ClassPassiveStat};
+
+    let body = crate::comp::Body::Humanoid(humanoid::Body::iter().next().unwrap());
+    let mut stats = Stats::empty(body);
+    ClassPassiveStat::HealPower.apply(&mut stats, 0.2);
+    assert!((stats.heal_power - 1.2).abs() < 1e-5);
+}
+
+#[test]
 fn active_skills_have_no_passive_modifier() {
     use crate::comp::skills::{ClericSkill, MageSkill, RogueSkill, WarriorSkill};
     // The 8 signature/capstone actives unlock abilities, not passive stats —
