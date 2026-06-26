@@ -1641,6 +1641,7 @@ impl ServerEvent for LandOnGroundEvent {
                     None,
                     None,
                     0.0,
+                    1.0, // crit_damage_mult — unused (no precision on falling damage)
                     1.0,
                     *time,
                     rand::random(),
@@ -2354,6 +2355,7 @@ pub fn emit_effect_events(
                 damage_contributor,
                 None,
                 0.0,
+                1.0, // crit_damage_mult — unused (no precision on this effect path)
                 1.0,
                 time,
                 rand::random(),
