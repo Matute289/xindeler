@@ -138,6 +138,7 @@ lazy_static! {
             BuffKind::Regeneration => "regeneration",
             BuffKind::Saturation => "saturation",
             BuffKind::Bleeding => "bleeding",
+            BuffKind::BleedingMark => "bleeding_mark",
             BuffKind::Cursed => "cursed",
             BuffKind::Potion => "potion",
             BuffKind::Agility => "agility",

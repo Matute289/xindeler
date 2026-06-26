@@ -93,6 +93,9 @@ buff-hastened = Hastened
 ## Bleeding
 buff-bleed = Bleeding
     .desc = Inflicts regular damage.
+## Bleeding Mark (bleed-detonate, BL-05)
+buff-bleeding_mark = Bleeding Mark
+    .desc = Bleeds over time, then detonates for a burst when it runs out — cleanse it to stop the blast.
 ## Curse
 buff-cursed = Cursed
     .desc = You are cursed.

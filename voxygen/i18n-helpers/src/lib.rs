@@ -369,7 +369,7 @@ fn localize_kill_message(
 fn get_buff_ident(buff: BuffKind) -> &'static str {
     match buff {
         BuffKind::Burning => "burning",
-        BuffKind::Bleeding => "bleeding",
+        BuffKind::Bleeding | BuffKind::BleedingMark => "bleeding",
         BuffKind::Cursed => "curse",
         BuffKind::Crippled => "crippled",
         BuffKind::Frozen => "frozen",

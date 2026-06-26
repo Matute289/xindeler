@@ -200,6 +200,12 @@ pub enum BuffKind {
     /// Lowers health over time for some duration.
     /// Strength should be the DPS of the debuff.
     Bleeding,
+    /// Bleed-detonate (BL-05 RD-7): bleeds over time like `Bleeding`, then
+    /// **detonates** for a burst of damage when it runs its full course
+    /// (natural expiry). Dispelling/cleansing it early prevents the blast.
+    /// Strength is the bleed DPS; the detonation is a multiple of it
+    /// (`BLEED_DETONATE_MULT`).
+    BleedingMark,
     /// Lower a creature's max health over time.
     /// Strength only affects the target max health, 0.5 targets 50% of base
     /// max, 1.0 targets 100% of base max.
@@ -372,6 +378,7 @@ impl BuffKind {
             | BuffKind::SepticShot
             | BuffKind::FreedomOfMovement => BuffDescriptor::SimplePositive,
             BuffKind::Bleeding
+            | BuffKind::BleedingMark
             | BuffKind::Cursed
             | BuffKind::Burning
             | BuffKind::Crippled
@@ -445,6 +452,15 @@ impl BuffKind {
         let instance = rand::random();
         match self {
             BuffKind::Bleeding => vec![BuffEffect::HealthChangeOverTime {
+                rate: -data.strength,
+                kind: ModifierKind::Additive,
+                instance,
+                tick_dur: Secs(0.5),
+            }],
+            // BL-05 RD-7: bleeds like `Bleeding` while active; the on-expire
+            // detonation burst is emitted by the buff system (the `effects()`
+            // here are only the per-tick bleed).
+            BuffKind::BleedingMark => vec![BuffEffect::HealthChangeOverTime {
                 rate: -data.strength,
                 kind: ModifierKind::Additive,
                 instance,
@@ -1537,6 +1553,18 @@ pub mod tests {
             BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)
         ));
         assert!(BuffKind::FreedomOfMovement.is_buff(), "should be positive");
+    }
+
+    #[test]
+    fn bleeding_mark_bleeds_and_is_a_debuff() {
+        // BL-05 RD-7: bleeds over time (DoT) like Bleeding; the on-expire
+        // detonation burst is emitted by the buff system, not as an effect here.
+        let effects = BuffKind::BleedingMark.effects(&BuffData::new(5.0, None), None);
+        assert!(matches!(
+            effects.as_slice(),
+            [BuffEffect::HealthChangeOverTime { rate, .. }] if *rate < 0.0
+        ));
+        assert!(!BuffKind::BleedingMark.is_buff(), "should be a debuff");
     }
 
     #[test]

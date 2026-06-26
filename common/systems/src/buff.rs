@@ -34,6 +34,11 @@ use specs::{
 };
 use vek::Vec3;
 
+/// BL-05 RD-7: a `BleedingMark` that runs its full duration detonates for this
+/// multiple of its bleed strength as a single burst. Placeholder magnitude —
+/// retune in the BL-52/BL-05 balance pass.
+const BLEED_DETONATE_MULT: f32 = 3.0;
+
 event_emitters! {
     struct Events[EventEmitters] {
         buff: BuffEvent,
@@ -498,7 +503,33 @@ impl<'a> System<'a> for Sys {
 
             buff_comp.buffs.iter().for_each(|(buff_key, buff)| {
                 if buff.end_time.is_some_and(|end| end.0 < read_data.time.0) {
-                    expired_buffs.push(buff_key)
+                    expired_buffs.push(buff_key);
+                    // BL-05 RD-7: a BleedingMark detonates for a burst when it runs
+                    // its full course (natural timer expiry). Dispel/cleanse before
+                    // then removes it via RemoveByKind and skips this path — the
+                    // counterplay. Attribution mirrors the bleed DoT.
+                    if buff.kind == BuffKind::BleedingMark {
+                        let by = match buff.source {
+                            BuffSource::Character { by, .. } => Some(by),
+                            _ => None,
+                        };
+                        let damage_contributor = by.and_then(|uid| {
+                            read_data.id_maps.uid_entity(uid).map(|e| {
+                                DamageContributor::new(uid, read_data.groups.get(e).cloned())
+                            })
+                        });
+                        emitters.emit(HealthChangeEvent {
+                            entity,
+                            change: HealthChange {
+                                amount: -(buff.data.strength * BLEED_DETONATE_MULT),
+                                by: damage_contributor,
+                                cause: Some(DamageSource::Buff(BuffKind::BleedingMark)),
+                                time: *read_data.time,
+                                precise: false,
+                                instance: rand::random(),
+                            },
+                        });
+                    }
                 }
             });
 
