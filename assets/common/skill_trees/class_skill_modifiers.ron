@@ -1,0 +1,64 @@
+// BL-06 — per-level stat modifiers for passive class skills.
+//
+// Maps each PASSIVE class skill to the `Stats` field(s) it boosts and the
+// magnitude added PER SKILL LEVEL. The buff system folds `magnitude * level`
+// into the matching field each tick (after `reset_temp_modifiers`), so these
+// stack with gear/buffs and need no persistence beyond the skill level itself.
+//
+// Active-ability skills (Rally/Onslaught/ArcaneSurge/ArcaneMastery/MendingLight/
+// RadiantChannel/Ambush/Vanish) are NOT listed here — they unlock abilities, not
+// passive stats (P2). Magnitudes are placeholders pending the balance pass.
+//
+// NOTE: SpellPotency / Overcharge / SmitingStrikes currently ride AttackDamage;
+// P1b adds `spell_power`/`heal_power` + magic-source gating and P2 re-points the
+// caster-damage entries (Q2/Q3 from the worksheet).
+//
+// CONVENTION: MaxHealth/MaxEnergy here are %-MULTIPLICATIVE per level (skills
+// scale your pool), whereas the per-class ClassAttributes layer adds a FLAT base
+// (class.rs). Intentional: attributes set the baseline, skills scale it.
+{
+    // ---------- Warrior ----------
+    Warrior(HardenedBody): [(MaxHealth, 0.04)],
+    Warrior(PracticedStrikes): [(Accuracy, 0.03)],
+    Warrior(IronSkin): [(DamageReduction, 0.02)],
+    Warrior(BrutalEdge): [(CritChance, 0.02)],
+    Warrior(CrushingBlows): [(PrecisionMult, 0.10)],
+    Warrior(Stalwart): [(CrowdControlResistance, 0.05)],
+    Warrior(SunderingForce): [(MitigationsPenetration, 0.03)],
+    Warrior(Stagger): [(PoiseDamage, 0.05)],
+    Warrior(BattleMomentum): [(EnergyReward, 0.05)],
+    Warrior(BulwarkStance): [(DamageReduction, 0.05)],
+    // ---------- Mage ----------
+    Mage(FocusedMind): [(MaxEnergy, 0.05)],
+    Mage(TrueAim): [(MagicAccuracy, 0.03)],
+    Mage(SpellPotency): [(AttackDamage, 0.04)],
+    Mage(PyromanticAttunement): [(ResistFire, 0.04)],
+    Mage(CryomanticAttunement): [(ResistFrost, 0.04)],
+    Mage(QuickCasting): [(RecoverySpeed, 0.04)],
+    Mage(PenetratingMagic): [(CritChance, 0.02)],
+    Mage(WardedSkin): [(ResistMagic, 0.03)],
+    Mage(ManaEfficiency): [(EnergyReward, 0.06)],
+    Mage(Overcharge): [(AttackDamage, 0.10), (PrecisionMult, 0.10)],
+    // ---------- Cleric ----------
+    Cleric(FaithfulVigor): [(MaxHealth, 0.04)],
+    Cleric(DevoutFocus): [(MaxEnergy, 0.05)],
+    Cleric(BlessedAim): [(Accuracy, 0.03)],
+    Cleric(SacredWards): [(ResistMagic, 0.04)],
+    Cleric(SteadfastFaith): [(CrowdControlResistance, 0.05)],
+    Cleric(PurifyingGrace): [(ResistPoison, 0.04)],
+    Cleric(DivineConduit): [(EnergyReward, 0.06)],
+    Cleric(SmitingStrikes): [(AttackDamage, 0.04)],
+    Cleric(ArmorOfFaith): [(DamageReduction, 0.02)],
+    Cleric(Aegis): [(DamageReduction, 0.05)],
+    // ---------- Rogue ----------
+    Rogue(Lithe): [(Evasion, 0.04)],
+    Rogue(KeenEdge): [(CritChance, 0.03)],
+    Rogue(DeadlyPrecision): [(PrecisionMult, 0.10)],
+    Rogue(FleetFooted): [(MoveSpeed, 0.03)],
+    Rogue(SureStrike): [(Accuracy, 0.03)],
+    Rogue(FindTheGap): [(MitigationsPenetration, 0.03)],
+    Rogue(QuickHands): [(RecoverySpeed, 0.04)],
+    Rogue(ToxinTolerance): [(ResistPoison, 0.05)],
+    Rogue(Opportunist): [(EnergyReward, 0.06)],
+    Rogue(Shadowstep): [(MoveSpeed, 0.03), (Evasion, 0.04)],
+}

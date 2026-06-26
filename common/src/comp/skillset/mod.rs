@@ -1,6 +1,11 @@
 use crate::{
     assets::{AssetExt, Ron},
-    comp::{class::ClassKind, item::tool::ToolKind, skills::Skill},
+    comp::{
+        Stats,
+        class::ClassKind,
+        item::tool::ToolKind,
+        skills::{ClassPassiveStat, Skill},
+    },
 };
 use core::borrow::{Borrow, BorrowMut};
 use hashbrown::HashMap;
@@ -101,6 +106,14 @@ lazy_static! {
             hashes.insert(*skill_group_kind, hash_result.iter().copied().collect());
         }
         hashes
+    };
+    /// BL-06: per-level `Stats` modifiers for passive class skills. Maps a class
+    /// skill to the field(s) it boosts and the magnitude added per skill level.
+    /// Active-ability skills are absent (they unlock abilities, not stats).
+    pub static ref CLASS_SKILL_MODIFIERS: HashMap<Skill, Vec<(ClassPassiveStat, f32)>> = {
+        Ron::load_expect_cloned(
+            "common.skill_trees.class_skill_modifiers",
+        ).into_inner()
     };
 }
 
@@ -698,6 +711,27 @@ impl SkillSet {
             Err(SkillError::MissingSkill)
         }
     }
+
+    /// BL-06: fold this skill set's passive class-skill bonuses into `stats`.
+    /// Called from the buff system each tick right after the stat reset (same
+    /// slot as racial/class-attribute passives), so the bonuses stack with
+    /// gear/buffs and need no persistence beyond the unlocked skill levels.
+    ///
+    /// Only the unlocked skills are walked (the skill map is small), and each
+    /// is looked up in [`CLASS_SKILL_MODIFIERS`]; non-class /
+    /// active-ability skills have no entry and are skipped.
+    pub fn apply_class_passives(&self, stats: &mut Stats) {
+        for (skill, level) in self.skills.iter() {
+            if *level == 0 {
+                continue;
+            }
+            if let Some(modifiers) = CLASS_SKILL_MODIFIERS.get(skill) {
+                for (passive_stat, per_level) in modifiers.iter() {
+                    passive_stat.apply(stats, per_level * f32::from(*level));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -916,6 +950,14 @@ mod class_tree_tests {
 
     #[test]
     fn class_skill_groups_have_defs_and_stable_hashes() {
+        // BL-06 proof slice: these 4 trees are populated; the other 10 are still
+        // empty stubs until they are authored in a later phase.
+        const POPULATED: [ClassKind; 4] = [
+            ClassKind::Warrior,
+            ClassKind::Mage,
+            ClassKind::Cleric,
+            ClassKind::Rogue,
+        ];
         for class in ClassKind::PLAYABLE {
             let group = SkillGroupKind::Class(class);
             assert!(
@@ -926,8 +968,19 @@ mod class_tree_tests {
                 SKILL_GROUP_HASHES.contains_key(&group),
                 "missing hash: {group:?}"
             );
-            // v1 stub trees are empty: no purchasable skills yet
-            assert_eq!(group.total_skill_point_cost(), 0);
+            if POPULATED.contains(&class) {
+                assert!(
+                    group.total_skill_point_cost() > 0,
+                    "{group:?} proof-slice tree should have purchasable skills"
+                );
+            } else {
+                // Stub trees stay empty until authored (P5+).
+                assert_eq!(
+                    group.total_skill_point_cost(),
+                    0,
+                    "{group:?} should be empty"
+                );
+            }
         }
     }
 
