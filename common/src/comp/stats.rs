@@ -158,6 +158,11 @@ pub struct Stats {
     /// cleanly into BL-53 later.
     pub spell_power: f32,
     pub heal_power: f32,
+    /// BL-06 (Q4) — extra outgoing damage vs targets with an undead body
+    /// (`Body::is_undead`), per-tick (not persisted), additive fraction (0.0 =
+    /// none). Applied in `apply_attack` only when the target is undead — the
+    /// Cleric's smite. Seeds future slayer-style conditionals.
+    pub bonus_damage_vs_undead: f32,
 }
 
 impl Stats {
@@ -203,6 +208,7 @@ impl Stats {
             knockback_mult: 1.0,
             spell_power: 1.0,
             heal_power: 1.0,
+            bonus_damage_vs_undead: 0.0,
         }
     }
 

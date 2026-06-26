@@ -98,6 +98,34 @@ fn heal_power_passive_applies() {
 }
 
 #[test]
+fn undead_body_tag_and_smite_passive() {
+    use crate::comp::{
+        Body, Stats,
+        body::{biped_small, humanoid},
+        skills::ClericSkill,
+    };
+
+    // Body::is_undead (Q4): true for an undead species, false for a humanoid.
+    let husk = Body::BipedSmall(biped_small::Body {
+        species: biped_small::Species::Husk,
+        body_type: biped_small::BodyType::Male,
+    });
+    assert!(husk.is_undead());
+    let human = Body::Humanoid(humanoid::Body::iter().next().unwrap());
+    assert!(!human.is_undead());
+
+    // SmitingStrikes folds into both spell_power and bonus_damage_vs_undead.
+    let mut skillset = SkillSet::default();
+    skillset
+        .skills
+        .insert(Skill::Cleric(ClericSkill::SmitingStrikes), 2);
+    let mut stats = Stats::empty(human);
+    skillset.apply_class_passives(&mut stats);
+    assert!((stats.spell_power - 1.08).abs() < 1e-5); // +0.04 spell_power/level
+    assert!((stats.bonus_damage_vs_undead - 0.20).abs() < 1e-5); // +0.10/level
+}
+
+#[test]
 fn active_skills_have_no_passive_modifier() {
     use crate::comp::skills::{ClericSkill, MageSkill, RogueSkill, WarriorSkill};
     // The 8 signature/capstone actives unlock abilities, not passive stats —
