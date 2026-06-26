@@ -575,6 +575,11 @@ impl<'a> System<'a> for Sys {
                         .copied()
                         .unwrap_or_default()
                         .apply(&mut stat, skill_set.character_level());
+
+                    // BL-06: passive class-skill bonuses, same per-tick slot as
+                    // the per-class attribute scaling (derived from purchased
+                    // skill levels → no persistence beyond the SkillSet).
+                    skill_set.apply_class_passives(&mut stat);
                 }
             }
 

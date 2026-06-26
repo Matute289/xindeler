@@ -1,5 +1,8 @@
-use crate::comp::skillset::{
-    SKILL_GROUP_LOOKUP, SKILL_MAX_LEVEL, SKILL_PREREQUISITES, SkillGroupKind, SkillPrerequisite,
+use crate::comp::{
+    Stats,
+    skillset::{
+        SKILL_GROUP_LOOKUP, SKILL_MAX_LEVEL, SKILL_PREREQUISITES, SkillGroupKind, SkillPrerequisite,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +23,91 @@ pub enum Skill {
     Climb(ClimbSkill),
     Swim(SwimSkill),
     Pick(MiningSkill),
+    // BL-06 class skill trees. Variants are mostly passive stat skills (their
+    // per-level stat modifiers live in the `class_skill_modifiers.ron` manifest,
+    // applied generically in the buff system) plus a couple of signature
+    // active-ability unlocks per class (gated like weapon abilities).
+    Warrior(WarriorSkill),
+    Mage(MageSkill),
+    Cleric(ClericSkill),
+    Rogue(RogueSkill),
     UnlockGroup(SkillGroupKind),
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+pub enum WarriorSkill {
+    // T1
+    HardenedBody,
+    PracticedStrikes,
+    Rally, // ACTIVE (signature)
+    // T2
+    IronSkin,
+    BrutalEdge,
+    CrushingBlows,
+    Stalwart,
+    SunderingForce,
+    Stagger,
+    BattleMomentum,
+    // T3
+    BulwarkStance, // notable
+    Onslaught,     // ACTIVE (capstone, synergy <- BrutalEdge)
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+pub enum MageSkill {
+    // T1
+    FocusedMind,
+    TrueAim,
+    ArcaneSurge, // ACTIVE (signature)
+    // T2
+    SpellPotency,
+    PyromanticAttunement,
+    CryomanticAttunement,
+    QuickCasting,
+    PenetratingMagic,
+    WardedSkin,
+    ManaEfficiency,
+    // T3
+    Overcharge,    // notable
+    ArcaneMastery, // ACTIVE (capstone, synergy <- FocusedMind)
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+pub enum ClericSkill {
+    // T1
+    FaithfulVigor,
+    DevoutFocus,
+    MendingLight, // ACTIVE (signature)
+    // T2
+    BlessedAim,
+    SacredWards,
+    SteadfastFaith,
+    PurifyingGrace,
+    DivineConduit,
+    SmitingStrikes,
+    ArmorOfFaith,
+    // T3
+    Aegis,          // notable
+    RadiantChannel, // ACTIVE (capstone)
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+pub enum RogueSkill {
+    // T1
+    Lithe,
+    KeenEdge,
+    Ambush, // ACTIVE (signature)
+    // T2
+    DeadlyPrecision,
+    FleetFooted,
+    SureStrike,
+    FindTheGap,
+    QuickHands,
+    ToxinTolerance,
+    Opportunist,
+    // T3
+    Shadowstep, // notable
+    Vanish,     // ACTIVE (capstone, synergy <- DeadlyPrecision)
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
@@ -360,6 +447,64 @@ impl GeneralTreeModifiers {
                 energy_cost: 0.8,
                 speed: 1.2,
             },
+        }
+    }
+}
+
+/// A `Stats` field a passive class skill (BL-06) can boost. The per-level
+/// magnitudes live in `class_skill_modifiers.ron`; the buff system folds
+/// `magnitude * skill_level` into the matching field each tick (after the
+/// reset), via [`ClassPassiveStat::apply`]. Adding a variant requires adding a
+/// match arm here AND (to take effect) a manifest entry that references it.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClassPassiveStat {
+    MaxHealth,
+    MaxEnergy,
+    AttackDamage,
+    Accuracy,
+    Evasion,
+    MagicAccuracy,
+    CritChance,
+    PrecisionMult,
+    ResistFire,
+    ResistFrost,
+    ResistPoison,
+    ResistMagic,
+    CrowdControlResistance,
+    DamageReduction,
+    MitigationsPenetration,
+    PoiseDamage,
+    MoveSpeed,
+    RecoverySpeed,
+    EnergyReward,
+}
+
+impl ClassPassiveStat {
+    /// Fold `amount` (already scaled by skill level) into the matching `Stats`
+    /// field, mirroring `ClassAttributes::apply`/racial conventions: the BL-52
+    /// to-hit/resist layer is additive; the `*_modifier` / `mult_mod` fields
+    /// are multiplicative (they default to 1.0 after the per-tick reset).
+    pub fn apply(self, stats: &mut Stats, amount: f32) {
+        match self {
+            ClassPassiveStat::MaxHealth => stats.max_health_modifiers.mult_mod *= 1.0 + amount,
+            ClassPassiveStat::MaxEnergy => stats.max_energy_modifiers.mult_mod *= 1.0 + amount,
+            ClassPassiveStat::AttackDamage => stats.attack_damage_modifier *= 1.0 + amount,
+            ClassPassiveStat::Accuracy => stats.accuracy += amount,
+            ClassPassiveStat::Evasion => stats.evasion += amount,
+            ClassPassiveStat::MagicAccuracy => stats.magic_accuracy += amount,
+            ClassPassiveStat::CritChance => stats.crit_chance += amount,
+            ClassPassiveStat::PrecisionMult => stats.precision_power_mult *= 1.0 + amount,
+            ClassPassiveStat::ResistFire => stats.resist_fire += amount,
+            ClassPassiveStat::ResistFrost => stats.resist_frost += amount,
+            ClassPassiveStat::ResistPoison => stats.resist_poison += amount,
+            ClassPassiveStat::ResistMagic => stats.resist_magic += amount,
+            ClassPassiveStat::CrowdControlResistance => stats.crowd_control_resistance += amount,
+            ClassPassiveStat::DamageReduction => stats.damage_reduction.pos_mod += amount,
+            ClassPassiveStat::MitigationsPenetration => stats.mitigations_penetration += amount,
+            ClassPassiveStat::PoiseDamage => stats.poise_damage_modifier *= 1.0 + amount,
+            ClassPassiveStat::MoveSpeed => stats.move_speed_modifier *= 1.0 + amount,
+            ClassPassiveStat::RecoverySpeed => stats.recovery_speed_modifier *= 1.0 + amount,
+            ClassPassiveStat::EnergyReward => stats.energy_reward_modifier *= 1.0 + amount,
         }
     }
 }

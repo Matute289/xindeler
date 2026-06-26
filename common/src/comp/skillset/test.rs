@@ -28,3 +28,74 @@ fn check_cyclic_skill_deps() {
 
     assert!(!is_cyclic_directed(&graph));
 }
+
+// ---- BL-06 class skill trees ----
+
+#[test]
+fn class_skill_persistence_round_trip() {
+    use crate::comp::skills::{MageSkill, WarriorSkill};
+    // Class skills persist via serde (json) like weapon skills; a new variant
+    // must round-trip without a manual conversion arm.
+    let skills = vec![
+        Skill::Warrior(WarriorSkill::Onslaught),
+        Skill::Mage(MageSkill::FocusedMind),
+        Skill::Warrior(WarriorSkill::HardenedBody),
+    ];
+    let json = serde_json::to_string(&skills).expect("serialize class skills");
+    let back: Vec<Skill> = serde_json::from_str(&json).expect("deserialize class skills");
+    assert_eq!(skills, back);
+}
+
+#[test]
+fn class_passive_raises_stats_field() {
+    use crate::comp::{Body, Stats, body::humanoid, skills::WarriorSkill};
+
+    let body = Body::Humanoid(humanoid::Body::iter().next().expect("a humanoid body"));
+    let mut skillset = SkillSet::default();
+    // Seed a leveled passive directly (the unlock flow is covered elsewhere).
+    skillset
+        .skills
+        .insert(Skill::Warrior(WarriorSkill::HardenedBody), 2);
+
+    let mut stats = Stats::empty(body);
+    let before = stats.max_health_modifiers.mult_mod;
+    skillset.apply_class_passives(&mut stats);
+    // HardenedBody = +0.04 max-health per level; level 2 → *= 1.08.
+    assert!((stats.max_health_modifiers.mult_mod - before * 1.08).abs() < 1e-5);
+}
+
+#[test]
+fn active_skills_have_no_passive_modifier() {
+    use crate::comp::skills::{ClericSkill, MageSkill, RogueSkill, WarriorSkill};
+    // The 8 signature/capstone actives unlock abilities, not passive stats —
+    // they must be absent from the modifier manifest.
+    for active in [
+        Skill::Warrior(WarriorSkill::Rally),
+        Skill::Warrior(WarriorSkill::Onslaught),
+        Skill::Mage(MageSkill::ArcaneSurge),
+        Skill::Mage(MageSkill::ArcaneMastery),
+        Skill::Cleric(ClericSkill::MendingLight),
+        Skill::Cleric(ClericSkill::RadiantChannel),
+        Skill::Rogue(RogueSkill::Ambush),
+        Skill::Rogue(RogueSkill::Vanish),
+    ] {
+        assert!(
+            CLASS_SKILL_MODIFIERS.get(&active).is_none(),
+            "{active:?} is an active ability and must not have a passive modifier",
+        );
+    }
+}
+
+#[test]
+fn class_skill_modifiers_manifest_integrity() {
+    // Every modifier entry must be a real skill living in a Class skill group.
+    for skill in CLASS_SKILL_MODIFIERS.keys() {
+        let group = SKILL_GROUP_LOOKUP
+            .get(skill)
+            .unwrap_or_else(|| panic!("{skill:?} has a modifier but is in no skill group"));
+        assert!(
+            matches!(group, SkillGroupKind::Class(_)),
+            "{skill:?} modifier must belong to a Class group, got {group:?}",
+        );
+    }
+}
