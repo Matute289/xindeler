@@ -1,0 +1,11 @@
+// BL-06 — Rogue capstone "Vanish" (P2b). Placeholder RON so the pool key resolves
+// to something inert until P2b wires up the full ability.
+// Gated on Rogue(Vanish) which nobody has yet; harmless until P2b.
+SelfBuff(
+    buildup_duration: 0.1,
+    cast_duration: 0.1,
+    recover_duration: 0.1,
+    buffs: [],
+    energy_cost: 0,
+    meta: (),
+)
