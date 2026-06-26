@@ -461,6 +461,11 @@ pub enum ClassPassiveStat {
     MaxHealth,
     MaxEnergy,
     AttackDamage,
+    /// BL-06 (Q2) magic-source damage channel (gated to spells in
+    /// `apply_attack`).
+    SpellPower,
+    /// BL-06 (Q2) healing-output channel.
+    HealPower,
     Accuracy,
     Evasion,
     MagicAccuracy,
@@ -489,6 +494,8 @@ impl ClassPassiveStat {
             ClassPassiveStat::MaxHealth => stats.max_health_modifiers.mult_mod *= 1.0 + amount,
             ClassPassiveStat::MaxEnergy => stats.max_energy_modifiers.mult_mod *= 1.0 + amount,
             ClassPassiveStat::AttackDamage => stats.attack_damage_modifier *= 1.0 + amount,
+            ClassPassiveStat::SpellPower => stats.spell_power *= 1.0 + amount,
+            ClassPassiveStat::HealPower => stats.heal_power *= 1.0 + amount,
             ClassPassiveStat::Accuracy => stats.accuracy += amount,
             ClassPassiveStat::Evasion => stats.evasion += amount,
             ClassPassiveStat::MagicAccuracy => stats.magic_accuracy += amount,
