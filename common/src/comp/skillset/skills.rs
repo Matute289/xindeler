@@ -482,6 +482,8 @@ pub enum ClassPassiveStat {
     MoveSpeed,
     RecoverySpeed,
     EnergyReward,
+    /// BL-06 (Q4) extra damage vs undead targets (the Cleric smite).
+    BonusVsUndead,
 }
 
 impl ClassPassiveStat {
@@ -512,6 +514,7 @@ impl ClassPassiveStat {
             ClassPassiveStat::MoveSpeed => stats.move_speed_modifier *= 1.0 + amount,
             ClassPassiveStat::RecoverySpeed => stats.recovery_speed_modifier *= 1.0 + amount,
             ClassPassiveStat::EnergyReward => stats.energy_reward_modifier *= 1.0 + amount,
+            ClassPassiveStat::BonusVsUndead => stats.bonus_damage_vs_undead += amount,
         }
     }
 }

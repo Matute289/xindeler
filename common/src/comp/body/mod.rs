@@ -333,6 +333,29 @@ impl Body {
 
     pub fn is_humanoid(&self) -> bool { matches!(self, Body::Humanoid(_)) }
 
+    /// BL-06 (Q4): undead/unholy body tag. Keys conditional "vs undead" bonus
+    /// damage (Cleric Smiting Strikes / Radiant Channel) and seeds future
+    /// slayer-style conditionals (demons, beasts, …). Constructs (golems,
+    /// terracotta, haniwa, training dummies) are deliberately NOT undead — they
+    /// are unliving but not raised dead. Extend the lists as undead content
+    /// lands.
+    pub fn is_undead(&self) -> bool {
+        match self {
+            Body::BipedSmall(b) => matches!(
+                b.species,
+                biped_small::Species::Husk | biped_small::Species::Jiangshi
+            ),
+            Body::BipedLarge(b) => matches!(
+                b.species,
+                biped_large::Species::Huskbrute | biped_large::Species::Dullahan
+            ),
+            Body::QuadrupedMedium(b) => {
+                matches!(b.species, quadruped_medium::Species::Bonerattler)
+            },
+            _ => false,
+        }
+    }
+
     pub fn is_campfire(&self) -> bool { matches!(self, Body::Object(object::Body::CampfireLit)) }
 
     pub fn is_portal(&self) -> bool {

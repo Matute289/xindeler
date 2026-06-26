@@ -590,6 +590,19 @@ impl Attack {
                 s.attack_damage_modifier
             }
         });
+        // BL-06 (Q4): conditional "vs undead" bonus — the Cleric smite. The
+        // target is fixed for the whole attack, so resolve it once and fold the
+        // attacker's `bonus_damage_vs_undead` into the modifier when the target
+        // has an undead body. `original_body` is the target's true body (Stats is
+        // always present on combat entities), so no signature change is needed.
+        let damage_modifier = damage_modifier
+            * if target.stats.is_some_and(|s| s.original_body.is_undead()) {
+                1.0 + attacker
+                    .and_then(|a| a.stats)
+                    .map_or(0.0, |s| s.bonus_damage_vs_undead)
+            } else {
+                1.0
+            };
         // BL-06 (Q2): the heal *source's* `heal_power` scales `CombatEffect::Heal`
         // output (the target is usually an ally). Buff/aura regen (a separate path
         // in common-systems) is deliberately NOT scaled yet — a follow-up if a

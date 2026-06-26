@@ -14,6 +14,8 @@
 // apply_attack — so they buff spells/smites but never weapon swings.
 // The `AttackDamage` (global, physical+magic) channel is now unused here but
 // kept for future physical-damage passives (e.g. a Warrior offense node).
+// SmitingStrikes also carries `BonusVsUndead` (Q4): extra damage applied in
+// apply_attack only when the target has an undead body (Body::is_undead).
 //
 // CONVENTION: MaxHealth/MaxEnergy here are %-MULTIPLICATIVE per level (skills
 // scale your pool), whereas the per-class ClassAttributes layer adds a FLAT base
@@ -49,7 +51,7 @@
     Cleric(SteadfastFaith): [(CrowdControlResistance, 0.05)],
     Cleric(PurifyingGrace): [(ResistPoison, 0.04)],
     Cleric(DivineConduit): [(EnergyReward, 0.06)],
-    Cleric(SmitingStrikes): [(SpellPower, 0.04)],
+    Cleric(SmitingStrikes): [(SpellPower, 0.04), (BonusVsUndead, 0.10)],
     Cleric(ArmorOfFaith): [(DamageReduction, 0.02)],
     Cleric(Aegis): [(DamageReduction, 0.05)],
     // ---------- Rogue ----------
