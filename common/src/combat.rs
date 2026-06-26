@@ -73,10 +73,17 @@ pub struct CombatTuning {
     /// Maximum rolled crit chance (guaranteed positional crits bypass it).
     /// BL-52 cap = 0.75.
     pub crit_chance_cap: f32,
-    /// Precision magnitude applied when a random `crit_chance` roll succeeds
-    /// (reuses the precision system; final bonus = damage·this·(precision_power
-    /// − 1)). BL-52 = 1.0 (a rolled crit lands at full precision).
+    /// Precision magnitude applied when a random `crit_chance` roll succeeds —
+    /// the positional-precision *fraction* used for a rolled crit (1.0 = full).
+    /// BL-52 = 1.0.
     pub crit_precision_mult: f32,
+    /// Combat resolution (BL-52 P6): a crit's base damage multiplier floor (WoW
+    /// model). A full crit deals at least this× and scales further with gear
+    /// `precision_power`: total = base·(crit_damage_mult + (precision_power −
+    /// 1)) for a full crit; positional precision scales the floor by its
+    /// fraction. 1.5 = a level-1 crit hits for ×1.5 (vs ~×1.0 before, when
+    /// it was tied solely to ungeared precision_power).
+    pub crit_damage_mult: f32,
     /// Combat resolution (BL-52 P3): hard cap on typed elemental resistance
     /// when mitigating AoE damage, so stacking can't reach immunity. BL-52
     /// = 0.75.
@@ -106,6 +113,7 @@ impl Default for CombatTuning {
             crit_chance_floor: 0.03,
             crit_chance_cap: 0.75,
             crit_precision_mult: 1.0,
+            crit_damage_mult: 1.5,
             resist_soft_cap: 0.75,
             gear_evasion_cap: 12.0,
             gear_evasion_floor: -10.0,
@@ -630,6 +638,7 @@ impl Attack {
                 attacker.map(|x| x.into()),
                 precision_mult,
                 precision_power,
+                combat_tuning.crit_damage_mult,
                 strength_modifier * damage_modifier,
                 time,
                 damage_instance,
@@ -2113,13 +2122,25 @@ impl Damage {
         damage_contributor: Option<DamageContributor>,
         precision_mult: Option<f32>,
         precision_power: f32,
+        // BL-52 P6: a crit's base damage multiplier floor (WoW model, Matías
+        // 2026-06-26). A full crit (precision_mult 1.0) deals at least
+        // `crit_damage_mult`× and scales further with gear precision_power, so
+        // crit matters from level 1 instead of being ~+0% at base gear. Positional
+        // precision keeps its 0.25/0.75/1.0 gradation (the floor is scaled by it).
+        // Irrelevant when `precision_mult` is None (no crit) — callers pass 1.0.
+        crit_damage_mult: f32,
         damage_modifier: f32,
         time: Time,
         instance: u64,
         damage_source: DamageSource,
     ) -> HealthChange {
         let mut damage = self.value * damage_modifier;
-        let precise_damage = damage * precision_mult.unwrap_or(0.0) * (precision_power - 1.0);
+        // `.max(0.0)`: a crit is always bonus damage — never let an unusually low
+        // `precision_power` (e.g. a future <0.5 precision debuff) make it subtract.
+        let precise_damage = (damage
+            * precision_mult.unwrap_or(0.0)
+            * ((crit_damage_mult - 1.0) + (precision_power - 1.0)))
+            .max(0.0);
         match damage_source {
             DamageSource::Attack(_) => {
                 // Precise hit
@@ -2926,6 +2947,29 @@ mod combat_resolution_tests {
         assert!(t.gear_evasion_floor < t.gear_evasion_cap);
         assert!(t.armor_evasion_per_protection > 0.0);
         assert!(t.shield_evasion_penalty >= 0.0);
+        // P6 crit-damage floor present + meaningful (>1.0).
+        assert!(t.crit_damage_mult > 1.0);
+    }
+
+    // BL-52 P6: a full crit deals at least crit_damage_mult× at base gear and
+    // scales up with precision_power; positional precision scales the floor by
+    // its fraction. Mirrors the `precise_damage` formula in
+    // calculate_health_change.
+    #[test]
+    fn crit_damage_floor_and_scaling() {
+        let t = CombatTuning::default();
+        // bonus fraction = precision_mult * ((crit_damage_mult - 1) + (precision_power
+        // - 1))
+        let bonus = |precision_mult: f32, precision_power: f32| {
+            precision_mult * ((t.crit_damage_mult - 1.0) + (precision_power - 1.0))
+        };
+        // Full crit at base gear (precision_power 1.0) → +50% (×1.5), not ~+0%.
+        assert!((bonus(1.0, 1.0) - 0.5).abs() < 1e-6);
+        // Endgame precision gear (precision_power 1.5) → +100% (×2.0).
+        assert!((bonus(1.0, 1.5) - 1.0).abs() < 1e-6);
+        // Positional gradation preserved: a side flank (0.25) at base < full crit.
+        assert!(bonus(0.25, 1.0) < bonus(1.0, 1.0));
+        assert!((bonus(0.25, 1.0) - 0.125).abs() < 1e-6);
     }
 
     // BL-52 P5: armor evasion is derived from total protection — unarmored hits
