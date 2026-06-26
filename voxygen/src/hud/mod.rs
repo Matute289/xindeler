@@ -5679,6 +5679,8 @@ pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
         BuffKind::SepticShot => imgs.buff_septicshot,
         //  Debuffs
         BuffKind::Bleeding => imgs.debuff_bleed_0,
+        // BL-05 RD-7: reuse the bleed icon for the bleed-detonate mark.
+        BuffKind::BleedingMark => imgs.debuff_bleed_0,
         BuffKind::Cursed => imgs.debuff_cursed_0,
         BuffKind::Burning => imgs.debuff_burning_0,
         BuffKind::Crippled => imgs.debuff_crippled_0,

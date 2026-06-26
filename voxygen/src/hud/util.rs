@@ -317,6 +317,7 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::SepticShot => "buff-septicshot",
         // Debuffs
         BuffKind::Bleeding => "buff-bleed",
+        BuffKind::BleedingMark => "buff-bleeding_mark",
         BuffKind::Cursed => "buff-cursed",
         BuffKind::Burning => "buff-burn",
         BuffKind::Crippled => "buff-crippled",
@@ -451,6 +452,7 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         },
                         // Have no stat description
                         BuffKind::Bleeding
+                        | BuffKind::BleedingMark
                         | BuffKind::Burning
                         | BuffKind::RestingHeal
                         | BuffKind::Cursed

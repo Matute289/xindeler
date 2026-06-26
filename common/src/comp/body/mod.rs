@@ -1273,7 +1273,9 @@ impl Body {
 
     pub fn immune_to(&self, buff: BuffKind) -> bool {
         match buff {
-            BuffKind::Bleeding => match self {
+            // BL-05 RD-7: BleedingMark bleeds too, so bloodless bodies resist it
+            // exactly like Bleeding (a golem can't be made to bleed-and-detonate).
+            BuffKind::Bleeding | BuffKind::BleedingMark => match self {
                 Body::Golem(_) | Body::Ship(_) => true,
                 Body::Object(object) => !matches!(object, object::Body::TrainingDummy),
                 Body::BipedSmall(b) => matches!(

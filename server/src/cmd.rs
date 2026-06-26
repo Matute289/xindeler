@@ -6149,6 +6149,7 @@ fn build_buff(
             | BuffKind::Bloodfeast
             | BuffKind::Berserk
             | BuffKind::Bleeding
+            | BuffKind::BleedingMark
             | BuffKind::Cursed
             | BuffKind::Burning
             | BuffKind::Crippled
