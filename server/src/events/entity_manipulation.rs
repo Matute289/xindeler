@@ -561,6 +561,16 @@ fn handle_exp_gain(
     let mut xp_pools = HashSet::<SkillGroupKind>::new();
     // Insert general pool since it is always accessible
     xp_pools.insert(SkillGroupKind::General);
+    // BL-06: the character's class group is always-active (like General), so it
+    // earns combat XP from every kill — this is the source of class skill points
+    // (spec §1). Without it the class trees can never be unlocked.
+    if let Some(class_group) = skill_set
+        .skill_groups()
+        .map(|sg| sg.skill_group_kind)
+        .find(|kind| matches!(kind, SkillGroupKind::Class(_)))
+    {
+        xp_pools.insert(class_group);
+    }
     // Closure to add xp pool corresponding to weapon type equipped in a particular
     // EquipSlot
     let mut add_tool_from_slot = |equip_slot| {

@@ -80,7 +80,7 @@ lazy_static! {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    static ref SKILL_TREES: Vec<String> = ["general", "sword", "axe", "hammer", "bow", "staff", "sceptre", "mining"]
+    static ref SKILL_TREES: Vec<String> = ["general", "sword", "axe", "hammer", "bow", "staff", "sceptre", "mining", "warrior", "mage", "cleric", "rogue"]
         .iter()
         .map(|s| s.to_string())
         .collect();
