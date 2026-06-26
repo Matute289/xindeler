@@ -1,11 +1,13 @@
-// BL-06 — Mage capstone "Arcane Mastery" (P2b). Placeholder RON so the pool key
-// resolves to something inert until P2b wires up the full ability.
-// Gated on Mage(ArcaneMastery) which nobody has yet; harmless until P2b.
+// BL-06 — Mage capstone "Arcane Mastery": casting-speed + energy window. Q5
+// synergy: buff strength scales with Focused Mind rank.
 SelfBuff(
-    buildup_duration: 0.1,
-    cast_duration: 0.1,
-    recover_duration: 0.1,
-    buffs: [],
+    buildup_duration: 0.3,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: Hastened, data: BuffData(strength: 0.25, duration: Some(8.0))),
+        BuffDesc(kind: EnergyRegen, data: BuffData(strength: 3.0, duration: Some(8.0))),
+    ],
     energy_cost: 0,
-    meta: (),
+    meta: (cooldown: Some(60.0)),
 )
