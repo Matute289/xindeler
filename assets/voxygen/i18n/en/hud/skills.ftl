@@ -8,6 +8,117 @@ hud-skill_tree-bow = Bow
 hud-skill_tree-staff = Fire Staff
 hud-skill_tree-sceptre = Sceptre
 hud-skill_tree-mining = Mining
+hud-skill_tree-class = Class
+hud-skill_tree-class-title = Class Skills
+hud-skill_tree-class-empty = No class skills available yet
+
+## BL-06 P3a — Warrior class skill strings
+
+hud-skill-class-warrior-hardened_body_title = Hardened Body
+hud-skill-class-warrior-hardened_body = Your body toughens through combat, increasing maximum health.
+hud-skill-class-warrior-practiced_strikes_title = Practiced Strikes
+hud-skill-class-warrior-practiced_strikes = Years of training sharpen every blow, increasing attack damage.
+hud-skill-class-warrior-rally_title = Rally
+hud-skill-class-warrior-rally = Call out to nearby allies, granting them a temporary burst of strength.
+hud-skill-class-warrior-iron_skin_title = Iron Skin
+hud-skill-class-warrior-iron_skin = Your skin hardens like iron, reducing damage taken.
+hud-skill-class-warrior-brutal_edge_title = Brutal Edge
+hud-skill-class-warrior-brutal_edge = Each strike carries crushing weight, increasing attack damage further.
+hud-skill-class-warrior-crushing_blows_title = Crushing Blows
+hud-skill-class-warrior-crushing_blows = Your strikes bypass some of the enemy's defenses.
+hud-skill-class-warrior-stalwart_title = Stalwart
+hud-skill-class-warrior-stalwart = Immovable in the heat of battle, increasing maximum health.
+hud-skill-class-warrior-sundering_force_title = Sundering Force
+hud-skill-class-warrior-sundering_force = Attacks carry devastating force, increasing attack damage.
+hud-skill-class-warrior-stagger_title = Stagger
+hud-skill-class-warrior-stagger = Powerful hits shake foes, increasing poise damage dealt.
+hud-skill-class-warrior-battle_momentum_title = Battle Momentum
+hud-skill-class-warrior-battle_momentum = Combat sharpens your reflexes, increasing energy regeneration.
+hud-skill-class-warrior-bulwark_stance_title = Bulwark Stance
+hud-skill-class-warrior-bulwark_stance = A defensive posture that significantly reduces damage taken.
+hud-skill-class-warrior-onslaught_title = Onslaught
+hud-skill-class-warrior-onslaught = Unleash a relentless assault that devastates your enemies.
+
+## BL-06 P3a — Mage class skill strings
+
+hud-skill-class-mage-focused_mind_title = Focused Mind
+hud-skill-class-mage-focused_mind = Clarity of thought increases spell power.
+hud-skill-class-mage-true_aim_title = True Aim
+hud-skill-class-mage-true_aim = Spells unerringly find their target, increasing magic accuracy.
+hud-skill-class-mage-arcane_surge_title = Arcane Surge
+hud-skill-class-mage-arcane_surge = Release a burst of raw arcane energy at a single target.
+hud-skill-class-mage-spell_potency_title = Spell Potency
+hud-skill-class-mage-spell_potency = Deeper attunement to the arcane increases spell power.
+hud-skill-class-mage-pyromantic_attunement_title = Pyromantic Attunement
+hud-skill-class-mage-pyromantic_attunement = Attunement to fire magic increases resistance to flame.
+hud-skill-class-mage-cryomantic_attunement_title = Cryomantic Attunement
+hud-skill-class-mage-cryomantic_attunement = Attunement to frost magic increases resistance to cold.
+hud-skill-class-mage-quick_casting_title = Quick Casting
+hud-skill-class-mage-quick_casting = Streamlined channeling reduces energy drain while casting.
+hud-skill-class-mage-penetrating_magic_title = Penetrating Magic
+hud-skill-class-mage-penetrating_magic = Spells pierce magical defenses, increasing mitigation penetration.
+hud-skill-class-mage-warded_skin_title = Warded Skin
+hud-skill-class-mage-warded_skin = Protective wards resist magical attacks.
+hud-skill-class-mage-mana_efficiency_title = Mana Efficiency
+hud-skill-class-mage-mana_efficiency = Efficient channeling increases maximum energy.
+hud-skill-class-mage-overcharge_title = Overcharge
+hud-skill-class-mage-overcharge = Push spells beyond their limits, greatly increasing spell power.
+hud-skill-class-mage-arcane_mastery_title = Arcane Mastery
+hud-skill-class-mage-arcane_mastery = True command of the arcane — unleash a devastating spell barrage.
+
+## BL-06 P3a — Cleric class skill strings
+
+hud-skill-class-cleric-faithful_vigor_title = Faithful Vigor
+hud-skill-class-cleric-faithful_vigor = Your faith renews your body, increasing maximum health.
+hud-skill-class-cleric-devout_focus_title = Devout Focus
+hud-skill-class-cleric-devout_focus = Devotion deepens your magical focus, increasing maximum energy.
+hud-skill-class-cleric-mending_light_title = Mending Light
+hud-skill-class-cleric-mending_light = Channel restorative light to heal yourself and nearby allies.
+hud-skill-class-cleric-blessed_aim_title = Blessed Aim
+hud-skill-class-cleric-blessed_aim = Your attacks carry divine precision, increasing accuracy.
+hud-skill-class-cleric-sacred_wards_title = Sacred Wards
+hud-skill-class-cleric-sacred_wards = Holy wards reduce incoming damage.
+hud-skill-class-cleric-steadfast_faith_title = Steadfast Faith
+hud-skill-class-cleric-steadfast_faith = Unshakeable faith increases resistance to crowd control.
+hud-skill-class-cleric-purifying_grace_title = Purifying Grace
+hud-skill-class-cleric-purifying_grace = Divine grace increases healing power.
+hud-skill-class-cleric-divine_conduit_title = Divine Conduit
+hud-skill-class-cleric-divine_conduit = Become a conduit for divine energy, increasing spell power.
+hud-skill-class-cleric-smiting_strikes_title = Smiting Strikes
+hud-skill-class-cleric-smiting_strikes = Weapons carry divine wrath, dealing bonus damage to the undead.
+hud-skill-class-cleric-armor_of_faith_title = Armor of Faith
+hud-skill-class-cleric-armor_of_faith = Faith itself becomes armor, reducing damage taken.
+hud-skill-class-cleric-aegis_title = Aegis
+hud-skill-class-cleric-aegis = A mighty divine shield greatly reduces incoming damage.
+hud-skill-class-cleric-radiant_channel_title = Radiant Channel
+hud-skill-class-cleric-radiant_channel = Pour divine radiance into your allies, healing them and smiting foes.
+
+## BL-06 P3a — Rogue class skill strings
+
+hud-skill-class-rogue-lithe_title = Lithe
+hud-skill-class-rogue-lithe = Fluid movement increases evasion.
+hud-skill-class-rogue-keen_edge_title = Keen Edge
+hud-skill-class-rogue-keen_edge = Razor-sharp focus increases attack damage.
+hud-skill-class-rogue-ambush_title = Ambush
+hud-skill-class-rogue-ambush = Strike from the shadows with a devastating backstab.
+hud-skill-class-rogue-deadly_precision_title = Deadly Precision
+hud-skill-class-rogue-deadly_precision = Pinpoint accuracy increases critical hit chance.
+hud-skill-class-rogue-fleet_footed_title = Fleet Footed
+hud-skill-class-rogue-fleet_footed = Swift feet increase movement speed.
+hud-skill-class-rogue-sure_strike_title = Sure Strike
+hud-skill-class-rogue-sure_strike = Practiced technique increases accuracy.
+hud-skill-class-rogue-find_the_gap_title = Find the Gap
+hud-skill-class-rogue-find_the_gap = Spot weaknesses in enemy defenses, increasing mitigation penetration.
+hud-skill-class-rogue-quick_hands_title = Quick Hands
+hud-skill-class-rogue-quick_hands = Fast hands increase recovery speed.
+hud-skill-class-rogue-toxin_tolerance_title = Toxin Tolerance
+hud-skill-class-rogue-toxin_tolerance = Exposure to toxins builds resistance to poison.
+hud-skill-class-rogue-opportunist_title = Opportunist
+hud-skill-class-rogue-opportunist = Attack damage increases when you have the upper hand.
+hud-skill-class-rogue-shadowstep_title = Shadowstep
+hud-skill-class-rogue-shadowstep = Master of movement — evasion is greatly increased.
+hud-skill-class-rogue-vanish_title = Vanish
+hud-skill-class-rogue-vanish = Disappear from sight entirely, then strike with lethal precision.
 
 hud-rank_up = New skill point
 hud-skill-sp_available =

@@ -22,7 +22,8 @@ use client::{self, Client};
 use common::{
     combat,
     comp::{
-        self, AttunedItems, Body, CharacterState, Energy, Health, Inventory, Poise, Stats,
+        self, AttunedItems, Body, CharacterState, ClassKind, Energy, Health, Inventory, Poise,
+        Stats,
         ability::{Ability, AbilityPool, ActiveAbilities, AuxiliaryAbility, BASE_ABILITY_LIMIT},
         inventory::{
             item::{
@@ -33,10 +34,13 @@ use common::{
             slot::EquipSlot,
         },
         skills::{
-            self, AxeSkill, BowSkill, ClimbSkill, HammerSkill, MiningSkill, SKILL_MODIFIERS,
-            SceptreSkill, Skill, SwimSkill, SwordSkill,
+            self, AxeSkill, BowSkill, ClericSkill, ClimbSkill, HammerSkill, MageSkill, MiningSkill,
+            RogueSkill, SKILL_MODIFIERS, SceptreSkill, Skill, SwimSkill, SwordSkill, WarriorSkill,
         },
-        skillset::{SkillGroupKind, SkillSet},
+        skillset::{
+            CLASS_SKILL_MODIFIERS, SKILL_GROUP_DEFS, SKILL_PREREQUISITES, SkillGroupKind,
+            SkillPrerequisite, SkillSet,
+        },
     },
     resources::BattleMode,
     uid::Uid,
@@ -180,6 +184,11 @@ widget_ids! {
         stat_values[],
         // Recipes
         recipe_groups[],
+        // BL-06 P3a: generic class skill-tree tab
+        class_tree_align,
+        class_tree_empty_txt,
+        class_skills[],
+        class_skill_lock_imgs[],
     }
 }
 
@@ -340,6 +349,10 @@ pub enum DiarySkillTree {
     Staff,
     Sceptre,
     Pick,
+    // BL-06 P3a: generic class skill-tree tab. The live ClassKind is
+    // determined from the skill set at render time; this variant carries no
+    // data because `DiarySkillTree` must be `EnumIter` + static.
+    Class,
 }
 
 impl DiarySkillTree {
@@ -353,6 +366,7 @@ impl DiarySkillTree {
             DiarySkillTree::Staff => "hud-skill_tree-staff",
             DiarySkillTree::Sceptre => "hud-skill_tree-sceptre",
             DiarySkillTree::Pick => "hud-skill_tree-mining",
+            DiarySkillTree::Class => "hud-skill_tree-class",
         }
     }
 
@@ -366,6 +380,10 @@ impl DiarySkillTree {
             DiarySkillTree::Staff => SkillGroupKind::Weapon(ToolKind::Staff),
             DiarySkillTree::Sceptre => SkillGroupKind::Weapon(ToolKind::Sceptre),
             DiarySkillTree::Pick => SkillGroupKind::Weapon(ToolKind::Pick),
+            // For the Class variant the live group is resolved at render time via
+            // `selected_class_group()`; `General` here is a never-reached
+            // placeholder that satisfies the exhaustive match.
+            DiarySkillTree::Class => SkillGroupKind::General,
         }
     }
 }
@@ -556,10 +574,28 @@ impl Widget for Diary<'_> {
                         .resize(skill_trees_len, &mut ui.widget_id_generator())
                 });
 
+                // Resolve the live class group once (None = Adventurer /
+                // unclassed).
+                let class_group = self.selected_class_group();
+
                 // Draw skillgroup tab's icons
                 for (i, skill_tree) in DiarySkillTree::iter().enumerate() {
+                    // The Class tab is only shown when the character has a class
+                    // skill group. Skip entirely otherwise so the tab doesn't
+                    // appear as a locked "General" placeholder.
+                    if skill_tree == DiarySkillTree::Class && class_group.is_none() {
+                        continue;
+                    }
+
                     let skill_tree_name = self.localized_strings.get_msg(skill_tree.title_key());
-                    let skill_group = skill_tree.to_skill_group();
+                    // For the Class variant, use the live group; for all others
+                    // use the static mapping.
+                    let skill_group = if skill_tree == DiarySkillTree::Class {
+                        // Safety: we skipped above when class_group is None.
+                        class_group.unwrap()
+                    } else {
+                        skill_tree.to_skill_group()
+                    };
 
                     // Check if we have this skill tree unlocked
                     let locked = !self.skill_set.skill_group_accessible(skill_group);
@@ -575,6 +611,9 @@ impl Widget for Diary<'_> {
                             DiarySkillTree::Staff => self.imgs.staff,
                             DiarySkillTree::Sceptre => self.imgs.sceptre,
                             DiarySkillTree::Pick => self.imgs.mining,
+                            // Use the skilltree icon for the class tab (a
+                            // generic skill-tree image already in the atlas).
+                            DiarySkillTree::Class => self.imgs.skilltree_ico,
                         };
 
                         if i == 0 {
@@ -807,6 +846,9 @@ impl Widget for Diary<'_> {
                     },
                     SelectedSkillTree::Weapon(ToolKind::Pick) => {
                         self.handle_mining_skills_window(&diary_tooltip, state, ui, events)
+                    },
+                    SelectedSkillTree::Class(class) => {
+                        self.handle_class_skills_window(*class, &diary_tooltip, state, ui, events)
                     },
                     _ => events,
                 }
@@ -1487,6 +1529,241 @@ enum SkillIcon<'a> {
 }
 
 impl Diary<'_> {
+    // --- BL-06 P3a helpers -------------------------------------------------
+
+    /// Returns the first Class skill group present in the skill set, or None
+    /// for Adventurer / unclassed characters.
+    fn selected_class_group(&self) -> Option<SkillGroupKind> {
+        self.skill_set
+            .skill_groups()
+            .find(|sg| matches!(sg.skill_group_kind, SkillGroupKind::Class(_)))
+            .map(|sg| sg.skill_group_kind)
+    }
+
+    /// Compute the tier (depth) of `skill` in the prerequisite DAG.
+    /// Tier 0 = no prerequisites (root node).
+    /// Tier N = 1 + max tier of any direct prerequisite.
+    fn class_skill_tier(skill: Skill, depth: u8) -> u8 {
+        if depth > 8 {
+            // Guard against unexpected cycles / pathological graphs.
+            return 0;
+        }
+        match SKILL_PREREQUISITES.get(&skill) {
+            None => 0,
+            Some(SkillPrerequisite::All(map) | SkillPrerequisite::Any(map)) => {
+                let max_prereq_tier = map
+                    .keys()
+                    .map(|p| Self::class_skill_tier(*p, depth + 1))
+                    .max()
+                    .unwrap_or(0);
+                max_prereq_tier + 1
+            },
+        }
+    }
+
+    /// Maps the 8 active class skills to their `ability_id` strings (the keys
+    /// used in the ability manifests). Returns None for passive skills.
+    fn class_skill_ability_id(skill: Skill) -> Option<&'static str> {
+        match skill {
+            Skill::Warrior(WarriorSkill::Rally) => Some("class.warrior.rally"),
+            Skill::Warrior(WarriorSkill::Onslaught) => Some("class.warrior.onslaught"),
+            Skill::Mage(MageSkill::ArcaneSurge) => Some("class.mage.arcanesurge"),
+            Skill::Mage(MageSkill::ArcaneMastery) => Some("class.mage.arcanemastery"),
+            Skill::Cleric(ClericSkill::MendingLight) => Some("class.cleric.mendinglight"),
+            Skill::Cleric(ClericSkill::RadiantChannel) => Some("class.cleric.radiantchannel"),
+            Skill::Rogue(RogueSkill::Ambush) => Some("class.rogue.ambush"),
+            Skill::Rogue(RogueSkill::Vanish) => Some("class.rogue.vanish"),
+            _ => None,
+        }
+    }
+
+    /// Map a `ClassPassiveStat` to a representative existing icon.
+    fn class_passive_icon(&self, stat: Option<&(skills::ClassPassiveStat, f32)>) -> image::Id {
+        use skills::ClassPassiveStat::*;
+        match stat.map(|(s, _)| *s) {
+            Some(MaxHealth) => self.imgs.buff_healthplus_0,
+            Some(MaxEnergy) => self.imgs.buff_energyplus_0,
+            Some(AttackDamage) => self.imgs.buff_damage_skill,
+            Some(SpellPower) => self.imgs.magic_damage_skill,
+            Some(HealPower) => self.imgs.magic_lifesteal_skill,
+            Some(Accuracy | MagicAccuracy) => self.imgs.magic_distance_skill,
+            Some(CritChance | PrecisionMult) => self.imgs.buff_imminentcritical,
+            Some(Evasion) => self.imgs.buff_haste_0,
+            Some(DamageReduction | MitigationsPenetration) => self.imgs.buff_dmg_red_0,
+            Some(ResistFire) => self.imgs.buff_flame,
+            Some(ResistFrost) => self.imgs.buff_frigid,
+            Some(ResistPoison) => self.imgs.magic_cost_skill,
+            Some(ResistMagic) => self.imgs.magic_radius_skill,
+            Some(CrowdControlResistance) => self.imgs.buff_fortitude_0,
+            Some(PoiseDamage) => self.imgs.buff_frenzy_0,
+            Some(MoveSpeed | RecoverySpeed) => self.imgs.utility_speed_skill,
+            Some(EnergyReward) => self.imgs.magic_energy_regen_skill,
+            Some(BonusVsUndead) => self.imgs.buff_plus_0,
+            None => self.imgs.buff_cost_skill,
+        }
+    }
+
+    /// Generic class skill-tree renderer — serves all 14 classes from the RON
+    /// manifests without hand-laying a grid. Skills are sorted into tier rows
+    /// (tier 0 at the top) and positioned inside `state.ids.content_align`.
+    ///
+    /// Layout constants (tunable for visual polish in-game):
+    ///   TOP_MARGIN  = 80 px  (below the tree title)
+    ///   ROW_H       = 120 px (vertical gap between tiers)
+    ///   COL_W       = 110 px (horizontal gap between skills in a row)
+    ///   ICON_SIZE   = 74 px  (matches existing Unlockable buttons)
+    fn handle_class_skills_window(
+        &mut self,
+        class: ClassKind,
+        diary_tooltip: &Tooltip,
+        state: &mut State<DiaryState>,
+        ui: &mut UiCell,
+        mut events: Vec<Event>,
+    ) -> Vec<Event> {
+        use PositionSpecifier::TopLeftWithMarginsOn;
+
+        // Title — generic localized header (the active class is conveyed by the
+        // selected tab + the character sheet, so this avoids needing a localized
+        // name key for every one of the 14 classes).
+        let title = self.localized_strings.get_msg("hud-skill_tree-class-title");
+        Text::new(&title)
+            .mid_top_with_margin_on(state.ids.content_align, 2.0)
+            .font_id(self.fonts.cyri.conrod_id)
+            .font_size(self.fonts.cyri.scale(34))
+            .color(TEXT_COLOR)
+            .set(state.ids.tree_title_txt, ui);
+
+        // Background alignment rectangle for the skill grid
+        const GRID_W: f64 = 900.0;
+        const GRID_H: f64 = 600.0;
+        Rectangle::fill_with([GRID_W, GRID_H], color::TRANSPARENT)
+            .mid_top_with_margin_on(state.ids.content_align, 50.0)
+            .set(state.ids.class_tree_align, ui);
+
+        // Collect the skills for this class from the manifest (BTreeSet → Vec
+        // gives a stable, deterministic order across runs).
+        let skills: Vec<Skill> = SKILL_GROUP_DEFS
+            .get(&SkillGroupKind::Class(class))
+            .map(|def| def.skills.iter().copied().collect())
+            .unwrap_or_default();
+
+        if skills.is_empty() {
+            // No skills yet for this class (10 classes are empty stubs). Use a
+            // dedicated widget id so it doesn't clobber the title above.
+            let empty = self.localized_strings.get_msg("hud-skill_tree-class-empty");
+            Text::new(&empty)
+                .mid_top_with_margin_on(state.ids.class_tree_align, 40.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .color(TEXT_COLOR)
+                .set(state.ids.class_tree_empty_txt, ui);
+            return events;
+        }
+
+        // Compute tier for each skill.
+        let tiers: Vec<u8> = skills
+            .iter()
+            .map(|&s| Self::class_skill_tier(s, 0))
+            .collect();
+
+        let max_tier = tiers.iter().copied().max().unwrap_or(0);
+
+        // Group skills by tier to compute row widths for centering.
+        let mut rows: Vec<Vec<usize>> = vec![vec![]; (max_tier as usize) + 1];
+        for (idx, &tier) in tiers.iter().enumerate() {
+            rows[tier as usize].push(idx);
+        }
+
+        // Layout constants
+        const TOP_MARGIN: f64 = 30.0;
+        const ROW_H: f64 = 120.0;
+        const COL_W: f64 = 110.0;
+
+        // Build the SkillIcon list in (tier, column) order.
+        let mut skill_icons: Vec<SkillIcon> = Vec::with_capacity(skills.len());
+
+        for (tier_idx, row_indices) in rows.iter().enumerate() {
+            let row_count = row_indices.len();
+            // Centre the row within the grid width.
+            let total_row_w = (row_count as f64 - 1.0) * COL_W;
+            let row_x_start = (GRID_W - total_row_w) / 2.0;
+            let y = TOP_MARGIN + tier_idx as f64 * ROW_H;
+
+            for (col, &skill_idx) in row_indices.iter().enumerate() {
+                let skill = skills[skill_idx];
+                let x = row_x_start + col as f64 * COL_W;
+                let position = TopLeftWithMarginsOn(state.ids.class_tree_align, y, x);
+
+                if let Some(ability_id) = Self::class_skill_ability_id(skill) {
+                    // Active ability skill
+                    skill_icons.push(SkillIcon::Ability {
+                        skill,
+                        ability_id,
+                        position,
+                    });
+                } else {
+                    // Passive skill — pick an icon based on what stat it boosts
+                    let first_stat = CLASS_SKILL_MODIFIERS.get(&skill).and_then(|v| v.first());
+                    let image = self.class_passive_icon(first_stat);
+                    skill_icons.push(SkillIcon::Unlockable {
+                        skill,
+                        image,
+                        position,
+                        // id is filled in below once we have the id vec
+                        id: state.ids.class_tree_align, // placeholder, overwritten below
+                    });
+                }
+            }
+        }
+
+        // Allocate widget-id arrays to match the skill count.
+        // `class_skills` backs Unlockable buttons (via pre-set `.id` field).
+        // `skills` / `skill_lock_imgs` back Ability buttons (used by
+        // `create_unlock_ability_button` via the slice index `i`).
+        let n = skill_icons.len();
+        state.update(|s| s.ids.class_skills.resize(n, &mut ui.widget_id_generator()));
+        state.update(|s| {
+            s.ids
+                .class_skill_lock_imgs
+                .resize(n, &mut ui.widget_id_generator())
+        });
+        state.update(|s| s.ids.skills.resize(n, &mut ui.widget_id_generator()));
+        state.update(|s| {
+            s.ids
+                .skill_lock_imgs
+                .resize(n, &mut ui.widget_id_generator())
+        });
+
+        // Resolve widget ids for Unlockable entries (abilities carry no id field).
+        let mut unlockable_counter = 0usize;
+        let final_icons: Vec<SkillIcon> = skill_icons
+            .into_iter()
+            .map(|icon| match icon {
+                SkillIcon::Unlockable {
+                    skill,
+                    image,
+                    position,
+                    ..
+                } => {
+                    let id = state.ids.class_skills[unlockable_counter];
+                    unlockable_counter += 1;
+                    SkillIcon::Unlockable {
+                        skill,
+                        image,
+                        position,
+                        id,
+                    }
+                },
+                other => other,
+            })
+            .collect();
+
+        self.handle_skill_buttons(&final_icons, ui, &mut events, diary_tooltip, state);
+        events
+    }
+
+    // --- end BL-06 P3a helpers ----------------------------------------------
+
     fn handle_general_skills_window(
         &mut self,
         diary_tooltip: &Tooltip,
@@ -2944,7 +3221,224 @@ fn skill_strings(skill: Skill) -> SkillStrings<'static> {
         Skill::Swim(s) => swim_skill_strings(s),
         // mining
         Skill::Pick(s) => mining_skill_strings(s),
+        // BL-06 P3a: class skill trees
+        Skill::Warrior(s) => warrior_skill_strings(s),
+        Skill::Mage(s) => mage_skill_strings(s),
+        Skill::Cleric(s) => cleric_skill_strings(s),
+        Skill::Rogue(s) => rogue_skill_strings(s),
         _ => SkillStrings::plain("", ""),
+    }
+}
+
+fn warrior_skill_strings(skill: WarriorSkill) -> SkillStrings<'static> {
+    match skill {
+        WarriorSkill::HardenedBody => SkillStrings::plain(
+            "hud-skill-class-warrior-hardened_body_title",
+            "hud-skill-class-warrior-hardened_body",
+        ),
+        WarriorSkill::PracticedStrikes => SkillStrings::plain(
+            "hud-skill-class-warrior-practiced_strikes_title",
+            "hud-skill-class-warrior-practiced_strikes",
+        ),
+        WarriorSkill::Rally => SkillStrings::plain(
+            "hud-skill-class-warrior-rally_title",
+            "hud-skill-class-warrior-rally",
+        ),
+        WarriorSkill::IronSkin => SkillStrings::plain(
+            "hud-skill-class-warrior-iron_skin_title",
+            "hud-skill-class-warrior-iron_skin",
+        ),
+        WarriorSkill::BrutalEdge => SkillStrings::plain(
+            "hud-skill-class-warrior-brutal_edge_title",
+            "hud-skill-class-warrior-brutal_edge",
+        ),
+        WarriorSkill::CrushingBlows => SkillStrings::plain(
+            "hud-skill-class-warrior-crushing_blows_title",
+            "hud-skill-class-warrior-crushing_blows",
+        ),
+        WarriorSkill::Stalwart => SkillStrings::plain(
+            "hud-skill-class-warrior-stalwart_title",
+            "hud-skill-class-warrior-stalwart",
+        ),
+        WarriorSkill::SunderingForce => SkillStrings::plain(
+            "hud-skill-class-warrior-sundering_force_title",
+            "hud-skill-class-warrior-sundering_force",
+        ),
+        WarriorSkill::Stagger => SkillStrings::plain(
+            "hud-skill-class-warrior-stagger_title",
+            "hud-skill-class-warrior-stagger",
+        ),
+        WarriorSkill::BattleMomentum => SkillStrings::plain(
+            "hud-skill-class-warrior-battle_momentum_title",
+            "hud-skill-class-warrior-battle_momentum",
+        ),
+        WarriorSkill::BulwarkStance => SkillStrings::plain(
+            "hud-skill-class-warrior-bulwark_stance_title",
+            "hud-skill-class-warrior-bulwark_stance",
+        ),
+        WarriorSkill::Onslaught => SkillStrings::plain(
+            "hud-skill-class-warrior-onslaught_title",
+            "hud-skill-class-warrior-onslaught",
+        ),
+    }
+}
+
+fn mage_skill_strings(skill: MageSkill) -> SkillStrings<'static> {
+    match skill {
+        MageSkill::FocusedMind => SkillStrings::plain(
+            "hud-skill-class-mage-focused_mind_title",
+            "hud-skill-class-mage-focused_mind",
+        ),
+        MageSkill::TrueAim => SkillStrings::plain(
+            "hud-skill-class-mage-true_aim_title",
+            "hud-skill-class-mage-true_aim",
+        ),
+        MageSkill::ArcaneSurge => SkillStrings::plain(
+            "hud-skill-class-mage-arcane_surge_title",
+            "hud-skill-class-mage-arcane_surge",
+        ),
+        MageSkill::SpellPotency => SkillStrings::plain(
+            "hud-skill-class-mage-spell_potency_title",
+            "hud-skill-class-mage-spell_potency",
+        ),
+        MageSkill::PyromanticAttunement => SkillStrings::plain(
+            "hud-skill-class-mage-pyromantic_attunement_title",
+            "hud-skill-class-mage-pyromantic_attunement",
+        ),
+        MageSkill::CryomanticAttunement => SkillStrings::plain(
+            "hud-skill-class-mage-cryomantic_attunement_title",
+            "hud-skill-class-mage-cryomantic_attunement",
+        ),
+        MageSkill::QuickCasting => SkillStrings::plain(
+            "hud-skill-class-mage-quick_casting_title",
+            "hud-skill-class-mage-quick_casting",
+        ),
+        MageSkill::PenetratingMagic => SkillStrings::plain(
+            "hud-skill-class-mage-penetrating_magic_title",
+            "hud-skill-class-mage-penetrating_magic",
+        ),
+        MageSkill::WardedSkin => SkillStrings::plain(
+            "hud-skill-class-mage-warded_skin_title",
+            "hud-skill-class-mage-warded_skin",
+        ),
+        MageSkill::ManaEfficiency => SkillStrings::plain(
+            "hud-skill-class-mage-mana_efficiency_title",
+            "hud-skill-class-mage-mana_efficiency",
+        ),
+        MageSkill::Overcharge => SkillStrings::plain(
+            "hud-skill-class-mage-overcharge_title",
+            "hud-skill-class-mage-overcharge",
+        ),
+        MageSkill::ArcaneMastery => SkillStrings::plain(
+            "hud-skill-class-mage-arcane_mastery_title",
+            "hud-skill-class-mage-arcane_mastery",
+        ),
+    }
+}
+
+fn cleric_skill_strings(skill: ClericSkill) -> SkillStrings<'static> {
+    match skill {
+        ClericSkill::FaithfulVigor => SkillStrings::plain(
+            "hud-skill-class-cleric-faithful_vigor_title",
+            "hud-skill-class-cleric-faithful_vigor",
+        ),
+        ClericSkill::DevoutFocus => SkillStrings::plain(
+            "hud-skill-class-cleric-devout_focus_title",
+            "hud-skill-class-cleric-devout_focus",
+        ),
+        ClericSkill::MendingLight => SkillStrings::plain(
+            "hud-skill-class-cleric-mending_light_title",
+            "hud-skill-class-cleric-mending_light",
+        ),
+        ClericSkill::BlessedAim => SkillStrings::plain(
+            "hud-skill-class-cleric-blessed_aim_title",
+            "hud-skill-class-cleric-blessed_aim",
+        ),
+        ClericSkill::SacredWards => SkillStrings::plain(
+            "hud-skill-class-cleric-sacred_wards_title",
+            "hud-skill-class-cleric-sacred_wards",
+        ),
+        ClericSkill::SteadfastFaith => SkillStrings::plain(
+            "hud-skill-class-cleric-steadfast_faith_title",
+            "hud-skill-class-cleric-steadfast_faith",
+        ),
+        ClericSkill::PurifyingGrace => SkillStrings::plain(
+            "hud-skill-class-cleric-purifying_grace_title",
+            "hud-skill-class-cleric-purifying_grace",
+        ),
+        ClericSkill::DivineConduit => SkillStrings::plain(
+            "hud-skill-class-cleric-divine_conduit_title",
+            "hud-skill-class-cleric-divine_conduit",
+        ),
+        ClericSkill::SmitingStrikes => SkillStrings::plain(
+            "hud-skill-class-cleric-smiting_strikes_title",
+            "hud-skill-class-cleric-smiting_strikes",
+        ),
+        ClericSkill::ArmorOfFaith => SkillStrings::plain(
+            "hud-skill-class-cleric-armor_of_faith_title",
+            "hud-skill-class-cleric-armor_of_faith",
+        ),
+        ClericSkill::Aegis => SkillStrings::plain(
+            "hud-skill-class-cleric-aegis_title",
+            "hud-skill-class-cleric-aegis",
+        ),
+        ClericSkill::RadiantChannel => SkillStrings::plain(
+            "hud-skill-class-cleric-radiant_channel_title",
+            "hud-skill-class-cleric-radiant_channel",
+        ),
+    }
+}
+
+fn rogue_skill_strings(skill: RogueSkill) -> SkillStrings<'static> {
+    match skill {
+        RogueSkill::Lithe => SkillStrings::plain(
+            "hud-skill-class-rogue-lithe_title",
+            "hud-skill-class-rogue-lithe",
+        ),
+        RogueSkill::KeenEdge => SkillStrings::plain(
+            "hud-skill-class-rogue-keen_edge_title",
+            "hud-skill-class-rogue-keen_edge",
+        ),
+        RogueSkill::Ambush => SkillStrings::plain(
+            "hud-skill-class-rogue-ambush_title",
+            "hud-skill-class-rogue-ambush",
+        ),
+        RogueSkill::DeadlyPrecision => SkillStrings::plain(
+            "hud-skill-class-rogue-deadly_precision_title",
+            "hud-skill-class-rogue-deadly_precision",
+        ),
+        RogueSkill::FleetFooted => SkillStrings::plain(
+            "hud-skill-class-rogue-fleet_footed_title",
+            "hud-skill-class-rogue-fleet_footed",
+        ),
+        RogueSkill::SureStrike => SkillStrings::plain(
+            "hud-skill-class-rogue-sure_strike_title",
+            "hud-skill-class-rogue-sure_strike",
+        ),
+        RogueSkill::FindTheGap => SkillStrings::plain(
+            "hud-skill-class-rogue-find_the_gap_title",
+            "hud-skill-class-rogue-find_the_gap",
+        ),
+        RogueSkill::QuickHands => SkillStrings::plain(
+            "hud-skill-class-rogue-quick_hands_title",
+            "hud-skill-class-rogue-quick_hands",
+        ),
+        RogueSkill::ToxinTolerance => SkillStrings::plain(
+            "hud-skill-class-rogue-toxin_tolerance_title",
+            "hud-skill-class-rogue-toxin_tolerance",
+        ),
+        RogueSkill::Opportunist => SkillStrings::plain(
+            "hud-skill-class-rogue-opportunist_title",
+            "hud-skill-class-rogue-opportunist",
+        ),
+        RogueSkill::Shadowstep => SkillStrings::plain(
+            "hud-skill-class-rogue-shadowstep_title",
+            "hud-skill-class-rogue-shadowstep",
+        ),
+        RogueSkill::Vanish => SkillStrings::plain(
+            "hud-skill-class-rogue-vanish_title",
+            "hud-skill-class-rogue-vanish",
+        ),
     }
 }
 
