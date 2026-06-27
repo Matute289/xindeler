@@ -3577,6 +3577,9 @@ impl Hud {
                     bag::Event::MoveBag(pos) => {
                         global_state.settings.hud_position.bag.own = pos;
                     },
+                    bag::Event::ToggleStatsTab => {
+                        self.show.stats = !self.show.stats;
+                    },
                 }
             }
         }

@@ -1906,7 +1906,6 @@ impl Controls {
                             Space::new(Length::Fill, Length::Units(12)).into(),
                             step_title,
                             species.into(),
-                            rand_character.into(),
                         ],
                         CreationStep::Appearance => {
                             vec![step_title, slider_options.into(), rand_character.into()]
