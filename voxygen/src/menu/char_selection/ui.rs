@@ -1845,7 +1845,17 @@ impl Controls {
                         kv("char_selection-summary_label_name", name.clone()),
                         kv(
                             "char_selection-summary_label_race",
-                            format!("{:?}", body.species),
+                            // Use the localized species name (renamed via i18n,
+                            // e.g. Danari→Gnome) rather than the Debug enum name.
+                            i18n.get_msg(match body.species {
+                                humanoid::Species::Danari => "common-species-danari",
+                                humanoid::Species::Dwarf => "common-species-dwarf",
+                                humanoid::Species::Elf => "common-species-elf",
+                                humanoid::Species::Human => "common-species-human",
+                                humanoid::Species::Orc => "common-species-orc",
+                                humanoid::Species::Draugr => "common-species-draugr",
+                            })
+                            .into_owned(),
                         ),
                         kv("char_selection-summary_label_class", class_name),
                         kv("char_selection-summary_label_alignment", alignment_str),
