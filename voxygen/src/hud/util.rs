@@ -869,6 +869,16 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         // Glider
         "common.abilities.debug.glide_boost" => imgs.flyingrod_m2,
         "common.abilities.debug.glide_speeder" => imgs.flyingrod_m1,
+        // BL-06 class signature/capstone abilities (Innate pool keys). Reuse
+        // existing skill/buff icons until bespoke art lands.
+        "class.warrior.rally" => imgs.buff_healthplus_0,
+        "class.warrior.onslaught" => imgs.buff_frenzy_0,
+        "class.mage.arcanesurge" => imgs.magic_energy_regen_skill,
+        "class.mage.arcanemastery" => imgs.magic_damage_skill,
+        "class.cleric.mendinglight" => imgs.buff_healthplus_0,
+        "class.cleric.radiantchannel" => imgs.buff_plus_0,
+        "class.rogue.ambush" => imgs.buff_imminentcritical,
+        "class.rogue.vanish" => imgs.buff_haste_0,
         _ => imgs.not_found,
     }
 }

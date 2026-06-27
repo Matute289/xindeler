@@ -543,3 +543,21 @@ innate-danari = Shadowstep
     .desc = Slip a short distance through the veil, blinking past your foes.
 innate-draugr = Gravechill
     .desc = Loose a burst of grave-cold, wounding and chilling those nearby.
+
+## BL-06 class signature/capstone abilities
+class-warrior-rally = Rally
+    .desc = Recover some health and gain a brief burst of speed.
+class-warrior-onslaught = Onslaught
+    .desc = Unleash a surge of attack and movement speed. Stronger the more ranks you have in Brutal Edge.
+class-mage-arcanesurge = Arcane Surge
+    .desc = Channel raw arcane power to rapidly restore your energy.
+class-mage-arcanemastery = Arcane Mastery
+    .desc = Enter a window of empowered, faster casting. Lasts longer with more ranks in Focused Mind.
+class-cleric-mendinglight = Mending Light
+    .desc = Bathe nearby allies in a gentle healing aura.
+class-cleric-radiantchannel = Radiant Channel
+    .desc = Channel a powerful healing aura over time.
+class-rogue-ambush = Ambush
+    .desc = A precise opening strike — devastating from behind.
+class-rogue-vanish = Vanish
+    .desc = A sudden burst of mobility to slip away. Stronger with more ranks in Deadly Precision.
