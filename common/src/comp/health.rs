@@ -184,10 +184,21 @@ impl Health {
         // bypass the pool entirely — temp-HP is separate from real HP.
         if change.amount < 0.0 && self.absorb > 0 {
             let damage = -change.amount;
-            let soaked = damage.min(self.absorb());
-            self.absorb = self
-                .absorb
-                .saturating_sub((soaked * Self::SCALING_FACTOR_FLOAT) as u32);
+            let absorb_real = self.absorb();
+            let soaked = damage.min(absorb_real);
+            // BL-05 RD-6: when the hit consumes the whole pool, zero it exactly.
+            // Going through the f32 round-trip (`absorb/256 * 256 as u32`) can
+            // truncate to a 1-unit residual (~0.004 HP), which leaves `absorb()`
+            // just above 0 — so the "absorb depleted → remove Shielded" check
+            // never fires and the shield lingers, silently re-absorbing damage
+            // until its timer expires. Zeroing on full depletion keeps the
+            // invariant "absorb > 0 ⟺ Shielded active" exact.
+            self.absorb = if damage >= absorb_real {
+                0
+            } else {
+                self.absorb
+                    .saturating_sub((soaked * Self::SCALING_FACTOR_FLOAT) as u32)
+            };
             change.amount += soaked;
         }
         let prev_health = i64::from(self.current);
@@ -472,6 +483,35 @@ mod tests {
         health.change_by(damage(10.0));
         assert_eq!(health.absorb(), 0.0);
         assert_eq!(health.current(), 95.0);
+    }
+
+    // BL-05 RD-6 regression: a hit that consumes the whole pool must leave
+    // `absorb()` *exactly* 0, even for values whose f32 round-trip would
+    // otherwise truncate to a 1-unit residual (which made the shield linger and
+    // keep absorbing until its timer expired). Tests several awkward magnitudes.
+    #[test]
+    fn full_depletion_zeroes_absorb_exactly() {
+        for &amount in &[0.1_f32, 3.3, 7.7, 12.34, 49.9, 0.004, 99.99] {
+            let mut health = Health::empty();
+            health.maximum = 1000 * Health::SCALING_FACTOR_INT;
+            health.current = health.maximum;
+            health.raise_absorb_to(amount);
+            // Exactly enough damage to drain the pool.
+            health.change_by(damage(-amount));
+            assert_eq!(
+                health.absorb(),
+                0.0,
+                "absorb residual after exact depletion of {amount}"
+            );
+            // Overkill damage must also zero it, never leave a residual.
+            health.raise_absorb_to(amount);
+            health.change_by(damage(-(amount + 5.0)));
+            assert_eq!(
+                health.absorb(),
+                0.0,
+                "absorb residual after overkill of {amount}"
+            );
+        }
     }
 
     #[test]
