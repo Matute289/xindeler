@@ -5,6 +5,8 @@
 //! `docs/design/tasks/45-engine-migration-tasks.md`. Isolation law: logic
 //! crates never depend on this crate or on Bevy.
 
+pub mod mesh;
+
 use bevy::app::{App, Plugin};
 
 pub struct VoxelRenderPlugin;
