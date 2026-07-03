@@ -16,8 +16,8 @@ cd "$(dirname "$0")/.."
 # (c) cheap source-level grep first: a `use bevy...` in a logic crate is illegal
 # even if the dep graph is (momentarily) clean.
 LOGIC_SRC=(client/src common/src common/*/src network/src network/protocol/src \
-           rtsim/src server/src server/agent/src server-cli/src world/src \
-           voxygen/anim/src voxygen/i18n-helpers/src)
+           rtsim/src server/src server/agent/src server-cli/src tools/*/src \
+           world/src voxygen/anim/src voxygen/i18n-helpers/src)
 if grep -rn --include='*.rs' -E '\bbevy(_[a-z_]+)?::' "${LOGIC_SRC[@]}" 2>/dev/null; then
     echo "ENGINE-ISOLATION VIOLATION (BL-82 §3.1): logic-crate source references the bevy namespace (see matches above)."
     exit 1

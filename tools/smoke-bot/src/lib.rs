@@ -129,11 +129,21 @@ fn phase_err(phase: &'static str, msg: impl fmt::Display) -> SmokeError {
     }
 }
 
+/// A successful run guarantees the character actually walked: if the
+/// horizontal displacement after the movement ticks is under `0.5` units the
+/// run fails, so the binary (CI) fails too — not just the test asserts.
+const MIN_MOVED_XY: f32 = 0.5;
+
 /// Runs the whole smoke flow described in the crate docs.
 ///
 /// Everything lives in a `tempfile` data dir (settings, sqlite saves) that is
 /// deleted on return; the only external requirement is the assets path env
 /// var (`VELOREN_ASSETS`/`XINDELER_ASSETS`) with the LFS map blobs present.
+///
+/// Timeouts: every phase after boot respects [`SmokeOptions::deadline`]
+/// (wall-clock, measured from entry). `Server::new` itself is **not
+/// cancelable** — a hung world load can exceed the deadline; CI relies on the
+/// job-level timeout to catch that case.
 pub fn run_smoke(opts: SmokeOptions) -> Result<SmokeReport, SmokeError> {
     let started = Instant::now();
     let deadline = started + opts.deadline;
@@ -181,7 +191,7 @@ pub fn run_smoke(opts: SmokeOptions) -> Result<SmokeReport, SmokeError> {
 
     // ---- Server tick thread (server-cli's loop shape, 30 TPS) ----
     let stop = Arc::new(AtomicBool::new(false));
-    let server_thread = {
+    let server_thread: ServerThread = {
         let stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("smoke-server-tick".to_owned())
@@ -202,25 +212,49 @@ pub fn run_smoke(opts: SmokeOptions) -> Result<SmokeReport, SmokeError> {
             .map_err(|e| phase_err("boot", e))?
     };
 
-    // Run the client side in a closure so the server thread is always stopped
-    // and joined, pass or fail.
-    let client_result = drive_client(&opts, server_addr.port(), deadline);
+    // Run the client side in its own function so the server thread is always
+    // stopped and joined afterwards, pass or fail.
+    let client_result = drive_client(&opts, server_addr.port(), deadline, &server_thread);
 
     stop.store(true, Ordering::Relaxed);
     let server_ticks = match server_thread.join() {
         Ok(Ok(ticks)) => ticks,
         Ok(Err(msg)) => {
-            // A client-phase error (e.g. a connect timeout) is usually the
-            // symptom; the server tick error is the cause — report it.
-            return Err(client_result
-                .err()
-                .unwrap_or_else(|| phase_err("server-tick", msg)));
+            // A client-phase error (e.g. a connect timeout) is usually just
+            // the symptom; the server tick error is the cause. Report the
+            // server error as primary and append the client symptom, if any.
+            let msg = match &client_result {
+                Err(client_err) => {
+                    format!("server tick thread died: {msg} (client-side symptom: {client_err})")
+                },
+                Ok(_) => format!("server tick thread died: {msg}"),
+            };
+            return Err(phase_err("server-tick", msg));
         },
         Err(_) => return Err(phase_err("server-tick", "server tick thread panicked")),
     };
 
     let (character_id, ticks, start_pos, end_pos) = client_result?;
     let moved = end_pos - start_pos;
+    let moved_distance_xy = moved.xy().magnitude();
+    // Enforce the point of the smoke: the character must have actually walked.
+    // (Vertical-only displacement is just gravity/settling — dead input passes
+    // that, so gate on the horizontal component.)
+    if moved_distance_xy < MIN_MOVED_XY {
+        return Err(phase_err(
+            "move",
+            format!(
+                "character barely moved horizontally ({moved_distance_xy:.3} < {MIN_MOVED_XY}) \
+                 over {ticks} ticks: start {start_pos:?} → end {end_pos:?}"
+            ),
+        ));
+    }
+    if server_ticks == 0 {
+        return Err(phase_err(
+            "server-tick",
+            "server thread never completed a single tick",
+        ));
+    }
     Ok(SmokeReport {
         server_boot,
         character_id,
@@ -228,11 +262,16 @@ pub fn run_smoke(opts: SmokeOptions) -> Result<SmokeReport, SmokeError> {
         start_pos,
         end_pos,
         moved_distance: moved.magnitude(),
-        moved_distance_xy: moved.xy().magnitude(),
+        moved_distance_xy,
         server_ticks,
         total_elapsed: started.elapsed(),
     })
 }
+
+/// The background thread ticking the sim; `Err` = a tick failed with that
+/// message. Checked with `is_finished()` mid-run so client phases fail fast
+/// instead of waiting for their timeout when the server dies under them.
+type ServerThread = thread::JoinHandle<Result<u64, String>>;
 
 /// Connect → register → create character → spawn → move → logout.
 /// Returns `(character_id, movement_ticks, start_pos, end_pos)`.
@@ -240,11 +279,14 @@ fn drive_client(
     opts: &SmokeOptions,
     port: u16,
     deadline: Instant,
+    server_thread: &ServerThread,
 ) -> Result<(i64, u32, Vec3<f32>, Vec3<f32>), SmokeError> {
     // ---- Phase: connect ----
     // `Client::new` performs the full handshake (TCP connect, version check,
     // registration — auth is disabled, so the username is accepted directly —
-    // and init-data download); it returns an already-registered client.
+    // and init-data download); it returns an already-registered client. Each
+    // attempt is capped at the remaining deadline so a wedged handshake can't
+    // hang the run.
     let client_runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -253,31 +295,59 @@ fn drive_client(
             .build()
             .map_err(|e| phase_err("connect", e))?,
     );
+    let connect_started = Instant::now();
     let mut client = loop {
+        if server_thread.is_finished() {
+            return Err(phase_err(
+                "connect",
+                "server tick thread died while the client was connecting",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(SmokeError::Timeout {
+                phase: "connect",
+                waited: connect_started.elapsed(),
+            });
+        }
         let addr = ConnectionArgs::Tcp {
             hostname: format!("127.0.0.1:{port}"),
             prefer_ipv6: false,
         };
-        let attempt = client_runtime.block_on(Client::new(
-            addr,
-            Arc::clone(&client_runtime),
-            &mut None,
-            &opts.username,
-            "",
-            None,
-            |_| true,
-            &|stage| tracing::debug!(?stage, "smoke client init"),
-            |_| {},
-            PathBuf::default(),
-            ClientType::Game,
-        ));
+        // NOTE: `timeout` must be constructed *inside* the runtime (its timer
+        // needs the reactor), hence the async block rather than a bare future.
+        let attempt = client_runtime.block_on(async {
+            tokio::time::timeout(
+                remaining,
+                Client::new(
+                    addr,
+                    Arc::clone(&client_runtime),
+                    &mut None,
+                    &opts.username,
+                    "",
+                    None,
+                    |_| true,
+                    &|stage| tracing::debug!(?stage, "smoke client init"),
+                    |_| {},
+                    PathBuf::default(),
+                    ClientType::Game,
+                ),
+            )
+            .await
+        });
         match attempt {
-            Ok(client) => break client,
-            Err(e) if Instant::now() < deadline => {
+            Ok(Ok(client)) => break client,
+            Ok(Err(e)) if Instant::now() < deadline => {
                 tracing::warn!(?e, "smoke: connect attempt failed, retrying");
                 thread::sleep(Duration::from_millis(500));
             },
-            Err(e) => return Err(phase_err("connect", format!("{e:?}"))),
+            Ok(Err(e)) => return Err(phase_err("connect", format!("{e:?}"))),
+            Err(_elapsed) => {
+                return Err(SmokeError::Timeout {
+                    phase: "connect",
+                    waited: connect_started.elapsed(),
+                });
+            },
         }
     };
     tracing::info!("smoke: connected + registered");
@@ -291,6 +361,7 @@ fn drive_client(
         &mut clock,
         deadline,
         "character-list",
+        server_thread,
         |c, _| (!c.character_list().loading).then_some(()),
     )?;
 
@@ -317,6 +388,7 @@ fn drive_client(
                 &mut clock,
                 deadline,
                 "create-character",
+                server_thread,
                 |c, events| {
                     for event in events {
                         if let ClientEvent::CharacterCreated(id) = event {
@@ -345,9 +417,14 @@ fn drive_client(
             entity: opts.view_distance,
         },
     );
-    let start_pos = wait_for(&mut client, &mut clock, deadline, "spawn", |c, _| {
-        c.position()
-    })?;
+    let start_pos = wait_for(
+        &mut client,
+        &mut clock,
+        deadline,
+        "spawn",
+        server_thread,
+        |c, _| c.position(),
+    )?;
     tracing::info!(?start_pos, "smoke: spawned in game");
 
     // ---- Phase: move ----
@@ -357,7 +434,7 @@ fn drive_client(
             move_dir: Vec2::unit_y(),
             ..Default::default()
         };
-        tick_client(&mut client, &mut clock, inputs, "move")?;
+        tick_client(&mut client, &mut clock, inputs, "move", server_thread)?;
         ticks += 1;
     }
     let end_pos = client
@@ -366,24 +443,45 @@ fn drive_client(
     tracing::info!(?end_pos, ticks, "smoke: movement done");
 
     // ---- Phase: logout ----
-    // `logout` sends `Terminate` and marks the client unregistered; give the
-    // async network stack a beat to flush before dropping the client (whose
-    // `Drop` closes the participant).
+    // `logout` sends `Terminate` and marks the client unregistered. Best-effort
+    // flush: keep ticking briefly so the message actually leaves the socket —
+    // here (and only here) a `Disconnect` event or a tick error is the
+    // *expected* outcome, since we asked the server to drop us. Then the
+    // client's `Drop` closes the participant.
     client.logout();
-    thread::sleep(Duration::from_millis(200));
+    let flush_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < flush_deadline {
+        clock.tick();
+        match client.tick(comp::ControllerInputs::default(), clock.game_dt()) {
+            Ok(events) => {
+                client.cleanup();
+                if events.iter().any(|e| matches!(e, ClientEvent::Disconnect)) {
+                    break;
+                }
+            },
+            // The server tearing the connection down after `Terminate` is the
+            // clean-shutdown signal, not a failure.
+            Err(_) => break,
+        }
+    }
     drop(client);
     tracing::info!("smoke: logged out cleanly");
 
     Ok((character_id, ticks, start_pos, end_pos))
 }
 
-/// One paced client tick with fatal-event screening.
+/// One paced client tick with fatal-event screening. Fails fast if the server
+/// tick thread already died — its error surfaces via the join in [`run_smoke`].
 fn tick_client(
     client: &mut Client,
     clock: &mut Clock,
     inputs: comp::ControllerInputs,
     phase: &'static str,
+    server_thread: &ServerThread,
 ) -> Result<Vec<ClientEvent>, SmokeError> {
+    if server_thread.is_finished() {
+        return Err(phase_err(phase, "server tick thread died mid-run"));
+    }
     clock.tick();
     let events = client
         .tick(inputs, clock.game_dt())
@@ -410,6 +508,7 @@ fn wait_for<T>(
     clock: &mut Clock,
     deadline: Instant,
     phase: &'static str,
+    server_thread: &ServerThread,
     mut check: impl FnMut(&mut Client, &[ClientEvent]) -> Option<T>,
 ) -> Result<T, SmokeError> {
     let waited = Instant::now();
@@ -420,7 +519,13 @@ fn wait_for<T>(
                 waited: waited.elapsed(),
             });
         }
-        let events = tick_client(client, clock, comp::ControllerInputs::default(), phase)?;
+        let events = tick_client(
+            client,
+            clock,
+            comp::ControllerInputs::default(),
+            phase,
+            server_thread,
+        )?;
         if let Some(value) = check(client, &events) {
             return Ok(value);
         }
@@ -467,9 +572,12 @@ mod tests {
             report.ticks, move_ticks,
             "all movement ticks should have run"
         );
+        // `run_smoke` already enforces this (it errors below MIN_MOVED_XY),
+        // but keep the explicit assert: xy, not 3D — gravity/settling on z
+        // would satisfy a 3D check even with dead input.
         assert!(
-            report.moved_distance > 0.5,
-            "character should have moved while holding move_dir forward: {report:#?}"
+            report.moved_distance_xy > 0.5,
+            "character should have walked horizontally while holding move_dir forward: {report:#?}"
         );
         assert!(report.server_ticks > 0, "server should have ticked");
     }
