@@ -12,9 +12,11 @@ mod light;
 mod post;
 mod scene;
 mod smoke;
+mod voxel_demo;
 
 use bevy::{asset::AssetPlugin, image::ImagePlugin, prelude::*, window::WindowResolution};
 use xindeler_app::XindelerAppPlugin;
+use xindeler_render_voxel::VoxelRenderPlugin;
 
 fn main() -> AppExit {
     let smoke_mode = smoke::parse_smoke_args();
@@ -53,6 +55,9 @@ fn main() -> AppExit {
         atmosphere::AtmospherePlugin,
         post::PostProcessPlugin,
         scene::DemoScenePlugin,
+        // EM-3.3: VoxelMaterialExt registration + the meshed-chunk demo.
+        VoxelRenderPlugin,
+        voxel_demo::VoxelDemoPlugin,
     ));
 
     match smoke_mode {
