@@ -145,9 +145,45 @@ impl AbilityPool {
         }
     }
 
+    /// Full ability pool for a player character: class active-ability keys
+    /// FIRST (spec order, stable indices for persisted hotbar slots — BL-06
+    /// P2a), then the racial innate key. Ordering contract: append-only;
+    /// never reorder.
+    ///
+    /// ALL class-ability keys are always emitted regardless of whether the
+    /// player has unlocked the skill yet. The manifest `Simple(Some(skill), …)`
+    /// gate makes an un-unlocked key resolve to nothing at use-time — stable
+    /// pool indices are thereby guaranteed even for locked skills.
+    pub fn for_character(body: &crate::comp::Body, class: crate::comp::ClassKind) -> Self {
+        // Class keys first, then the racial innate — delegate the racial part to
+        // `for_body` so the species→key logic lives in exactly one place.
+        let abilities = Self::class_ability_keys(class)
+            .iter()
+            .map(|k| k.to_string())
+            .chain(Self::for_body(body).abilities)
+            .collect();
+        Self { abilities }
+    }
+
+    /// Manifest `Custom(...)` keys for a class's active abilities (BL-06
+    /// P2a/P2b). Signature first, capstone second — indices are stable
+    /// across PRs. Capstone stubs exist as RONs but are gated on skills
+    /// nobody has yet; they resolve to the stub (inert) until P2b populates
+    /// them.
+    fn class_ability_keys(class: crate::comp::ClassKind) -> &'static [&'static str] {
+        use crate::comp::ClassKind;
+        match class {
+            ClassKind::Warrior => &["class.warrior.rally", "class.warrior.onslaught"],
+            ClassKind::Mage => &["class.mage.arcanesurge", "class.mage.arcanemastery"],
+            ClassKind::Cleric => &["class.cleric.mendinglight", "class.cleric.radiantchannel"],
+            ClassKind::Rogue => &["class.rogue.ambush", "class.rogue.vanish"],
+            _ => &[],
+        }
+    }
+
     /// Manifest `Custom(...)` set key for a humanoid species' racial innate.
     /// Exhaustive on purpose: a new species is a compile error until assigned.
-    fn innate_set_key(species: crate::comp::humanoid::Species) -> &'static str {
+    pub(crate) fn innate_set_key(species: crate::comp::humanoid::Species) -> &'static str {
         use crate::comp::humanoid::Species;
         match species {
             Species::Human => "innate.human",
@@ -373,7 +409,10 @@ impl ActiveAbilities {
                         .and_then(|set| set.primary(Some(skill_set), context))
                         .map(|(item, i)| {
                             (
-                                item.ability.clone().adjusted_by_skills(skill_set, None),
+                                item.ability
+                                    .clone()
+                                    .adjusted_by_skills(skill_set, None)
+                                    .adjusted_by_class_synergy(skill_set, key),
                                 false,
                                 spec_ability(i),
                             )
@@ -2551,6 +2590,43 @@ impl CharacterAbility {
         self
     }
 
+    /// BL-06 Q5 — dynamic capstone synergies: a capstone active scales off the
+    /// rank of its sibling passive, read from the live SkillSet at
+    /// ability-build time and keyed by the InnateAux ability id. Per-rank
+    /// factors are balance placeholders, kept as code constants consistent
+    /// with the existing SKILL_MODIFIERS convention.
+    /// TODO: move the synergy factors (and SKILL_MODIFIERS) to RON so designers
+    /// can tune them without a recompile.
+    ///
+    /// NOTE: every keyed capstone here is currently a `SelfBuff`; the scaling
+    /// only applies to that variant. If a future synergy-keyed capstone is
+    /// authored as another variant, the `debug_assert!` below flags the silent
+    /// no-op so the synergy isn't quietly dropped.
+    #[must_use = "method returns new ability and doesn't mutate the original value"]
+    pub fn adjusted_by_class_synergy(mut self, skillset: &SkillSet, ability_id: &str) -> Self {
+        use skills::{MageSkill, RogueSkill, Skill, WarriorSkill};
+        let rank = |s: Skill| skillset.skill_level(s).unwrap_or(0) as f32;
+        let scale = match ability_id {
+            "class.warrior.onslaught" => {
+                1.0 + 0.08 * rank(Skill::Warrior(WarriorSkill::BrutalEdge))
+            },
+            "class.mage.arcanemastery" => 1.0 + 0.06 * rank(Skill::Mage(MageSkill::FocusedMind)),
+            "class.rogue.vanish" => 1.0 + 0.08 * rank(Skill::Rogue(RogueSkill::DeadlyPrecision)),
+            _ => return self,
+        };
+        if let CharacterAbility::SelfBuff { buffs, .. } = &mut self {
+            for b in buffs.iter_mut() {
+                b.data.strength *= scale;
+            }
+        } else {
+            debug_assert!(
+                false,
+                "class synergy for `{ability_id}` expects a SelfBuff ability; synergy dropped",
+            );
+        }
+        self
+    }
+
     fn adjusted_by_mining_skills(&mut self, skillset: &SkillSet) {
         use skills::MiningSkill::Speed;
 
@@ -4199,6 +4275,121 @@ mod innate_tests {
                     .is_some(),
                 "species {species:?} maps to {key}, which has no manifest set"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod class_ability_pool_tests {
+    use crate::{
+        assets::AssetExt,
+        comp::{Body, ClassKind, ability::AbilityPool, humanoid, item::tool::AbilitySpec},
+    };
+
+    /// Build a minimal Human body for deterministic testing.
+    fn human_body() -> Body {
+        Body::Humanoid(humanoid::Body {
+            species: humanoid::Species::Human,
+            body_type: humanoid::BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+            eyes: 0,
+        })
+    }
+
+    /// `for_character` emits class keys BEFORE the racial innate key, in spec
+    /// order (BL-06 P2a ordering contract).
+    #[test]
+    fn warrior_pool_order_is_class_then_racial() {
+        let body = human_body();
+        let pool = AbilityPool::for_character(&body, ClassKind::Warrior);
+        // First two entries are the Warrior class keys (signature, capstone).
+        assert_eq!(
+            pool.abilities.first().map(String::as_str),
+            Some("class.warrior.rally")
+        );
+        assert_eq!(
+            pool.abilities.get(1).map(String::as_str),
+            Some("class.warrior.onslaught"),
+        );
+        // Third entry is the racial innate key (Human in this case).
+        assert_eq!(
+            pool.abilities.get(2).map(String::as_str),
+            Some("innate.human")
+        );
+        assert_eq!(pool.abilities.len(), 3);
+    }
+
+    /// A non-proof class (e.g. Adventurer) gets only the racial innate — no
+    /// class keys — preserving the legacy/empty-tree behaviour.
+    #[test]
+    fn adventurer_pool_has_only_racial_innate() {
+        let body = human_body();
+        let pool = AbilityPool::for_character(&body, ClassKind::Adventurer);
+        assert_eq!(pool.abilities.len(), 1);
+        assert_eq!(pool.abilities[0], "innate.human");
+    }
+
+    /// Every class ability key emitted by `for_character` resolves to a real
+    /// manifest set — a typo in any RON path or key name is caught here, not
+    /// in-game (mirrors the innate_set_key_matches_manifest test).
+    #[test]
+    fn class_ability_keys_match_manifest() {
+        let map = crate::comp::item::tool::AbilityMap::load().read();
+        let proof_classes = [
+            ClassKind::Warrior,
+            ClassKind::Mage,
+            ClassKind::Cleric,
+            ClassKind::Rogue,
+        ];
+        let body = human_body();
+        for class in proof_classes {
+            let pool = AbilityPool::for_character(&body, class);
+            for key in &pool.abilities {
+                // Skip the trailing racial innate (already covered by innate tests).
+                if key.starts_with("innate.") {
+                    continue;
+                }
+                assert!(
+                    map.get_ability_set(&AbilitySpec::Custom(key.clone()))
+                        .is_some(),
+                    "class {class:?} key '{key}' has no manifest set",
+                );
+            }
+        }
+    }
+
+    /// The four signature ability RONs deserialize without error.
+    #[test]
+    fn signature_ability_rons_load() {
+        use crate::comp::CharacterAbility;
+        let ids = [
+            "common.abilities.class.warrior.rally",
+            "common.abilities.class.mage.arcanesurge",
+            "common.abilities.class.cleric.mendinglight",
+            "common.abilities.class.rogue.ambush",
+        ];
+        for id in ids {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
+        }
+    }
+
+    /// BL-06 P2b — the four capstone ability RONs deserialize without error.
+    #[test]
+    fn capstone_ability_rons_load() {
+        use crate::comp::CharacterAbility;
+        let ids = [
+            "common.abilities.class.warrior.onslaught",
+            "common.abilities.class.mage.arcanemastery",
+            "common.abilities.class.cleric.radiantchannel",
+            "common.abilities.class.rogue.vanish",
+        ];
+        for id in ids {
+            crate::assets::Ron::<CharacterAbility>::load_expect(id).read();
         }
     }
 }

@@ -1,0 +1,23 @@
+// BL-06 — Cleric signature "Mending Light": ally heal aura. NOTE: aura/HoT heals do
+// not yet scale with heal_power (P1b only wired CombatEffect::Heal); heal_power-for-auras
+// is a follow-up.
+BasicAura(
+    buildup_duration: 0.4,
+    cast_duration: 0.3,
+    recover_duration: 0.5,
+    targets: InGroup,
+    auras: [
+        (
+            kind: Regeneration,
+            strength: 0.6,
+            duration: Some(8),
+            category: Magical,
+        ),
+    ],
+    aura_duration: Some(1.0),
+    range: 15.0,
+    energy_cost: 20.0,
+    scales_with_combo: false,
+    specifier: Some(HealingAura),
+    meta: (cooldown: Some(20.0)),
+)

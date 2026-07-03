@@ -200,6 +200,12 @@ pub enum BuffKind {
     /// Lowers health over time for some duration.
     /// Strength should be the DPS of the debuff.
     Bleeding,
+    /// Bleed-detonate (BL-05 RD-7): bleeds over time like `Bleeding`, then
+    /// **detonates** for a burst of damage when it runs its full course
+    /// (natural expiry). Dispelling/cleansing it early prevents the blast.
+    /// Strength is the bleed DPS; the detonation is a multiple of it
+    /// (`BLEED_DETONATE_MULT`).
+    BleedingMark,
     /// Lower a creature's max health over time.
     /// Strength only affects the target max health, 0.5 targets 50% of base
     /// max, 1.0 targets 100% of base max.
@@ -305,6 +311,12 @@ pub enum BuffKind {
     /// damage dealt. The action-combat analogue of "attack disadvantage";
     /// vision occlusion is a deferred client-only effect.
     Blinded,
+    /// Generic movement slow (BL-66 d), for Slow spells and other sources
+    /// that should reduce movement speed without any other side effect.
+    /// Mirrors `Crippled`'s movement-speed curve but WITHOUT the HP drain.
+    /// Strength scales the movement speed debuff non-linearly, 0.5 is 50%
+    /// speed, 1.0 is 33% speed.
+    Slowed,
     // =================
     //      COMPLEX
     // =================
@@ -372,6 +384,7 @@ impl BuffKind {
             | BuffKind::SepticShot
             | BuffKind::FreedomOfMovement => BuffDescriptor::SimplePositive,
             BuffKind::Bleeding
+            | BuffKind::BleedingMark
             | BuffKind::Cursed
             | BuffKind::Burning
             | BuffKind::Crippled
@@ -395,7 +408,8 @@ impl BuffKind {
             | BuffKind::Antimagic
             | BuffKind::Anchored
             | BuffKind::Asleep
-            | BuffKind::Blinded => BuffDescriptor::SimpleNegative,
+            | BuffKind::Blinded
+            | BuffKind::Slowed => BuffDescriptor::SimpleNegative,
             BuffKind::Polymorphed => BuffDescriptor::Complex,
         }
     }
@@ -406,6 +420,15 @@ impl BuffKind {
             BuffDescriptor::SimplePositive => true,
             BuffDescriptor::SimpleNegative | BuffDescriptor::Complex => false,
         }
+    }
+
+    /// Healing kinds whose strength should scale with the caster's
+    /// `heal_power`.
+    pub fn is_heal(self) -> bool {
+        matches!(
+            self,
+            BuffKind::Regeneration | BuffKind::Saturation | BuffKind::RestingHeal
+        )
     }
 
     pub fn is_simple(self) -> bool {
@@ -445,6 +468,15 @@ impl BuffKind {
         let instance = rand::random();
         match self {
             BuffKind::Bleeding => vec![BuffEffect::HealthChangeOverTime {
+                rate: -data.strength,
+                kind: ModifierKind::Additive,
+                instance,
+                tick_dur: Secs(0.5),
+            }],
+            // BL-05 RD-7: bleeds like `Bleeding` while active; the on-expire
+            // detonation burst is emitted by the buff system (the `effects()`
+            // here are only the per-tick bleed).
+            BuffKind::BleedingMark => vec![BuffEffect::HealthChangeOverTime {
                 rate: -data.strength,
                 kind: ModifierKind::Additive,
                 instance,
@@ -605,6 +637,9 @@ impl BuffKind {
             ],
             // BL-05 rider: blinded — reduced outgoing attack damage (can't aim).
             BuffKind::Blinded => vec![BuffEffect::AttackDamage((1.0 - data.strength).max(0.0))],
+            // BL-66 d: generic movement slow, mirrors Crippled's speed curve
+            // without the HP drain.
+            BuffKind::Slowed => vec![BuffEffect::MovementSpeed(1.0 - nn_scaling(data.strength))],
             BuffKind::Hastened => vec![
                 BuffEffect::MovementSpeed(1.0 + data.strength),
                 BuffEffect::AttackSpeed(1.0 + data.strength),
@@ -1510,6 +1545,27 @@ pub mod tests {
     }
 
     #[test]
+    fn is_heal_flags_healing_kinds_only() {
+        // BL-66 d: heal_power should scale exactly the positive
+        // HealthChangeOverTime kinds, not arbitrary buffs/debuffs.
+        assert!(BuffKind::Regeneration.is_heal());
+        assert!(!BuffKind::Slowed.is_heal());
+    }
+
+    #[test]
+    fn slowed_reduces_movement_speed_only() {
+        // BL-66 d: Slowed mirrors Crippled's movement curve without the HP
+        // drain, and is a debuff.
+        assert!(!BuffKind::Slowed.is_buff(), "should be a debuff");
+        let effects = BuffKind::Slowed.effects(&BuffData::new(0.5, None), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, BuffEffect::MovementSpeed(s) if *s < 1.0))
+        );
+    }
+
+    #[test]
     fn terrified_slows_and_lowers_accuracy() {
         // BL-05 Fear rider on the BL-52 engine: slows AND lowers accuracy
         // (fights at a disadvantage — more misses, same damage); flee behaviour
@@ -1537,6 +1593,18 @@ pub mod tests {
             BuffEffect::BuffImmunity(BuffKind::DifficultTerrain)
         ));
         assert!(BuffKind::FreedomOfMovement.is_buff(), "should be positive");
+    }
+
+    #[test]
+    fn bleeding_mark_bleeds_and_is_a_debuff() {
+        // BL-05 RD-7: bleeds over time (DoT) like Bleeding; the on-expire
+        // detonation burst is emitted by the buff system, not as an effect here.
+        let effects = BuffKind::BleedingMark.effects(&BuffData::new(5.0, None), None);
+        assert!(matches!(
+            effects.as_slice(),
+            [BuffEffect::HealthChangeOverTime { rate, .. }] if *rate < 0.0
+        ));
+        assert!(!BuffKind::BleedingMark.is_buff(), "should be a debuff");
     }
 
     #[test]

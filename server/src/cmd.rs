@@ -1778,12 +1778,17 @@ fn handle_health(
     args: Vec<String>,
     _action: &ServerChatCommand,
 ) -> CmdResult<()> {
-    if let Some(hp) = parse_cmd_args!(args, f32) {
+    let (hp, entity_target) = parse_cmd_args!(args, f32, EntityTarget);
+    if let Some(hp) = hp {
+        // Optional trailing entity target (e.g. `uid@<n>`); defaults to self.
+        let health_target = entity_target
+            .map(|entity_target| get_entity_target(entity_target, server))
+            .unwrap_or(Ok(target))?;
         if let Some(mut health) = server
             .state
             .ecs()
             .write_storage::<comp::Health>()
-            .get_mut(target)
+            .get_mut(health_target)
         {
             let time = server.state.ecs().read_resource::<Time>();
             let change = comp::HealthChange {
@@ -1797,7 +1802,7 @@ fn handle_health(
             health.change_by(change);
             Ok(())
         } else {
-            Err(Content::Plain("You have no health".into()))
+            Err(Content::Plain("Target has no health".into()))
         }
     } else {
         Err(Content::Plain("You must specify health amount!".into()))
@@ -2636,7 +2641,7 @@ fn handle_clear_persisted_terrain(
         }
 
         drop(terrain_persistence2);
-        reload_chunks_inner(server, pos.0, Some(radius));
+        reload_chunks_inner(server, pos.0, Some(radius), false);
 
         Ok(())
     } else {
@@ -4723,7 +4728,7 @@ fn handle_skill_point(
 }
 
 fn parse_skill_tree(skill_tree: &str) -> CmdResult<comp::skillset::SkillGroupKind> {
-    use comp::{item::tool::ToolKind, skillset::SkillGroupKind};
+    use comp::{class::ClassKind, item::tool::ToolKind, skillset::SkillGroupKind};
     match skill_tree {
         "general" => Ok(SkillGroupKind::General),
         "sword" => Ok(SkillGroupKind::Weapon(ToolKind::Sword)),
@@ -4733,6 +4738,15 @@ fn parse_skill_tree(skill_tree: &str) -> CmdResult<comp::skillset::SkillGroupKin
         "staff" => Ok(SkillGroupKind::Weapon(ToolKind::Staff)),
         "sceptre" => Ok(SkillGroupKind::Weapon(ToolKind::Sceptre)),
         "mining" => Ok(SkillGroupKind::Weapon(ToolKind::Pick)),
+        // BL-06 class trees (proof slice) — `/skill_point <class> <n>` for testing.
+        "warrior" => Ok(SkillGroupKind::Class(ClassKind::Warrior)),
+        "mage" => Ok(SkillGroupKind::Class(ClassKind::Mage)),
+        "cleric" => Ok(SkillGroupKind::Class(ClassKind::Cleric)),
+        "rogue" => Ok(SkillGroupKind::Class(ClassKind::Rogue)),
+        // BL-20: `/skill_point feats <n>` grants test feat points via the
+        // existing exp-based path (admin/testing convenience; the real grant
+        // path is milestone-based, see `SkillSet::grant_skill_point`).
+        "feats" => Ok(SkillGroupKind::Feats),
         _ => Err(Content::localized_with_args(
             "command-invalid-skill-group",
             [("group", skill_tree)],
@@ -4740,7 +4754,12 @@ fn parse_skill_tree(skill_tree: &str) -> CmdResult<comp::skillset::SkillGroupKin
     }
 }
 
-fn reload_chunks_inner(server: &mut Server, pos: Vec3<f32>, radius: Option<i32>) -> usize {
+pub fn reload_chunks_inner(
+    server: &mut Server,
+    pos: Vec3<f32>,
+    radius: Option<i32>,
+    only_sites: bool,
+) -> usize {
     let mut removed = 0;
 
     if let Some(radius) = radius {
@@ -4748,6 +4767,16 @@ fn reload_chunks_inner(server: &mut Server, pos: Vec3<f32>, radius: Option<i32>)
 
         for key_offset in Spiral2d::with_radius(radius) {
             let chunk_key = chunk_key + key_offset;
+            #[cfg(feature = "worldgen")]
+            if only_sites
+                && server
+                    .world
+                    .sim()
+                    .get(chunk_key)
+                    .is_none_or(|c| c.sites.is_empty())
+            {
+                continue;
+            }
 
             #[cfg(feature = "persistent_world")]
             server
@@ -4759,6 +4788,35 @@ fn reload_chunks_inner(server: &mut Server, pos: Vec3<f32>, radius: Option<i32>)
                 removed += 1;
             }
         }
+    } else if cfg!(feature = "worldgen") && only_sites {
+        let removed_chunks = &mut server
+            .state
+            .ecs()
+            .write_resource::<common_state::TerrainChanges>()
+            .removed_chunks;
+        server.state.terrain_mut().retain(|chunk_key| {
+            #[cfg(feature = "worldgen")]
+            if server
+                .world
+                .sim()
+                .get(chunk_key)
+                .is_none_or(|c| c.sites.is_empty())
+            {
+                return true;
+            }
+
+            #[cfg(feature = "persistent_world")]
+            server
+                .state
+                .ecs()
+                .try_fetch_mut::<crate::terrain_persistence::TerrainPersistence>()
+                .map(|mut terrain_persistence| terrain_persistence.unload_chunk(chunk_key));
+
+            removed_chunks.insert(chunk_key);
+            removed += 1;
+
+            false
+        });
     } else {
         #[cfg(feature = "persistent_world")]
         server
@@ -4779,10 +4837,15 @@ fn handle_reload_chunks(
     args: Vec<String>,
     _action: &ServerChatCommand,
 ) -> CmdResult<()> {
-    let radius = parse_cmd_args!(args, i32);
+    let (radius, only_sites) = parse_cmd_args!(args, i32, bool);
 
     let pos = position(server, target, "target")?.0;
-    let removed = reload_chunks_inner(server, pos, radius.map(|radius| radius.clamp(0, 64)));
+    let removed = reload_chunks_inner(
+        server,
+        pos,
+        radius.map(|radius| radius.clamp(0, 64)),
+        only_sites.unwrap_or(false),
+    );
 
     server.notify_client(
         client,
@@ -6038,11 +6101,15 @@ fn handle_buff(
     args: Vec<String>,
     action: &ServerChatCommand,
 ) -> CmdResult<()> {
-    let (Some(buff), strength, duration, misc_data_spec) =
-        parse_cmd_args!(args, String, f32, f64, String)
+    let (Some(buff), strength, duration, misc_data_spec, entity_target) =
+        parse_cmd_args!(args, String, f32, f64, String, EntityTarget)
     else {
         return Err(action.help_content());
     };
+
+    let buff_target = entity_target
+        .map(|entity_target| get_entity_target(entity_target, server))
+        .unwrap_or(Ok(target))?;
 
     let strength = strength.unwrap_or(0.01);
 
@@ -6059,14 +6126,14 @@ fn handle_buff(
                 .iter()
                 .filter_map(|kind_key| parse_buffkind(kind_key))
                 .filter(|buffkind| buffkind.is_simple())
-                .for_each(|buffkind| cast_buff(buffkind, buffdata, server, target));
+                .for_each(|buffkind| cast_buff(buffkind, buffdata, server, buff_target));
         },
         "clear" => {
             if let Some(mut buffs) = server
                 .state
                 .ecs()
                 .write_storage::<comp::Buffs>()
-                .get_mut(target)
+                .get_mut(buff_target)
             {
                 buffs.buffs.clear();
                 buffs.kinds.clear();
@@ -6095,7 +6162,7 @@ fn handle_buff(
                     .transpose()?,
             )?;
 
-            cast_buff(buffkind, buffdata, server, target);
+            cast_buff(buffkind, buffdata, server, buff_target);
         },
     }
 
@@ -6149,6 +6216,7 @@ fn build_buff(
             | BuffKind::Bloodfeast
             | BuffKind::Berserk
             | BuffKind::Bleeding
+            | BuffKind::BleedingMark
             | BuffKind::Cursed
             | BuffKind::Burning
             | BuffKind::Crippled
@@ -6182,7 +6250,8 @@ fn build_buff(
             | BuffKind::Antimagic
             | BuffKind::Anchored
             | BuffKind::Asleep
-            | BuffKind::Blinded => {
+            | BuffKind::Blinded
+            | BuffKind::Slowed => {
                 if buff_kind.is_simple() {
                     unreachable!("is_simple() above")
                 } else {

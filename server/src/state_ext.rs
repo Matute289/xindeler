@@ -705,6 +705,7 @@ impl StateExt for State {
             active_abilities,
             map_marker,
             ethos,
+            background,
         } = components;
 
         if let Some(player_uid) = self.read_component_copied::<Uid>(entity) {
@@ -745,12 +746,19 @@ impl StateExt for State {
             self.write_component_ignore_entity_dead(entity, comp::Energy::new(body));
             self.write_component_ignore_entity_dead(entity, Poise::new(body));
             self.write_component_ignore_entity_dead(entity, stats);
+            // Copy the ClassKind out (ClassKind: Copy) for the AbilityPool below,
+            // since `character_class` is moved into its component write (BL-06 P2a).
+            let class_kind = character_class.0;
             self.write_component_ignore_entity_dead(entity, character_class);
             self.write_component_ignore_entity_dead(entity, ethos);
+            self.write_component_ignore_entity_dead(entity, background);
             self.write_component_ignore_entity_dead(entity, active_abilities);
             self.write_component_ignore_entity_dead(entity, comp::AbilityCooldowns::default());
-            // Grant the racial innate ability by species (magic-abilities plan Task 14).
-            self.write_component_ignore_entity_dead(entity, comp::AbilityPool::for_body(&body));
+            // Grant class active-ability keys (BL-06 P2a) + racial innate (Task 14).
+            self.write_component_ignore_entity_dead(
+                entity,
+                comp::AbilityPool::for_character(&body, class_kind),
+            );
             self.write_component_ignore_entity_dead(entity, skill_set);
             self.write_component_ignore_entity_dead(entity, inventory);
             self.write_component_ignore_entity_dead(

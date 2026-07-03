@@ -64,8 +64,8 @@ common-species-orc = Orc
 common-species-human = Human
 common-species-dwarf = Dwarf
 common-species-elf = Elf
-common-species-draugr = Draugr
-common-species-danari = Danari
+common-species-draugr = Dhampir
+common-species-danari = Gnome
 
 ## Classes
 common-class-warrior = Warrior

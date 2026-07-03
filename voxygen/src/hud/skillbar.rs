@@ -27,8 +27,8 @@ use i18n::Localization;
 use client::{self, Client};
 use common::{
     comp::{
-        self, Ability, AbilityPool, ActiveAbilities, Body, CharacterState, Combo, Energy, Hardcore,
-        Health, Inventory, Poise, PoiseState, SkillSet, Stats,
+        self, Ability, AbilityCooldowns, AbilityPool, ActiveAbilities, Body, CharacterState, Combo,
+        Energy, Hardcore, Health, Inventory, Poise, PoiseState, SkillSet, Stats,
         ability::{AbilityInput, Stance},
         is_downed,
         item::{
@@ -68,6 +68,7 @@ widget_ids! {
         // HP-Bar
         hp_alignment,
         hp_filling,
+        hp_absorb,
         hp_decayed,
         hp_txt_bg,
         hp_txt,
@@ -147,6 +148,9 @@ widget_ids! {
         slot10_text,
         slot10_text_bg,
         slot_highlight,
+        // Cooldown overlays (one per hotbar slot)
+        slot_cooldown_overlays[],
+        slot_cooldown_txts[],
     }
 }
 
@@ -300,6 +304,8 @@ pub struct Skillbar<'a> {
     char_state: Option<&'a CharacterState>,
     stance: Option<&'a Stance>,
     stats: Option<&'a Stats>,
+    ability_cooldowns: Option<&'a AbilityCooldowns>,
+    now: f64,
 }
 
 impl<'a> Skillbar<'a> {
@@ -336,6 +342,8 @@ impl<'a> Skillbar<'a> {
         char_state: Option<&'a CharacterState>,
         stance: Option<&'a Stance>,
         stats: Option<&'a Stats>,
+        ability_cooldowns: Option<&'a AbilityCooldowns>,
+        now: f64,
     ) -> Self {
         Self {
             client,
@@ -370,6 +378,8 @@ impl<'a> Skillbar<'a> {
             char_state,
             stance,
             stats,
+            ability_cooldowns,
+            now,
         }
     }
 
@@ -594,6 +604,38 @@ impl<'a> Skillbar<'a> {
                 .color(Some(health_col))
                 .top_left_with_margins_on(state.ids.hp_alignment, 0.0, 0.0)
                 .set(state.ids.hp_filling, ui);
+
+            // BL-05 RD-6b: temp-HP / absorb shield drawn on top of the HP fill.
+            // The shield segment sits after current HP in a distinct colour;
+            // when it would fill past the end of the bar (overshield) the whole
+            // segment turns blue. NOTE: Veloren's HP fill is green, so the shield
+            // uses cyan (not green) to contrast — tune the two consts to taste.
+            let absorb = self.health.absorb() as f64;
+            if absorb > 0.0 && !is_downed {
+                let max_hp = f64::from(self.health.maximum()).max(1.0);
+                let absorb_pct = absorb / max_hp * 100.0;
+                let hp_pct = hp_percentage.clamp(0.0, 100.0);
+                let overshield = hp_pct + absorb_pct > 100.0;
+                // Visible portion of the shield within the bar (after the HP).
+                let absorb_width = ((hp_pct + absorb_pct).min(100.0) - hp_pct).max(0.0);
+                const SHIELD_COLOR: Color = Color::Rgba(0.36, 0.78, 0.95, 1.0); // cyan
+                const SHIELD_OVERFLOW_COLOR: Color = Color::Rgba(0.16, 0.40, 0.95, 1.0); // blue
+                if absorb_width > 0.0 {
+                    Image::new(self.imgs.bar_content)
+                        .w_h(480.0 * absorb_width / 100.0, 18.0)
+                        .color(Some(if overshield {
+                            SHIELD_OVERFLOW_COLOR
+                        } else {
+                            SHIELD_COLOR
+                        }))
+                        .top_left_with_margins_on(
+                            state.ids.hp_alignment,
+                            0.0,
+                            480.0 * hp_pct / 100.0,
+                        )
+                        .set(state.ids.hp_absorb, ui);
+                }
+            }
 
             if decayed_health > 0.0 {
                 let decay_bar_len = 480.0 * decayed_health;
@@ -1141,6 +1183,58 @@ impl<'a> Skillbar<'a> {
         slot_maker.selected_slot = self.imgs.skillbar_slot;
 
         let slots = slot_entries(state, slot_offset);
+        // Collect cooldown data before entering the slot loop so we can draw overlays
+        // after the slot_maker/closure borrows are released.
+        let cooldown_data: Vec<Option<(widget::Id, widget::Id, f64)>> = slots
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let ability_id =
+                    if let Some(hotbar::SlotContents::Ability(i)) = self.hotbar.get(entry.slot) {
+                        let (
+                            _,
+                            inventory,
+                            _,
+                            skill_set,
+                            active_abilities,
+                            ability_pool,
+                            _,
+                            contexts,
+                            ..,
+                        ) = content_source;
+                        active_abilities.and_then(|a| {
+                            a.auxiliary_set(Some(inventory), Some(skill_set))
+                                .get(i)
+                                .and_then(|a| {
+                                    Ability::from(*a).ability_id(
+                                        self.char_state,
+                                        Some(inventory),
+                                        Some(skill_set),
+                                        ability_pool,
+                                        contexts,
+                                    )
+                                })
+                        })
+                    } else {
+                        None
+                    };
+                if let Some(id) = ability_id
+                    && let Some(ready_at) = self
+                        .ability_cooldowns
+                        .and_then(|c| c.ready_at(id))
+                        .filter(|ready_at| self.now < ready_at.0)
+                {
+                    let remaining = (ready_at.0 - self.now).ceil();
+                    return Some((
+                        state.ids.slot_cooldown_overlays[idx],
+                        state.ids.slot_cooldown_txts[idx],
+                        remaining,
+                    ));
+                }
+                None
+            })
+            .collect();
+
         for entry in slots {
             let slot = slot_maker
                 .fabricate(entry.slot, [40.0; 2])
@@ -1245,6 +1339,23 @@ impl<'a> Skillbar<'a> {
                     .set(id_bg, ui);
             }
         }
+
+        // Cooldown overlays — drawn after the slot loop so slot_maker borrows are
+        // released.
+        for (entry, cd) in slots.iter().zip(cooldown_data.iter()) {
+            if let Some((overlay_id, txt_id, remaining_secs)) = cd {
+                Rectangle::fill_with([40.0, 40.0], Color::Rgba(0.0, 0.0, 0.0, 0.55))
+                    .middle_of(entry.widget_id)
+                    .set(*overlay_id, ui);
+                Text::new(&format!("{:.0}", remaining_secs))
+                    .middle_of(entry.widget_id)
+                    .font_size(self.fonts.cyri.scale(14))
+                    .font_id(self.fonts.cyri.conrod_id)
+                    .color(Color::Rgba(1.0, 1.0, 1.0, 1.0))
+                    .set(*txt_id, ui);
+            }
+        }
+
         // M1 is primary slot on mouse, M2 is primary slot on controller
         let (primary_id, primary_bg, secondary_id, secondary_bg) =
             match self.global_state.window.last_input() {
@@ -1471,6 +1582,16 @@ impl Widget for Skillbar<'_> {
                 self::Poise::POISE_THRESHOLDS.len(),
                 &mut ui.widget_id_generator(),
             )
+        });
+
+        // Cooldown overlay widget ids (one per hotbar slot)
+        state.update(|s| {
+            s.ids
+                .slot_cooldown_overlays
+                .resize(10, &mut ui.widget_id_generator());
+            s.ids
+                .slot_cooldown_txts
+                .resize(10, &mut ui.widget_id_generator());
         });
 
         // Alignment and BG

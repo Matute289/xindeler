@@ -523,6 +523,11 @@ fn handle_experimental_shader(
                     "command-experimental-shaders-disabled",
                     [("shader", LocalizationArg::from(item))],
                 )))
+            } else if !shader.is_supported() {
+                Err(Content::localized_with_args(
+                    "command-experimental-shaders-not-supported",
+                    [("shader", LocalizationArg::from(item))],
+                ))
             } else {
                 new_render_mode.experimental_shaders.insert(shader);
                 Ok(Some(Content::localized_with_args(
@@ -1058,6 +1063,7 @@ fn test_complete_command() {
         "/make_block".to_string(),
         "/make_npc".to_string(),
         "/make_sprite".to_string(),
+        "/make_test_char".to_string(),
         "/make_volume".to_string()
     ]);
 }

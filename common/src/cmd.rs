@@ -80,7 +80,7 @@ lazy_static! {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    static ref SKILL_TREES: Vec<String> = ["general", "sword", "axe", "hammer", "bow", "staff", "sceptre", "mining"]
+    static ref SKILL_TREES: Vec<String> = ["general", "sword", "axe", "hammer", "bow", "staff", "sceptre", "mining", "warrior", "mage", "cleric", "rogue"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -138,6 +138,7 @@ lazy_static! {
             BuffKind::Regeneration => "regeneration",
             BuffKind::Saturation => "saturation",
             BuffKind::Bleeding => "bleeding",
+            BuffKind::BleedingMark => "bleeding_mark",
             BuffKind::Cursed => "cursed",
             BuffKind::Potion => "potion",
             BuffKind::Agility => "agility",
@@ -196,6 +197,7 @@ lazy_static! {
             BuffKind::Anchored => "anchored",
             BuffKind::Asleep => "asleep",
             BuffKind::Blinded => "blinded",
+            BuffKind::Slowed => "slowed",
         };
         let mut buff_parser = HashMap::new();
         for kind in BuffKind::iter() {
@@ -530,6 +532,7 @@ impl ServerChatCommand {
                     Float("strength", 0.01, Optional),
                     Float("duration", 10.0, Optional),
                     Any("buff data spec", Optional),
+                    EntityTarget(Optional),
                 ],
                 Content::localized("command-buff-desc"),
                 Some(Admin),
@@ -753,7 +756,7 @@ impl ServerChatCommand {
                 None,
             ),
             ServerChatCommand::Health => cmd(
-                vec![Integer("hp", 100, Required)],
+                vec![Integer("hp", 100, Required), EntityTarget(Optional)],
                 Content::localized("command-health-desc"),
                 Some(Admin),
             ),
@@ -880,7 +883,10 @@ impl ServerChatCommand {
                 Some(Admin),
             ),
             ServerChatCommand::ReloadChunks => cmd(
-                vec![Integer("chunk_radius", 6, Optional)],
+                vec![
+                    Integer("chunk_radius", 6, Optional),
+                    Boolean("only_sites", "true".to_string(), Optional),
+                ],
                 Content::localized("command-reload_chunks-desc"),
                 Some(Admin),
             ),

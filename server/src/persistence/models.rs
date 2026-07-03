@@ -8,6 +8,13 @@ pub struct Character {
     pub class: String,
     pub ethos_good_evil: i16,
     pub ethos_law_chaos: i16,
+    /// BL-31: `NULL` -> `Background(None)` ("Uncommitted", P0 §Q1).
+    pub background: Option<String>,
+    /// Dead column (BL-31 UI-fixes pass): `BackgroundKind::Custom` was
+    /// removed, so this is never populated with real data anymore. Left in
+    /// place to avoid a migration (nullable, zero live rows referenced it).
+    #[expect(dead_code)]
+    pub background_custom_note: Option<String>,
 }
 
 #[derive(Debug)]

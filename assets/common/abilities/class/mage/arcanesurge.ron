@@ -1,0 +1,11 @@
+// BL-06 — Mage signature "Arcane Surge": restore energy (Arcane-Recovery-like).
+SelfBuff(
+    buildup_duration: 0.3,
+    cast_duration: 0.2,
+    recover_duration: 0.4,
+    buffs: [
+        BuffDesc(kind: EnergyRegen, data: BuffData(strength: 5.0, duration: Some(6.0))),
+    ],
+    energy_cost: 0,
+    meta: (cooldown: Some(30.0)),
+)

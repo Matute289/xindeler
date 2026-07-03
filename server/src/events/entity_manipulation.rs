@@ -561,6 +561,16 @@ fn handle_exp_gain(
     let mut xp_pools = HashSet::<SkillGroupKind>::new();
     // Insert general pool since it is always accessible
     xp_pools.insert(SkillGroupKind::General);
+    // BL-06: the character's class group is always-active (like General), so it
+    // earns combat XP from every kill — this is the source of class skill points
+    // (spec §1). Without it the class trees can never be unlocked.
+    if let Some(class_group) = skill_set
+        .skill_groups()
+        .map(|sg| sg.skill_group_kind)
+        .find(|kind| matches!(kind, SkillGroupKind::Class(_)))
+    {
+        xp_pools.insert(class_group);
+    }
     // Closure to add xp pool corresponding to weapon type equipped in a particular
     // EquipSlot
     let mut add_tool_from_slot = |equip_slot| {
@@ -607,6 +617,16 @@ fn handle_exp_gain(
             uid = ?uid,
             new_level = level_after
         );
+    }
+    // BL-20: 1 feat point per 10 character levels (15/25/35/45 — lore cadence,
+    // max 4 total). Grants directly via `grant_skill_point` (exp-independent),
+    // not the standard XP-per-group path. Checks every milestone so a single
+    // XP gain that crosses several thresholds at once (e.g. level 13 -> 30)
+    // grants one point per milestone crossed.
+    for milestone in [15, 25, 35, 45] {
+        if level_before < milestone && level_after >= milestone {
+            skill_set.grant_skill_point(SkillGroupKind::Feats);
+        }
     }
     outcomes_emitter.emit(Outcome::ExpChange {
         uid: *uid,
@@ -1641,6 +1661,7 @@ impl ServerEvent for LandOnGroundEvent {
                     None,
                     None,
                     0.0,
+                    1.0, // crit_damage_mult — unused (no precision on falling damage)
                     1.0,
                     *time,
                     rand::random(),
@@ -1782,7 +1803,7 @@ impl ServerEvent for ExplosionEvent {
                 sound: Sound::new(SoundKind::Explosion, ev.pos, explosion_volume, data.time.0),
             });
 
-            let outcome_power = ev.explosion.radius;
+            let outcome_power = (ev.explosion.radius * 0.25).powi(2);
             outcome_emitter.emit(Outcome::Explosion {
                 pos: ev.pos,
                 power: outcome_power,
@@ -2354,6 +2375,7 @@ pub fn emit_effect_events(
                 damage_contributor,
                 None,
                 0.0,
+                1.0, // crit_damage_mult — unused (no precision on this effect path)
                 1.0,
                 time,
                 rand::random(),

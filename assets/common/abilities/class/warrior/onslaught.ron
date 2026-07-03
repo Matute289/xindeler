@@ -1,0 +1,12 @@
+// BL-06 — Warrior capstone "Onslaught": attack/move-speed burst. Q5 synergy:
+// buff strength scales with Brutal Edge rank (in adjusted_by_class_synergy).
+SelfBuff(
+    buildup_duration: 0.2,
+    cast_duration: 0.1,
+    recover_duration: 0.3,
+    buffs: [
+        BuffDesc(kind: Hastened, data: BuffData(strength: 0.3, duration: Some(6.0))),
+    ],
+    energy_cost: 25,
+    meta: (cooldown: Some(60.0)),
+)

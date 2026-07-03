@@ -93,6 +93,7 @@ pub fn skill_group_to_db_string(skill_group: comp::skillset::SkillGroupKind) -> 
         Class(ClassKind::Monk) => "Class Monk",
         Class(ClassKind::Artificer) => "Class Artificer",
         Class(ClassKind::BloodSlayer) => "Class BloodSlayer",
+        Feats => "Feats",
         // Adventurer has no class tree; a Class(Adventurer) group reaching
         // persistence is a bug, consistent with the unsupported-weapon arm.
         Class(ClassKind::Adventurer) => panic!(
@@ -145,6 +146,7 @@ pub fn db_string_to_skill_group(skill_group_string: &str) -> comp::skillset::Ski
         "Class Monk" => Class(ClassKind::Monk),
         "Class Artificer" => Class(ClassKind::Artificer),
         "Class BloodSlayer" => Class(ClassKind::BloodSlayer),
+        "Feats" => Feats,
 
         _ => panic!(
             "Tried to convert an unsupported string from the database: {}",
@@ -185,6 +187,27 @@ pub fn db_string_to_class(class_string: &str) -> comp::class::ClassKind {
             tracing::warn!(unknown = ?class_string, "Unknown class in database, defaulting to Adventurer");
             comp::class::ClassKind::Adventurer
         })
+}
+
+/// BL-31: db-string for `BackgroundKind` variants.
+pub fn background_to_db_string(background: comp::background::BackgroundKind) -> String {
+    background.keyword().to_string()
+}
+
+/// Unlike the skill-group converter this never panics: unknown or
+/// unrecognized strings fall back to `None` (P0 §Q1's "Uncommitted") with a
+/// warning so a DB downgrade or a future-version string (including the
+/// removed `"custom"` value) never bricks a save.
+pub fn db_string_to_background(
+    background_string: &str,
+) -> Option<comp::background::BackgroundKind> {
+    comp::background::BackgroundKind::from_keyword(background_string).or_else(|| {
+        tracing::warn!(
+            unknown = ?background_string,
+            "Unknown background in database, defaulting to Uncommitted (None)"
+        );
+        None
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -513,6 +536,26 @@ pub mod tests {
             super::db_string_to_class("Necromancer"),
             ClassKind::Adventurer
         );
+    }
+
+    /// BL-31 task BG1b.5 (updated post-`Custom` removal): every
+    /// `BackgroundKind` round-trips through its db string; an unrecognized
+    /// string degrades to `None` (never panics — P0 §Q1, a DB downgrade must
+    /// never brick the server, mirroring the class-string test above).
+    #[test]
+    fn background_db_string_round_trips_and_tolerates_unknown() {
+        use common::comp::BackgroundKind;
+        for background in BackgroundKind::ALL {
+            assert_eq!(
+                super::db_string_to_background(&super::background_to_db_string(background)),
+                Some(background),
+                "{background:?} did not round-trip through its db string"
+            );
+        }
+        assert_eq!(super::db_string_to_background("necromancer"), None);
+        // The removed "custom" value degrades to `None` like any other
+        // unrecognized string, rather than panicking.
+        assert_eq!(super::db_string_to_background("custom"), None);
     }
 
     #[test]

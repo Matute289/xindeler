@@ -1,0 +1,21 @@
+// BL-06 — Rogue signature "Ambush": precision burst opener.
+// Back-attack multiplier triples damage when striking from behind (opener).
+BasicMelee(
+    energy_cost: 10,
+    buildup_duration: 0.25,
+    swing_duration: 0.05,
+    hit_timing: 0.4,
+    recover_duration: 0.6,
+    melee_constructor: (
+        kind: Stab(
+            damage: 30,
+            poise: 8,
+            knockback: 0,
+            energy_regen: 0,
+        ),
+        range: 3,
+        angle: 10,
+        precision_flank_multipliers: (front: 1.0, side: 1.5, back: 3.0),
+    ),
+    meta: (cooldown: Some(15.0)),
+)

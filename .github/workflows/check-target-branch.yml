@@ -1,0 +1,33 @@
+name: Check PRs into development
+
+# Promotion is strictly one-way: feature/bug/etc. branches -> development, and
+# (periodically) development -> main. We NEVER merge main back into development
+# (the only exception is an explicit hot-fix, which lands on main and is synced
+# via sync-hotfix.yml). GitHub still shows a cosmetic "development is N commits
+# behind main" banner after each development->main promotion (the empty merge
+# commit) — ignore it. This guard makes an accidental main->development PR fail
+# CI so it can't be merged.
+
+on:
+  pull_request:
+    branches:
+      - development
+
+jobs:
+  reject-main-source:
+    name: Reject main -> development
+    runs-on: ubuntu-latest
+    env:
+      # Quote untrusted branch name via env (never interpolate into the script).
+      SOURCE: ${{ github.head_ref }}
+    steps:
+      - name: Validate source branch
+        run: |
+          if [[ "$SOURCE" == "main" ]]; then
+            echo "ERROR: do not merge 'main' into 'development'."
+            echo "Promotion is one-way: feature/bug -> development -> main."
+            echo "The 'N commits behind main' banner is cosmetic (the development->main"
+            echo "merge commit) — ignore it. (Hot-fixes use the 'hot-fix' branch + sync-hotfix.yml.)"
+            exit 1
+          fi
+          echo "Source branch '$SOURCE' is allowed into development."

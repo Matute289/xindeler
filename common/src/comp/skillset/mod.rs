@@ -1,6 +1,11 @@
 use crate::{
     assets::{AssetExt, Ron},
-    comp::{class::ClassKind, item::tool::ToolKind, skills::Skill},
+    comp::{
+        Stats,
+        class::ClassKind,
+        item::tool::ToolKind,
+        skills::{ClassPassiveStat, Skill},
+    },
 };
 use core::borrow::{Borrow, BorrowMut};
 use hashbrown::HashMap;
@@ -102,6 +107,24 @@ lazy_static! {
         }
         hashes
     };
+    /// BL-06: per-level `Stats` modifiers for passive class skills. Maps a class
+    /// skill to the field(s) it boosts and the magnitude added per skill level.
+    /// Active-ability skills are absent (they unlock abilities, not stats).
+    pub static ref CLASS_SKILL_MODIFIERS: HashMap<Skill, Vec<(ClassPassiveStat, f32)>> = {
+        Ron::load_expect_cloned(
+            "common.skill_trees.class_skill_modifiers",
+        ).into_inner()
+    };
+    /// BL-20: per-level `Stats` modifiers for passive feats. Maps a feat skill
+    /// to the field(s) it boosts and the magnitude added per skill level (all
+    /// feats are max_level = 1, so this degenerates to one magnitude per
+    /// purchased feat). Active-ability feats are absent (they unlock
+    /// abilities, not stats).
+    pub static ref FEAT_MODIFIERS: HashMap<Skill, Vec<(ClassPassiveStat, f32)>> = {
+        Ron::load_expect_cloned(
+            "common.skill_trees.feat_modifiers",
+        ).into_inner()
+    };
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
@@ -109,6 +132,10 @@ pub enum SkillGroupKind {
     General,
     Weapon(ToolKind),
     Class(ClassKind),
+    // BL-20: a single, class-agnostic group available to every character
+    // (parallel to `General`). Points are granted via level-milestone
+    // (`grant_skill_point`), never via the XP-per-group economy.
+    Feats,
 }
 
 impl SkillGroupKind {
@@ -153,6 +180,14 @@ impl SkillGroupKind {
         } else {
             0
         }
+    }
+
+    /// True for groups granted directly (at creation / `/set_class` /
+    /// level-milestone) rather than earned through the skill tree. These need
+    /// their `UnlockGroup` skill re-seeded on `load_from_database`.
+    pub fn is_directly_granted(&self) -> bool {
+        matches!(self, SkillGroupKind::Class(_) | SkillGroupKind::Feats)
+        // Future: add `| SkillGroupKind::EpicBoons` (spec 2026-06-27 §3 Q5).
     }
 }
 
@@ -286,6 +321,9 @@ impl Default for SkillSet {
         // Insert default skill groups
         skill_group.unlock_skill_group(SkillGroupKind::General);
         skill_group.unlock_skill_group(SkillGroupKind::Weapon(ToolKind::Pick));
+        // BL-20: every character should see the Feats group from creation, even
+        // with zero points (points arrive later via level-milestone grants).
+        skill_group.unlock_skill_group(SkillGroupKind::Feats);
 
         // No XP yet — derive the level-1 baseline (unlocking groups doesn't
         // touch earned_exp, so a single recompute here suffices).
@@ -322,18 +360,20 @@ impl SkillSet {
         skillset.recompute_character_level();
         let mut persistence_load_error = None;
 
-        // Class skill groups are granted directly (unlock_skill_group at creation /
-        // /set_class), not earned through the skill tree, so seed their unlock skill
-        // here — both the loop below and class-gated abilities key off
+        // Directly-granted skill groups (Class, Feats — see
+        // `SkillGroupKind::is_directly_granted`) are unlocked via
+        // `unlock_skill_group` at creation / `/set_class` / level-milestone, not
+        // earned through the skill tree, so seed their unlock skill here — both
+        // the loop below and class-gated abilities key off
         // has_skill(UnlockGroup(..)). Also repairs characters saved before this
         // seeding.
-        let class_groups: Vec<SkillGroupKind> = skillset
+        let directly_granted_groups: Vec<SkillGroupKind> = skillset
             .skill_groups
             .keys()
             .copied()
-            .filter(|kind| matches!(kind, SkillGroupKind::Class(_)))
+            .filter(|kind| kind.is_directly_granted())
             .collect();
-        for kind in class_groups {
+        for kind in directly_granted_groups {
             skillset.skills.entry(Skill::UnlockGroup(kind)).or_insert(1);
         }
 
@@ -432,7 +472,10 @@ impl SkillSet {
             self.recompute_character_level();
             earned_sp
         } else {
-            warn!("Tried to add experience to a skill group that player does not have");
+            warn!(
+                ?skill_group_kind,
+                "Tried to add experience to a skill group that player does not have"
+            );
             None
         }
     }
@@ -517,6 +560,19 @@ impl SkillSet {
         for _ in 0..number_of_skill_points {
             let exp_needed = self.skill_point_cost(skill_group_kind);
             self.add_experience(skill_group_kind, exp_needed);
+        }
+    }
+
+    /// BL-20: grants one skill point to `kind` directly, bypassing the
+    /// XP-cost economy entirely. Used for milestone-based grants (e.g. "1
+    /// feat point per 10 character levels"), as opposed to
+    /// [`Self::add_skill_points`]/[`SkillGroup::earn_skill_point`] which are
+    /// exp-driven. Unlocks the group first if it doesn't exist yet.
+    pub fn grant_skill_point(&mut self, kind: SkillGroupKind) {
+        self.unlock_skill_group(kind);
+        if let Some(skill_group) = self.skill_groups.get_mut(&kind) {
+            skill_group.earned_sp = skill_group.earned_sp.saturating_add(1);
+            skill_group.available_sp = skill_group.available_sp.saturating_add(1);
         }
     }
 
@@ -698,6 +754,48 @@ impl SkillSet {
             Err(SkillError::MissingSkill)
         }
     }
+
+    /// BL-06: fold this skill set's passive class-skill bonuses into `stats`.
+    /// Called from the buff system each tick right after the stat reset (same
+    /// slot as racial/class-attribute passives), so the bonuses stack with
+    /// gear/buffs and need no persistence beyond the unlocked skill levels.
+    ///
+    /// Only the unlocked skills are walked (the skill map is small), and each
+    /// is looked up in [`CLASS_SKILL_MODIFIERS`]; non-class /
+    /// active-ability skills have no entry and are skipped.
+    pub fn apply_class_passives(&self, stats: &mut Stats) {
+        for (skill, level) in self.skills.iter() {
+            if *level == 0 {
+                continue;
+            }
+            if let Some(modifiers) = CLASS_SKILL_MODIFIERS.get(skill) {
+                for (passive_stat, per_level) in modifiers.iter() {
+                    passive_stat.apply(stats, per_level * f32::from(*level));
+                }
+            }
+        }
+    }
+
+    /// BL-20: fold this skill set's passive feat bonuses into `stats`. Same
+    /// tick slot as [`Self::apply_class_passives`] (called right after it in
+    /// the buff system), so feats stack with class/gear/buff bonuses and need
+    /// no persistence beyond the unlocked skill levels.
+    ///
+    /// Only the unlocked skills are walked (the skill map is small), and each
+    /// is looked up in [`FEAT_MODIFIERS`]; non-feat / active-ability feats
+    /// have no entry and are skipped.
+    pub fn apply_feat_passives(&self, stats: &mut Stats) {
+        for (skill, level) in self.skills.iter() {
+            if *level == 0 {
+                continue;
+            }
+            if let Some(modifiers) = FEAT_MODIFIERS.get(skill) {
+                for (passive_stat, per_level) in modifiers.iter() {
+                    passive_stat.apply(stats, per_level * f32::from(*level));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -844,6 +942,38 @@ mod character_level_tests {
         );
     }
 
+    // BL-20 regression (post-#129 smoke test): `SkillSet::default()` unlocks
+    // Feats directly (both `skill_groups` and the `UnlockGroup` skill flag), but
+    // a DB round-trip used to reset `skills` and only re-seed `UnlockGroup` for
+    // `Class(_)` groups, silently dropping Feats accessibility for every
+    // character after load. Fixed via `SkillGroupKind::is_directly_granted`.
+    #[test]
+    fn feats_group_accessible_after_load_from_database() {
+        let created = SkillSet::default();
+        assert!(
+            created.skill_group_accessible(SkillGroupKind::Feats),
+            "Feats should be accessible immediately after creation"
+        );
+
+        let (loaded, err) =
+            SkillSet::load_from_database(created.skill_groups.clone(), HashMap::new());
+        assert!(err.is_none(), "round-trip should not report a load error");
+
+        assert!(
+            loaded.skill_group_accessible(SkillGroupKind::Feats),
+            "Feats should still be accessible after a DB round-trip"
+        );
+
+        let mut loaded = loaded;
+        let exp_for_one_sp = loaded.skill_point_cost(SkillGroupKind::Feats);
+        assert_eq!(
+            loaded.add_experience(SkillGroupKind::Feats, exp_for_one_sp),
+            Some(1),
+            "adding experience to Feats post-load should earn a skill point, not hit the \
+             does-not-have-group warning path"
+        );
+    }
+
     #[test]
     fn character_level_cache_repopulated_after_deserialize() {
         // SkillSet is network-synced via serde; the cache is never sent over the
@@ -916,6 +1046,14 @@ mod class_tree_tests {
 
     #[test]
     fn class_skill_groups_have_defs_and_stable_hashes() {
+        // BL-06 proof slice: these 4 trees are populated; the other 10 are still
+        // empty stubs until they are authored in a later phase.
+        const POPULATED: [ClassKind; 4] = [
+            ClassKind::Warrior,
+            ClassKind::Mage,
+            ClassKind::Cleric,
+            ClassKind::Rogue,
+        ];
         for class in ClassKind::PLAYABLE {
             let group = SkillGroupKind::Class(class);
             assert!(
@@ -926,8 +1064,19 @@ mod class_tree_tests {
                 SKILL_GROUP_HASHES.contains_key(&group),
                 "missing hash: {group:?}"
             );
-            // v1 stub trees are empty: no purchasable skills yet
-            assert_eq!(group.total_skill_point_cost(), 0);
+            if POPULATED.contains(&class) {
+                assert!(
+                    group.total_skill_point_cost() > 0,
+                    "{group:?} proof-slice tree should have purchasable skills"
+                );
+            } else {
+                // Stub trees stay empty until authored (P5+).
+                assert_eq!(
+                    group.total_skill_point_cost(),
+                    0,
+                    "{group:?} should be empty"
+                );
+            }
         }
     }
 

@@ -25,7 +25,7 @@ use crate::{
 use client::Client;
 use common::{
     assets::AssetExt,
-    combat::{Damage, combat_rating, perception_dist_multiplier_from_stealth},
+    combat::{combat_rating, compute_protection, perception_dist_multiplier_from_stealth},
     comp::{
         AttunedItems, Body, CharacterClass, Energy, Health, Inventory, Poise, SkillSet, Stats,
         inventory::{InventorySortOrder, slot::Slot},
@@ -34,7 +34,7 @@ use common::{
     recipe::RecipeBookManifest,
 };
 use conrod_core::{
-    Color, Colorable, Positionable, Sizeable, UiCell, Widget, WidgetCommon, color,
+    Color, Colorable, Labelable, Positionable, Sizeable, UiCell, Widget, WidgetCommon, color,
     widget::{self, Button, Image, Rectangle, Scrollbar, State as ConrodState, Text},
     widget_ids,
 };
@@ -719,6 +719,8 @@ widget_ids! {
         inventory_sort_selected,
         bag_expand_btn,
         bag_details_btn,
+        tab_items_btn,
+        tab_stats_btn,
         // Armor Slots
         head_slot,
         neck_slot,
@@ -852,6 +854,7 @@ pub enum Event {
     SwapEquippedWeapons,
     SetDetailsMode(bool),
     MoveBag(Vec2<f64>),
+    ToggleStatsTab,
 }
 
 impl Widget for Bag<'_> {
@@ -1041,6 +1044,48 @@ impl Widget for Bag<'_> {
                 events.push(Event::BagExpand);
             }
 
+            // Items | Stats tab buttons (only show when bag is in compact/loadout mode)
+            if !self.show.bag_inv {
+                let items_txt = i18n.get_msg("hud-bag-tab_items");
+                let items_tab_color = if !self.show.stats {
+                    Color::Rgba(0.9, 0.82, 0.6, 1.0) // active
+                } else {
+                    Color::Rgba(0.6, 0.55, 0.45, 1.0) // inactive
+                };
+                if Button::image(self.imgs.nothing)
+                    .w_h(55.0, 17.0)
+                    .label(&items_txt)
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(12))
+                    .label_color(items_tab_color)
+                    .top_left_with_margins_on(state.bg_ids.bg_frame, buttons_top, 125.0)
+                    .set(state.ids.tab_items_btn, ui)
+                    .was_clicked()
+                    && self.show.stats
+                {
+                    events.push(Event::ToggleStatsTab);
+                }
+                let stats_txt = i18n.get_msg("hud-bag-tab_stats");
+                let stats_tab_color = if self.show.stats {
+                    Color::Rgba(0.9, 0.82, 0.6, 1.0) // active
+                } else {
+                    Color::Rgba(0.6, 0.55, 0.45, 1.0) // inactive
+                };
+                if Button::image(self.imgs.nothing)
+                    .w_h(55.0, 17.0)
+                    .label(&stats_txt)
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(12))
+                    .label_color(stats_tab_color)
+                    .right_from(state.ids.tab_items_btn, 2.0)
+                    .set(state.ids.tab_stats_btn, ui)
+                    .was_clicked()
+                    && !self.show.stats
+                {
+                    events.push(Event::ToggleStatsTab);
+                }
+            }
+
             // Sort mode inventory button
             if Button::image(self.imgs.inv_sort_btn)
             .w_h(30.0, 17.0)
@@ -1160,7 +1205,7 @@ impl Widget for Bag<'_> {
             }
 
             let filled_slot = self.imgs.armor_slot;
-            if !self.show.bag_inv {
+            if self.show.stats && !self.show.bag_inv {
                 // Stat icons and text
                 state.update(|s| {
                     s.ids
@@ -1204,17 +1249,11 @@ impl Widget for Bag<'_> {
                     } else {
                         TEXT_COLOR
                     });
-                    let protection_txt = format!(
-                        "{}%",
-                        (100.0
-                            * Damage::compute_damage_reduction(
-                                None,
-                                Some(inventory),
-                                attuned,
-                                Some(self.stats),
-                                self.msm
-                            )) as i32
-                    );
+                    let protection_txt =
+                        match compute_protection(Some(inventory), attuned, self.msm) {
+                            Some(p) => format!("{:.0}", p),
+                            None => "\u{221e}".to_string(),
+                        };
                     let health_txt = format!("{}", self.health.maximum().round() as usize);
                     let energy_txt = format!("{}", self.energy.maximum().round() as usize);
                     let combat_rating_txt = format!("{}", (combat_rating * 10.0) as usize);
@@ -1282,6 +1321,8 @@ impl Widget for Bag<'_> {
                     .graphics_for(state.ids.stat_icons[i.0])
                     .set(state.ids.stat_txts[i.0], ui);
                 }
+            }
+            if !self.show.bag_inv {
                 // Loadout Slots
                 //  Head
                 let item_slot = EquipSlot::Armor(ArmorSlot::Head);
