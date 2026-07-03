@@ -1,0 +1,26 @@
+[package]
+name = "xindeler-smoke-bot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# BL-82 (EM-1.6) — CI-runnable smoke regression for the logic crates: boots a
+# real `xindeler-server-core` server, connects a real `xindeler-client-core`
+# client over loopback TCP, creates a character, moves it, and disconnects.
+# Pure logic — NO bevy/wgpu/winit deps, ever (scripts/check-engine-isolation.sh
+# scans this crate as a logic crate).
+
+[dependencies]
+client = { package = "xindeler-client-core", path = "../../client" }
+server = { package = "xindeler-server-core", path = "../../server" }
+common = { package = "xindeler-common", path = "../../common" }
+
+# "time" → `tokio::time::timeout` caps each connect attempt at the remaining deadline.
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+vek = { workspace = true }
+tempfile = { workspace = true }

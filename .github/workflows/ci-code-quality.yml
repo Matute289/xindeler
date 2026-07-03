@@ -39,12 +39,15 @@ jobs:
         # `mold` — the repo's .cargo/config.toml forces `-fuse-ld=mold` globally,
         # so the linker MUST be present or every build fails with "cannot find ld".
         # binutils/pkg-config — general build.
-        # BL-82 (EM-1.1): alsa/udev dev headers dropped — only voxygen needed them,
-        # and voxygen is no longer a workspace member (unbuilt in-tree reference).
+        # BL-82 (EM-2.2): the Bevy client (default features) needs the standard
+        # bevy-on-linux compile-time headers — alsa (bevy_audio), udev (gilrs input),
+        # wayland + xkbcommon (winit's wayland backend; wayland-sys builds against
+        # them). X11 needs no headers (pure-Rust x11rb bindings).
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            mold binutils pkg-config
+            mold binutils pkg-config \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
       - name: Install Rust toolchain (pinned, read from rust-toolchain)
         # Read the pin dynamically so this stays in sync with the monthly bump
