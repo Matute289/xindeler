@@ -8,4 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-bevy = { version = "=0.19.0", default-features = false }
+# Full default feature set (2d + 3d + ui + audio); `default_platform` (inside 3d/ui)
+# already brings `default_font`, needed by the FPS overlay text.
+bevy = { version = "=0.19.0" }
+xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }

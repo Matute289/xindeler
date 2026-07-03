@@ -7,7 +7,20 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# FPS overlay (bevy_dev_tools::fps_overlay) needs the UI render stack + a default
+# font — enable this from the CLIENT binary only; the server shell stays headless.
+fps-overlay = ["bevy/bevy_dev_tools"]
+
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
-# Skeleton uses no default features (no render stack yet); features arrive with each phase.
-bevy = { version = "=0.19.0", default-features = false }
+# No render/window features here: states/schedules/settings/diagnostics only.
+# The render stack lives in the client binary (features are additive workspace-wide,
+# but this crate must stay usable from the headless server shell).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_log",
+    "bevy_state",
+] }
+ron = { workspace = true }
+serde = { workspace = true }
