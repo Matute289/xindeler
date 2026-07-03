@@ -28,6 +28,8 @@ members = [
     "server",
     "server/agent",
     "server-cli",
+    # BL-82 (EM-1.6): loopback smoke regression for the logic crates (pure logic, no bevy).
+    "tools/smoke-bot",
     # BL-82 (EM-1.1): `voxygen` and `voxygen/egui` are NOT workspace members anymore —
     # the legacy wgpu client stays in-tree as an upstream-merge-friendly reference but
     # is never built here (reference builds happen in xindeler-old). The two PURE-LOGIC
