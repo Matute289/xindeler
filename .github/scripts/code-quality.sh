@@ -17,5 +17,5 @@ time cargo clippy \
 # unbuilt reference; reference builds live in xindeler-old).
 
 # Ensure that test-server compiles.
-time cargo clippy --locked --bin veloren-server-cli --no-default-features -F simd  -- -D warnings &&
+time cargo clippy --locked --bin xindeler-server-cli --no-default-features -F simd  -- -D warnings &&
 time cargo fmt --all -- --check;

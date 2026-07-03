@@ -249,7 +249,7 @@ end of 2nd level Enums
 /// Inform the client of updates to the player list.
 ///
 /// Note: Before emiting any of these, check if the current
-/// [`veloren_client::Client::client_type`] wants to emit login events.
+/// [`xindeler_client_core::Client::client_type`] wants to emit login events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PlayerListUpdate {
     Init(HashMap<Uid, PlayerInfo>),
@@ -299,9 +299,9 @@ pub enum InviteAnswer {
 /// A message that should be displayed to the player, possibly with data to
 /// update the client.
 ///
-/// See [`veloren_client::UserNotification`] for the stripped down version,
-/// which the client sends to the UI after removing (and using) any data that is
-/// not relevant to rendering.
+/// See [`xindeler_client_core::UserNotification`] for the stripped down
+/// version, which the client sends to the UI after removing (and using) any
+/// data that is not relevant to rendering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Notification {
     WaypointSaved { location_name: String },

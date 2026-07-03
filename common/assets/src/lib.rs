@@ -49,7 +49,7 @@ pub trait AssetExt: Sized + Send + Sync + 'static {
     /// Function used to load assets from the filesystem or the cache.
     /// Example usage:
     /// ```no_run
-    /// use veloren_common_assets::{AssetExt, Image};
+    /// use xindeler_common_assets::{AssetExt, Image};
     ///
     /// let my_image = Image::load("core.ui.backgrounds.city").unwrap();
     /// ```
@@ -74,7 +74,7 @@ pub trait AssetExt: Sized + Send + Sync + 'static {
     /// Function used to load essential assets from the filesystem or the cache.
     /// It will panic if the asset is not found. Example usage:
     /// ```no_run
-    /// use veloren_common_assets::{AssetExt, Image};
+    /// use xindeler_common_assets::{AssetExt, Image};
     ///
     /// let my_image = Image::load_expect("core.ui.backgrounds.city");
     /// ```
@@ -342,8 +342,10 @@ lazy_static! {
 
         // Note: Ordering matters here!
 
-        // 1. VELOREN_ASSETS environment variable
-        if let Ok(var) = std::env::var("VELOREN_ASSETS") {
+        // 1. XINDELER_ASSETS environment variable, with VELOREN_ASSETS as a
+        // fallback (BL-82 EM-1.4 rebranding shim — Mapper §A/§B2-D2; existing
+        // scripts and CI keep working during the transition)
+        if let Ok(var) = std::env::var("XINDELER_ASSETS").or_else(|_| std::env::var("VELOREN_ASSETS")) {
             paths.push(var.into());
         }
 

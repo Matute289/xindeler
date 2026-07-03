@@ -50,13 +50,13 @@ cargo build --release --no-default-features --features default-publish
 **Standard dev server** (with worldgen, hot-reload agent AI):
 ```bash
 cargo server
-# equivalent to: cargo run --bin veloren-server-cli
+# equivalent to: cargo run --bin xindeler-server-cli
 ```
 
 **Minimal server** (no hot-reloading, faster startup for testing net code):
 ```bash
 cargo test-server
-# equivalent to: cargo run --bin veloren-server-cli --no-default-features --features simd
+# equivalent to: cargo run --bin xindeler-server-cli --no-default-features --features simd
 ```
 
 **With Tracy profiler**:

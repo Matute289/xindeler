@@ -20,7 +20,7 @@ The specs ECS simulation (logic crates: `common*`, `world`, `rtsim`, `client`, `
 (`server/src/lib.rs:787`) is a headless function called from the Bevy server shell
 (`MinimalPlugins` App — full multithreaded scheduler headless). The server-side
 `bevy/xindeler-sim-bridge` mirrors sim state → **replicated** Bevy entities, and **bevy_replicon**
-([Q3]=B) carries them to a **100%-pure-Bevy client** (no specs, no `veloren-client` embedded —
+([Q3]=B) carries them to a **100%-pure-Bevy client** (no specs, no `xindeler-client-core` embedded —
 logic crates linked as type libraries only). The replication contract lives in
 `bevy/xindeler-protocol` (shared comps/channels/events). During the migration the sim's legacy
 quinn listener stays up (**dual-stack**) so the old client coexists; it's retired at cutover.
