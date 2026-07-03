@@ -1,5 +1,5 @@
 #!/bin/bash
-VELOREN_ASSETS="$(pwd)/assets";
-export VELOREN_ASSETS;
+XINDELER_ASSETS="$(pwd)/assets";
+export XINDELER_ASSETS;
 
 time cargo test;

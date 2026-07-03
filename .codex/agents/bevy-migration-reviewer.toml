@@ -19,7 +19,7 @@ Review for, in priority order — every finding cites file:line and the violated
    wire-protocol identifiers or DB migration names. These break the continuous-sync requirement.
 3. **Bridge & replication discipline ([Q3]=B):** `xindeler-sim-bridge` (server-side only) writing
    into specs storages directly instead of the sim's public APIs/events; the Bevy client linking
-   specs or `veloren-client` (it must be pure Bevy + replicon); replicated components not defined
+   specs or `xindeler-client-core` (it must be pure Bevy + replicon); replicated components not defined
    in `xindeler-protocol`; terrain sent via per-component replication instead of the dedicated
    compressed chunk channel; missing interest-management/visibility scoping on new replicated
    state (bandwidth!); per-frame allocations in mirror loops; missing despawn path for dead sim

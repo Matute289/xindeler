@@ -7,8 +7,8 @@ use assets_manager::{
 };
 use hashbrown::HashSet;
 
-/// Loads assets from the default path or `VELOREN_ASSETS_OVERRIDE` env if it is
-/// set.
+/// Loads assets from the default path or `XINDELER_ASSETS_OVERRIDE` env if it
+/// is set (`VELOREN_ASSETS_OVERRIDE` kept as a fallback — BL-82 EM-1.4 shim).
 #[derive(Debug, Clone)]
 pub struct FileSystem {
     default: RawFs,
@@ -18,11 +18,15 @@ pub struct FileSystem {
 impl FileSystem {
     pub fn new() -> io::Result<Self> {
         let default = RawFs::new(&*super::ASSETS_PATH)?;
-        let override_dir = std::env::var_os("VELOREN_ASSETS_OVERRIDE").and_then(|path| {
-            RawFs::new(path)
-                .map_err(|err| tracing::error!("Error setting override assets directory: {}", err))
-                .ok()
-        });
+        let override_dir = std::env::var_os("XINDELER_ASSETS_OVERRIDE")
+            .or_else(|| std::env::var_os("VELOREN_ASSETS_OVERRIDE"))
+            .and_then(|path| {
+                RawFs::new(path)
+                    .map_err(|err| {
+                        tracing::error!("Error setting override assets directory: {}", err)
+                    })
+                    .ok()
+            });
 
         let canary = fs::read_to_string(super::ASSETS_PATH.join("common").join("canary.canary"))
             .map_err(|e| io::Error::other(format!("failed to load canary asset: {}", e)))?;

@@ -26,13 +26,13 @@ Nightly Rust is required (pinned in `rust-toolchain`). The project uses the 2024
 cargo run -p xindeler-client
 
 # Run the server
-cargo run --bin veloren-server-cli
+cargo run --bin xindeler-server-cli
 
 # Tests require the assets path
 VELOREN_ASSETS="$(pwd)/assets" cargo test
 
 # Single crate test
-VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-common
+VELOREN_ASSETS="$(pwd)/assets" cargo test -p xindeler-common
 
 # Engine-isolation guard (BL-82: logic crates must never depend on bevy/wgpu/winit)
 ./scripts/check-engine-isolation.sh
@@ -136,7 +136,7 @@ Large binary assets (`.vox`, `.png`/`.jpg`/`.jpeg`, `.ogg`/`.wav`, `.ttf`, `.ico
 **Where each build runs:**
 - **Code CI** (build / check / test / lint on PRs) → **GitHub Actions** (public repo = free, unlimited minutes). It must **not** pull LFS — compilation and tests don't need the binary assets.
 - **Server release** → built **on the VPS** (where the assets are local), not on GitHub Actions. `release.yml` triggers on a `v*` tag push, SSHes to the VPS with `secrets.VPS_SSH_KEY`, and runs `/srv/git-lfs/scripts/build-release.sh <tag>` → produces `/srv/git-lfs/releases/xindeler-server-<tag>.tar.gz`.
-- **Docker image** (`publish-docker.yml`, manual) → pulls only the asset dirs the image bundles (`assets/common,server,world`) from the VPS, builds `veloren-server-cli`, pushes to GHCR.
+- **Docker image** (`publish-docker.yml`, manual) → pulls only the asset dirs the image bundles (`assets/common,server,world`) from the VPS, builds `xindeler-server-cli`, pushes to GHCR.
 - **Client release** (voxygen desktop installer + Airshipper) → **deferred** to the first client release; study Veloren's packaging then. The shipped client necessarily bundles its assets (players have them locally) — "private" means private in source control, not in the shipped binary.
 
 **GitHub Actions minutes:** the 2,000-minute quota is for **private** repos only; the public `xindeler` repo runs Actions for free. Heavy Rust builds run on the VPS anyway, so they don't consume GitHub minutes.

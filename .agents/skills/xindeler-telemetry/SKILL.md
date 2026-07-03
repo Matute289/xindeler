@@ -287,5 +287,5 @@ When you need a complete picture, run steps 2–9 in sequence and synthesize:
 
 - If telemetry files are gzipped (`.jsonl.gz`), decompress first: `gunzip -c file.jsonl.gz | grep ...`
 - Telemetry is only generated with `--features veloren-voxygen/logging-verbose` (dev builds)
-- Server telemetry requires `--features veloren-server-cli/logging-verbose`
+- Server telemetry requires `--features xindeler-server-cli/logging-verbose`
 - The most recent file may still be open and writing — tail it live with: `tail -f userdata/voxygen/logs/*telemetry*.jsonl`

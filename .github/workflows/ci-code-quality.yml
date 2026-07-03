@@ -27,7 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Defensive: clippy doesn't load assets, but code-quality.sh exports nothing.
-      VELOREN_ASSETS: ${{ github.workspace }}/assets
+      # BL-82 (EM-1.4): CI uses the NEW var so the shim's primary branch is what CI exercises.
+      XINDELER_ASSETS: ${{ github.workspace }}/assets
     steps:
       - name: Checkout (no LFS — assets are on the VPS, not GitHub)
         uses: actions/checkout@v4

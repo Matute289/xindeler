@@ -71,7 +71,7 @@ incremental = true
 [profile.dev.package."*"]
 # TODO: seems like opt-level=2 should be sufficient here....
 opt-level = 3
-[profile.dev.package."veloren-network-protocol"]
+[profile.dev.package."xindeler-network-protocol"]
 opt-level = 3
 # BL-82 (EM-1.1): the `veloren-voxygen` profile overrides were removed — the crate
 # is no longer a workspace member, and unmatched profile specs make cargo warn on
@@ -94,9 +94,9 @@ inherits = 'dev'
 overflow-checks = false
 debug-assertions = false
 
-[profile.no_overflow.package."veloren-world"]
+[profile.no_overflow.package."xindeler-world"]
 opt-level = 3
-[profile.no_overflow.package."veloren-voxygen-anim"]
+[profile.no_overflow.package."xindeler-anim"]
 opt-level = 3
 
 # this profile is for profiling with using the no_overflow profile, since release can take signifcant times to build.
@@ -115,21 +115,21 @@ lto = true
 debug = false
 panic = "abort"          # don't need unwinding so we can skip including the landing pads for that
 # line tables so we can have useful backtraces for in-house crates
-[profile.release.package."veloren-network"]
+[profile.release.package."xindeler-network"]
 debug = "line-tables-only"
-[profile.release.package."veloren-network-protocol"]
+[profile.release.package."xindeler-network-protocol"]
 debug = "line-tables-only"
-[profile.release.package."veloren-common"]
+[profile.release.package."xindeler-common"]
 debug = "line-tables-only"
-[profile.release.package."veloren-common-systems"]
+[profile.release.package."xindeler-common-systems"]
 debug = "line-tables-only"
-[profile.release.package."veloren-client"]
+[profile.release.package."xindeler-client-core"]
 debug = "line-tables-only"
-[profile.release.package."veloren-server"]
+[profile.release.package."xindeler-server-core"]
 debug = "line-tables-only"
-[profile.release.package."veloren-server-cli"]
+[profile.release.package."xindeler-server-cli"]
 debug = "line-tables-only"
-[profile.release.package."veloren-world"]
+[profile.release.package."xindeler-world"]
 debug = "line-tables-only"
 
 [profile.release-thinlto]
