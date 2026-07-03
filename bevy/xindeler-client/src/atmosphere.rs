@@ -51,6 +51,17 @@ pub struct AtmospherePlugin;
 
 impl Plugin for AtmospherePlugin {
     fn build(&self, app: &mut App) {
+        // Sky ambient so the vertex AO has indirect light to act on (spec §4.3
+        // multiplies AO into indirect ONLY; bevy's default 80 cd/m² is invisible
+        // next to the 130k-lux sun at EV100 13). 0.19: `GlobalAmbientLight` is the
+        // resource (`AmbientLight` became per-camera). TODO(EM-3.4/atmo-v2): add an
+        // `ambient_sky` field to AtmosphereProfile and lerp/apply it like the rest —
+        // this hardcode is the LAST atmosphere value living in code.
+        app.insert_resource(bevy::light::GlobalAmbientLight {
+            color: Color::srgb(0.75, 0.85, 1.0),
+            brightness: 6_000.0,
+            affects_lightmapped_meshes: true,
+        });
         app.add_plugins(XindelerAtmospherePlugin {
             profile_path: PROFILE_ASSET_PATH.to_owned(),
         })

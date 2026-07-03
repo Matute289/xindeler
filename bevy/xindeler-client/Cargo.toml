@@ -19,6 +19,17 @@ bevy = { version = "=0.19.0", features = ["file_watcher"] }
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }
 # AtmosphereProfile asset + AtmosphereController (EM-2.4, spec §5.4).
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-3.2/3.3: greedy mesher + bevy conversion + VoxelMaterialExt.
+xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [
+    "material",
+] }
+# Logic crates as TYPE LIBRARIES only ([Q3]=B): the voxel demo builds a
+# synthetic `VolGrid2d<TerrainChunk>` with `common` terrain types. Legal
+# direction (shell → logic); the isolation law forbids the reverse.
+common = { package = "xindeler-common", path = "../../common", features = [
+    "no-assets",
+] }
+vek = { workspace = true }
 
 [dev-dependencies]
 # Tests validate that the smoke harness's baked extreme profile parses.

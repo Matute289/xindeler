@@ -11554,8 +11554,11 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "ron",
+ "vek",
  "xindeler-app",
+ "xindeler-common",
  "xindeler-oracle-host",
+ "xindeler-render-voxel",
 ]
 
 [[package]]

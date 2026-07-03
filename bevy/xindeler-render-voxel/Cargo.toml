@@ -7,9 +7,27 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `convert` is on by default so `cargo test -p xindeler-render-voxel` covers
+# the EM-3.2 conversion tests; `--no-default-features` still builds the pure
+# CPU mesher (greedy/terrain/segment) with zero bevy render machinery.
+default = ["convert"]
+# EM-3.2: `Mesh<TerrainVertex>` → `bevy::mesh::Mesh` conversion. Minimal bevy
+# 0.19 features (verified against bevy-0.19.0/Cargo.toml + bevy_internal):
+# - `bevy_mesh`: gates the `bevy::mesh` re-export (Mesh, MeshVertexAttribute,
+#   Indices, PrimitiveTopology, VertexFormat re-exported from wgpu_types),
+# - `bevy_asset`: gates `bevy::asset` (RenderAssetUsages lives there in 0.19).
+# Neither pulls bevy_render/wgpu — the mesher core stays render-free.
+convert = ["bevy/bevy_mesh", "bevy/bevy_asset"]
+# EM-3.3: `VoxelMaterialExt` (ExtendedMaterial extension + embedded WGSL).
+# `bevy_pbr` transitively enables bevy_core_pipeline → bevy_render →
+# bevy_shader (facade module gates verified in bevy_internal-0.19.0/src/lib.rs).
+material = ["convert", "bevy/bevy_pbr"]
+
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
-# Skeleton uses no default features (no render stack yet); features arrive with each phase.
+# The skeleton used no default features; EM-3.2/3.3 add the minimal per-phase
+# feature sets above (never `default-features = true` — the client owns that).
 bevy = { version = "=0.19.0", default-features = false }
 
 # EM-3.1 (Mapper C5–C7): deps of the lift-copied greedy mesher.

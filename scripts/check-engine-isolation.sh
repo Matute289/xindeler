@@ -23,6 +23,14 @@ if grep -rn --include='*.rs' -E '\bbevy(_[a-z_]+)?::' "${LOGIC_SRC[@]}" 2>/dev/n
     exit 1
 fi
 
+# (d) [Q3]=B client purity: the Bevy client links logic crates as TYPE LIBRARIES
+# only — any specs usage in it means sim state is leaking into the client
+# (the only legal specs consumer in bevy/ is the server-side sim-bridge).
+if grep -rn --include='*.rs' -E '\bspecs::|^use specs' bevy/xindeler-client/src 2>/dev/null; then
+    echo "ENGINE-ISOLATION VIOLATION (BL-82 §2.1): the Bevy client must not use specs (type-library-only rule)."
+    exit 1
+fi
+
 python3 - <<'EOF'
 import json, subprocess, sys, os
 

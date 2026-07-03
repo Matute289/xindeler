@@ -91,6 +91,9 @@ fn spawn_demo_scene(
     ));
 
     // 6x6 metallic (x) by roughness (z) sweep, alternating spheres/cubes.
+    // Shifted east since EM-3.3: the voxel demo chunk (voxel_demo.rs) occupies
+    // the scene center ([-16, 17] x [-17, 16]).
+    const SWEEP_OFFSET_X: f32 = 28.0;
     let sphere = meshes.add(Sphere::new(0.6));
     let cube = meshes.add(Cuboid::from_length(1.1));
     for x in 0..6u32 {
@@ -109,7 +112,11 @@ fn spawn_demo_scene(
             commands.spawn((
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::from_xyz(x as f32 * 2.5 - 6.25, 0.6, z as f32 * 2.5 - 6.25),
+                Transform::from_xyz(
+                    x as f32 * 2.5 - 6.25 + SWEEP_OFFSET_X,
+                    0.6,
+                    z as f32 * 2.5 - 6.25,
+                ),
             ));
         }
     }
@@ -121,7 +128,8 @@ fn spawn_demo_scene(
         perceptual_roughness: 0.7,
         ..Default::default()
     });
-    for (x, z) in [(14.0, -6.0), (16.0, 6.0), (-12.0, -14.0), (-16.0, 10.0)] {
+    // Kept clear of the voxel chunk footprint (EM-3.3).
+    for (x, z) in [(24.0, -14.0), (36.0, 12.0), (-24.0, -20.0), (-24.0, 14.0)] {
         commands.spawn((
             Mesh3d(column.clone()),
             MeshMaterial3d(column_material.clone()),
@@ -129,7 +137,7 @@ fn spawn_demo_scene(
         ));
     }
 
-    // Emissive sphere: bloom check.
+    // Emissive sphere: bloom check (south of the voxel chunk since EM-3.3).
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(0.8))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -137,7 +145,7 @@ fn spawn_demo_scene(
             emissive: LinearRgba::rgb(60.0, 25.0, 6.0),
             ..Default::default()
         })),
-        Transform::from_xyz(6.0, 3.5, -10.0),
+        Transform::from_xyz(10.0, 3.5, 22.0),
     ));
 
     // Test fog volume over one corner of the scene (unit cube scaled up).
