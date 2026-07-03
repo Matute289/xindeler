@@ -141,9 +141,11 @@ fn spawn_demo_scene(
     ));
 
     // Test fog volume over one corner of the scene (unit cube scaled up).
+    // Density comes from the default atmosphere profile (single source of
+    // truth); the AtmosphereController re-drives it at runtime (EM-2.4).
     commands.spawn((
         FogVolume {
-            density_factor: 0.15,
+            density_factor: xindeler_oracle_host::AtmosphereProfile::default().fog_volume_density,
             ..Default::default()
         },
         Transform::from_xyz(-22.0, 5.0, -12.0).with_scale(Vec3::new(30.0, 10.0, 30.0)),

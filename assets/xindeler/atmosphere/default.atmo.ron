@@ -1,0 +1,27 @@
+// Default atmosphere profile (BL-82 EM-2.4, spec §5.4).
+//
+// Schema: `AtmosphereProfile` in bevy/xindeler-oracle-host/src/atmosphere.rs.
+// These values MUST equal `AtmosphereProfile::default()` (unit-tested there):
+// the camera/light rigs spawn from the Rust defaults, so the first load of
+// this file is a visual no-op. Edit it while the client runs to watch the
+// atmosphere animate (hot reload via bevy's file_watcher).
+(
+    // Distance-fog extinction density (~350 m visibility).
+    fog_density: 0.00856,
+    // sRGB fog color.
+    fog_color: (0.55, 0.65, 0.75),
+    // sRGB sky/void color (world ClearColor; bevy stock = srgb_u8(43, 44, 47)).
+    sky_color: (0.168627, 0.172549, 0.184314),
+    // Density factor for placed volumetric FogVolumes (engine extension).
+    fog_volume_density: 0.15,
+    // VolumetricFog ambient intensity on the camera.
+    ambient_light_intensity: 0.1,
+    // Sun illuminance, lux (physical raw sunlight; engine extension).
+    sun_illuminance: 130000.0,
+    // Placeholder weather tag: None | Rain | Storm (data only for now).
+    weather_effect: None,
+    // Some(hour 0.0..24.0) freezes the day/night cycle; None = normal cycle.
+    time_lock: None,
+    // Seconds over which a change TO this profile interpolates.
+    transition_secs: 5.0,
+)

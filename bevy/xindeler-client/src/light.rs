@@ -8,11 +8,11 @@ use std::f32::consts::PI;
 use bevy::{
     light::{
         Atmosphere, CascadeShadowConfigBuilder, VolumetricLight, atmosphere::ScatteringMedium,
-        light_consts::lux,
     },
     prelude::*,
 };
 use xindeler_app::{GameplaySet, XindelerSettings};
+use xindeler_oracle_host::AtmosphereProfile;
 
 pub struct LightRigPlugin;
 
@@ -63,8 +63,10 @@ fn spawn_light_rig(
     commands.spawn((
         Sun,
         DirectionalLight {
-            // Physical sunlight; the camera compensates with Exposure (EM-2.2).
-            illuminance: lux::RAW_SUNLIGHT,
+            // Physical sunlight (RAW_SUNLIGHT lux via the default atmosphere
+            // profile — runtime-driven by EM-2.4's AtmosphereController); the
+            // camera compensates with Exposure (EM-2.2).
+            illuminance: AtmosphereProfile::default().sun_illuminance,
             shadow_maps_enabled: true,
             // Per-light half of contact shadows; the camera carries the
             // `ContactShadows` component (bevy_pbr::contact_shadows, 0.19).

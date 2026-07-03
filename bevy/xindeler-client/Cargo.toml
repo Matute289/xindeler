@@ -10,7 +10,16 @@ workspace = true
 [dependencies]
 # Full default feature set (2d + 3d + ui + audio); `default_platform` (inside 3d/ui)
 # already brings `default_font`, needed by the FPS overlay text.
-bevy = { version = "=0.19.0" }
+# `file_watcher` (EM-2.4): asset hot reload — bevy_asset builds its notify-based
+# watcher and AssetPlugin's default `watch_for_changes_override: None` resolves
+# to watching in Unprocessed mode.
+bevy = { version = "=0.19.0", features = ["file_watcher"] }
 # fps-overlay: deliberate for Phase-2 validation; gate behind a GraphicsSettings
 # toggle / debug_assertions before the EM-5.x UI gate (reviewer m5).
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }
+# AtmosphereProfile asset + AtmosphereController (EM-2.4, spec §5.4).
+xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+
+[dev-dependencies]
+# Tests validate that the smoke harness's baked extreme profile parses.
+ron = { workspace = true }
