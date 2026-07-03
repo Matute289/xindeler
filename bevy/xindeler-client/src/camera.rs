@@ -7,13 +7,15 @@ use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, Hdr},
     input::mouse::AccumulatedMouseMotion,
-    light::VolumetricFog,
     pbr::{AtmosphereSettings, ContactShadows, ScreenSpaceAmbientOcclusion},
     post_process::bloom::Bloom,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use xindeler_app::{GameplaySet, XindelerSettings};
+use xindeler_oracle_host::AtmosphereProfile;
+
+use crate::{atmosphere, post::VignettePost};
 
 pub struct CameraRigPlugin;
 
@@ -57,6 +59,9 @@ impl Default for FlyCam {
 
 fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
     let graphics = &settings.graphics;
+    // Spawn-time fog matches the default profile so EM-2.4's first applied
+    // AtmosphereController state is a visual no-op (no boot pop).
+    let boot_profile = AtmosphereProfile::default();
 
     let transform =
         Transform::from_xyz(-22.0, 9.0, 26.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y);
@@ -74,17 +79,8 @@ fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
         Exposure { ev100: 13.0 },
         // Picks up the standalone `Atmosphere` entity spawned by the light rig.
         AtmosphereSettings::default(),
-        // Placeholder colors until EM-2.4's AtmosphereController drives this.
-        DistanceFog {
-            color: Color::srgb(0.55, 0.65, 0.75),
-            directional_light_color: Color::srgba(1.0, 0.95, 0.85, 0.5),
-            directional_light_exponent: 30.0,
-            falloff: FogFalloff::from_visibility_colors(
-                350.0,
-                Color::srgb(0.35, 0.5, 0.66),
-                Color::srgb(0.8, 0.844, 1.0),
-            ),
-        },
+        // Driven at runtime by the AtmosphereController (EM-2.4).
+        atmosphere::distance_fog_from(&boot_profile),
         FlyCam {
             yaw,
             pitch,
@@ -102,13 +98,14 @@ fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
         camera.insert(Bloom::NATURAL);
     }
     if graphics.volumetric_fog {
-        camera.insert(VolumetricFog {
-            ambient_intensity: 0.1,
-            ..Default::default()
-        });
+        camera.insert(atmosphere::volumetric_fog_from(&boot_profile));
     }
     if graphics.contact_shadows {
         camera.insert(ContactShadows::default());
+    }
+    if graphics.vignette {
+        // EM-2.6: custom post-process pass (vignette + gamma placeholder).
+        camera.insert(VignettePost::default());
     }
 }
 

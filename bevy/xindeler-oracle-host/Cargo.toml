@@ -9,5 +9,13 @@ workspace = true
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
-# Skeleton uses no default features (no render stack yet); features arrive with each phase.
-bevy = { version = "=0.19.0", default-features = false }
+# `bevy_asset` only — this crate hosts the data-driven ORACLE assets (DmEvent,
+# AtmosphereProfile, ...) and must stay render-free so the headless server shell
+# can use it (spec §5). Apply-to-render systems live in `xindeler-client`.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_log",
+    "bevy_asset",
+] }
+ron = { workspace = true }
+serde = { workspace = true }
