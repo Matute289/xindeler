@@ -22,8 +22,8 @@ Nightly Rust is required (pinned in `rust-toolchain`). The project uses the 2024
 ## Commands
 
 ```bash
-# Run the game client (hot-reloading enabled by default in dev builds)
-cargo run --bin veloren-voxygen
+# Run the Bevy client (BL-82 migration; the legacy voxygen client lives in xindeler-old)
+cargo run -p xindeler-client
 
 # Run the server
 cargo run --bin veloren-server-cli
@@ -34,20 +34,22 @@ VELOREN_ASSETS="$(pwd)/assets" cargo test
 # Single crate test
 VELOREN_ASSETS="$(pwd)/assets" cargo test -p veloren-common
 
+# Engine-isolation guard (BL-82: logic crates must never depend on bevy/wgpu/winit)
+./scripts/check-engine-isolation.sh
+
 # Lint (matches CI exactly)
 cargo clippy --all-targets --locked \
-  --features="bin_cmd_doc_gen,bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat,cli" \
+  --features="bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat,cli" \
   -- -D warnings
-
-# Clippy for voxygen publish profile (no hot-reloading)
-cargo clippy -p veloren-voxygen --locked --no-default-features --features="default-publish" -- -D warnings
 
 # Format check
 cargo fmt --all -- --check
-
-# Release build (no hot-reloading, with LTO)
-cargo build --release --no-default-features --features default-publish
 ```
+
+> **BL-82 (EM-1.1):** `voxygen` (+ `voxygen/egui`) is no longer a workspace member — it stays
+> in-tree only as an upstream-merge-friendly reference. Do not build, edit, or format it here;
+> the playable legacy client lives in the `xindeler-old` repo. `voxygen/anim` and
+> `voxygen/i18n-helpers` (pure logic) remain built.
 
 ## Workspace Architecture
 

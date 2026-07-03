@@ -37,13 +37,13 @@ jobs:
       - name: Install system dependencies
         # `mold` — the repo's .cargo/config.toml forces `-fuse-ld=mold` globally,
         # so the linker MUST be present or every build fails with "cannot find ld".
-        # alsa/udev dev headers — voxygen (clippy'd by code-quality.sh) needs them to
-        # compile. binutils/pkg-config — general build. No X11/wayland headers needed
-        # for a compile-only (clippy) build — winit/wgpu dlopen those at runtime.
+        # binutils/pkg-config — general build.
+        # BL-82 (EM-1.1): alsa/udev dev headers dropped — only voxygen needed them,
+        # and voxygen is no longer a workspace member (unbuilt in-tree reference).
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            mold binutils pkg-config libasound2-dev libudev-dev
+            mold binutils pkg-config
 
       - name: Install Rust toolchain (pinned, read from rust-toolchain)
         # Read the pin dynamically so this stays in sync with the monthly bump

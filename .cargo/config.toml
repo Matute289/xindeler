@@ -32,11 +32,10 @@ tracy-server = "run --bin veloren-server-cli --features tracy,simd --profile no_
 tracy-server-debuginfo = "run --bin veloren-server-cli --features tracy,simd --profile no_overflow_debuginfo"
 tracy-server-releasedebuginfo = "run --bin veloren-server-cli --features tracy,simd --profile releasedebuginfo"
 tracy-test-server = "run --bin veloren-server-cli --no-default-features --features tracy,simd --profile no_overflow"
-# voxygen
-test-voxygen = "run --bin veloren-voxygen --no-default-features --features simd,egui-ui,shaderc-from-source,hot-reloading"
-tracy-voxygen = "run --bin veloren-voxygen --no-default-features --features tracy,simd,egui-ui,shaderc-from-source --profile no_overflow"
-dbg-voxygen = "run --bin veloren-voxygen --profile debuginfo"
+# voxygen — BL-82 (EM-1.1): legacy-client aliases removed; voxygen is no longer a
+# workspace member (unbuilt in-tree reference). The playable legacy client lives in
+# xindeler-old; the Bevy client is `cargo run -p xindeler-client`.
 # misc
 swarm = "run --bin swarm --features client/bin_bot,client/tick_network --"
-ci-clippy = "clippy --all-targets --locked --features=bin_cmd_doc_gen,bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,bin,stat"
-ci-clippy2 = "clippy -p veloren-voxygen --locked --no-default-features --features=default-publish"
+ci-clippy = "clippy --all-targets --locked --features=bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,bin,stat"
+# BL-82 (EM-1.1): ci-clippy2 (voxygen default-publish check) removed with voxygen.

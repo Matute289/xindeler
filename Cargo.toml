@@ -28,9 +28,12 @@ members = [
     "server",
     "server/agent",
     "server-cli",
-    "voxygen",
+    # BL-82 (EM-1.1): `voxygen` and `voxygen/egui` are NOT workspace members anymore —
+    # the legacy wgpu client stays in-tree as an upstream-merge-friendly reference but
+    # is never built here (reference builds happen in xindeler-old). The two PURE-LOGIC
+    # subcrates stay built: `voxygen/anim` (skeletal animation) and
+    # `voxygen/i18n-helpers` (client depends on it via bin_bot + dev-dependency).
     "voxygen/anim",
-    "voxygen/egui",
     "voxygen/i18n-helpers",
     "world",
 ]
@@ -70,8 +73,9 @@ incremental = true
 opt-level = 3
 [profile.dev.package."veloren-network-protocol"]
 opt-level = 3
-[profile.dev.package."veloren-voxygen"]
-debug = "line-tables-only"
+# BL-82 (EM-1.1): the `veloren-voxygen` profile overrides were removed — the crate
+# is no longer a workspace member, and unmatched profile specs make cargo warn on
+# every invocation. Restore them if voxygen ever rejoins the workspace.
 
 # this profile is used by developers if dev doesn't has enough debug information,
 # the name must != debug, as debug is used by dev because....
@@ -124,8 +128,6 @@ debug = "line-tables-only"
 [profile.release.package."veloren-server"]
 debug = "line-tables-only"
 [profile.release.package."veloren-server-cli"]
-debug = "line-tables-only"
-[profile.release.package."veloren-voxygen"]
 debug = "line-tables-only"
 [profile.release.package."veloren-world"]
 debug = "line-tables-only"
