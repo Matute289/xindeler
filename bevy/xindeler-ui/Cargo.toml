@@ -1,0 +1,13 @@
+[package]
+name = "xindeler-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
+# Skeleton uses no default features (no render stack yet); features arrive with each phase.
+bevy = { version = "=0.19.0", default-features = false }

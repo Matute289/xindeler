@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
+    "bevy/xindeler-app",
+    "bevy/xindeler-client",
+    "bevy/xindeler-oracle-host",
+    "bevy/xindeler-protocol",
+    "bevy/xindeler-render-voxel",
+    "bevy/xindeler-server-app",
+    "bevy/xindeler-sim-bridge",
+    "bevy/xindeler-ui",
     "client",
     "client/i18n",
     "common",
