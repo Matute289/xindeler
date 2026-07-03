@@ -9195,7 +9195,9 @@ name = "xindeler-protocol"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "bevy_math",
  "bevy_replicon",
+ "serde",
 ]
 
 [[package]]
@@ -9357,6 +9359,25 @@ name = "xindeler-sim-bridge"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "specs",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "xindeler-server-core",
+]
+
+[[package]]
+name = "xindeler-smoke-bot"
+version = "0.18.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vek",
+ "xindeler-client-core",
+ "xindeler-common",
+ "xindeler-server-core",
 ]
 
 [[package]]

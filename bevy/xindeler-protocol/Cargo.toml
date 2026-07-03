@@ -9,7 +9,19 @@ workspace = true
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
-# Skeleton uses no default features (no render stack yet); features arrive with each phase.
-bevy = { version = "=0.19.0", default-features = false }
+# No render stack: only what the replication contract needs.
+#   - `bevy_state`: bevy_replicon manages `ClientState`/`ServerState` as Bevy states.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "bevy_state",
+] }
+# Feature-only dep: turns on serde impls for `Vec3`/`Quat` (glam) used inside the
+# Net* components. We enable `bevy_math/serialize` directly instead of the bevy
+# facade's `serialize`, because the facade feature makes cargo resolve the
+# optional `bevy_a11y 0.19.0`, which only exists as -rc on crates.io.
+# Pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
+bevy_math = { version = "=0.19.0", default-features = false, features = [
+    "serialize",
+] }
 # Networking per BL-82 [Q3]=B — replication contract shared by client & server.
 bevy_replicon = "=0.41.1"
+serde = { workspace = true }
