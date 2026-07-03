@@ -24,7 +24,7 @@ cargo fmt --all -- --check
 cargo ci-clippy
 # expands to:
 # cargo clippy --all-targets --locked \
-#   --features="bin_cmd_doc_gen,bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat"
+#   --features="bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat"
 ```
 
 Fix every warning before proceeding. To treat warnings as errors (strict mode, matching CI):
@@ -32,16 +32,15 @@ Fix every warning before proceeding. To treat warnings as errors (strict mode, m
 cargo ci-clippy -- -D warnings
 ```
 
-## Step 3: Lint — Voxygen Publish Profile (CI exact command)
+## Step 3: Lint — engine isolation (BL-82)
 
 ```bash
-cargo ci-clippy2
-# expands to:
-# cargo clippy -p veloren-voxygen --locked \
-#   --no-default-features --features="default-publish"
+./scripts/check-engine-isolation.sh
 ```
 
-This checks the client in release mode (no hot-reloading). Catches feature-gated issues that only surface in publish builds.
+(The old Step 3 — `cargo ci-clippy2`, the voxygen default-publish check — was removed in
+BL-82/EM-1.1: voxygen is no longer a workspace member. This step instead enforces the
+migration isolation law: logic crates must never depend on bevy/wgpu/winit.)
 
 ## Step 4: ECS Pattern Checklist
 

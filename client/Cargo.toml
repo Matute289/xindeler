@@ -23,7 +23,7 @@ bin_bot = [
 tracy = ["common-base/tracy"]
 tick_network = []
 
-default = ["simd"]
+default = ["simd", "plugins"] # BL-82 (EM-1.1): voxygen (removed from workspace) used to activate client/plugins; without it, workspace feature-unification breaks (server enables common-state/plugins -> State::client signature mismatch). Tracked deviation, Mapper §B.
 
 [dependencies]
 common = { package = "veloren-common", path = "../common", features = [
