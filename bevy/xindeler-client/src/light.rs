@@ -72,7 +72,9 @@ fn spawn_light_rig(
             ..Default::default()
         },
         CascadeShadowConfigBuilder {
-            num_cascades: usize::from(graphics.shadow_cascades.max(1)),
+            // Clamp to the range the renderer meaningfully supports — a user-edited
+            // settings.ron with e.g. 255 would allocate 255 cascade frusta (reviewer m2).
+            num_cascades: usize::from(graphics.shadow_cascades.clamp(1, 4)),
             maximum_distance: 500.0,
             ..Default::default()
         }
@@ -102,6 +104,10 @@ fn day_night_stub(
     let elevation = (cycle.hour - 6.0) / 12.0 * PI;
     let rotation = Quat::from_rotation_y(SUN_AZIMUTH) * Quat::from_rotation_x(-elevation);
     for mut transform in &mut suns {
-        transform.rotation = rotation;
+        // set_if_neq semantics: writing through Mut every frame would dirty the
+        // light's change tick and force cascade recompute even with a paused sun.
+        if transform.rotation != rotation {
+            transform.rotation = rotation;
+        }
     }
 }

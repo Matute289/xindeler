@@ -51,6 +51,8 @@ pub struct GraphicsSettings {
     /// Screen-space contact shadows (camera + per-light flag).
     pub contact_shadows: bool,
     /// Number of directional-light shadow cascades (clamped to >= 1).
+    /// Number of shadow cascades. Effective range 1..=4 (clamped at the light
+    /// rig).
     pub shadow_cascades: u8,
 }
 

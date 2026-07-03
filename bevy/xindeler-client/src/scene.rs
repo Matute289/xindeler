@@ -19,6 +19,9 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+// TODO(EM-5.9): scope to `OnEnter(AppState::Demo)` + despawn on exit once
+// MainMenu becomes the default state — today Demo is the only path so Startup
+// is equivalent (reviewer m6).
 pub struct DemoScenePlugin;
 
 impl Plugin for DemoScenePlugin {

@@ -41,6 +41,8 @@ pub struct FlyCam {
     pub pitch: f32,
 }
 
+// TODO(EM-5.11): speed/sensitivity belong in XindelerSettings (user-facing
+// input settings); hardcoded defaults are Phase-2 fly-cam scaffolding only.
 impl Default for FlyCam {
     fn default() -> Self {
         Self {

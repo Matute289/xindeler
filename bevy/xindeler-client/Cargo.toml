@@ -11,4 +11,6 @@ workspace = true
 # Full default feature set (2d + 3d + ui + audio); `default_platform` (inside 3d/ui)
 # already brings `default_font`, needed by the FPS overlay text.
 bevy = { version = "=0.19.0" }
+# fps-overlay: deliberate for Phase-2 validation; gate behind a GraphicsSettings
+# toggle / debug_assertions before the EM-5.x UI gate (reviewer m5).
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }

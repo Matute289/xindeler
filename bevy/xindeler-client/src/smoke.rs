@@ -105,10 +105,23 @@ fn drive_smoke_screenshot(mut state: ResMut<SmokeScreenshot>, mut commands: Comm
     state.frames += 1;
 
     if state.captured {
-        // `save_to_disk` already ran inside the same capture trigger, so the
-        // file is on disk by now.
-        info!("smoke screenshot saved to {}", state.path.display());
-        commands.write_message(AppExit::Success);
+        // `save_to_disk` already ran inside the same capture trigger — but bevy's
+        // `save_to_disk` SWALLOWS IO errors (logs + continues, bevy_render
+        // screenshot.rs), so `ScreenshotCaptured` alone doesn't prove a file was
+        // written. Verify on disk before reporting success (reviewer major-1):
+        // this harness must never exit 0 without a real, non-empty PNG.
+        let written = std::fs::metadata(&state.path).is_ok_and(|m| m.len() > 0);
+        if written {
+            info!("smoke screenshot saved to {}", state.path.display());
+            commands.write_message(AppExit::Success);
+        } else {
+            error!(
+                "screenshot capture completed but no file was written at {} (unwritable path / \
+                 bad extension?)",
+                state.path.display()
+            );
+            commands.write_message(AppExit::error());
+        }
         return;
     }
 
