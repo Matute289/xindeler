@@ -38,6 +38,8 @@ xindeler-oracle-host = { path = "../xindeler-oracle-host" }
 # palette (EM-3.4) + async chunk pipeline (EM-3.5).
 xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [
     "pipeline",
+    # EM-3.8: real `.vox` figures (figure mesher + anim rest-pose bones).
+    "figure",
 ] }
 # Logic crates as TYPE LIBRARIES only ([Q3]=B): the voxel demo builds a
 # synthetic `VolGrid2d<TerrainChunk>` with `common` terrain types. Legal
@@ -46,6 +48,12 @@ common = { package = "xindeler-common", path = "../../common", features = [
     "no-assets",
 ] }
 vek = { workspace = true }
+# EM-3.8: parse the `.vox` bytes the client loads via `AssetServer` into the
+# `DotVoxData` the figure loader consumes (SAME "5.x" line `common` pins).
+dot_vox = "5.1"
+# EM-3.8: deserialise the frozen-name figure manifests via a tiny `AssetLoader`
+# (same crate the block-palette loader uses). Promoted from dev-dep.
+ron = { workspace = true }
 
 # EM-3.6 listen-server (optional; enabled by the `listen-server` feature). The
 # server SHELL + terrain bridge (the only crate under bevy/ that touches specs)
@@ -54,6 +62,5 @@ xindeler-sim-bridge = { path = "../xindeler-sim-bridge", optional = true }
 xindeler-protocol = { path = "../xindeler-protocol", optional = true }
 bevy_replicon = { version = "=0.41.1", optional = true }
 
-[dev-dependencies]
-# Tests validate that the smoke harness's baked extreme profile parses.
-ron = { workspace = true }
+# (Tests that validate the smoke harness's baked extreme profile parses use
+# `ron`, now a normal dependency above — EM-3.8.)

@@ -266,6 +266,67 @@ fn smoke_auto_move(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Smoke figure cam (scaffolding — smoke-screenshot only, EM-3.8)
+// ---------------------------------------------------------------------------
+
+/// SCAFFOLDING for the EM-3.8 smoke screenshot: the world-centre singleplayer
+/// spawn buries the player (and its third-person camera) in a large shadowed
+/// voxel pillar (the documented EM-3.7b framing caveat), so a follow shot can't
+/// SHOW the new figures. Added ONLY under `--listen-server --smoke-screenshot`,
+/// this plugin overrides the camera to orbit an elevated vantage onto the
+/// NEAREST wandering NPC figure (they roam open, lit terrain around the
+/// anchor), so the capture actually shows a real `.vox` model. It runs after
+/// the third-person camera so it wins; interactive play never adds it.
+pub struct SmokeFigureCamPlugin;
+
+impl Plugin for SmokeFigureCamPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            smoke_figure_cam
+                .after(third_person_camera)
+                .in_set(GameplaySet),
+        );
+    }
+}
+
+/// Elevated 3/4 vantage offset (Bevy metres) from the framed NPC, and how close
+/// an NPC must be to the anchor-ish player to be considered "the subject".
+const FIG_CAM_BACK: f32 = 3.5;
+const FIG_CAM_UP: f32 = 2.2;
+
+/// Points the smoke camera at the nearest non-player mirrored figure from a
+/// close, elevated 3/4 angle, so the capture shows an assembled `.vox` NPC.
+/// Picks the NPC closest to the player (or world centre) — the wandering test
+/// critters spawn in a ring around the anchor on open terrain.
+fn smoke_figure_cam(
+    players: Query<&Transform, With<NetLocalPlayer>>,
+    figures: Query<
+        (&Transform, Option<&Interpolated>),
+        (With<Children>, Without<NetLocalPlayer>, Without<FlyCam>),
+    >,
+    mut cameras: Query<&mut Transform, (With<FlyCam>, Without<NetLocalPlayer>)>,
+) {
+    let focus = players.iter().next().map_or(Vec3::ZERO, |t| t.translation);
+    // Nearest child-bearing (= assembled figure) NPC to the player/centre.
+    let subject = figures
+        .iter()
+        .map(|(tf, interp)| interp.map_or(tf.translation, |i| i.pos))
+        .min_by(|a, b| {
+            a.distance_squared(focus)
+                .total_cmp(&b.distance_squared(focus))
+        });
+    let Some(subject) = subject else {
+        return; // no figure spawned yet — leave the existing camera
+    };
+    // A fixed, clear 3/4 angle (looking roughly north-east-down at the NPC).
+    let eye = subject + Vec3::new(FIG_CAM_BACK, FIG_CAM_UP, FIG_CAM_BACK);
+    for mut cam in &mut cameras {
+        *cam = Transform::from_translation(eye).looking_at(subject + Vec3::Y * 0.5, Vec3::Y);
+    }
+}
+
 /// Drops the y (vertical) component and renormalizes — a ground-plane heading.
 fn flatten(v: Vec3) -> Vec3 { Vec3::new(v.x, 0.0, v.z).normalize_or_zero() }
 

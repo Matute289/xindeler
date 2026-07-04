@@ -12,10 +12,15 @@
 //!   by [`VoxelRenderPlugin`],
 //! - `pipeline` (default): EM-3.5 async chunk meshing ([`pipeline`]) — dirty
 //!   queue → `AsyncComputeTaskPool` → budgeted uploads.
+//! - `figure`: EM-3.8 real `.vox` figures ([`figure`]) — assembles per-body
+//!   voxel parts (figure mesher + `xindeler-anim` rest-pose bones) into
+//!   coloured `bevy::Mesh`es. Off by default (the default set is terrain-only);
+//!   the client opts in.
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy.
 
 #[cfg(feature = "convert")] pub mod convert;
+#[cfg(feature = "figure")] pub mod figure;
 #[cfg(feature = "material")] pub mod material;
 pub mod mesh;
 #[cfg(feature = "material")] pub mod palette;

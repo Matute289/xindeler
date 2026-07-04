@@ -11554,6 +11554,7 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "dot_vox",
  "ron",
  "vek",
  "xindeler-app",
@@ -11904,11 +11905,13 @@ name = "xindeler-render-voxel"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "dot_vox",
  "guillotiere 0.7.0",
  "ron",
  "serde",
  "tracing",
  "vek",
+ "xindeler-anim",
  "xindeler-common",
  "xindeler-common-base",
 ]

@@ -31,6 +31,14 @@ material = ["convert", "bevy/bevy_pbr", "dep:serde", "dep:ron"]
 # budgeted uploads). `multi_threaded` gives bevy_tasks real worker threads so
 # the pipeline (and its headless test) actually meshes off the main thread.
 pipeline = ["material", "bevy/multi_threaded"]
+# EM-3.8: real `.vox` figures (Mapper C7/C12/C13). Assembles per-body voxel
+# parts (`generate_mesh_base_vol_figure` → per-part `bevy::Mesh` with vertex
+# colours) and places them with `xindeler-anim`'s rest-pose bone matrices. Adds
+# `dot_vox` (parse the `.vox` bytes the client hands in — render-voxel keeps
+# `common`'s `no-assets`, so it never touches `assets_manager`) and
+# `xindeler-anim` (the kept skeletal-anim crate, C13 — a LOGIC crate, so this
+# is the legal shell→logic direction the isolation guard allows).
+figure = ["convert", "dep:dot_vox", "dep:xindeler-anim", "dep:serde"]
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
@@ -54,3 +62,17 @@ ron = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 tracing = { workspace = true }
 vek = { workspace = true }
+
+# EM-3.8 figures (`figure` feature). `dot_vox` parses the `.vox` bytes the
+# client streams in (SAME "5.x" line `common` pins so the `DotVoxData` type
+# matches `common::figure::Segment::from_vox_*`). `xindeler-anim` is the kept
+# skeletal-animation LOGIC crate (Mapper C13) — the legal shell→logic dep the
+# isolation guard allows (anim never gains a bevy/render dep). No default
+# features on either (mirrors the per-phase minimalism above).
+dot_vox = { version = "5.1", optional = true }
+xindeler-anim = { path = "../../voxygen/anim", optional = true, default-features = false }
+
+[dev-dependencies]
+# EM-3.8: the ignored `real_pig_manifests_parse` test reads + parses the frozen
+# figure manifests to lock the deser shape against the real asset.
+ron = { workspace = true }

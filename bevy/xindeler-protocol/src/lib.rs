@@ -57,10 +57,17 @@ pub struct NetHealth {
 
 /// Replicated body identifier (which model/species an entity displays as).
 ///
-/// v0 placeholder: an opaque `u32` key into the client-side body/model table;
-/// the real `comp::Body` → key mapping lands with the mirror (EM-3.6/3.7).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NetBody(pub u32);
+/// EM-3.8: carries the FULL sim `comp::Body` — not just a class id. Real
+/// `.vox` figures need the exact `(species, body_type)` (and, for humanoids,
+/// the head/skin/hair/eye/armour fields) to pick and assemble the right model
+/// pieces, so a `u32` class key (EM-3.7's placeholder) is not enough. `Body`
+/// is `Copy + Serialize + Deserialize` and lives in `common` (which this crate
+/// already links for `TerrainChunk`), so replicating it verbatim is the honest
+/// minimal enrichment; the client resolves it to a `FigureBody`
+/// (`xindeler-render-voxel::figure`). The client stays specs-free — it only
+/// pattern-matches this plain data enum, never touches the ECS.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct NetBody(pub common::comp::Body);
 
 /// Marks the mirrored entity that is THIS client's own player (EM-3.7b).
 ///
@@ -319,7 +326,12 @@ mod tests {
             current: 42.0,
             max: 100.0,
         };
-        let body = NetBody(7);
+        let body = NetBody(common::comp::Body::QuadrupedSmall(
+            common::comp::quadruped_small::Body {
+                species: common::comp::quadruped_small::Species::Pig,
+                body_type: common::comp::quadruped_small::BodyType::Female,
+            },
+        ));
         server_app
             .world_mut()
             .spawn((Replicated, pos, ori, vel, health, body));

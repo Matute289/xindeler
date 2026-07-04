@@ -39,7 +39,7 @@ use xindeler_sim_bridge::{
 };
 
 use crate::{
-    entity_view::EntityViewPlugin, player_input::PlayerInputPlugin,
+    entity_view::EntityViewPlugin, figure_view::FigureViewPlugin, player_input::PlayerInputPlugin,
     terrain_stream::TerrainStreamPlugin,
 };
 
@@ -105,6 +105,9 @@ impl Plugin for ListenServerPlugin {
             // Client-side presentation of the mirrored entities: placeholder
             // meshes + interpolation (EM-3.7). Pure Bevy — no specs.
             EntityViewPlugin,
+            // EM-3.8: real `.vox` figures — for supported bodies, replaces the
+            // capsule with the assembled Veloren voxel model. Pure Bevy.
+            FigureViewPlugin,
             // Client-side: keyboard/mouse → LocalPlayerInput + third-person
             // camera following the player's mirror (EM-3.7b). Pure Bevy.
             PlayerInputPlugin,
