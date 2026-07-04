@@ -42,6 +42,14 @@ use crate::atmosphere::{PROFILE_ASSET_PATH, assets_root};
 const WARMUP_FRAMES: u32 = 90;
 /// Safety timeout for the single-screenshot mode.
 const TIMEOUT_FRAMES: u32 = 600;
+/// EM-3.6 listen-server warmup: the embedded world boots (~5–10 s) then streams
+/// terrain that meshes over several frames — far longer than the static demo.
+/// A generous ceiling at ~30–60 fps; the frame-count gate is the safety net,
+/// the real trigger is "warmup elapsed AND terrain has meshed" (see
+/// [`drive_smoke_screenshot`]).
+const LISTEN_SERVER_WARMUP_FRAMES: u32 = 1200;
+/// Matching timeout for listen-server mode (cold asset I/O + boot can stall).
+const LISTEN_SERVER_TIMEOUT_FRAMES: u32 = 6000;
 /// Offscreen target size (matches the default window resolution).
 const TARGET_SIZE: (u32, u32) = (1280, 720);
 
@@ -139,16 +147,27 @@ fn file_written(path: &Path) -> bool { std::fs::metadata(path).is_ok_and(|m| m.l
 
 pub struct SmokeScreenshotPlugin {
     pub path: PathBuf,
+    /// EM-3.6: in listen-server mode, use the long warmup/timeout AND wait for
+    /// real terrain to mesh before capturing.
+    pub listen_server: bool,
 }
 
 impl Plugin for SmokeScreenshotPlugin {
     fn build(&self, app: &mut App) {
+        let (warmup, timeout) = if self.listen_server {
+            (LISTEN_SERVER_WARMUP_FRAMES, LISTEN_SERVER_TIMEOUT_FRAMES)
+        } else {
+            (WARMUP_FRAMES, TIMEOUT_FRAMES)
+        };
         app.insert_resource(SmokeScreenshot {
             path: self.path.clone(),
             target: Handle::default(),
             frames: 0,
             requested: false,
             captured: false,
+            listen_server: self.listen_server,
+            warmup_frames: warmup,
+            timeout_frames: timeout,
         })
         // PostStartup: the camera rig spawns its camera in Startup.
         .add_systems(PostStartup, retarget_for_screenshot)
@@ -163,6 +182,9 @@ struct SmokeScreenshot {
     frames: u32,
     requested: bool,
     captured: bool,
+    listen_server: bool,
+    warmup_frames: u32,
+    timeout_frames: u32,
 }
 
 fn retarget_for_screenshot(
@@ -174,7 +196,11 @@ fn retarget_for_screenshot(
     state.target = retarget_camera_to_image(&mut commands, &mut images, &cameras);
 }
 
-fn drive_smoke_screenshot(mut state: ResMut<SmokeScreenshot>, mut commands: Commands) {
+fn drive_smoke_screenshot(
+    mut state: ResMut<SmokeScreenshot>,
+    mut commands: Commands,
+    upload_stats: Res<xindeler_render_voxel::pipeline::ChunkUploadStats>,
+) {
     state.frames += 1;
 
     if state.captured {
@@ -192,16 +218,31 @@ fn drive_smoke_screenshot(mut state: ResMut<SmokeScreenshot>, mut commands: Comm
         return;
     }
 
-    if state.frames >= TIMEOUT_FRAMES {
+    if state.frames >= state.timeout_frames {
         error!(
-            "smoke screenshot timed out after {TIMEOUT_FRAMES} frames (path: {})",
-            state.path.display()
+            "smoke screenshot timed out after {} frames (path: {}, meshed chunks: {})",
+            state.timeout_frames,
+            state.path.display(),
+            upload_stats.total_uploads,
         );
         commands.write_message(AppExit::error());
         return;
     }
 
-    if !state.requested && state.frames >= WARMUP_FRAMES {
+    // In listen-server mode the warmup covers world boot + streaming, but the
+    // exact time-to-first-mesh is data-dependent — so ALSO require that real
+    // terrain has actually meshed (and the pipeline has drained, so no chunks
+    // pop in mid-capture) before firing.
+    let terrain_ready =
+        !state.listen_server || (upload_stats.total_uploads > 0 && upload_stats.in_flight == 0);
+
+    if !state.requested && state.frames >= state.warmup_frames && terrain_ready {
+        if state.listen_server {
+            info!(
+                "listen-server smoke: capturing after {} frames ({} chunks meshed)",
+                state.frames, upload_stats.total_uploads
+            );
+        }
         state.requested = true;
         commands
             .spawn(Screenshot::image(state.target.clone()))

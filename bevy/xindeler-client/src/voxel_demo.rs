@@ -25,11 +25,11 @@ use common::{
     volumes::vol_grid_2d::VolGrid2d,
 };
 use vek::{Rgb, Vec2 as VVec2, Vec3 as VVec3};
-use xindeler_render_voxel::{
-    material::{VoxelMaterial, VoxelMaterialExt},
-    palette::{BlockPalette, PALETTE_ASSET_PATH, build_block_texture_arrays},
-    pipeline::{ChunkLayerMap, ChunkMaterials, ChunkMeshQueue, ChunkVolume, ChunkVolumeProvider},
+use xindeler_render_voxel::pipeline::{
+    ChunkLayerMap, ChunkMeshQueue, ChunkVolume, ChunkVolumeProvider,
 };
+
+use crate::palette_material::PaletteMaterialPlugin;
 
 pub struct VoxelDemoPlugin;
 
@@ -37,8 +37,11 @@ impl Plugin for VoxelDemoPlugin {
     fn build(&self, app: &mut App) {
         // Sky ambient lives in the ATMOSPHERE module (AtmospherePlugin) — not
         // here — so deleting this demo never silently changes scene lighting.
-        app.add_systems(Startup, setup_voxel_demo)
-            .add_systems(Update, apply_block_palette);
+        // The palette → material/layer-map setup is shared (also used by the
+        // listen-server terrain path); the demo only owns its geometry.
+        app.add_plugins(PaletteMaterialPlugin)
+            .add_systems(Startup, setup_voxel_demo)
+            .add_systems(Update, mark_demo_chunks_when_ready);
     }
 }
 
@@ -169,140 +172,32 @@ fn mark_all_chunks_dirty(queue: &mut ChunkMeshQueue) {
 // Setup: volume provider + palette load
 // ---------------------------------------------------------------------------
 
-/// Strong handle keeping the palette (and its file watch) alive.
-#[derive(Resource)]
-struct DemoPaletteHandle(Handle<BlockPalette>);
-
-fn setup_voxel_demo(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_voxel_demo(mut commands: Commands) {
     let world = build_world();
     // Serve only the meshed window; z bounds are the generator's globals.
     commands.insert_resource(ChunkVolumeProvider::new(move |key| {
         ((1..=GRID).contains(&key.x) && (1..=GRID).contains(&key.y))
             .then(|| ChunkVolume::with_z_bounds(world.clone(), key, 0, MAX_HEIGHT))
     }));
-    // Typed load: the palette loader claims the plain `ron` extension and
-    // bevy disambiguates by asset type (palette.rs docs).
-    commands.insert_resource(DemoPaletteHandle(
-        asset_server.load::<BlockPalette>(PALETTE_ASSET_PATH),
-    ));
-    // Chunks are marked dirty by apply_block_palette once the palette lands
-    // (meshing before the layer LUT exists would bake layer 0 everywhere).
+    // The palette (and thus ChunkLayerMap/ChunkMaterials) is loaded by the
+    // shared PaletteMaterialPlugin; `mark_demo_chunks_when_ready` marks the
+    // demo chunks dirty once the layer LUT lands (meshing before it exists
+    // would bake layer 0 everywhere).
 }
 
-// ---------------------------------------------------------------------------
-// Palette apply / hot reload
-// ---------------------------------------------------------------------------
-
-/// Consumes `AssetEvent<BlockPalette>` (Added/Modified — hot reload via
-/// `file_watcher`, same mechanism as the atmosphere profiles):
-/// - builds the three texture arrays (real mip chains) from the palette,
-/// - first load: creates the shared terrain + fluid materials and installs
-///   [`ChunkMaterials`]/[`ChunkLayerMap`];
-/// - reload: updates the SAME material assets in place (live chunk entities
-///   keep their handles — no respawn) and swaps the layer LUT;
-/// - both: re-marks every chunk dirty (per-vertex layers ⇒ re-mesh). The visual
-///   change POPS by design (documented in palette.rs).
-fn apply_block_palette(
-    mut commands: Commands,
-    mut events: MessageReader<AssetEvent<BlockPalette>>,
-    palettes: Res<Assets<BlockPalette>>,
-    handle: Res<DemoPaletteHandle>,
-    mut images: ResMut<Assets<Image>>,
-    mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
-    existing: Option<Res<ChunkMaterials>>,
-    layer_map: Option<ResMut<ChunkLayerMap>>,
+/// Marks every demo chunk dirty ONCE the palette's [`ChunkLayerMap`] is in
+/// (the shared `PaletteMaterialPlugin` installs it on palette load). A latch
+/// so it fires exactly once.
+fn mark_demo_chunks_when_ready(
+    layer_map: Option<Res<ChunkLayerMap>>,
     mut queue: ResMut<ChunkMeshQueue>,
+    mut done: Local<bool>,
 ) {
-    let changed = events.read().any(|event| {
-        matches!(
-            event,
-            AssetEvent::Added { id } | AssetEvent::Modified { id }
-                if *id == handle.0.id()
-        )
-    });
-    if !changed {
+    if *done || layer_map.is_none() {
         return;
-    }
-    let Some(palette) = palettes.get(&handle.0) else {
-        return;
-    };
-
-    // Procedural arrays from palette data (base color + noise, flat normals,
-    // full mip chain + nearest/linear-mip sampler — palette.rs docs).
-    let arrays = build_block_texture_arrays(palette);
-    let albedo = images.add(arrays.albedo);
-    let normal = images.add(arrays.normal);
-    let mra = images.add(arrays.mra);
-
-    // The interim fluid material is palette data too (Water entry): stock
-    // transparent StandardMaterial until EM-3.9's dedicated water shader.
-    let water = palette
-        .blocks
-        .get(&BlockKind::Water)
-        .cloned()
-        .unwrap_or_default();
-    let fluid_material = StandardMaterial {
-        base_color: Color::srgba(
-            water.base_color[0],
-            water.base_color[1],
-            water.base_color[2],
-            // Opacity is palette data too (BlockLayerDef::alpha, EM-3.4 m3).
-            water.alpha,
-        ),
-        perceptual_roughness: water.roughness.max(0.045),
-        alpha_mode: AlphaMode::Blend,
-        ..Default::default()
-    };
-
-    if let Some(materials) = existing {
-        // HOT RELOAD: mutate the shared assets in place so every live chunk
-        // entity keeps its material handle. The replaced image handles drop
-        // with the old extension values (assets GC'd).
-        info!("block palette reloaded; rebuilding texture arrays + re-meshing all chunks");
-        if let Some(mut material) = voxel_materials.get_mut(&materials.terrain) {
-            material.extension.albedo = albedo;
-            material.extension.normal = normal;
-            material.extension.mra = mra;
-            material.extension.emissive_strength = palette.material.emissive_strength;
-            material.extension.ao_strength = palette.material.ao_strength;
-        }
-        if let Some(mut material) = std_materials.get_mut(&materials.fluid) {
-            *material = fluid_material;
-        }
-    } else {
-        info!("block palette loaded; building terrain material");
-        let terrain = voxel_materials.add(VoxelMaterial {
-            base: StandardMaterial {
-                // Textures come from the arrays; keep the base fully neutral.
-                base_color: Color::WHITE,
-                ..Default::default()
-            },
-            extension: VoxelMaterialExt {
-                albedo,
-                normal,
-                mra,
-                emissive_strength: palette.material.emissive_strength,
-                ao_strength: palette.material.ao_strength,
-            },
-        });
-        let fluid = std_materials.add(fluid_material);
-        commands.insert_resource(ChunkMaterials { terrain, fluid });
-    }
-
-    // Snapshot the kind→layer LUT for the mesh tasks, then re-mesh. On
-    // reload the swap MUST be in place (ResMut): `commands.insert_resource`
-    // is deferred to the end of the frame, while the dirty marks below are
-    // immediate — with no ordering edge against `spawn_chunk_mesh_tasks`,
-    // the re-marked chunks could all drain capturing the STALE Arc and the
-    // layer remap would never apply. First load keeps the deferred insert:
-    // the spawn system is gated on `resource_exists::<ChunkLayerMap>`, so
-    // nothing can drain the queue before the resource lands.
-    match layer_map {
-        Some(mut map) => map.0 = Arc::new(palette.layer_lut()),
-        None => commands.insert_resource(ChunkLayerMap(Arc::new(palette.layer_lut()))),
     }
     mark_all_chunks_dirty(&mut queue);
+    *done = true;
 }
 
 #[cfg(test)]
@@ -311,6 +206,7 @@ mod tests {
     use xindeler_render_voxel::{
         convert::{ATTRIBUTE_BLOCK_LAYER, ATTRIBUTE_VOXEL_AO, terrain_mesh_to_bevy},
         mesh::terrain::generate_mesh,
+        palette::BlockPalette,
     };
 
     fn shipped_palette() -> BlockPalette {

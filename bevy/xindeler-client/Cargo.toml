@@ -7,6 +7,21 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# EM-3.6 listen-server: this binary HOSTS the embedded sim server shell +
+# replicon server + the terrain bridge, replicating loopback to its own client
+# plugins in ONE process/App ([Q3]=B, single-App listen server). SANCTIONED
+# exception to "client links no server crates": in this mode the binary IS the
+# server. The isolation law still holds — the PRESENTATION code (this crate's
+# `src`) uses NO specs (CI greps for it, `check-engine-isolation.sh`);
+# everything server-side lives in `xindeler-sim-bridge`, added as an OPTIONAL
+# dep enabled only by this feature.
+listen-server = [
+    "dep:xindeler-sim-bridge",
+    "dep:xindeler-protocol",
+    "dep:bevy_replicon",
+]
+
 [dependencies]
 # Full default feature set (2d + 3d + ui + audio); `default_platform` (inside 3d/ui)
 # already brings `default_font`, needed by the FPS overlay text.
@@ -31,6 +46,13 @@ common = { package = "xindeler-common", path = "../../common", features = [
     "no-assets",
 ] }
 vek = { workspace = true }
+
+# EM-3.6 listen-server (optional; enabled by the `listen-server` feature). The
+# server SHELL + terrain bridge (the only crate under bevy/ that touches specs)
+# and the shared replication contract. Pinned EXACT per BL-82 [Q5]=A.
+xindeler-sim-bridge = { path = "../xindeler-sim-bridge", optional = true }
+xindeler-protocol = { path = "../xindeler-protocol", optional = true }
+bevy_replicon = { version = "=0.41.1", optional = true }
 
 [dev-dependencies]
 # Tests validate that the smoke harness's baked extreme profile parses.
