@@ -39,8 +39,9 @@ use xindeler_sim_bridge::{
 };
 
 use crate::{
-    entity_view::EntityViewPlugin, figure_view::FigureViewPlugin, player_input::PlayerInputPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    entity_view::EntityViewPlugin, figure_view::FigureViewPlugin, lod::LodCullingPlugin,
+    player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -111,6 +112,9 @@ impl Plugin for ListenServerPlugin {
             // EM-3.9: block sprites (grass/flowers) instanced over the streamed
             // terrain from the same CompressedChunk stream. Pure Bevy.
             SpriteViewPlugin,
+            // EM-3.10: distance-band culling of the streamed chunks + sprites
+            // (frustum culling is already automatic via mesh Aabbs). Pure Bevy.
+            LodCullingPlugin,
             // Client-side: keyboard/mouse → LocalPlayerInput + third-person
             // camera following the player's mirror (EM-3.7b). Pure Bevy.
             PlayerInputPlugin,
