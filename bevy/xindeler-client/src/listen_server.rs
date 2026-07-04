@@ -33,9 +33,11 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
 use xindeler_app::settings::userdata_dir;
 use xindeler_protocol::XindelerProtocolPlugin;
-use xindeler_sim_bridge::{SimBridgePlugin, SimTerrainStreamPlugin, boot_test_server};
+use xindeler_sim_bridge::{
+    SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, boot_test_server,
+};
 
-use crate::terrain_stream::TerrainStreamPlugin;
+use crate::{entity_view::EntityViewPlugin, terrain_stream::TerrainStreamPlugin};
 
 /// Adds the whole listen-server stack to the client `App`.
 ///
@@ -44,6 +46,30 @@ use crate::terrain_stream::TerrainStreamPlugin;
 /// the `SimServer` as non-send data. If the boot fails (missing assets/LFS) we
 /// log and add nothing — the app still runs (as an empty world) rather than
 /// panicking the whole client.
+///
+/// ## EM-3.7 scope: PASSIVE mirror (A) shipped; CONTROLLABLE character (B)
+/// deferred to **EM-3.7b**. This milestone proves the entity half end-to-end:
+/// the sim's entities (rtsim NPCs + test Pigs spawned around the anchor)
+/// replicate to the pure-Bevy client as placeholder capsules that interpolate
+/// smoothly (`EntityViewPlugin`), on the real streamed terrain. The camera is
+/// still the EM-3.6 spectator fly-cam parked over the anchor — there is no
+/// player-controlled entity yet.
+///
+/// TODO(EM-3.7b): a CONTROLLABLE local player. The clean path (per the spec and
+/// the EM-1.6 smoke-bot pattern) is an embedded `xindeler-client-core::Client`
+/// living inside `xindeler-sim-bridge` (server-side crate — the only place a
+/// second sim stack is legal), connected over TCP loopback, that
+/// creates/selects a character and spawns in-game; the Bevy keyboard/mouse
+/// input (`camera.rs` already reads WASD + `AccumulatedMouseMotion`) is
+/// translated to `xindeler_protocol::PlayerInput`, sent as a replicon client
+/// message, applied to that Client's `ControllerInputs` via
+/// `client.tick(inputs, dt)` in a bridge system; the camera then follows the
+/// player's mirrored entity (3rd person). Trade-off documented: the listen
+/// server would then host the sim AND a loopback Client acting as the local
+/// player — heavier than the passive `create_centered_persister` anchor, which
+/// is why it is split out. The `PlayerInput` message + replicon client→server
+/// plumbing already exist (EM-1.5b); EM-3.7b is the embedded-Client +
+/// character-creation + input-apply wiring.
 pub struct ListenServerPlugin;
 
 impl Plugin for ListenServerPlugin {
@@ -64,8 +90,14 @@ impl Plugin for ListenServerPlugin {
             // lives entirely inside these plugins).
             SimBridgePlugin,
             SimTerrainStreamPlugin,
+            // Server shell: entity mirror (sim entities → replicated Bevy
+            // entities) + one-shot test-NPC spawn (EM-3.7). Specs stays inside.
+            SimEntityMirrorPlugin,
             // Client-side consumer of the streamed terrain.
             TerrainStreamPlugin,
+            // Client-side presentation of the mirrored entities: placeholder
+            // meshes + interpolation (EM-3.7). Pure Bevy — no specs.
+            EntityViewPlugin,
             // The pipeline needs the palette-derived ChunkLayerMap +
             // ChunkMaterials to mesh at all. The synthetic demo isn't added in
             // listen-server mode, so add the shared palette plugin here (it

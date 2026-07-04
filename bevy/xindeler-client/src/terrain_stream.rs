@@ -269,10 +269,16 @@ fn place_camera_on_anchor(
         return;
     }
     let target = anchor.bevy_pos;
-    // Stand back a couple of chunks and up ~1.5 chunks; look at the anchor.
-    let eye = target + Vec3::new(1.5 * CHUNK_EDGE, 1.8 * CHUNK_EDGE, 1.5 * CHUNK_EDGE);
+    // EM-3.7: a near, low, mostly-horizontal vantage so the ~1-2 m placeholder
+    // entity capsules that spawn in a ~12 m ring around the anchor are clearly
+    // visible (not sub-pixel dots seen from straight above), while still showing
+    // terrain behind them. Stand ~18 m back and only ~5 m up, and aim slightly
+    // ABOVE the ground so the capsules sit in the lower third of frame rather
+    // than being occluded by foreground terrain.
+    let eye = target + Vec3::new(-0.5 * CHUNK_EDGE, 0.22 * CHUNK_EDGE, -0.5 * CHUNK_EDGE);
+    let look_at = target + Vec3::new(0.0, 1.5, 0.0);
     for (mut transform, mut cam) in &mut cameras {
-        *transform = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+        *transform = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
         let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
         cam.yaw = yaw;
         cam.pitch = pitch;

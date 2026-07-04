@@ -2,7 +2,8 @@
 //! client/server messages. Shared by client and server — [Q3]=B.
 //!
 //! BL-82 Bevy migration — EM-1.5b: replicated component set v0 (`NetPos`,
-//! `NetOri`, `NetHealth`, `NetBody`), the [`XindelerChannel`] lanes, the
+//! `NetOri`, `NetVel`, `NetHealth`, `NetBody`), the [`XindelerChannel`] lanes,
+//! the
 //! `PlayerInput` client message, and [`XindelerProtocolPlugin`] registering
 //! everything **symmetrically** (the same plugin runs on client and server, so
 //! the replication rule/message registries — and therefore the protocol hash —
@@ -34,6 +35,15 @@ pub struct NetPos(pub Vec3);
 /// Mirrored from the sim's `comp::Ori` (which is quaternion-backed).
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct NetOri(pub Quat);
+
+/// Replicated velocity of an entity (server-authoritative, Bevy axes).
+///
+/// Mirrored from the sim's `comp::Vel`; the client uses it for dead-reckoning
+/// in its interpolation buffer (EM-3.7 — mirrors voxygen's `pos + vel * 0.03`
+/// lead so an entity that keeps moving between the low-rate net samples doesn't
+/// visibly lag its own motion).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct NetVel(pub Vec3);
 
 /// Replicated health snapshot of an entity (server-authoritative).
 ///
@@ -197,6 +207,7 @@ impl Plugin for XindelerProtocolPlugin {
         // `Replicated` marker on the server to be sent at all.
         app.replicate::<NetPos>()
             .replicate::<NetOri>()
+            .replicate::<NetVel>()
             .replicate::<NetHealth>()
             .replicate::<NetBody>();
 
@@ -260,6 +271,7 @@ mod tests {
 
         let pos = NetPos(Vec3::new(1.0, 2.0, 3.0));
         let ori = NetOri(Quat::from_rotation_z(core::f32::consts::FRAC_PI_2));
+        let vel = NetVel(Vec3::new(0.5, 0.0, -0.25));
         let health = NetHealth {
             current: 42.0,
             max: 100.0,
@@ -267,20 +279,22 @@ mod tests {
         let body = NetBody(7);
         server_app
             .world_mut()
-            .spawn((Replicated, pos, ori, health, body));
+            .spawn((Replicated, pos, ori, vel, health, body));
 
         server_app.update();
         server_app.exchange_with_client(&mut client_app);
         client_app.update();
 
-        let mut replicated = client_app
-            .world_mut()
-            .query::<(&NetPos, &NetOri, &NetHealth, &NetBody)>();
-        let (got_pos, got_ori, got_health, got_body) = replicated
+        let mut replicated =
+            client_app
+                .world_mut()
+                .query::<(&NetPos, &NetOri, &NetVel, &NetHealth, &NetBody)>();
+        let (got_pos, got_ori, got_vel, got_health, got_body) = replicated
             .single(client_app.world())
             .expect("exactly one replicated entity should reach the client");
         assert_eq!(*got_pos, pos);
         assert_eq!(*got_ori, ori);
+        assert_eq!(*got_vel, vel);
         assert_eq!(*got_health, health);
         assert_eq!(*got_body, body);
     }
