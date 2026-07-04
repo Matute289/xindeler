@@ -396,36 +396,6 @@ fn sim_ori_to_bevy(q: vek::Quaternion<f32>) -> Quat {
     (frame * sim * frame.inverse()).normalize()
 }
 
-/// Maps a sim `Body` to the stable small class id the client colours the
-/// placeholder mesh by ([`NetBody`]). Mirrors the `#[repr(u32)]` discriminants
-/// of `common::comp::Body` (body/mod.rs) WITHOUT relying on the unstable
-/// fieldful-enum cast — an explicit match is immune to upstream reordering the
-/// payloads and needs no `unsafe`. The real per-species `.vox` model is EM-3.8;
-/// v1 only needs a per-body-class bucket.
-fn body_class_id(body: &comp::Body) -> u32 {
-    match body {
-        comp::Body::Humanoid(_) => 0,
-        comp::Body::QuadrupedSmall(_) => 1,
-        comp::Body::QuadrupedMedium(_) => 2,
-        comp::Body::BirdMedium(_) => 3,
-        comp::Body::FishMedium(_) => 4,
-        comp::Body::Dragon(_) => 5,
-        comp::Body::BirdLarge(_) => 6,
-        comp::Body::FishSmall(_) => 7,
-        comp::Body::BipedLarge(_) => 8,
-        comp::Body::BipedSmall(_) => 9,
-        comp::Body::Object(_) => 10,
-        comp::Body::Golem(_) => 11,
-        comp::Body::Theropod(_) => 12,
-        comp::Body::QuadrupedLow(_) => 13,
-        comp::Body::Ship(_) => 14,
-        comp::Body::Arthropod(_) => 15,
-        comp::Body::Item(_) => 16,
-        comp::Body::Crustacean(_) => 17,
-        comp::Body::Plugin(_) => 18,
-    }
-}
-
 /// Registers the [`SimMirror`] map and the EM-3.7 systems: a one-shot test-NPC
 /// spawn and the per-tick entity mirror. Runs only while acting as the terrain/
 /// entity SOURCE (`ClientState::Disconnected`, the listen-server / singleplayer
@@ -643,7 +613,10 @@ fn mirror_sim_entities(
         let net_pos = NetPos(sim_pos_to_bevy(pos.0));
         let net_ori = NetOri(ori.map_or(Quat::IDENTITY, |o| sim_ori_to_bevy(o.to_quat())));
         let net_vel = NetVel(vel.map_or(Vec3::ZERO, |v| sim_pos_to_bevy(v.0)));
-        let net_body = NetBody(body_class_id(body));
+        // EM-3.8: replicate the FULL `Body` so the client can pick + assemble
+        // the real `.vox` figure (species/body_type, and for humanoids the
+        // style/armour fields). `Body` is `Copy`, so this is a plain copy.
+        let net_body = NetBody(*body);
         let net_health = health.map(|h| NetHealth {
             current: h.current(),
             max: h.maximum(),
@@ -883,16 +856,25 @@ mod tests {
 
     // --- EM-3.7 entity mirror ---------------------------------------------
 
-    /// `body_class_id` is a total, stable map matching the `#[repr(u32)]`
-    /// discriminants of `common::comp::Body` — no assets needed.
+    /// EM-3.8: `NetBody` now carries the FULL `Body`, so the mirror replicates
+    /// it verbatim (a plain copy) — the client resolves species/body_type. This
+    /// pins the round-trip: the same `Body` we mirror comes back equal.
     #[test]
-    fn body_class_ids_match_discriminants() {
+    fn net_body_carries_the_full_body() {
         let pig: comp::Body = comp::quadruped_small::Body {
             species: comp::quadruped_small::Species::Pig,
             body_type: comp::quadruped_small::BodyType::Female,
         }
         .into();
-        assert_eq!(body_class_id(&pig), 1, "QuadrupedSmall is discriminant 1");
+        let net = NetBody(pig);
+        assert_eq!(net.0, pig, "the mirror replicates the exact Body");
+        match net.0 {
+            comp::Body::QuadrupedSmall(b) => {
+                assert_eq!(b.species, comp::quadruped_small::Species::Pig);
+                assert_eq!(b.body_type, comp::quadruped_small::BodyType::Female);
+            },
+            other => panic!("expected a QuadrupedSmall body, got {other:?}"),
+        }
     }
 
     /// The sim→Bevy position rotation matches the voxel converter's

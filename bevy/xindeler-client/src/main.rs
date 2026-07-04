@@ -13,6 +13,7 @@
 mod atmosphere;
 mod camera;
 #[cfg(feature = "listen-server")] mod entity_view;
+#[cfg(feature = "listen-server")] mod figure_view;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
@@ -106,6 +107,9 @@ fn main() -> AppExit {
             #[cfg(feature = "listen-server")]
             if listen_server {
                 app.add_plugins(player_input::SmokeAutoMovePlugin);
+                // EM-3.8: frame a real `.vox` NPC figure in the capture (the
+                // spawn pillar occludes the player — EM-3.7b caveat).
+                app.add_plugins(player_input::SmokeFigureCamPlugin);
             }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {

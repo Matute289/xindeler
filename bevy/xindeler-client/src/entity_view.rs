@@ -60,35 +60,36 @@ impl Plugin for EntityViewPlugin {
     }
 }
 
-/// A distinct, readable colour per body-class id (the [`NetBody`] key from the
-/// bridge's `body_class_id`). Placeholder palette only — the real per-species
-/// model + texture is EM-3.8.
-fn body_class_color(class: u32) -> Color {
-    // A small qualitative palette; classes past its length wrap.
-    const PALETTE: [(f32, f32, f32); 8] = [
-        (0.90, 0.30, 0.30), // 0 humanoid — red
-        (0.40, 0.80, 0.40), // 1 quadruped small — green
-        (0.35, 0.55, 0.95), // 2 quadruped medium — blue
-        (0.95, 0.80, 0.30), // 3 bird medium — yellow
-        (0.75, 0.45, 0.90), // 4 fish medium — purple
-        (0.95, 0.60, 0.25), // 5 dragon — orange
-        (0.30, 0.85, 0.85), // 6 bird large — cyan
-        (0.85, 0.85, 0.85), // 7 fish small — grey
-    ];
-    let (r, g, b) = PALETTE[(class as usize) % PALETTE.len()];
+/// A distinct, readable colour per body class. Placeholder palette for the
+/// capsule fallback — EM-3.8 replaces supported bodies with the real `.vox`
+/// model (`figure_view`), but unsupported bodies (humanoid, etc.) keep this
+/// capsule until EM-3.8b. Reads the replicated full `Body` (EM-3.8 enrichment).
+fn body_class_color(body: &common::comp::Body) -> Color {
+    use common::comp::Body::*;
+    let (r, g, b) = match body {
+        Humanoid(_) => (0.90, 0.30, 0.30),                  // red
+        QuadrupedSmall(_) => (0.40, 0.80, 0.40),            // green
+        QuadrupedMedium(_) => (0.35, 0.55, 0.95),           // blue
+        BirdMedium(_) | BirdLarge(_) => (0.95, 0.80, 0.30), // yellow
+        FishMedium(_) | FishSmall(_) => (0.75, 0.45, 0.90), // purple
+        Dragon(_) => (0.95, 0.60, 0.25),                    // orange
+        _ => (0.80, 0.80, 0.80),                            // grey
+    };
     Color::srgb(r, g, b)
 }
 
-/// A rough visual size per body-class so a humanoid isn't the same blob as a
-/// dragon. Radius, half-height (capsule). Placeholder scale only (EM-3.8).
-fn body_class_capsule(class: u32) -> (f32, f32) {
-    match class {
-        0 => (0.4, 0.9),  // humanoid
-        1 => (0.4, 0.4),  // quadruped small
-        2 => (0.7, 0.7),  // quadruped medium
-        5 => (1.5, 2.0),  // dragon
-        8 => (0.8, 1.4),  // biped large
-        11 => (1.2, 1.6), // golem
+/// A rough capsule size (radius, half-height) per body so a humanoid isn't the
+/// same blob as a dragon. Placeholder scale only — supported bodies get their
+/// real model (EM-3.8); this is the unsupported-body fallback.
+fn body_class_capsule(body: &common::comp::Body) -> (f32, f32) {
+    use common::comp::Body::*;
+    match body {
+        Humanoid(_) => (0.4, 0.9),
+        QuadrupedSmall(_) => (0.4, 0.4),
+        QuadrupedMedium(_) => (0.7, 0.7),
+        Dragon(_) => (1.5, 2.0),
+        BipedLarge(_) => (0.8, 1.4),
+        Golem(_) => (1.2, 1.6),
         _ => (0.5, 0.7),
     }
 }
@@ -107,10 +108,10 @@ fn add_presentation(
     query: Query<(Entity, &NetBody, Option<&NetPos>, Option<&NetOri>), Added<NetBody>>,
 ) {
     for (entity, body, pos, ori) in &query {
-        let (radius, half_length) = body_class_capsule(body.0);
+        let (radius, half_length) = body_class_capsule(&body.0);
         let mesh = meshes.add(Capsule3d::new(radius, half_length * 2.0));
         let material = materials.add(StandardMaterial {
-            base_color: body_class_color(body.0),
+            base_color: body_class_color(&body.0),
             perceptual_roughness: 0.8,
             ..default()
         });
