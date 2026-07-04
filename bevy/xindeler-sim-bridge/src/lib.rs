@@ -25,9 +25,21 @@
 //!   watch. Broadcast to all clients (`Replicated` default visibility); per-
 //!   client interest management is EM-4.2d.
 //!
+//! - EM-3.7b (the controllable half): [`PlayerBridgePlugin`] boots an embedded
+//!   `xindeler-client-core::Client` over TCP loopback that IS the local player
+//!   (see [`player`]); [`player::tick_player`] applies the Bevy keyboard/mouse
+//!   (via [`xindeler_protocol::LocalPlayerInput`]) to its `ControllerInputs`.
+//!   The mirror ([`mirror_sim_entities`]) tags the player's replicated entity
+//!   with [`NetLocalPlayer`] so the pure-Bevy client's third-person camera can
+//!   follow it. The terrain persister anchor becomes a FALLBACK, spawned only
+//!   if the embedded player never reaches in-game.
+//!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
+
+mod player;
+pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
 
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
@@ -57,7 +69,8 @@ use server::{
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetOri, NetPos, NetVel, RemoveChunk, TerrainAnchor,
+    CompressedChunk, NetBody, NetHealth, NetLocalPlayer, NetOri, NetPos, NetVel, RemoveChunk,
+    TerrainAnchor,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -236,43 +249,63 @@ impl Plugin for SimTerrainStreamPlugin {
     }
 }
 
-/// Spawns the server-side presence anchor once the sim is booted, then reads
-/// back a sensible world position for the camera and broadcasts it once.
+/// Spawns the server-side presence FALLBACK once the sim is booted (only when
+/// no embedded player covers terrain), then broadcasts the world-centre anchor
+/// position once for the client's initial camera placement.
 ///
-/// ## Why a centered persister (not an embedded `Client`)
-/// EM-1.6 showed a full embedded `xindeler-client-core::Client` anchor works
-/// over TCP loopback, but it is heavy (a second network stack, registration,
-/// character creation). The sim exposes a PUBLIC, purpose-built alternative —
-/// `Server::create_centered_persister` — that spawns exactly the `Presence`
-/// spectator entity the terrain system needs, with no networking. It lives
-/// entirely inside the sim's public API, so the bridge stays a thin shell and
-/// the client stays pure. Chosen for v1; the embedded-Client path remains the
-/// fallback for when we need a *controllable* character (EM-3.7).
+/// ## Persister vs embedded player (EM-3.6 → EM-3.7b)
+/// EM-3.6 used `Server::create_centered_persister` — a networking-free
+/// `Presence` spectator — as the anchor that keeps chunks loaded. EM-3.7b adds
+/// a real embedded `xindeler-client-core::Client` (see [`player`]) that is the
+/// controllable local player; it ALSO holds a `Presence`, so it keeps chunks
+/// loaded on its own and SUBSUMES the persister's job. The persister therefore
+/// becomes a FALLBACK here: it is spawned only when there is no embedded player
+/// or the player failed to connect (pure-spectator mode), so terrain still
+/// streams and the world is visible. Everything stays inside the sim's public
+/// API (persister) / the bridge's own embedded-client module, so the pure Bevy
+/// client is unaffected.
 fn ensure_terrain_anchor(
     sim: Option<NonSendMut<SimServer>>,
+    // EM-3.7b: the embedded local player, if any. When a player is present the
+    // persister is a FALLBACK — the player's own `Presence` keeps chunks
+    // loaded, so we only spawn the persister if there is no player OR the
+    // player failed to reach in-game. While the player is still connecting we
+    // WAIT (don't spawn the persister), so we never end up with two anchors.
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut anchor: bevy::ecs::system::ResMut<TerrainAnchorState>,
     mut anchor_writer: MessageWriter<ToClients<TerrainAnchor>>,
 ) {
     let Some(mut sim) = sim else { return };
 
-    if !anchor.anchored {
-        // `create_centered_persister` is `#[cfg(feature = "worldgen")]` in the
-        // server crate; the bridge always links `server` with its default
-        // features (worldgen on), so this is always available here.
+    // Does the embedded player cover terrain streaming on its own? An
+    // in-game player holds a `Presence` (loads chunks); a player that is still
+    // connecting WILL, so we also count it as covering (and simply wait rather
+    // than double-anchor). Only a missing OR failed player leaves terrain
+    // uncovered → the persister fallback.
+    let player_covers_terrain = player.as_ref().is_some_and(|p| !p.is_failed());
+
+    if !anchor.anchored && !player_covers_terrain {
+        // FALLBACK: no controllable player is keeping chunks loaded, so spawn
+        // the spectator persister (EM-3.6 path). `create_centered_persister` is
+        // `#[cfg(feature = "worldgen")]`; the bridge always links `server` with
+        // worldgen on, so it is always available.
         sim.server.create_centered_persister(ANCHOR_VIEW_DISTANCE);
         anchor.anchored = true;
+        tracing::info!("no embedded player covering terrain; spawned persister fallback");
+    }
 
-        // World-center XY (chunk keys only depend on XY); z = the sim's
-        // approximate surface altitude there so the spectator camera starts
-        // near the ground rather than at half the world's block height.
+    // Broadcast the world-centre anchor position ONCE, as soon as we can read a
+    // sensible altitude, regardless of which presence is loading chunks. The
+    // client parks its spectator camera here until it identifies the player
+    // entity (which it then follows in third person — EM-3.7b). Compute it only
+    // when we're about to send (cheap, but avoid every-frame work).
+    if !anchor.anchor_sent {
         let sim_ref = &sim.server;
         let size_chunks = sim_ref.world().sim().get_size();
         // Mirrors `common::terrain::TerrainChunkSize::RECT_SIZE`
-        // (`1 << TERRAIN_CHUNK_BLOCKS_LG` = 32). Kept as a literal here because
-        // this crate depends only on `server`, not `common` directly — adding a
-        // whole dep for one constant isn't worth it (client-side terrain_stream,
-        // which does depend on common, derives it properly). Revisit when
-        // EM-3.7 makes this crate mirror common comp types anyway.
+        // (`1 << TERRAIN_CHUNK_BLOCKS_LG` = 32). Kept as a literal because this
+        // crate depends on `server`, not `common`, for terrain constants (the
+        // client-side terrain_stream, which does depend on common, derives it).
         let chunk_sz = vek::Vec2::new(32.0_f32, 32.0);
         let center_xy = vek::Vec2::new(size_chunks.x as f32, size_chunks.y as f32) * chunk_sz * 0.5;
         let alt = sim_ref
@@ -280,18 +313,14 @@ fn ensure_terrain_anchor(
             .sim()
             .get_alt_approx(center_xy.map(|e| e as i32))
             .unwrap_or(0.0);
-        anchor.anchor_wpos = Some([center_xy.x, center_xy.y, alt]);
-        tracing::info!(?anchor.anchor_wpos, "terrain anchor persister spawned");
-    }
-
-    if !anchor.anchor_sent
-        && let Some(wpos) = anchor.anchor_wpos
-    {
+        let wpos = [center_xy.x, center_xy.y, alt];
+        anchor.anchor_wpos = Some(wpos);
         anchor_writer.write(ToClients {
             targets: SendTargets::All,
             message: TerrainAnchor { wpos },
         });
         anchor.anchor_sent = true;
+        tracing::info!(?wpos, "terrain anchor position broadcast");
     }
 }
 
@@ -543,10 +572,20 @@ impl SimServer {
 /// of the mirror entities).
 fn mirror_sim_entities(
     sim: Option<NonSendMut<SimServer>>,
+    // EM-3.7b: the embedded local player, if any. Used to tag ITS mirror entity
+    // with `NetLocalPlayer` so the client's third-person camera follows it.
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut mirror: bevy::ecs::system::ResMut<SimMirror>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
+
+    // The player's sim entity (if in game), so we can mark exactly one mirror.
+    let player_sim_entity = player
+        .as_ref()
+        .and_then(|p| p.uid())
+        .and_then(|uid| player::player_sim_entity(&sim, uid));
+
     let ecs = sim.server.state().ecs();
 
     let entities = ecs.entities();
@@ -624,6 +663,7 @@ fn mirror_sim_entities(
     ));
 
     for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health) in updates {
+        let is_local_player = player_sim_entity == Some(sim_entity);
         match mirror.0.get(&sim_entity).copied() {
             Some(bevy_entity) => {
                 // UPSERT: overwrite the net comps every tick (server-authoritative
@@ -638,6 +678,13 @@ fn mirror_sim_entities(
                         ec.remove::<NetHealth>();
                     },
                 }
+                // EM-3.7b: keep the local-player marker in sync (it never moves
+                // between entities in a session, but stay robust).
+                if is_local_player {
+                    ec.insert(NetLocalPlayer);
+                } else {
+                    ec.remove::<NetLocalPlayer>();
+                }
             },
             None => {
                 // First sighting: spawn the replicated mirror entity.
@@ -651,6 +698,9 @@ fn mirror_sim_entities(
                 ));
                 if let Some(h) = net_health {
                     ec.insert(h);
+                }
+                if is_local_player {
+                    ec.insert(NetLocalPlayer);
                 }
                 mirror.0.insert(sim_entity, ec.id());
             },

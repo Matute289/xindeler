@@ -26,6 +26,12 @@ server = { package = "xindeler-server-core", path = "../../server" }
 # not re-export `common`, so the bridge takes it directly. This is a logic crate
 # used as a type library by a shell crate — the legal direction (shell → logic).
 common = { package = "xindeler-common", path = "../../common" }
+# EM-3.7b — the embedded LOCAL-PLAYER client. The listen server hosts the sim
+# AND a real `xindeler-client-core::Client` connected over TCP loopback that IS
+# the player's presence (keeps chunks loaded, receives a controllable
+# character). Same crate + flow as the EM-1.6 smoke bot; server-side by design
+# (a second sim/network stack is only legal here, never in the pure client).
+client = { package = "xindeler-client-core", path = "../../client" }
 # The replication contract (EM-3.6): the bridge writes `ToClients<CompressedChunk>`
 # etc. on the same App the client plugins consume (listen-server single-App).
 xindeler-protocol = { path = "../xindeler-protocol" }

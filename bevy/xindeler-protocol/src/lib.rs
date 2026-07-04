@@ -16,7 +16,7 @@
 
 use bevy::{
     app::{App, Plugin},
-    ecs::{component::Component, message::Message},
+    ecs::{component::Component, message::Message, resource::Resource},
     math::{Quat, Vec2, Vec3},
 };
 use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt, ServerMessageAppExt};
@@ -62,6 +62,17 @@ pub struct NetHealth {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetBody(pub u32);
 
+/// Marks the mirrored entity that is THIS client's own player (EM-3.7b).
+///
+/// The listen-server bridge hosts an embedded `xindeler-client-core::Client`
+/// that IS the local player; the bridge tags that player's mirror entity with
+/// this component so the pure-Bevy client can tell which of the replicated
+/// capsules to follow with the third-person camera. It carries no data — its
+/// mere presence is the signal. Replicated like the Net* comps (a marker
+/// component with no fields still round-trips through replicon).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetLocalPlayer;
+
 /// Client → server input sample (v0 placeholder shape).
 ///
 /// Sent as a replicon *client message*; it surfaces on the server wrapped in
@@ -73,6 +84,35 @@ pub struct PlayerInput {
     /// Whether the jump control is pressed this sample.
     pub jump: bool,
     /// Camera/look direction.
+    pub look: Vec3,
+}
+
+/// The current local-player control sample, shared IN-PROCESS between the pure
+/// Bevy client (which reads keyboard/mouse) and the listen-server bridge (which
+/// applies it to the embedded `Client`'s `ControllerInputs`) — EM-3.7b.
+///
+/// ## Why a shared `Resource`, not the `PlayerInput` replicon message
+/// [`PlayerInput`] is the WIRE shape for a *remote* client sending input to a
+/// *remote* server (EM-4.2c). In the single-App listen server the input
+/// producer and the sim consumer live in the SAME Bevy world, so routing input
+/// through replicon's client→server loopback would be pointless serialization
+/// (and replicon's local client message loopback is a different path than the
+/// server-message one the terrain stream uses). Instead the client writes this
+/// resource each frame and the bridge reads it the same frame — a direct
+/// in-world handoff. The fields already match [`PlayerInput`] so the remote
+/// path (EM-4.2c) can serialize this verbatim later.
+///
+/// Vectors are in SIM/world axes (x-east, y-north, z-up), already resolved from
+/// the camera-relative keyboard intent by the client input system — so the
+/// bridge stays a thin applicator and never needs Bevy↔sim axis knowledge for
+/// input.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct LocalPlayerInput {
+    /// Horizontal movement intent in sim axes (XY plane), magnitude ≤ 1.
+    pub move_dir: Vec2,
+    /// Whether the jump control is held this sample.
+    pub jump: bool,
+    /// Look direction in sim axes (x-east, y-north, z-up), unit-ish.
     pub look: Vec3,
 }
 
@@ -209,7 +249,10 @@ impl Plugin for XindelerProtocolPlugin {
             .replicate::<NetOri>()
             .replicate::<NetVel>()
             .replicate::<NetHealth>()
-            .replicate::<NetBody>();
+            .replicate::<NetBody>()
+            // EM-3.7b: the local-player marker on the mirror entity so the
+            // client's third-person camera knows which capsule to follow.
+            .replicate::<NetLocalPlayer>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
