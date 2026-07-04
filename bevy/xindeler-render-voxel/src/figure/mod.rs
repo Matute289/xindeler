@@ -13,22 +13,19 @@
 //!   per-species `scaler / 11` model scale), so the assembled parts sit where a
 //!   standing figure's limbs sit.
 //!
-//! ## What v1 does (and does NOT)
-//! v1 assembles a **static** figure: every part is meshed at its manifest
-//! offset and parented at its bone's REST matrix (the idle animation evaluated
-//! at `anim_time = 0`, which is deterministic — `sin(0) = 0`). There is NO
-//! time-based skeletal animation yet: the parts don't walk/breathe.
-//! `TODO(EM-3.8b)`: feed per-frame bone matrices (run the real `*Animation`
-//! against the sim's `CharacterState`/velocity) into the child `Transform`s.
+//! ## What is wired (and what remains)
+//! - [`FigureBody::QuadrupedSmall`] (EM-3.8): a central + lateral `.vox`
+//!   manifest keyed by `(species, body_type)`, no recolour — the sim's test-NPC
+//!   Pig, meshed at its manifest offset and parented at its bone's REST matrix.
+//! - [`FigureBody::Humanoid`] (EM-3.8b, see [`humanoid`]): the full 16-bone
+//!   character figure with real per-species head/skin/hair/eye recolour
+//!   (`MatSegment`) + a default clothing loadout, AND per-frame skeletal
+//!   ANIMATION (idle vs walk/run driven by the entity's replicated velocity).
 //!
-//! v1 also covers only the **manifest-driven** bodies (a central + lateral
-//! `.vox` manifest keyed by `(species, body_type)`, no armour/recolour): the
-//! [`FigureBody::QuadrupedSmall`] path is wired end-to-end (it is the sim's
-//! test-NPC body — a Pig). `TODO(EM-3.8b)`: the **humanoid** figure
-//! (per-species head/skin/hair/eye recolour via `MatSegment`, the armour
-//! loadout, weapons, and the 16-bone character skeleton) is a much larger
-//! assembly and stays a placeholder capsule for now; the other quadruped /
-//! bird / etc. bodies are additive table entries on the SAME machinery here.
+//! The quadruped path is still STATIC (rest pose); `TODO(EM-3.8c)`: run its
+//! `*Animation` per frame too, plus the remaining bodies (quadruped medium /
+//! birds / …) as additive table entries on the SAME machinery, and the
+//! humanoid weapon/lantern bones + real equipped gear.
 //!
 //! ## Colour, not texture arrays (spec §4.2)
 //! Terrain uses PBR texture arrays keyed by a per-vertex block layer; figures
@@ -78,8 +75,14 @@ pub enum FigureBody {
         species: common::comp::quadruped_small::Species,
         body_type: common::comp::quadruped_small::BodyType,
     },
-    /// A body v1 does not build a real figure for yet (humanoid, quadruped
-    /// medium, birds, …). The caller falls back to its placeholder.
+    /// A humanoid (the player + humanoid NPCs): the full 16-bone character
+    /// skeleton, head recoloured per (species, skin, hair, eye) + a default
+    /// clothing loadout (chest/belt/pants/shoulders/hands/feet). Carries the
+    /// WHOLE `humanoid::Body` because the recolour reads its skin/hair/eye
+    /// indices (EM-3.8b). See [`humanoid`].
+    Humanoid(common::comp::humanoid::Body),
+    /// A body v1 does not build a real figure for yet (quadruped medium, birds,
+    /// …). The caller falls back to its placeholder.
     Unsupported,
 }
 
@@ -276,16 +279,24 @@ impl PartSpecRef {
 #[must_use]
 pub fn figure_part_to_bevy(part: &LoadedPart) -> Option<BevyMesh> {
     let segment = Segment::from_vox(part.vox, part.flipped, part.model_index as usize, None);
+    segment_to_bevy(&segment, part.offset)
+}
 
+/// Meshes an already-built [`Segment`] (colours resolved) at `offset` into a
+/// coloured `bevy::Mesh`. This is the shared core behind both the raw-`.vox`
+/// quadruped path ([`figure_part_to_bevy`]) and the humanoid path
+/// ([`humanoid`], whose parts are recoloured `MatSegment`→`Segment`s), so both
+/// go through the SAME figure mesher (Mapper C7) + atlas → `ATTRIBUTE_COLOR`
+/// conversion. Returns `None` if the segment meshes to nothing (empty).
+#[must_use]
+pub fn segment_to_bevy(segment: &Segment, offset: Vec3<f32>) -> Option<BevyMesh> {
     let mut greedy =
         GreedyMesh::<FigureSpriteAtlasData>::new(MAX_ATLAS_SIZE, greedy_general_config());
     let mut opaque = Mesh::<TerrainVertex>::new();
     // Bone index 0: v1 is static, so the (unused) bone-in-vertex packing is
     // irrelevant — each PART is its own mesh placed by its own child Transform.
-    let _ = generate_mesh_base_vol_figure(
-        &segment,
-        (&mut greedy, &mut opaque, part.offset, Vec3::one(), 0),
-    );
+    let _ =
+        generate_mesh_base_vol_figure(segment, (&mut greedy, &mut opaque, offset, Vec3::one(), 0));
     if opaque.is_empty() {
         return None;
     }
@@ -298,6 +309,8 @@ pub fn figure_part_to_bevy(part: &LoadedPart) -> Option<BevyMesh> {
 fn greedy_general_config() -> guillotiere::AllocatorOptions {
     crate::mesh::greedy::general_config()
 }
+
+pub mod humanoid;
 
 /// Veloren z-up → Bevy y-up (pure rotation, winding preserved — same map the
 /// terrain converter bakes; see `convert.rs`).
@@ -441,7 +454,7 @@ impl BoneRest {
 /// matrix, so the part (whose vertices are ALSO converted the same way) lands
 /// correctly. Concretely: `M_bevy = C · M_veloren · C⁻¹`, with `C` the z-up→
 /// y-up rotation; then decompose to a `Transform`.
-fn mat_to_transform(m: vek::Mat4<f32>) -> Transform {
+pub(crate) fn mat_to_transform(m: vek::Mat4<f32>) -> Transform {
     // C: (x, y, z) -> (x, z, -y). C⁻¹ = Cᵀ (pure rotation): (x, y, z) -> (x, -z,
     // y).
     let c = vek::Mat4::new(
