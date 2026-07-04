@@ -480,11 +480,53 @@ fn spawn_test_npcs(
             .get_alt_approx(xy.map(|e| e as i32))
             .unwrap_or(0.0);
         let wpos = vek::Vec3::new(xy.x, xy.y, alt + 3.0);
-        emit_wandering_npc(&sim.server, wpos, i);
+        // Alternate Pig / Humanoid around the ring so the EM-3.8b humanoid
+        // figure path has live subjects to render (and the smoke camera, which
+        // frames non-player figures, has a humanoid NPC to point at).
+        if i % 2 == 0 {
+            emit_wandering_npc(&sim.server, wpos, i);
+        } else {
+            emit_wandering_humanoid(&sim.server, wpos, i);
+        }
     }
 
     tracing::info!(count = state.count, "spawned test NPCs around the anchor");
     state.spawned = true;
+}
+
+/// Requests one wandering HUMANOID NPC (a random human) at `wpos` through the
+/// sim's PUBLIC event bus (EM-3.8b). Same path as [`emit_wandering_npc`], but a
+/// `Body::Humanoid` so the client assembles the real 16-bone character figure.
+fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
+    // A fixed, valid default human so the figure is deterministic across runs;
+    // `validate()` clamps the cosmetic indices to the species' ranges.
+    let mut hum = comp::humanoid::Body {
+        species: comp::humanoid::Species::Human,
+        body_type: comp::humanoid::BodyType::Male,
+        hair_style: 0,
+        beard: 0,
+        eyes: 0,
+        accessory: 0,
+        hair_color: 0,
+        skin: 0,
+        eye_color: 0,
+    };
+    hum.validate();
+    let body: comp::Body = hum.into();
+
+    let npc = NpcBuilder::new(
+        comp::Stats::new(comp::Content::Plain(format!("Test Human {index}")), body),
+        body,
+        comp::Alignment::Wild,
+    )
+    .with_health(comp::Health::new(body))
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+
+    server.state().emit_event_now(CreateNpcEvent {
+        pos: comp::Pos(wpos),
+        ori: comp::Ori::default(),
+        npc,
+    });
 }
 
 /// Requests one wandering critter (a Pig, always available + cheap) at `wpos`
