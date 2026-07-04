@@ -17,6 +17,7 @@ mod camera;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
+#[cfg(feature = "listen-server")] mod lod;
 mod palette_material;
 #[cfg(feature = "listen-server")]
 mod player_input;
