@@ -163,6 +163,14 @@ so an upgrade waits until the dep tree catches up.
 
 ---
 
+## 🔻 Low-priority / deferred (unscheduled)
+
+| ID | Task | Status |
+|---|---|---|
+| **EM-L1** | **Asset rebrand (`veloren-*` names → `xindeler-*`) + asset-sync mapper.** Everything in Xindeler's CODE is already rebranded (crates, binaries, identifiers — EM-1.3); **the world, sim and game are Xindeler**. The ONE remaining Veloren-named surface is **assets** — `.vox`/`.png`/`.ogg`/`.ttf` file names + their RON load-path strings (frozen on purpose per the migration spec §0 constraint 2, so upstream `gitlab/master` assets keep flowing in unbroken). This task: **(a)** investigate whether those asset names/paths CAN be renamed to Xindeler given how many RON manifests + code strings reference them (measure scope + risk); **(b)** if feasible, build the **asset-sync mapper** — the asset analog of the code `tools/xindeler-rename.sh` + Mapper §B — that maps an upstream Veloren asset (name/path) to our renamed Xindeler one, so each `gitlab/master` sync can still pull the upstream asset's UPDATED CONTENT into our renamed file. Without that mapper a rename would sever the ability to keep our assets current from upstream, so the mapper is the enabling piece. **Low priority:** the frozen-names approach works fine today; this is consistency polish and it RAISES the upstream-merge conflict surface, so weigh it against the sync cost. Author a spec/plan/tasks in `docs/design/` before touching anything. Relates to EM-M2 (upstream sync) + the code Mapper (§B). Note: some Veloren strings must stay regardless (wire-protocol magic, plugin ABI, DB migrations) — those are NOT assets and out of scope. | ⚪ |
+
+---
+
 ## Adding tasks
 
 New migration work (a Bevy upgrade, a discovered gap, an emerged sub-task) gets:
