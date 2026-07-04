@@ -5,13 +5,22 @@
 //! rig + atmosphere (data-driven, hot-reloadable), a vignette post-process
 //! slot, a procedural demo scene, and two autonomous verification harnesses:
 //! `--smoke-screenshot <path.png>` and `--smoke-atmosphere <out_dir>`.
+//!
+//! EM-3.6: `--listen-server` (needs the `listen-server` cargo feature) boots
+//! an embedded Veloren world in-process and streams its REAL terrain to the
+//! mesh pipeline via replicon loopback, replacing the synthetic 5×5 demo.
 
 mod atmosphere;
 mod camera;
 mod light;
+#[cfg(feature = "listen-server")]
+mod listen_server;
+mod palette_material;
 mod post;
 mod scene;
 mod smoke;
+#[cfg(feature = "listen-server")]
+mod terrain_stream;
 mod voxel_demo;
 
 use bevy::{asset::AssetPlugin, image::ImagePlugin, prelude::*, window::WindowResolution};
@@ -20,6 +29,17 @@ use xindeler_render_voxel::VoxelRenderPlugin;
 
 fn main() -> AppExit {
     let smoke_mode = smoke::parse_smoke_args();
+    // EM-3.6: `--listen-server` boots the embedded world and streams REAL
+    // terrain instead of the synthetic 5×5 demo.
+    let listen_server = std::env::args().any(|a| a == "--listen-server");
+    #[cfg(not(feature = "listen-server"))]
+    if listen_server {
+        eprintln!(
+            "--listen-server requires the `listen-server` cargo feature (rebuild with --features \
+             listen-server)"
+        );
+        return AppExit::error();
+    }
 
     let mut app = App::new();
     app.add_plugins(
@@ -55,14 +75,28 @@ fn main() -> AppExit {
         atmosphere::AtmospherePlugin,
         post::PostProcessPlugin,
         scene::DemoScenePlugin,
-        // EM-3.3: VoxelMaterialExt registration + the meshed-chunk demo.
+        // EM-3.3: VoxelMaterialExt registration + the async chunk pipeline.
         VoxelRenderPlugin,
-        voxel_demo::VoxelDemoPlugin,
     ));
+
+    // The synthetic 5×5 demo and the real listen-server terrain are mutually
+    // exclusive: both drive the SAME pipeline (one ChunkVolumeProvider), so
+    // only one may install a provider.
+    if listen_server {
+        #[cfg(feature = "listen-server")]
+        app.add_plugins(listen_server::ListenServerPlugin);
+    } else {
+        app.add_plugins(voxel_demo::VoxelDemoPlugin);
+    }
 
     match smoke_mode {
         Some(smoke::SmokeMode::Screenshot(path)) => {
-            app.add_plugins(smoke::SmokeScreenshotPlugin { path });
+            app.add_plugins(smoke::SmokeScreenshotPlugin {
+                path,
+                // The world boot (~5–10 s) + terrain streaming needs a much
+                // longer warmup than the static demo scene.
+                listen_server,
+            });
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {
             app.add_plugins(smoke::SmokeAtmospherePlugin { out_dir });

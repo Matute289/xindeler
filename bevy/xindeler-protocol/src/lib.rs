@@ -18,7 +18,8 @@ use bevy::{
     ecs::{component::Component, message::Message},
     math::{Quat, Vec2, Vec3},
 };
-use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt};
+use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt, ServerMessageAppExt};
+use common::terrain::TerrainChunk;
 use serde::{Deserialize, Serialize};
 
 /// Replicated world position of an entity (server-authoritative).
@@ -63,6 +64,76 @@ pub struct PlayerInput {
     pub jump: bool,
     /// Camera/look direction.
     pub look: Vec3,
+}
+
+/// Server → client terrain stream: one sim chunk, bincode(legacy)-serialized
+/// and lz4-compressed (EM-3.6; same scheme Veloren's COMPRESSED net streams
+/// use — `network/src/message.rs`). Travels on the [`XindelerChannel::Terrain`]
+/// lane (reliable, unordered — cross-chunk ordering is irrelevant).
+///
+/// Sent by the server-side bridge for every new/modified chunk the sim's
+/// `TerrainChanges` reports; v1 is a broadcast to all clients (per-client
+/// interest management = EM-4.2d).
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CompressedChunk {
+    /// 2D chunk key (upstream `TerrainGrid` convention).
+    pub key: [i32; 2],
+    /// lz4-compressed bincode of the sim's `TerrainChunk`.
+    pub bytes: Vec<u8>,
+}
+
+impl CompressedChunk {
+    /// Serializes (bincode `legacy()`, matching `common-net`) + compresses
+    /// (lz4 raw block, `lz_fear` — the crate Veloren's net stack already
+    /// pins) one chunk.
+    #[must_use]
+    pub fn encode(key: [i32; 2], chunk: &TerrainChunk) -> Self {
+        let raw = bincode::serde::encode_to_vec(chunk, bincode::config::legacy())
+            .expect("bincode serialization can only fail if a byte limit is set");
+        let mut bytes = Vec::with_capacity(raw.len() / 4 + 16);
+        let mut table = lz_fear::raw::U32Table::default();
+        lz_fear::raw::compress2(&raw, 0, &mut table, &mut bytes)
+            .expect("lz4 compression into a Vec<u8> is infallible");
+        Self { key, bytes }
+    }
+
+    /// Decompresses + deserializes the payload. `None` = corrupt payload
+    /// (callers log and drop; the local loopback can't corrupt, so this only
+    /// matters once a real transport lands in EM-4.2b).
+    ///
+    /// The decompressed-size cap mirrors `network/src/message.rs`
+    /// (`usize::MAX`); a hostile-input budget is an EM-4.2d (hardening)
+    /// concern, not a loopback one.
+    #[must_use]
+    pub fn decode(&self) -> Option<TerrainChunk> {
+        let mut raw = Vec::with_capacity(self.bytes.len() * 2);
+        lz_fear::raw::decompress_raw(&self.bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+        bincode::serde::decode_from_slice(&raw, bincode::config::legacy())
+            .ok()
+            .map(|(chunk, _)| chunk)
+    }
+}
+
+/// Server → client: the sim unloaded a chunk; drop it (store + mesh).
+///
+/// Same Terrain lane as [`CompressedChunk`]. ⚠️ The lane is UNORDERED: over a
+/// real transport a remove could overtake the chunk it removes. The v1
+/// loopback preserves order (local `Messages` drain); revisit with interest
+/// management (EM-4.2d).
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoveChunk {
+    /// 2D chunk key (upstream `TerrainGrid` convention).
+    pub key: [i32; 2],
+}
+
+/// Server → client: world position (sim coordinates, z-up) of the terrain
+/// presence anchor — where chunks are being kept loaded around (EM-3.6's
+/// centered persister). v1 pragmatic: sent once at boot on the ordered
+/// Events lane; the client parks its spectator camera over it.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct TerrainAnchor {
+    /// Sim/world position (Veloren axes: x-east, y-north, z-up).
+    pub wpos: [f32; 3],
 }
 
 /// Logical channel lanes of the Xindeler protocol.
@@ -133,6 +204,24 @@ impl Plugin for XindelerProtocolPlugin {
         // (no client-side redundancy/resampling yet); it moves to the
         // unreliable State lane once the input stream sends redundant samples.
         app.add_client_message::<PlayerInput>(XindelerChannel::Events.delivery());
+
+        // Server → client messages (EM-3.6 terrain stream). The server writes
+        // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients
+        // AND, in listen-server mode (`ClientState::Disconnected`), re-emits
+        // them locally as plain `CompressedChunk` in the same App — that local
+        // path is exactly how the single-App listen server receives its own
+        // terrain (see `server/message.rs::send_locally`, gated on
+        // `ClientState::Disconnected`).
+        //
+        // `make_message_independent`: these carry NO entity references, so they
+        // must NOT be queued behind entity replication (the default) — the
+        // terrain stream is decoupled from the entity/component tick.
+        app.add_server_message::<CompressedChunk>(XindelerChannel::Terrain.delivery())
+            .make_message_independent::<CompressedChunk>();
+        app.add_server_message::<RemoveChunk>(XindelerChannel::Terrain.delivery())
+            .make_message_independent::<RemoveChunk>();
+        app.add_server_message::<TerrainAnchor>(XindelerChannel::Events.delivery())
+            .make_message_independent::<TerrainAnchor>();
     }
 }
 
@@ -222,5 +311,62 @@ mod tests {
             .collect();
         assert_eq!(received.len(), 1, "server should receive one input message");
         assert_eq!(received[0].message, input);
+    }
+
+    /// A real `TerrainChunk` survives `encode` → `decode` byte-for-byte.
+    #[test]
+    fn compressed_chunk_round_trips() {
+        use common::{
+            terrain::{Block, BlockKind, TerrainChunk, TerrainChunkMeta},
+            vol::{ReadVol, WriteVol},
+        };
+        use vek::{Rgb, Vec3 as VVec3};
+
+        let mut chunk =
+            TerrainChunk::new(0, Block::empty(), Block::empty(), TerrainChunkMeta::void());
+        let block = Block::new(BlockKind::Rock, Rgb::new(120, 100, 90));
+        chunk
+            .set(VVec3::new(3, 4, 5), block)
+            .expect("in-bounds write");
+
+        let encoded = CompressedChunk::encode([2, -7], &chunk);
+        assert_eq!(encoded.key, [2, -7]);
+        assert!(!encoded.bytes.is_empty());
+
+        let decoded = encoded.decode().expect("round-trips");
+        assert_eq!(decoded.get(VVec3::new(3, 4, 5)).ok(), Some(&block));
+    }
+
+    /// Listen-server path: a server writing `ToClients<CompressedChunk>` in an
+    /// App with NO connected client (i.e. `ClientState::Disconnected`) receives
+    /// it back locally as `CompressedChunk` — this is the single-App loopback
+    /// the listen server relies on (replicon's `send_locally`).
+    #[test]
+    fn compressed_chunk_loops_back_locally_on_listen_server() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut app = new_app();
+        // No `connect_client`: the App is a server that is ALSO the only
+        // client (ClientState defaults to Disconnected).
+        let payload = CompressedChunk {
+            key: [1, 2],
+            bytes: vec![9, 8, 7],
+        };
+        app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: payload.clone(),
+        });
+        app.update();
+
+        let received: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<CompressedChunk>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            received,
+            vec![payload],
+            "listen server must see its own terrain locally"
+        );
     }
 }

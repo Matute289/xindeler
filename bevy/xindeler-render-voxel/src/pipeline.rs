@@ -254,6 +254,10 @@ impl ChunkMeshIndex {
 
     #[must_use]
     pub fn get(&self, key: ChunkKey) -> Option<&ChunkEntities> { self.0.get(&key) }
+
+    /// Keys of every currently-spawned chunk. Used by palette hot reload to
+    /// re-mark all live chunks dirty (their per-vertex layers changed).
+    pub fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ { self.0.keys().copied() }
 }
 
 /// Upload instrumentation (complements the tracing spans).

@@ -11553,12 +11553,15 @@ name = "xindeler-client"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "bevy_replicon",
  "ron",
  "vek",
  "xindeler-app",
  "xindeler-common",
  "xindeler-oracle-host",
+ "xindeler-protocol",
  "xindeler-render-voxel",
+ "xindeler-sim-bridge",
 ]
 
 [[package]]
@@ -11877,7 +11880,11 @@ dependencies = [
  "bevy",
  "bevy_math",
  "bevy_replicon",
+ "bincode",
+ "lz-fear",
  "serde",
+ "vek",
+ "xindeler-common",
 ]
 
 [[package]]
@@ -12046,10 +12053,13 @@ name = "xindeler-sim-bridge"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "bevy_replicon",
  "specs",
  "tempfile",
  "tokio",
  "tracing",
+ "vek",
+ "xindeler-protocol",
  "xindeler-server-core",
 ]
 

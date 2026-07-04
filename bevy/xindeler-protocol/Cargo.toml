@@ -25,3 +25,18 @@ bevy_math = { version = "=0.19.0", default-features = false, features = [
 # Networking per BL-82 [Q3]=B — replication contract shared by client & server.
 bevy_replicon = "=0.41.1"
 serde = { workspace = true }
+
+# EM-3.6 terrain channel: `CompressedChunk` payloads are bincode(legacy)+lz4 —
+# the SAME scheme Veloren's net stack uses (network/src/message.rs: bincode
+# `legacy()` config + `lz_fear::raw::{compress2, decompress_raw}`), so no new
+# compression crate enters the lock (lz-fear 0.2.0 was already pinned via
+# `network`/`world`; "0.2" matches their requirement string).
+bincode = { workspace = true }
+lz-fear = "0.2"
+# Logic crate as TYPE LIBRARY only ([Q3]=B): the chunk payload type is the
+# sim's `TerrainChunk`. Legal direction (shell → logic); the isolation law
+# forbids the reverse.
+common = { package = "xindeler-common", path = "../../common", features = [
+    "no-assets",
+] }
+vek = { workspace = true }
