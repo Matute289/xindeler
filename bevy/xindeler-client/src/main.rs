@@ -23,6 +23,7 @@ mod player_input;
 mod post;
 mod scene;
 mod smoke;
+#[cfg(feature = "listen-server")] mod sprite_view;
 #[cfg(feature = "listen-server")]
 mod terrain_stream;
 mod voxel_demo;
@@ -110,6 +111,10 @@ fn main() -> AppExit {
                 // EM-3.8: frame a real `.vox` NPC figure in the capture (the
                 // spawn pillar occludes the player — EM-3.7b caveat).
                 app.add_plugins(player_input::SmokeFigureCamPlugin);
+                // EM-3.9: once sprites build, override the framing to the
+                // densest vegetation patch on open lit terrain (the figure sits
+                // in the dark spawn interior). Runs after the figure cam.
+                app.add_plugins(player_input::SmokeSpriteCamPlugin);
             }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {

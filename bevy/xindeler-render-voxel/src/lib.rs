@@ -16,6 +16,11 @@
 //!   voxel parts (figure mesher + `xindeler-anim` rest-pose bones) into
 //!   coloured `bevy::Mesh`es. Off by default (the default set is terrain-only);
 //!   the client opts in.
+//! - `figure` also carries EM-3.9 block [`sprite`]s (grass/flowers/props) —
+//!   per-chunk instance collection + `.vox` meshing (reusing the figure segment
+//!   mesher). Fluids (water) need no new module: the terrain mesher already
+//!   emits a fluid mesh that [`pipeline`] renders (EM-3.9 carries the river
+//!   velocity through [`convert::fluid_mesh_to_bevy`]).
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy.
 
@@ -25,6 +30,7 @@
 pub mod mesh;
 #[cfg(feature = "material")] pub mod palette;
 #[cfg(feature = "pipeline")] pub mod pipeline;
+#[cfg(feature = "figure")] pub mod sprite;
 
 use bevy::app::{App, Plugin};
 

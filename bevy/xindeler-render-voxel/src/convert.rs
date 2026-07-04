@@ -89,6 +89,15 @@ pub const ATTRIBUTE_VOXEL_AO: MeshVertexAttribute =
 pub const ATTRIBUTE_BLOCK_LAYER: MeshVertexAttribute =
     MeshVertexAttribute::new("BlockLayer", 988_540_918, VertexFormat::Uint32);
 
+/// Per-vertex river-flow velocity (xz plane, Bevy space) baked from the fluid
+/// mesher's `FluidVertex::river_velocity` (EM-3.9). The interim stock water
+/// `StandardMaterial` does not consume it, but carrying it keeps the data
+/// intact for the dedicated water shader (EM-3.9b: scroll the surface / spawn
+/// wakes along the flow). Distinct id so it can never collide with the terrain
+/// attributes above.
+pub const ATTRIBUTE_RIVER_VELOCITY: MeshVertexAttribute =
+    MeshVertexAttribute::new("RiverVelocity", 988_540_919, VertexFormat::Float32x2);
+
 /// Veloren z-up → Bevy y-up (pure rotation: winding preserved).
 #[inline]
 fn to_bevy(v: Vec3<f32>) -> [f32; 3] { [v.x, v.z, -v.y] }
@@ -181,10 +190,14 @@ pub fn terrain_mesh_to_bevy(
     out
 }
 
-/// Converts the fluid (water) mesh: `POSITION`/`NORMAL`/`UV_0` only — fluids
-/// render with a stock transparent material until the dedicated water shader
-/// (EM-3.9); `river_velocity` (wave advection) is dropped for now,
-/// documented: TODO(EM-3.9).
+/// Converts the fluid (water) mesh: `POSITION`/`NORMAL`/`UV_0` +
+/// [`ATTRIBUTE_RIVER_VELOCITY`] (EM-3.9). Fluids render with a stock
+/// transparent `StandardMaterial` (the palette's Water entry — translucent
+/// blue, low roughness for a wet sheen); the per-vertex river velocity is
+/// carried but not yet consumed (the stock material has no vertex-driven UV
+/// scroll). The dedicated water shader (EM-3.9b) reads it to advect the
+/// surface. `river_velocity` is in the Veloren xy plane; z-up→y-up maps that to
+/// Bevy's xz ground plane as `(vx, -vy)` (the same rotation `to_bevy` applies).
 pub fn fluid_mesh_to_bevy(mesh: &Mesh<FluidVertex>) -> BevyMesh {
     debug_assert!(FluidVertex::QUADS_INDEX.is_some());
 
@@ -192,12 +205,15 @@ pub fn fluid_mesh_to_bevy(mesh: &Mesh<FluidVertex>) -> BevyMesh {
     let mut positions = Vec::with_capacity(n);
     let mut normals = Vec::with_capacity(n);
     let mut uvs = Vec::with_capacity(n);
+    let mut velocities = Vec::with_capacity(n);
     for v in mesh.vertices() {
         let pos = to_bevy(v.pos);
         let norm = to_bevy(v.norm);
         positions.push(pos);
         normals.push(norm);
         uvs.push(planar_uv(pos, norm));
+        // Veloren xy flow → Bevy ground-plane xz: (vx, vy) → (vx, -vy).
+        velocities.push([v.river_velocity.x, -v.river_velocity.y]);
     }
 
     let mut out = BevyMesh::new(
@@ -207,6 +223,7 @@ pub fn fluid_mesh_to_bevy(mesh: &Mesh<FluidVertex>) -> BevyMesh {
     out.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
     out.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
     out.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
+    out.insert_attribute(ATTRIBUTE_RIVER_VELOCITY, velocities);
     out.insert_indices(Indices::U32(quad_indices(n)));
     out
 }

@@ -30,7 +30,7 @@ use bevy::{
     prelude::MinimalPlugins,
 };
 use common::{
-    terrain::{Block, BlockKind, MapSizeLg, TerrainChunk, TerrainChunkMeta},
+    terrain::{Block, BlockKind, MapSizeLg, SpriteKind, TerrainChunk, TerrainChunkMeta},
     vol::WriteVol,
     volumes::vol_grid_2d::VolGrid2d,
 };
@@ -39,7 +39,8 @@ use xindeler_render_voxel::{
     convert::ATTRIBUTE_BLOCK_LAYER,
     pipeline::{
         ChunkLayerMap, ChunkMaterials, ChunkMeshIndex, ChunkMeshPipelinePlugin, ChunkMeshQueue,
-        ChunkUploadBudget, ChunkUploadStats, ChunkVolume, ChunkVolumeProvider, TerrainChunkMesh,
+        ChunkUploadBudget, ChunkUploadStats, ChunkVolume, ChunkVolumeProvider, FluidChunkMesh,
+        TerrainChunkMesh,
     },
 };
 
@@ -182,6 +183,107 @@ fn terrain_entity_count(app: &mut App) -> usize {
         .query_filtered::<Entity, With<TerrainChunkMesh>>()
         .iter(world)
         .count()
+}
+
+fn fluid_entity_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    world
+        .query_filtered::<Entity, With<FluidChunkMesh>>()
+        .iter(world)
+        .count()
+}
+
+/// A 3×3 grid of chunks whose surface is a rock slab topped with a layer of
+/// water blocks — the mesher emits BOTH an opaque and a fluid mesh, exercising
+/// the EM-3.9 fluid spawn path.
+fn build_water_world() -> Arc<VolGrid2d<TerrainChunk>> {
+    let map_size_lg = MapSizeLg::new(VVec2::new(3, 3)).expect("valid test map size");
+    let default = Arc::new(TerrainChunk::new(
+        0,
+        Block::empty(),
+        Block::empty(),
+        TerrainChunkMeta::void(),
+    ));
+    let mut grid = VolGrid2d::new(map_size_lg, default).expect("chunk size is a power of two");
+    for kx in 0..=2 {
+        for ky in 0..=2 {
+            let mut chunk =
+                TerrainChunk::new(0, Block::empty(), Block::empty(), TerrainChunkMeta::void());
+            for lx in 0..CHUNK {
+                for ly in 0..CHUNK {
+                    // Rock floor z=0..2, then a water block at z=2.
+                    for z in 0..2 {
+                        chunk
+                            .set(
+                                VVec3::new(lx, ly, z),
+                                Block::new(BlockKind::Rock, Rgb::new(120, 120, 120)),
+                            )
+                            .expect("in-bounds chunk write");
+                    }
+                    chunk
+                        .set(VVec3::new(lx, ly, 2), Block::water(SpriteKind::Empty))
+                        .expect("in-bounds water write");
+                }
+            }
+            grid.insert(VVec2::new(kx, ky), Arc::new(chunk));
+        }
+    }
+    Arc::new(grid)
+}
+
+/// App over the water world (center key (1,1) meshed, neighbours populated).
+fn water_test_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .init_asset::<bevy::mesh::Mesh>()
+        .add_plugins(ChunkMeshPipelinePlugin);
+
+    let world_grid = build_water_world();
+    app.insert_resource(ChunkVolumeProvider::new(move |key| {
+        (key.x == 1 && key.y == 1)
+            .then(|| ChunkVolume::with_z_bounds(world_grid.clone(), key, 0, 4))
+    }))
+    .insert_resource(ChunkLayerMap::default())
+    .insert_resource(ChunkMaterials {
+        terrain: Handle::default(),
+        fluid: Handle::default(),
+    })
+    .insert_resource(ChunkUploadBudget {
+        max_uploads_per_frame: 2,
+    });
+    app
+}
+
+/// EM-3.9: a chunk with water meshes into BOTH a terrain and a fluid entity
+/// (the fluid spawn path the listen-server water rendering relies on).
+#[test]
+fn water_chunk_spawns_a_fluid_entity() {
+    let mut app = water_test_app();
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(VVec2::new(1, 1));
+    run_until_complete(&mut app, 1);
+
+    assert_eq!(
+        terrain_entity_count(&mut app),
+        1,
+        "the rock floor meshes into a terrain entity"
+    );
+    assert_eq!(
+        fluid_entity_count(&mut app),
+        1,
+        "the water layer meshes into a fluid entity (EM-3.9 spawn path)"
+    );
+    let index = app.world().resource::<ChunkMeshIndex>();
+    let entities = index
+        .get(VVec2::new(1, 1))
+        .expect("the meshed key is indexed");
+    assert!(entities.terrain.is_some());
+    assert!(
+        entities.fluid.is_some(),
+        "water chunk carries a fluid entity"
+    );
 }
 
 #[test]

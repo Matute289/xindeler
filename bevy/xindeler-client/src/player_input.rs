@@ -351,6 +351,57 @@ fn smoke_figure_cam(
 /// Drops the y (vertical) component and renormalizes — a ground-plane heading.
 fn flatten(v: Vec3) -> Vec3 { Vec3::new(v.x, 0.0, v.z).normalize_or_zero() }
 
+// ---------------------------------------------------------------------------
+// Smoke sprite/water cam (scaffolding — smoke-screenshot only, EM-3.9)
+// ---------------------------------------------------------------------------
+
+/// SCAFFOLDING for the EM-3.9 smoke screenshot. The world-centre spawn sits in
+/// a dark shadowed pillar structure (the EM-3.7b/3.8 framing caveat), so the
+/// figure cam captures vegetation-free interior floor. This plugin instead
+/// frames the DENSEST sprite patch (open, sunlit terrain where grass/flowers
+/// grow) from a low, close 3/4 angle, so the capture actually shows the EM-3.9
+/// sprites. Added ONLY under `--listen-server --smoke-screenshot`; runs after
+/// the figure cam so it wins. Interactive play never adds it.
+pub struct SmokeSpriteCamPlugin;
+
+impl Plugin for SmokeSpriteCamPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            smoke_sprite_cam.after(smoke_figure_cam).in_set(GameplaySet),
+        );
+    }
+}
+
+/// Low, close 3/4 vantage offset (Bevy metres) from the framed vegetation
+/// patch.
+const SPR_CAM_BACK: f32 = 6.0;
+const SPR_CAM_UP: f32 = 3.5;
+
+/// Points the smoke camera at the densest built sprite patch from a close,
+/// slightly-elevated angle, so the capture shows grass/flowers on lit terrain.
+/// Falls back to leaving the camera as-is (figure framing) when no sprites have
+/// been built yet.
+fn smoke_sprite_cam(
+    patches: Query<&crate::sprite_view::SpriteChunkParent>,
+    mut cameras: Query<&mut Transform, With<FlyCam>>,
+) {
+    // The densest patch = the most visible vegetation.
+    let Some(target) = patches
+        .iter()
+        .filter(|p| p.count > 0)
+        .max_by_key(|p| p.count)
+        .map(|p| p.centroid)
+    else {
+        return; // no sprites yet — keep the figure framing
+    };
+    // Stand back along +x/+z and above, looking down at the patch centroid.
+    let eye = target + Vec3::new(SPR_CAM_BACK, SPR_CAM_UP, SPR_CAM_BACK);
+    for mut cam in &mut cameras {
+        *cam = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    }
+}
+
 /// Bevy y-up → sim z-up direction: inverse of the converter `(x,y,z)→(x,z,−y)`,
 /// i.e. bevy `(x, y, z)` → sim `(x, −z, y)`.
 fn bevy_to_sim(v: Vec3) -> Vec3 { Vec3::new(v.x, -v.z, v.y) }
