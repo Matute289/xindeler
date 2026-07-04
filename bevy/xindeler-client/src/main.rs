@@ -17,6 +17,8 @@ mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
 mod palette_material;
+#[cfg(feature = "listen-server")]
+mod player_input;
 mod post;
 mod scene;
 mod smoke;
@@ -98,6 +100,13 @@ fn main() -> AppExit {
                 // longer warmup than the static demo scene.
                 listen_server,
             });
+            // EM-3.7b smoke scaffolding: with no real keyboard, drive the
+            // embedded player forward so the third-person camera shows it
+            // walking on the real terrain in the capture. Listen-server only.
+            #[cfg(feature = "listen-server")]
+            if listen_server {
+                app.add_plugins(player_input::SmokeAutoMovePlugin);
+            }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {
             app.add_plugins(smoke::SmokeAtmospherePlugin { out_dir });

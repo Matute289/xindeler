@@ -19,14 +19,35 @@ use crate::{atmosphere, post::VignettePost};
 
 pub struct CameraRigPlugin;
 
+/// System set covering the fly-cam controller (cursor grab + look + move). The
+/// listen-server player rig (`player_input`) orders its follow-camera AFTER
+/// this so it reads an up-to-date yaw and can override the transform (EM-3.7b).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlyCamSet;
+
+/// Gates whether [`fly_cam_move`] actually translates the camera. Default on
+/// (free fly-cam). The third-person player rig turns it OFF while following so
+/// it can own the camera translation without the fly-cam fighting it; mouse
+/// look ([`fly_cam_look`]) keeps running either way so its yaw drives the
+/// orbit.
+#[derive(Resource)]
+pub struct FlyCamMovementEnabled(pub bool);
+
+impl Default for FlyCamMovementEnabled {
+    fn default() -> Self { Self(true) }
+}
+
 impl Plugin for CameraRigPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera).add_systems(
-            Update,
-            (cursor_grab, fly_cam_look, fly_cam_move)
-                .chain()
-                .in_set(GameplaySet),
-        );
+        app.init_resource::<FlyCamMovementEnabled>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(
+                Update,
+                (cursor_grab, fly_cam_look, fly_cam_move)
+                    .chain()
+                    .in_set(FlyCamSet)
+                    .in_set(GameplaySet),
+            );
     }
 }
 
@@ -156,8 +177,13 @@ fn fly_cam_look(
 fn fly_cam_move(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    enabled: Res<FlyCamMovementEnabled>,
     mut cameras: Query<(&mut Transform, &FlyCam)>,
 ) {
+    // Third-person follow (EM-3.7b) turns this off so it owns the translation.
+    if !enabled.0 {
+        return;
+    }
     for (mut transform, cam) in &mut cameras {
         let mut wish = Vec3::ZERO;
         if keys.pressed(KeyCode::KeyW) {

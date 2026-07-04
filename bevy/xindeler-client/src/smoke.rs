@@ -88,6 +88,20 @@ pub enum SmokeMode {
     Atmosphere(PathBuf),
 }
 
+/// Listen-server smoke gate (EM-3.7b): set `true` by the player rig once the
+/// controllable player has spawned AND visibly moved, so the screenshot fires
+/// on a frame that actually shows the walking character (not empty terrain).
+/// Defined here (always compiled) so the always-compiled smoke driver can read
+/// it; only the listen-server `player_input` rig ever WRITES it. Defaults to
+/// `true` so non-listen-server smoke and any path that never installs the rig
+/// are unaffected.
+#[derive(Resource)]
+pub struct SmokePlayerMoved(pub bool);
+
+impl Default for SmokePlayerMoved {
+    fn default() -> Self { Self(true) }
+}
+
 /// Parses `--smoke-screenshot <path.png>` / `--smoke-atmosphere <out_dir>`
 /// from `std::env::args` (no clap).
 pub fn parse_smoke_args() -> Option<SmokeMode> {
@@ -169,6 +183,11 @@ impl Plugin for SmokeScreenshotPlugin {
             warmup_frames: warmup,
             timeout_frames: timeout,
         })
+        // Listen-server capture PREFERS a frame where the player has walked;
+        // start `false` there and let the rig raise it. If the player never
+        // spawns (spectator fallback), the driver falls back to a terrain-only
+        // capture after `PLAYER_WAIT_FRAMES` so the smoke never wrongly fails.
+        .insert_resource(SmokePlayerMoved(!self.listen_server))
         // PostStartup: the camera rig spawns its camera in Startup.
         .add_systems(PostStartup, retarget_for_screenshot)
         .add_systems(Update, drive_smoke_screenshot);
@@ -196,10 +215,16 @@ fn retarget_for_screenshot(
     state.target = retarget_camera_to_image(&mut commands, &mut images, &cameras);
 }
 
+/// Extra frames past the warmup we give the embedded player to spawn + walk
+/// before falling back to a terrain-only listen-server capture (so a failed /
+/// slow player never turns into a false smoke failure).
+const PLAYER_WAIT_FRAMES: u32 = 900;
+
 fn drive_smoke_screenshot(
     mut state: ResMut<SmokeScreenshot>,
     mut commands: Commands,
     upload_stats: Res<xindeler_render_voxel::pipeline::ChunkUploadStats>,
+    player_moved: Res<SmokePlayerMoved>,
 ) {
     state.frames += 1;
 
@@ -236,11 +261,18 @@ fn drive_smoke_screenshot(
     let terrain_ready =
         !state.listen_server || (upload_stats.total_uploads > 0 && upload_stats.in_flight == 0);
 
-    if !state.requested && state.frames >= state.warmup_frames && terrain_ready {
+    // EM-3.7b: prefer a frame where the controllable player has spawned + moved
+    // (the rig raises `SmokePlayerMoved`). If it hasn't happened within a
+    // generous window past the warmup, fall back to a terrain-only capture so a
+    // slow/failed player never turns into a false smoke failure.
+    let player_ready = player_moved.0 || state.frames >= state.warmup_frames + PLAYER_WAIT_FRAMES;
+
+    if !state.requested && state.frames >= state.warmup_frames && terrain_ready && player_ready {
         if state.listen_server {
             info!(
-                "listen-server smoke: capturing after {} frames ({} chunks meshed)",
-                state.frames, upload_stats.total_uploads
+                "listen-server smoke: capturing after {} frames ({} chunks meshed, \
+                 player_moved={})",
+                state.frames, upload_stats.total_uploads, player_moved.0
             );
         }
         state.requested = true;
