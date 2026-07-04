@@ -19,13 +19,19 @@
 //!   Pig, meshed at its manifest offset and parented at its bone's REST matrix.
 //! - [`FigureBody::Humanoid`] (EM-3.8b, see [`humanoid`]): the full 16-bone
 //!   character figure with real per-species head/skin/hair/eye recolour
-//!   (`MatSegment`) + a default clothing loadout, AND per-frame skeletal
-//!   ANIMATION (idle vs walk/run driven by the entity's replicated velocity).
+//!   (`MatSegment`) + a default clothing loadout + a TEST main-hand weapon
+//!   (EM-3.8c), AND per-frame skeletal ANIMATION (idle vs walk/run driven by
+//!   the entity's replicated velocity).
+//! - [`FigureBody::QuadrupedMedium`] / [`FigureBody::BirdMedium`] (EM-3.8c, see
+//!   [`quadruped_medium`] / [`bird_medium`]): additive bodies on the SAME
+//!   machinery — manifest-driven parts + animated (idle/run, plus fly for
+//!   birds).
 //!
-//! The quadruped path is still STATIC (rest pose); `TODO(EM-3.8c)`: run its
-//! `*Animation` per frame too, plus the remaining bodies (quadruped medium /
-//! birds / …) as additive table entries on the SAME machinery, and the
-//! humanoid weapon/lantern bones + real equipped gear.
+//! EM-3.8c also animates the quadruped-small path (was static) and adds the
+//! three animation-polish minors (acc-based run phase, idle/run hysteresis,
+//! per-part fallback) client-side. Still `TODO(EM-3.8d)`: real equipped gear
+//! from the inventory (v1 weapon is a fixed test sword) + lantern/back/glider
+//! bones + the remaining bodies (quadruped-low, bipeds, dragons, …).
 //!
 //! ## Colour, not texture arrays (spec §4.2)
 //! Terrain uses PBR texture arrays keyed by a per-vertex block layer; figures
@@ -81,7 +87,22 @@ pub enum FigureBody {
     /// WHOLE `humanoid::Body` because the recolour reads its skin/hair/eye
     /// indices (EM-3.8b). See [`humanoid`].
     Humanoid(common::comp::humanoid::Body),
-    /// A body v1 does not build a real figure for yet (quadruped medium, birds,
+    /// A quadruped-medium (Wolf, Bear, Deer, …): central (head/neck/jaw/ears/
+    /// torso×2/tail) + lateral (four legs + four feet) manifests, animated
+    /// (EM-3.8c). See [`quadruped_medium`].
+    QuadrupedMedium {
+        species: common::comp::quadruped_medium::Species,
+        body_type: common::comp::quadruped_medium::BodyType,
+    },
+    /// A bird-medium (Owl, Duck, Eagle, …): central (head/chest/tail) + lateral
+    /// (wings + legs) manifests, animated idle/run/fly (EM-3.8c). See
+    /// [`bird_medium`].
+    BirdMedium {
+        species: common::comp::bird_medium::Species,
+        body_type: common::comp::bird_medium::BodyType,
+    },
+    /// A body v1 does not build a real figure for yet (the remaining bodies:
+    /// quadruped-low, biped-large/small, birds-large, fish, dragons, golems,
     /// …). The caller falls back to its placeholder.
     Unsupported,
 }
@@ -310,7 +331,9 @@ fn greedy_general_config() -> guillotiere::AllocatorOptions {
     crate::mesh::greedy::general_config()
 }
 
+pub mod bird_medium;
 pub mod humanoid;
+pub mod quadruped_medium;
 
 /// Veloren z-up → Bevy y-up (pure rotation, winding preserved — same map the
 /// terrain converter bakes; see `convert.rs`).
@@ -419,6 +442,86 @@ pub fn quadruped_small_bone_rest(
     }
 }
 
+/// Which locomotion state to animate a quadruped in (EM-3.8c). Picked
+/// client-side from the entity's replicated velocity, with hysteresis to avoid
+/// flicker at the idle/run boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FigureAnim {
+    /// Standing idle (subtle breathing/sway).
+    Idle,
+    /// Moving on the ground (run cycle).
+    Run,
+    /// Airborne (flight flap cycle — birds only; ground bodies treat it as
+    /// [`FigureAnim::Run`]).
+    Fly,
+}
+
+/// Animated bone transforms for a quadruped-small figure at locomotion `anim`,
+/// phase accumulator `acc` (blocks travelled, drives the foot cycle) and `time`
+/// seconds (global clock for idle sway). EM-3.8c: replaces the static-only
+/// [`quadruped_small_bone_rest`] path — the client feeds a per-figure `acc`
+/// advanced by `speed * dt` so the run cycle stays phase-continuous when the
+/// speed changes (polish minor a).
+///
+/// `ground_speed` (blocks/s) scales the run cadence; `acc` is the integrated
+/// distance the caller keeps (NOT `time * speed`, which discontinues on a speed
+/// change).
+#[must_use]
+pub fn quadruped_small_bone_transforms(
+    species: common::comp::quadruped_small::Species,
+    body_type: common::comp::quadruped_small::BodyType,
+    anim: FigureAnim,
+    acc: f32,
+    time: f32,
+    ground_speed: f32,
+) -> BoneRest {
+    use xindeler_anim::{
+        Animation, Skeleton,
+        quadruped_small::{IdleAnimation, QuadrupedSmallSkeleton, RunAnimation, SkeletonAttr},
+    };
+
+    let body = common::comp::quadruped_small::Body { species, body_type };
+    let attr = SkeletonAttr::from(&body);
+    let base = QuadrupedSmallSkeleton::default();
+    let mut rate = 0.0;
+
+    let skeleton = match anim {
+        FigureAnim::Idle => IdleAnimation::update_skeleton(&base, time, time, &mut rate, &attr),
+        // Ground bodies have no flight animation — treat Fly as Run.
+        FigureAnim::Run | FigureAnim::Fly => {
+            // QS run dependency (mod.rs `run.rs`):
+            // `(velocity: f32, orientation, last_ori, global_time, avg_vel, acc_vel)`.
+            // The whole figure already faces its heading (entity Transform), so
+            // drive with forward motion of the right magnitude. `acc` (the
+            // caller's integrated distance) is the phase — continuous across
+            // speed changes.
+            let speed = ground_speed.max(0.5);
+            let ori = vek::Vec3::new(0.0, 1.0, 0.0);
+            let vel = vek::Vec3::new(0.0, speed, 0.0);
+            RunAnimation::update_skeleton(
+                &base,
+                (speed, ori, ori, time, vel, acc),
+                time,
+                &mut rate,
+                &attr,
+            )
+        },
+    };
+
+    let mut buf = [xindeler_anim::FigureBoneData::default(); xindeler_anim::MAX_BONE_COUNT];
+    let computed = skeleton.compute_matrices(vek::Mat4::identity(), &mut buf, body);
+
+    BoneRest {
+        head: mat_to_transform(computed.head),
+        chest: mat_to_transform(computed.chest),
+        leg_fl: mat_to_transform(computed.leg_fl),
+        leg_fr: mat_to_transform(computed.leg_fr),
+        leg_bl: mat_to_transform(computed.leg_bl),
+        leg_br: mat_to_transform(computed.leg_br),
+        tail: mat_to_transform(computed.tail),
+    }
+}
+
 /// The seven rest-pose bone transforms of a quadruped-small figure (Bevy
 /// space, model-scaled).
 pub struct BoneRest {
@@ -488,6 +591,27 @@ pub fn assemble(parts: &[LoadedPart], rest: &BoneRest) -> Vec<FigurePart> {
                 transform: rest.get(part.bone),
                 name: bone_name(part.bone),
             })
+        })
+        .collect()
+}
+
+/// Like [`assemble`] but tags each placed part with its bone, so a caller that
+/// animates the figure per frame can map child entities back to bones even
+/// though empty parts are dropped (EM-3.8c — the animated quadruped path).
+#[must_use]
+pub fn assemble_with_bones(
+    parts: &[LoadedPart],
+    rest: &BoneRest,
+) -> Vec<(FigureBoneName, FigurePart)> {
+    parts
+        .iter()
+        .filter_map(|part| {
+            let mesh = figure_part_to_bevy(part)?;
+            Some((part.bone, FigurePart {
+                mesh,
+                transform: rest.get(part.bone),
+                name: bone_name(part.bone),
+            }))
         })
         .collect()
 }

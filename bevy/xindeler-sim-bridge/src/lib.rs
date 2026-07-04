@@ -439,7 +439,9 @@ impl Default for TestNpcState {
             // ~150 ticks (~5 s at 30 TPS) gives the async chunk gen around the
             // anchor time to produce ground under the spawn ring.
             warmup_ticks: 150,
-            count: 6,
+            // 8 = two of each of the four figure paths (pig / human / wolf /
+            // owl) so every EM-3.8c body type is on the ring.
+            count: 8,
         }
     }
 }
@@ -480,13 +482,14 @@ fn spawn_test_npcs(
             .get_alt_approx(xy.map(|e| e as i32))
             .unwrap_or(0.0);
         let wpos = vek::Vec3::new(xy.x, xy.y, alt + 3.0);
-        // Alternate Pig / Humanoid around the ring so the EM-3.8b humanoid
-        // figure path has live subjects to render (and the smoke camera, which
-        // frames non-player figures, has a humanoid NPC to point at).
-        if i % 2 == 0 {
-            emit_wandering_npc(&sim.server, wpos, i);
-        } else {
-            emit_wandering_humanoid(&sim.server, wpos, i);
+        // Cycle Pig / Humanoid / Wolf / Owl around the ring so every EM-3.8c
+        // figure path (quadruped-small, humanoid, quadruped-medium, bird-medium)
+        // has a live subject the smoke camera can frame.
+        match i % 4 {
+            0 => emit_wandering_npc(&sim.server, wpos, i),
+            1 => emit_wandering_humanoid(&sim.server, wpos, i),
+            2 => emit_wandering_quadruped_medium(&sim.server, wpos, i),
+            _ => emit_wandering_bird_medium(&sim.server, wpos, i),
         }
     }
 
@@ -516,6 +519,54 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
 
     let npc = NpcBuilder::new(
         comp::Stats::new(comp::Content::Plain(format!("Test Human {index}")), body),
+        body,
+        comp::Alignment::Wild,
+    )
+    .with_health(comp::Health::new(body))
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+
+    server.state().emit_event_now(CreateNpcEvent {
+        pos: comp::Pos(wpos),
+        ori: comp::Ori::default(),
+        npc,
+    });
+}
+
+/// Requests one wandering QUADRUPED-MEDIUM (a Wolf) at `wpos` through the sim's
+/// PUBLIC event bus (EM-3.8c) so the client assembles the real QM figure.
+fn emit_wandering_quadruped_medium(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
+    let body: comp::Body = comp::quadruped_medium::Body {
+        species: comp::quadruped_medium::Species::Wolf,
+        body_type: comp::quadruped_medium::BodyType::Male,
+    }
+    .into();
+
+    let npc = NpcBuilder::new(
+        comp::Stats::new(comp::Content::Plain(format!("Test Wolf {index}")), body),
+        body,
+        comp::Alignment::Wild,
+    )
+    .with_health(comp::Health::new(body))
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+
+    server.state().emit_event_now(CreateNpcEvent {
+        pos: comp::Pos(wpos),
+        ori: comp::Ori::default(),
+        npc,
+    });
+}
+
+/// Requests one wandering BIRD-MEDIUM (a Snowy Owl) at `wpos` through the sim's
+/// PUBLIC event bus (EM-3.8c) so the client assembles the real bird figure.
+fn emit_wandering_bird_medium(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
+    let body: comp::Body = comp::bird_medium::Body {
+        species: comp::bird_medium::Species::SnowyOwl,
+        body_type: comp::bird_medium::BodyType::Male,
+    }
+    .into();
+
+    let npc = NpcBuilder::new(
+        comp::Stats::new(comp::Content::Plain(format!("Test Owl {index}")), body),
         body,
         comp::Alignment::Wild,
     )

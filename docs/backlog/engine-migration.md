@@ -50,7 +50,7 @@ so an upgrade waits until the dep tree catches up.
 | **0** | Repos & clean environment | ✅ **complete** (PRs #1, #2, #149) |
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
-| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.8 done (PRs #7–#15): **real Xindeler terrain + entities + a controllable character + real `.vox` figures now render in Bevy**; EM-3.8b (humanoid+animation) next; EM-3.9/3.10/3.11 pending |
+| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.8b done (PRs #7–#17): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped + humanoid) now render in Bevy**; EM-3.8c (figure completion) in progress; EM-3.9/3.10/3.11 pending |
 | **4** | Server shell, replicon transport & ORACLE foundations | ⚪ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
@@ -119,8 +119,8 @@ so an upgrade waits until the dep tree catches up.
 | EM-3.7 | Entity mirror + interpolation — sim entities live on the streamed world | ✅ PR #12 |
 | EM-3.7b | Controllable character + input — **walk the world yourself** (embedded Client, 3rd-person cam) | ✅ PR #13 |
 | EM-3.8 | Figures (`.vox`) — real assembled voxel models replace capsules (quadruped end-to-end; `NetBody`→full `Body`) | ✅ PR #15 |
-| EM-3.8b | Humanoid figures + skeletal animation (armour/recolour/16-bone assembly + idle/walk bone matrices) | 🔵 **NEXT** |
-| EM-3.8c | Skeletal animation follow-up (conditional — if EM-3.8b defers walk/run) | ⚪ |
+| EM-3.8b | Humanoid figures + skeletal animation (armour/recolour/16-bone assembly + idle/walk/run bone matrices) | ✅ PR #17 |
+| EM-3.8c | Figure completion — humanoid weapons/gear bones + remaining bodies (quadruped-medium, birds) + animate the quadruped path + 3 animation-polish minors | 🔵 **NEXT** |
 | EM-3.9 | Sprites (grass/props) + fluids v1 (`river_velocity`) | ⚪ |
 | EM-3.10 | LOD & culling v1 (distance bands + GPU occlusion) | ⚪ |
 | EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | ⚪ |
