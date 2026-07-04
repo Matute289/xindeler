@@ -12,7 +12,7 @@ pub mod atmosphere;
 use bevy::app::{App, Plugin};
 
 pub use crate::atmosphere::{
-    AtmosphereController, AtmosphereProfile, WeatherEffect, XindelerAtmospherePlugin,
+    AmbientSky, AtmosphereController, AtmosphereProfile, WeatherEffect, XindelerAtmospherePlugin,
 };
 
 pub struct OracleHostPlugin;

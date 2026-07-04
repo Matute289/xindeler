@@ -37,6 +37,36 @@ pub enum WeatherEffect {
     Storm,
 }
 
+/// Uniform sky ambient light (drives the client's `GlobalAmbientLight`
+/// resource): the indirect-light floor the voxel vertex AO acts on (spec
+/// §4.3 multiplies AO into indirect light only — without an ambient term the
+/// AO would be invisible).
+///
+/// Engine extension (EM-3.4): not in the canonical DmEvent example; the name
+/// `ambient_sky` follows the engine-extension naming convention of
+/// `fog_volume_density`/`sun_illuminance` (spec §5.4 amendment tracked in
+/// the design repo).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AmbientSky {
+    /// sRGB triple for the ambient tint.
+    pub color: [f32; 3],
+    /// Ambient brightness in cd/m² (bevy's stock default is 80; ours is a
+    /// sky-lit outdoor value balanced against the EV100 13 camera).
+    pub brightness: f32,
+}
+
+impl Default for AmbientSky {
+    fn default() -> Self {
+        Self {
+            // The EM-3.3-era values that used to be hardcoded in the client's
+            // AtmospherePlugin — now data like every other atmosphere knob.
+            color: [0.75, 0.85, 1.0],
+            brightness: 6_000.0,
+        }
+    }
+}
+
 /// One atmosphere preset, loadable from `*.atmo.ron` (and, later, carried
 /// inside a DmEvent). All fields have defaults so partial files keep loading
 /// as the schema grows (`#[serde(default)]`).
@@ -44,9 +74,9 @@ pub enum WeatherEffect {
 /// Field names follow the canonical DmEvent `atmosphere` schema (spec §5.1:
 /// `fog_density`, `fog_color`, `sky_color`, `ambient_light_intensity`,
 /// `weather_effect`, `time_lock`, `transition_secs`);
-/// `fog_volume_density` and `sun_illuminance` are engine extensions (they
-/// drive render knobs the DmEvent example doesn't name; spec §5.4 amendment
-/// tracked in the design repo).
+/// `fog_volume_density`, `sun_illuminance` and `ambient_sky` are engine
+/// extensions (they drive render knobs the DmEvent example doesn't name;
+/// spec §5.4 amendment tracked in the design repo).
 ///
 /// `AtmosphereProfile::default()`, the client rig spawn values and the
 /// shipped `default.atmo.ron` are one single source of truth, so the first
@@ -78,6 +108,9 @@ pub struct AtmosphereProfile {
     /// — the camera compensates with `Exposure { ev100: 13.0 }`.
     /// Engine extension (not in the canonical DmEvent example).
     pub sun_illuminance: f32,
+    /// Uniform sky ambient (`GlobalAmbientLight` on the client). Engine
+    /// extension (EM-3.4) — see [`AmbientSky`].
+    pub ambient_sky: AmbientSky,
     /// Placeholder weather tag (data only for now).
     pub weather_effect: WeatherEffect,
     /// `Some(hour)` freezes the day/night cycle at that hour (`0.0..24.0`,
@@ -100,6 +133,7 @@ impl Default for AtmosphereProfile {
             fog_volume_density: 0.15,
             ambient_light_intensity: 0.1,
             sun_illuminance: 130_000.0,
+            ambient_sky: AmbientSky::default(),
             weather_effect: WeatherEffect::None,
             time_lock: None,
             transition_secs: 5.0,
@@ -120,6 +154,9 @@ pub mod bounds {
     pub const AMBIENT_LIGHT_INTENSITY: (f32, f32) = (0.0, 10.0);
     /// Lux; 200 000 > any physical daylight (raw sunlight = 130 000).
     pub const SUN_ILLUMINANCE: (f32, f32) = (0.0, 200_000.0);
+    /// `GlobalAmbientLight.brightness`, cd/m² (bevy default 80, our sky-lit
+    /// default 6 000; 100 000 is already well past "everything washed out").
+    pub const AMBIENT_SKY_BRIGHTNESS: (f32, f32) = (0.0, 100_000.0);
     /// Transitions longer than an hour are indistinguishable from broken.
     pub const TRANSITION_SECS: (f32, f32) = (0.0, 3600.0);
 }
@@ -164,6 +201,18 @@ impl AtmosphereProfile {
             bounds::SUN_ILLUMINANCE,
             defaults.sun_illuminance,
         );
+        for i in 0..3 {
+            self.ambient_sky.color[i] = sane(
+                self.ambient_sky.color[i],
+                (0.0, 1.0),
+                defaults.ambient_sky.color[i],
+            );
+        }
+        self.ambient_sky.brightness = sane(
+            self.ambient_sky.brightness,
+            bounds::AMBIENT_SKY_BRIGHTNESS,
+            defaults.ambient_sky.brightness,
+        );
         self.time_lock = self
             .time_lock
             .and_then(|hour| hour.is_finite().then(|| hour.rem_euclid(24.0)));
@@ -195,6 +244,12 @@ impl AtmosphereProfile {
         self.ambient_light_intensity =
             lerp(self.ambient_light_intensity, target.ambient_light_intensity);
         self.sun_illuminance = lerp(self.sun_illuminance, target.sun_illuminance);
+        for i in 0..3 {
+            self.ambient_sky.color[i] =
+                lerp(self.ambient_sky.color[i], target.ambient_sky.color[i]);
+        }
+        self.ambient_sky.brightness =
+            lerp(self.ambient_sky.brightness, target.ambient_sky.brightness);
         self.time_lock = match (self.time_lock, target.time_lock) {
             (Some(a), Some(b)) => {
                 // Shortest path around the 24 h wheel (23.0 -> 1.0 goes
@@ -472,6 +527,10 @@ mod tests {
             fog_volume_density: -7.0,
             ambient_light_intensity: f32::INFINITY,
             sun_illuminance: 9.0e9,
+            ambient_sky: AmbientSky {
+                color: [f32::NAN, 5.0, -1.0],
+                brightness: f32::NEG_INFINITY,
+            },
             weather_effect: WeatherEffect::Storm,
             time_lock: Some(37.0),
             transition_secs: -1.0,
@@ -488,6 +547,14 @@ mod tests {
                 < f32::EPSILON
         );
         assert!((garbage.sun_illuminance - bounds::SUN_ILLUMINANCE.1).abs() < f32::EPSILON);
+        assert_eq!(garbage.ambient_sky.color, [
+            defaults.ambient_sky.color[0],
+            1.0,
+            0.0
+        ]);
+        assert!(
+            (garbage.ambient_sky.brightness - defaults.ambient_sky.brightness).abs() < f32::EPSILON
+        );
         assert_eq!(garbage.time_lock, Some(13.0)); // 37 h -> 13 h on the wheel
         assert!((garbage.transition_secs - 0.0).abs() < f32::EPSILON);
 

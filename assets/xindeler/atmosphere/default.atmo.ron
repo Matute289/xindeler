@@ -18,6 +18,12 @@
     ambient_light_intensity: 0.1,
     // Sun illuminance, lux (physical raw sunlight; engine extension).
     sun_illuminance: 130000.0,
+    // Uniform sky ambient -> GlobalAmbientLight (engine extension, EM-3.4):
+    // sRGB color + brightness in cd/m². The indirect floor vertex AO acts on.
+    ambient_sky: (
+        color: (0.75, 0.85, 1.0),
+        brightness: 6000.0,
+    ),
     // Placeholder weather tag: None | Rain | Storm (data only for now).
     weather_effect: None,
     // Some(hour 0.0..24.0) freezes the day/night cycle; None = normal cycle.

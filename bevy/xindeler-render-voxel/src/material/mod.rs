@@ -12,10 +12,36 @@
 //! extension binds THREE texture arrays — albedo, normal, MRA — indexed per
 //! fragment by the flat [`ATTRIBUTE_BLOCK_LAYER`] vertex attribute (one layer
 //! per block type ⇒ no atlas bleeding, greedy-compatible via the converter's
-//! world-space planar UVs). MRA channel convention (documented, kept until
-//! EM-3.4's block palette formalises it): `R = metallic`, `G = perceptual
+//! world-space planar UVs). MRA channel convention (formalised by the
+//! EM-3.4 block palette, which bakes it in [`crate::palette::
+//! build_block_texture_arrays`]): `R = metallic`, `G = perceptual
 //! roughness`, `B = texture AO`, `A = emissive mask` (× albedo ×
 //! [`VoxelMaterialExt::emissive_strength`] — lava/crystal glow).
+//!
+//! ## Per-fragment atlas AO — evaluated for EM-3.5, deferred (design sketch)
+//! Upstream samples the ColLight atlas PER FRAGMENT; our v1 bakes it per
+//! vertex (convert.rs docs). Doing it per fragment here is NOT a drop-in:
+//! the ColLight atlas is PER CHUNK, so the material would need a 4th,
+//! per-chunk texture binding — i.e. one `VoxelMaterial` asset per chunk.
+//! That forfeits the single shared material every chunk entity reuses today
+//! (one bind group, cheap budgeted uploads, trivial hot-reload-in-place) and
+//! adds an atlas image upload per chunk to the EM-3.5 budget. Sketch for
+//! when a chunk shows a crease the corner bake misses (the known v1 loss):
+//! 1. converter emits `ATTRIBUTE_ATLAS_UV` (Float32x2, `atlas_pos /
+//!    atlas_size`, shader location 10 — free in main + prepass, same argument
+//!    as 8/9),
+//! 2. extension grows `#[texture(108)] #[sampler(109)] col_light:
+//!    Handle<Image>` (linear filter, per-chunk asset built from
+//!    `TerrainAtlasData::col_lights`),
+//! 3. fragment replaces `in.voxel_ao` with `textureSample(col_light, …,
+//!    atlas_uv).a` and `ao_strength` returns to ~1.0,
+//! 4. pipeline gains a small per-chunk material cache (`HashMap<ChunkKey,
+//!    Handle<VoxelMaterial>>`) and counts the atlas upload against the frame
+//!    budget.
+//!
+//! Not scheduled: terrain-ish content splits greedy quads at exactly the
+//! creases that matter (EM-3.2 histogram test), so the corner bake plus the
+//! `ao_strength` remap covers what the eye sees today.
 //!
 //! ## Custom vertex path (verified against bevy_pbr-0.19.0 source)
 //! The extension supplies BOTH main-pass shaders (`vertex` + `fragment` in
@@ -91,7 +117,9 @@ pub struct VoxelMaterialExt {
     #[sampler(105)]
     pub mra: Handle<Image>,
     /// Luminance scale for the MRA alpha emissive mask (HDR units, feeds
-    /// bloom). TODO(EM-3.4): per-block emissive comes from the palette RON.
+    /// bloom). EM-3.4: data — `block_palette.ron`
+    /// (`material.emissive_strength`); the per-block mask itself is baked
+    /// into the MRA alpha by the palette's array builder.
     #[uniform(106)]
     pub emissive_strength: f32,
     /// Vertex-AO response: occlusion is remapped as
@@ -101,8 +129,9 @@ pub struct VoxelMaterialExt {
     /// vertices bottom out around ~0.74, which is imperceptible once
     /// multiplied into the indirect share of the lighting — pixel-A/B
     /// measured −0.4% at 1.0. Values ~2..3 restore the visible Bedrock
-    /// corner. TODO(EM-3.5): per-fragment ColLight atlas sampling makes this
-    /// mostly redundant.
+    /// corner. EM-3.4: data — `block_palette.ron` (`material.ao_strength`).
+    /// Per-fragment ColLight sampling would retire the remap — evaluated
+    /// and deferred with a design sketch (module docs, EM-3.5 decision).
     #[uniform(107)]
     pub ao_strength: f32,
 }

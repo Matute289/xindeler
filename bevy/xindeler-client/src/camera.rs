@@ -63,10 +63,12 @@ fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
     // AtmosphereController state is a visual no-op (no boot pop).
     let boot_profile = AtmosphereProfile::default();
 
-    // Raised/pulled back for EM-3.3: frames the voxel demo chunk (centered on
-    // the origin, up to ~15 high) with the PBR sweep + columns at the edges.
+    // Reframed for EM-3.5: the voxel demo is now a 5×5 chunk grid spanning
+    // Bevy x ∈ [32, 192], z ∈ [-192, -32] (center ~(112, ~7, -112), heights
+    // ≤ 15) — look at it diagonally from above the EM-2.2 scene corner so
+    // the smoke screenshot shows the terrain continuous across chunks.
     let transform =
-        Transform::from_xyz(-28.0, 20.0, 32.0).looking_at(Vec3::new(2.0, 4.0, -2.0), Vec3::Y);
+        Transform::from_xyz(44.0, 38.0, -44.0).looking_at(Vec3::new(124.0, 4.0, -124.0), Vec3::Y);
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
 
     let mut camera = commands.spawn((

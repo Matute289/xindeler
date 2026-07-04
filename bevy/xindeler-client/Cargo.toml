@@ -19,9 +19,10 @@ bevy = { version = "=0.19.0", features = ["file_watcher"] }
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }
 # AtmosphereProfile asset + AtmosphereController (EM-2.4, spec §5.4).
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
-# EM-3.2/3.3: greedy mesher + bevy conversion + VoxelMaterialExt.
+# EM-3.2..3.5: greedy mesher + bevy conversion + VoxelMaterialExt + block
+# palette (EM-3.4) + async chunk pipeline (EM-3.5).
 xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [
-    "material",
+    "pipeline",
 ] }
 # Logic crates as TYPE LIBRARIES only ([Q3]=B): the voxel demo builds a
 # synthetic `VolGrid2d<TerrainChunk>` with `common` terrain types. Legal

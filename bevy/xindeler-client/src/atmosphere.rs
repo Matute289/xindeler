@@ -54,14 +54,11 @@ impl Plugin for AtmospherePlugin {
         // Sky ambient so the vertex AO has indirect light to act on (spec §4.3
         // multiplies AO into indirect ONLY; bevy's default 80 cd/m² is invisible
         // next to the 130k-lux sun at EV100 13). 0.19: `GlobalAmbientLight` is the
-        // resource (`AmbientLight` became per-camera). TODO(EM-3.4/atmo-v2): add an
-        // `ambient_sky` field to AtmosphereProfile and lerp/apply it like the rest —
-        // this hardcode is the LAST atmosphere value living in code.
-        app.insert_resource(bevy::light::GlobalAmbientLight {
-            color: Color::srgb(0.75, 0.85, 1.0),
-            brightness: 6_000.0,
-            affects_lightmapped_meshes: true,
-        });
+        // resource (`AmbientLight` became per-camera). EM-3.4: the value is DATA
+        // (`AtmosphereProfile.ambient_sky`) — boot from the same defaults the
+        // shipped default.atmo.ron carries (single source of truth, no boot pop);
+        // apply_atmosphere lerps/applies it like every other atmosphere knob.
+        app.insert_resource(ambient_light_from(&AtmosphereProfile::default()));
         app.add_plugins(XindelerAtmospherePlugin {
             profile_path: PROFILE_ASSET_PATH.to_owned(),
         })
@@ -100,6 +97,18 @@ pub fn volumetric_fog_from(profile: &AtmosphereProfile) -> VolumetricFog {
     }
 }
 
+/// `GlobalAmbientLight` built from a profile (see [`distance_fog_from`] for
+/// the spawn/apply sharing rationale). `affects_lightmapped_meshes` is a
+/// code-side constant (terrain is never lightmapped).
+pub fn ambient_light_from(profile: &AtmosphereProfile) -> bevy::light::GlobalAmbientLight {
+    let [r, g, b] = profile.ambient_sky.color;
+    bevy::light::GlobalAmbientLight {
+        color: Color::srgb(r, g, b),
+        brightness: profile.ambient_sky.brightness,
+        affects_lightmapped_meshes: true,
+    }
+}
+
 fn profile_fog_color(profile: &AtmosphereProfile) -> Color {
     let [r, g, b] = profile.fog_color;
     Color::srgb(r, g, b)
@@ -116,6 +125,7 @@ fn apply_atmosphere(
     mut volumetric_fogs: Query<&mut VolumetricFog, With<Camera3d>>,
     mut fog_volumes: Query<&mut bevy::light::FogVolume>,
     mut suns: Query<&mut DirectionalLight, With<Sun>>,
+    mut ambient: ResMut<bevy::light::GlobalAmbientLight>,
     mut clear_color: ResMut<ClearColor>,
     mut cycle: ResMut<SunCycle>,
 ) {
@@ -142,6 +152,15 @@ fn apply_atmosphere(
         if (sun.illuminance - profile.sun_illuminance).abs() > f32::EPSILON {
             sun.illuminance = profile.sun_illuminance;
         }
+    }
+
+    // Sky ambient -> GlobalAmbientLight (EM-3.4). Guard the write like the
+    // sun: only dirty the resource while the value actually animates.
+    let ambient_target = ambient_light_from(profile);
+    if ambient.color != ambient_target.color
+        || (ambient.brightness - ambient_target.brightness).abs() > f32::EPSILON
+    {
+        *ambient = ambient_target;
     }
 
     // Sky/void color -> world ClearColor (lerped upstream like the rest).

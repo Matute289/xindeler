@@ -43,15 +43,17 @@
 //! crease strictly inside one huge merged rect is missed — terrain-ish
 //! content splits quads at exactly those creases, so corners dominate in
 //! practice. The thresholded `ColLight::ao` bool, `glow` (→ emissive) and
-//! per-block `col` tint are NOT consumed yet — TODO(EM-3.4): block palette
-//! decides glow→emissive and colour-vs-texture policy.
+//! per-block `col` tint are NOT consumed: EM-3.4's block palette decided the
+//! policy — emissive and colour are PER LAYER (palette-baked into the
+//! texture arrays), not per voxel; the atlas `glow`/`col` channels stay
+//! unread (upstream diff surface only).
 //!
 //! **`ATTRIBUTE_BLOCK_LAYER` = texture-array layer from the kinds atlas.**
 //! The vertex itself does not carry a block kind, but its `atlas_pos` indexes
 //! `TerrainAtlasData::kinds` (one `BlockKind as u8` per texel), so we sample
 //! that and map it through a caller-provided `kind → layer` function — the
-//! mapping is DATA the caller owns. TODO(EM-3.4): the real mapping comes from
-//! `block_palette.ron`; until then callers pass a stub (unknown kinds → 0).
+//! mapping is DATA the caller owns (EM-3.4: `BlockPalette::layer_lut` from
+//! `block_palette.ron`, snapshotted per EM-3.5 mesh task).
 //! Same v1 caveat as AO: greedy merges across kind boundaries, so a mixed
 //! quad takes its corner kinds (flat-interpolated in the shader).
 //!
@@ -124,7 +126,8 @@ fn quad_indices(vert_count: usize) -> Vec<u32> {
 /// `POSITION`/`NORMAL`/`UV_0`/[`ATTRIBUTE_VOXEL_AO`]/[`ATTRIBUTE_BLOCK_LAYER`].
 ///
 /// `kind_to_layer` maps a `BlockKind as u8` (from the kinds atlas) to a
-/// texture-array layer — pass the block-palette mapping (TODO(EM-3.4): RON).
+/// texture-array layer — pass the block-palette mapping
+/// (`BlockPalette::layer_lut`, EM-3.4).
 ///
 /// # Panics
 /// Debug-panics if the mesh is not quad-indexed (terrain always is) or an

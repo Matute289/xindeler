@@ -1,0 +1,42 @@
+// Block palette (BL-82 EM-3.4, spec §4.2/§5.1) — the data-driven mapping
+// BlockKind -> texture-array layer + PBR parameters.
+//
+// Schema: `BlockPalette` in bevy/xindeler-render-voxel/src/palette.rs.
+// Every value is sanitized on load (colors/roughness/metallic/per-block
+// emissive/alpha 0..=1, layers < 64, texture_size a power of two in
+// 4..=128); garbage falls back to documented defaults instead of reaching
+// the GPU.
+//
+// Hot reload: edit while the client runs — the texture arrays and material
+// regenerate and every chunk re-meshes (the change POPS; palettes are
+// content edits, not ambience transitions).
+//
+// `texture` per-block override paths are reserved for future HD packs and
+// unused in v1 (the layers are generated procedurally: base_color +
+// deterministic noise, flat normals).
+(
+    // Layer for any BlockKind without an explicit entry below.
+    default_layer: 0,
+    // Per-layer texel resolution of the procedural arrays.
+    texture_size: 32,
+    // Material-level knobs of VoxelMaterialExt (were code constants pre-3.4):
+    material: (
+        // HDR luminance scale of the emissive mask (bloom at EV100 13).
+        emissive_strength: 60000.0,
+        // Vertex-AO response remap (>1 compensates the v1 per-vertex bake).
+        ao_strength: 2.5,
+    ),
+    blocks: {
+        // Gray stone — the workhorse fallback look (layer 0 = default_layer).
+        Rock:        (layer: 0, base_color: (0.46, 0.46, 0.48), roughness: 0.88, metallic: 0.0, emissive_strength: 0.0),
+        // Warm brown topsoil.
+        Earth:       (layer: 1, base_color: (0.55, 0.38, 0.22), roughness: 0.96, metallic: 0.0, emissive_strength: 0.0),
+        // Cyan crystal veins (emissive mask -> bloom).
+        GlowingRock: (layer: 2, base_color: (0.35, 0.88, 1.0), roughness: 0.35, metallic: 0.05, emissive_strength: 0.85),
+        // Water: the fluid mesh renders with a stock transparent material
+        // until EM-3.9's water shader, but its color/roughness/alpha come
+        // from HERE (the client builds that material from this entry;
+        // `alpha` defaults to 1.0 and is only consumed by fluid kinds).
+        Water:       (layer: 3, base_color: (0.15, 0.35, 0.6), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.6),
+    },
+)
