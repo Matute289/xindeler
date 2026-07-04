@@ -12,6 +12,7 @@
 
 mod atmosphere;
 mod camera;
+#[cfg(feature = "listen-server")] mod entity_view;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
