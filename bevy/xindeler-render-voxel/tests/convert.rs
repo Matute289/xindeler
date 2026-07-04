@@ -15,7 +15,8 @@ use std::sync::Arc;
 use vek::*;
 use xindeler_render_voxel::{
     convert::{
-        ATTRIBUTE_BLOCK_LAYER, ATTRIBUTE_VOXEL_AO, fluid_mesh_to_bevy, terrain_mesh_to_bevy,
+        ATTRIBUTE_BLOCK_LAYER, ATTRIBUTE_RIVER_VELOCITY, ATTRIBUTE_VOXEL_AO, fluid_mesh_to_bevy,
+        terrain_mesh_to_bevy,
     },
     mesh::terrain::generate_mesh,
 };
@@ -181,6 +182,13 @@ fn golden_chunk_converts_with_matching_counts() {
             .attribute(BevyMesh::ATTRIBUTE_UV_0.id)
             .is_some()
     );
+    // EM-3.9: the river-velocity attribute is carried (one Vec2 per vertex).
+    let Some(VertexAttributeValues::Float32x2(vel)) =
+        fluid_converted.attribute(ATTRIBUTE_RIVER_VELOCITY.id)
+    else {
+        panic!("fluid mesh must carry the river-velocity attribute (Float32x2)");
+    };
+    assert_eq!(vel.len(), GOLDEN_FLUID_VERTS);
 }
 
 #[test]
