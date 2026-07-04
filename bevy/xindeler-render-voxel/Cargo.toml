@@ -8,21 +8,29 @@ license.workspace = true
 workspace = true
 
 [features]
-# `convert` is on by default so `cargo test -p xindeler-render-voxel` covers
-# the EM-3.2 conversion tests; `--no-default-features` still builds the pure
-# CPU mesher (greedy/terrain/segment) with zero bevy render machinery.
-default = ["convert"]
+# `pipeline` (→ material → convert) is on by default so a plain
+# `cargo test -p xindeler-render-voxel` covers the EM-3.2 conversion, EM-3.4
+# palette and EM-3.5 pipeline tests; `--no-default-features` still builds the
+# pure CPU mesher (greedy/terrain/segment) with zero bevy render machinery.
+default = ["pipeline"]
 # EM-3.2: `Mesh<TerrainVertex>` → `bevy::mesh::Mesh` conversion. Minimal bevy
 # 0.19 features (verified against bevy-0.19.0/Cargo.toml + bevy_internal):
 # - `bevy_mesh`: gates the `bevy::mesh` re-export (Mesh, MeshVertexAttribute,
-#   Indices, PrimitiveTopology, VertexFormat re-exported from wgpu_types),
+#   Indices, PrimitiveTopology, VertexFormat re-exported from wgpu_types) and
+#   enables `bevy_image` (the `bevy::image` facade — used by EM-3.4),
 # - `bevy_asset`: gates `bevy::asset` (RenderAssetUsages lives there in 0.19).
 # Neither pulls bevy_render/wgpu — the mesher core stays render-free.
 convert = ["bevy/bevy_mesh", "bevy/bevy_asset"]
-# EM-3.3: `VoxelMaterialExt` (ExtendedMaterial extension + embedded WGSL).
-# `bevy_pbr` transitively enables bevy_core_pipeline → bevy_render →
-# bevy_shader (facade module gates verified in bevy_internal-0.19.0/src/lib.rs).
-material = ["convert", "bevy/bevy_pbr"]
+# EM-3.3/3.4: `VoxelMaterialExt` (ExtendedMaterial extension + embedded WGSL)
+# + the data-driven block palette (`BlockPalette` RON asset + procedural
+# texture-array builder). `bevy_pbr` transitively enables bevy_core_pipeline
+# → bevy_render → bevy_shader (facade module gates verified in
+# bevy_internal-0.19.0/src/lib.rs).
+material = ["convert", "bevy/bevy_pbr", "dep:serde", "dep:ron"]
+# EM-3.5: async chunk meshing pipeline (dirty queue → AsyncComputeTaskPool →
+# budgeted uploads). `multi_threaded` gives bevy_tasks real worker threads so
+# the pipeline (and its headless test) actually meshes off the main thread.
+pipeline = ["material", "bevy/multi_threaded"]
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
@@ -41,5 +49,8 @@ common-base = { package = "xindeler-common-base", path = "../../common/base" }
 # reference (voxygen/Cargo.toml: guillotiere = "0.7.0") so upstream fixes
 # diff-port cleanly.
 guillotiere = "0.7.0"
+# EM-3.4 block palette (`material` feature): RON asset schema + loader.
+ron = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 tracing = { workspace = true }
 vek = { workspace = true }

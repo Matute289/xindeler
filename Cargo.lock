@@ -11898,6 +11898,8 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "guillotiere 0.7.0",
+ "ron",
+ "serde",
  "tracing",
  "vek",
  "xindeler-common",
