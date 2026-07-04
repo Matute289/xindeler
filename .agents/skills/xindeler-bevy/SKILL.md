@@ -10,8 +10,24 @@ Xindeler is migrating 100% (client + server shell) from Veloren's bespoke engine
 - Spec: `docs/design/specs/2026-07-02-bevy-migration-design.md`
 - Mapper (rename + concept map + sync triage): `docs/design/specs/2026-07-02-veloren-xindeler-mapper.md`
 - Plan: `docs/design/plans/2026-07-02-bevy-migration-plan.md` · Board: `docs/design/tasks/45-engine-migration-tasks.md`
+- **Human-readable program backlog (PUBLIC repo): `docs/backlog/engine-migration.md`** — all EM tasks,
+  done + pending, phase by phase. Keep it current when a task lands or a new one is added.
 
 Review every migration PR with the **`bevy-migration-reviewer`** agent.
+
+## ⚠️ Bevy is pre-1.0 — plan for breaking changes every release (standing rule)
+
+Bevy is young and NOT production-frozen: **minor releases (0.19 → 0.20 → …) routinely break APIs**
+(0.19 alone moved the render graph to ECS schedules, made resources components, swapped the text
+stack). So on **every new Bevy release** (standing track **EM-M1** in the migration backlog):
+1. Read the official **migration guide** (`bevy.org/learn/migration-guides/<from>-to-<to>/`) + release
+   notes (`bevy.org/news/…`) — never upgrade blind.
+2. Catalog the breaking changes that touch our `bevy/*` crates; write a spec+plan+tasks for the bump.
+3. Bump the exact pin, fix everything that broke, re-run all gates + the smoke screenshots.
+4. Add the concrete tasks to `docs/backlog/engine-migration.md` when it fires.
+Contained by design: engine churn lives only in `bevy/*`, so an upgrade is one bounded PR. Pin EXACT
+(`=0.19.0`) so a version never drifts by accident; ecosystem deps (replicon…) lag a new Bevy ~1–3
+months, so wait for the dep tree before upgrading. First real exercise = EM-6.3.
 
 ## The architecture in one paragraph (decisions LOCKED 2026-07-02)
 
