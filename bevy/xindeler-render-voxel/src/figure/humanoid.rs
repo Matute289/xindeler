@@ -255,6 +255,8 @@ pub enum HumBone {
     FootR,
     ShoulderL,
     ShoulderR,
+    /// The main-hand weapon bone (EM-3.8c). Holds the equipped tool `.vox`.
+    Main,
 }
 
 impl HumBone {
@@ -270,6 +272,7 @@ impl HumBone {
             HumBone::FootR => "foot_r",
             HumBone::ShoulderL => "shoulder_l",
             HumBone::ShoulderR => "shoulder_r",
+            HumBone::Main => "main",
         }
     }
 }
@@ -320,7 +323,28 @@ pub enum HumVoxRole {
         flipped: bool,
         tint: Option<[u8; 3]>,
     },
+    /// The main-hand weapon (EM-3.8c). v1 uses a fixed TEST tool (a sword) at a
+    /// hardcoded offset, since the mirror does not carry equipped-inventory
+    /// data yet — real equipped gear is a later follow-up. `offset` recentres
+    /// the tool around the `main` bone (voxygen `HumMainWeaponSpec` `vox_spec`
+    /// offset).
+    MainWeapon {
+        offset: [f32; 3],
+    },
 }
+
+/// The TEST main-hand weapon v1 hangs on the humanoid's `main` bone (EM-3.8c).
+/// A concrete bronze longsword from the frozen `biped_weapon_manifest` — chosen
+/// as a stand-in until real equipped gear rides the mirror. Name relative to
+/// `voxygen.voxel` (`graceful_load_vox` namespace); offset copied from that
+/// tool's manifest `vox_spec` entry so it sits in the hand correctly.
+pub const TEST_MAIN_WEAPON_VOX: &str = "weapon.sword.longsword.bronze-2h";
+/// The frozen manifest offset for [`TEST_MAIN_WEAPON_VOX`]
+/// (`biped_weapon_manifest.ron`: `vox_spec: ("...longsword.bronze-2h", (-1.5,
+/// -3.5, -5.0))`). Kept as a literal — the ToolKey-keyed manifest is not worth
+/// deserialising just for one test tool (isolation law rule 3: we read the
+/// value, not the file, for the v1 stand-in).
+pub const TEST_MAIN_WEAPON_OFFSET: [f32; 3] = [-1.5, -3.5, -5.0];
 
 /// The list of `.vox` files (+ their roles) a humanoid figure needs, in the
 /// order the assembler expects. The caller loads each `vox_name`, then calls
@@ -402,6 +426,18 @@ pub fn humanoid_vox_refs(manifests: &HumManifests<'_>, body: &Body) -> Option<Ve
     let shoulder = &manifests.shoulder.default_slot();
     refs.push(sided_ref(HumBone::ShoulderL, &shoulder.left, true));
     refs.push(sided_ref(HumBone::ShoulderR, &shoulder.right, false));
+
+    // --- Main-hand weapon (EM-3.8c): a fixed TEST tool on the `main` bone. ---
+    // v1 always gives the humanoid the stand-in sword (no equipped-gear data in
+    // the mirror yet). It's a plain-colour `.vox` (no material recolour), placed
+    // by the character skeleton's `main` bone.
+    refs.push(HumVoxRef {
+        role: HumVoxRole::MainWeapon {
+            offset: TEST_MAIN_WEAPON_OFFSET,
+        },
+        vox_name: TEST_MAIN_WEAPON_VOX.to_string(),
+        model_index: 0,
+    });
 
     Some(refs)
 }
@@ -610,6 +646,12 @@ pub fn assemble_humanoid(
                 };
                 (*bone, seg, offset)
             },
+            HumVoxRole::MainWeapon { offset } => {
+                // The weapon is a plain-colour `.vox` (no material recolour),
+                // placed on the `main` bone (voxygen `mesh_main_weapon`).
+                let seg = plain_seg(p.vox, false, p.model_index);
+                (HumBone::Main, seg, Vec3::from(*offset))
+            },
             _ => continue,
         };
         if let Some(mesh) = segment_to_bevy(&seg, offset) {
@@ -680,6 +722,8 @@ pub struct HumBoneTransforms {
     pub foot_r: Transform,
     pub shoulder_l: Transform,
     pub shoulder_r: Transform,
+    /// The main-hand weapon bone (EM-3.8c).
+    pub main: Transform,
 }
 
 impl HumBoneTransforms {
@@ -696,6 +740,7 @@ impl HumBoneTransforms {
             HumBone::FootR => self.foot_r,
             HumBone::ShoulderL => self.shoulder_l,
             HumBone::ShoulderR => self.shoulder_r,
+            HumBone::Main => self.main,
         }
     }
 }
@@ -711,10 +756,13 @@ pub enum HumAnim {
     Run,
 }
 
-/// Compute the humanoid bone transforms for `body` at animation `anim` and
-/// `time` seconds (Part B). `time` drives the cyclic animations; passing a
-/// constant (e.g. 0) with [`HumAnim::Idle`] yields a deterministic rest pose
-/// (the EM-3.8 static path).
+/// Compute the humanoid bone transforms for `body` at animation `anim`, phase
+/// accumulator `acc` and `time` seconds (Part B). `time` drives the cyclic
+/// idle sway; `acc` (blocks travelled, advanced by the caller as `speed * dt`)
+/// drives the foot cycle so it stays phase-continuous across speed changes
+/// (EM-3.8c polish minor a). Passing `acc = 0`, `time = 0` with
+/// [`HumAnim::Idle`] yields the deterministic rest pose (the EM-3.8 static
+/// path).
 ///
 /// `ground_speed` (blocks/s, from the entity's replicated velocity) scales the
 /// run cycle so a slow walk animates slower than a sprint.
@@ -722,6 +770,7 @@ pub enum HumAnim {
 pub fn humanoid_bone_transforms(
     body: &Body,
     anim: HumAnim,
+    acc: f32,
     time: f32,
     ground_speed: f32,
 ) -> HumBoneTransforms {
@@ -741,11 +790,25 @@ pub fn humanoid_bone_transforms(
     // `back_carry_offset = 0.0` are the v1 no-loadout defaults.)
     let base = CharacterSkeleton::new(false, 0.0, 1.0);
 
+    // EM-3.8c: the humanoid carries a fixed TEST 2-handed sword (see
+    // [`TEST_MAIN_WEAPON_VOX`]). We MUST tell the idle/run animations that so
+    // their `do_tools_on_back(hands, active_tool_kind, ..)` step places the
+    // `main` bone correctly — SHEATHED on the back with the 2H-sword pose
+    // (`position (-7,-5,15)`, `rotation_y(2.5)·rotation_z(π/2)`). Without this
+    // the `main` bone stays at its raw skeleton default (unrotated at the
+    // hand), so the long flat sword `.vox` renders as a big vertical slab (the
+    // EM-3.8c-review bug). We do NOT drive a wield/attack pose (no live tool
+    // state in the mirror) — "sword on the back" is the correct neutral pose
+    // for a non-attacking character, exactly what voxygen shows.
+    use common::comp::tool::{Hands, ToolKind};
+    let active_tool = Some(ToolKind::Sword);
+    let hands = (Some(Hands::Two), None);
+
     let skeleton = match anim {
         HumAnim::Idle => IdleAnimation::update_skeleton(
             &base,
             // (active_tool, second_tool, hands, global_time)
-            (None, None, (None, None), time),
+            (active_tool, None, hands, time),
             time,
             &mut rate,
             &attr,
@@ -759,15 +822,17 @@ pub fn humanoid_bone_transforms(
             let speed = ground_speed.max(0.5);
             let vel = Vec3::new(0.0, speed, 0.0);
             let ori = Vec3::new(0.0, 1.0, 0.0);
-            // acc_vel accumulates distance for the foot-cycle phase; derive a
-            // continuous phase from time * speed so the cycle advances smoothly.
-            let acc_vel = time * speed;
+            // acc_vel accumulates distance for the foot-cycle phase. Use the
+            // caller-maintained `acc` (integrated `speed * dt`) so the cycle
+            // stays continuous when the speed changes (polish minor a) rather
+            // than the old `time * speed`, which jumps on any speed change.
+            let acc_vel = acc;
             RunAnimation::update_skeleton(
                 &base,
                 (
-                    None,           // active_tool_kind
+                    active_tool,    // active_tool_kind (sheathes the sword)
                     None,           // second_tool_kind
-                    (None, None),   // hands
+                    hands,          // hands (Two → 2H back pose)
                     vel,            // velocity
                     ori,            // orientation
                     ori,            // last_ori
@@ -802,6 +867,7 @@ pub fn humanoid_bone_transforms(
         foot_r: mat_to_transform(computed.foot_r),
         shoulder_l: mat_to_transform(computed.shoulder_l),
         shoulder_r: mat_to_transform(computed.shoulder_r),
+        main: mat_to_transform(computed.main),
     }
 }
 
@@ -809,7 +875,7 @@ pub fn humanoid_bone_transforms(
 /// (`sin(0) = 0`). Convenience wrapper over [`humanoid_bone_transforms`].
 #[must_use]
 pub fn humanoid_bone_rest(body: &Body) -> HumBoneTransforms {
-    humanoid_bone_transforms(body, HumAnim::Idle, 0.0, 0.0)
+    humanoid_bone_transforms(body, HumAnim::Idle, 0.0, 0.0, 0.0)
 }
 
 #[cfg(test)]
@@ -873,9 +939,10 @@ mod tests {
             skin: 0,
             eye_color: 0,
         };
-        let idle = humanoid_bone_transforms(&body, HumAnim::Idle, 1.0, 0.0);
-        let run_a = humanoid_bone_transforms(&body, HumAnim::Run, 1.0, 4.0);
-        let run_b = humanoid_bone_transforms(&body, HumAnim::Run, 1.3, 4.0);
+        let idle = humanoid_bone_transforms(&body, HumAnim::Idle, 0.0, 1.0, 0.0);
+        let run_a = humanoid_bone_transforms(&body, HumAnim::Run, 4.0, 1.0, 4.0);
+        // Advance the accumulator (not just `time`) to prove acc drives phase.
+        let run_b = humanoid_bone_transforms(&body, HumAnim::Run, 5.2, 1.3, 4.0);
         // A running foot is placed differently than an idle one.
         assert_ne!(
             idle.foot_l.translation, run_a.foot_l.translation,
@@ -885,6 +952,125 @@ mod tests {
         assert_ne!(
             run_a.foot_l.translation, run_b.foot_l.translation,
             "run cycle should advance with time"
+        );
+    }
+
+    /// EM-3.8c: a `MainWeapon` role meshes to a real (non-empty) `bevy::Mesh`
+    /// on the `main` bone, WITHOUT needing the (ToolKey-keyed) weapon manifest
+    /// — v1 uses a fixed test-tool `.vox`. A tiny synthetic `.vox` stands
+    /// in for the real sword so the test needs no assets.
+    #[test]
+    fn main_weapon_meshes_on_the_main_bone() {
+        use super::super::LoadedPart;
+
+        // Reuse the parent module's 1-voxel `.vox` helper via a local build.
+        let mut palette = vec![
+            dot_vox::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
+            };
+            256
+        ];
+        palette[1] = dot_vox::Color {
+            r: 180,
+            g: 180,
+            b: 200,
+            a: 255,
+        };
+        let vox = DotVoxData {
+            version: 150,
+            models: vec![dot_vox::Model {
+                size: dot_vox::Size { x: 1, y: 1, z: 1 },
+                voxels: vec![dot_vox::Voxel {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    i: 1,
+                }],
+            }],
+            palette,
+            materials: vec![],
+            scenes: vec![],
+            layers: vec![],
+            index_map: Vec::new(),
+        };
+        // The weapon is a plain-colour segment (no recolour) placed at its
+        // offset — exactly what `assemble_humanoid` does for `MainWeapon`.
+        let part = LoadedPart {
+            vox: &vox,
+            model_index: 0,
+            offset: Vec3::from(TEST_MAIN_WEAPON_OFFSET),
+            flipped: false,
+            bone: super::super::FigureBoneName::Chest, // unused for direct mesh
+        };
+        let mesh = super::super::figure_part_to_bevy(&part).expect("weapon voxel meshes");
+        assert_eq!(mesh.count_vertices(), 24, "a cube is 6 quads × 4 verts");
+
+        // And the `main` bone transform exists + is finite in a full pose.
+        let body = Body {
+            species: Species::Human,
+            body_type: BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+        };
+        let bones = humanoid_bone_rest(&body);
+        let main = bones.get(HumBone::Main).translation;
+        assert!(
+            main.is_finite(),
+            "the main-weapon bone transform must be finite"
+        );
+        // EM-3.8c bug fix: the 2H sword must be SHEATHED ON THE BACK, not stuck
+        // at the raw skeleton default. `do_tools_on_back` (fed
+        // `ToolKind::Sword` + `Hands::Two`) moves `main` well BEHIND the chest
+        // (negative sim-y = Bevy +z, i.e. behind), high up the back — clearly
+        // separated from the hand. Assert it moved off the chest centre so the
+        // "flat slab at the origin" regression can't come back silently.
+        let chest = bones.get(HumBone::Chest).translation;
+        assert!(
+            (main - chest).length() > 0.05,
+            "the sheathed weapon must be offset from the chest (on the back), got main={main:?} \
+             chest={chest:?}"
+        );
+        // On the back = behind the chest in Bevy z (+z is behind, since sim −y →
+        // Bevy +z) and above the belt.
+        assert!(
+            main.z > chest.z,
+            "the sheathed 2H sword sits BEHIND the chest (on the back), got main.z={} chest.z={}",
+            main.z,
+            main.z,
+        );
+    }
+
+    /// EM-3.8c minor (a): the run foot cycle is driven by the `acc`
+    /// accumulator, NOT the wall clock — advancing `acc` while holding `time`
+    /// fixed still moves the feet. This is what keeps the cycle continuous when
+    /// the speed (and thus `d(acc)/dt`) changes.
+    #[test]
+    fn run_phase_follows_acc_not_time() {
+        let body = Body {
+            species: Species::Human,
+            body_type: BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+        };
+        // Same `time`, different `acc` → different foot placement.
+        let a = humanoid_bone_transforms(&body, HumAnim::Run, 2.0, 1.0, 4.0);
+        let b = humanoid_bone_transforms(&body, HumAnim::Run, 6.0, 1.0, 4.0);
+        assert_ne!(
+            a.foot_l.translation, b.foot_l.translation,
+            "acc must drive the foot cycle independently of the wall clock"
         );
     }
 

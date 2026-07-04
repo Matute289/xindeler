@@ -296,12 +296,22 @@ impl Plugin for SmokeFigureCamPlugin {
 const FIG_CAM_BACK: f32 = 3.5;
 const FIG_CAM_UP: f32 = 2.2;
 
-/// Points the smoke camera at the nearest non-player mirrored figure from a
-/// close, elevated 3/4 angle, so the capture shows an assembled `.vox` NPC.
-/// Picks the NPC closest to the player (or world centre) — the wandering test
-/// critters spawn in a ring around the anchor on open terrain.
+/// Points the smoke camera at a non-player mirrored figure from a close,
+/// elevated 3/4 angle, so the capture shows an assembled `.vox` NPC. PREFERS
+/// the nearest HUMANOID (the richest figure — head recolour + clothing + the
+/// sheathed weapon), falling back to the nearest figure of any body when no
+/// humanoid is assembled yet. The wandering test critters spawn in a ring
+/// around the anchor on open terrain.
 fn smoke_figure_cam(
     players: Query<&Transform, With<NetLocalPlayer>>,
+    humanoids: Query<
+        (&Transform, Option<&Interpolated>),
+        (
+            With<crate::figure_view::HumanoidFigure>,
+            Without<NetLocalPlayer>,
+            Without<FlyCam>,
+        ),
+    >,
     figures: Query<
         (&Transform, Option<&Interpolated>),
         (With<Children>, Without<NetLocalPlayer>, Without<FlyCam>),
@@ -309,14 +319,25 @@ fn smoke_figure_cam(
     mut cameras: Query<&mut Transform, (With<FlyCam>, Without<NetLocalPlayer>)>,
 ) {
     let focus = players.iter().next().map_or(Vec3::ZERO, |t| t.translation);
-    // Nearest child-bearing (= assembled figure) NPC to the player/centre.
-    let subject = figures
-        .iter()
-        .map(|(tf, interp)| interp.map_or(tf.translation, |i| i.pos))
-        .min_by(|a, b| {
+    let nearest = |it: &mut dyn Iterator<Item = Vec3>| {
+        it.min_by(|a, b| {
             a.distance_squared(focus)
                 .total_cmp(&b.distance_squared(focus))
-        });
+        })
+    };
+    // Prefer a humanoid; else any assembled (child-bearing) figure.
+    let subject = nearest(
+        &mut humanoids
+            .iter()
+            .map(|(tf, interp)| interp.map_or(tf.translation, |i| i.pos)),
+    )
+    .or_else(|| {
+        nearest(
+            &mut figures
+                .iter()
+                .map(|(tf, interp)| interp.map_or(tf.translation, |i| i.pos)),
+        )
+    });
     let Some(subject) = subject else {
         return; // no figure spawned yet — leave the existing camera
     };

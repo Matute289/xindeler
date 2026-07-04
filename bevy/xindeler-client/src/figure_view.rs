@@ -5,13 +5,18 @@
 //! The heavy lifting (meshing, recolour, bone placement, animation) lives in
 //! `xindeler-render-voxel::figure`; THIS module is the client-side asset glue.
 //!
-//! ## Two body paths
-//! - **quadruped-small** (EM-3.8): two manifests + raw `.vox` parts → static
-//!   rest-pose figure (the sim's test-NPC Pig).
-//! - **humanoid** (EM-3.8b): eight manifests (colour + head + six armour slots)
-//!   → recoloured 16-bone character (the player + humanoid NPCs), plus
-//!   per-frame skeletal ANIMATION (idle vs walk/run from the entity's
-//!   replicated velocity) via [`animate_humanoids`].
+//! ## Body paths (EM-3.8 → EM-3.8c)
+//! - **quadruped-small** (EM-3.8, animated in EM-3.8c): two manifests + raw
+//!   `.vox` parts → the sim's test-NPC Pig.
+//! - **quadruped-medium** (EM-3.8c): two manifests → Wolf/Bear/etc.
+//! - **bird-medium** (EM-3.8c): two manifests → Owl/Duck/etc (idle/run/fly).
+//! - **humanoid** (EM-3.8b + EM-3.8c weapon): eight manifests (colour + head +
+//!   six armour slots) → recoloured 16-bone character + a TEST main-hand
+//!   weapon.
+//!
+//! Every body is animated per frame by the single [`animate_figures`] system
+//! (idle vs run from the replicated velocity), each figure carrying a
+//! [`FigureAnimState`] (phase accumulator + idle/run hysteresis).
 //!
 //! ## Flow (decoupled from load timing)
 //! `super::entity_view::add_presentation` still gives EVERY new mirrored entity
@@ -25,9 +30,10 @@
 //!    crate) and parented at its bone `Transform` — then marks [`FigureBuilt`]
 //!    (humanoids additionally get a [`HumanoidFigure`] the animation drives).
 //!
-//! Still-unsupported bodies (quadruped-medium, birds, …) are marked
-//! [`FigureBuilt`] immediately and keep their capsule. `TODO(EM-3.8c)`: the
-//! remaining bodies + quadruped animation + humanoid weapons/equipped gear.
+//! Still-unsupported bodies (quadruped-low, bipeds, dragons, …) are marked
+//! [`FigureBuilt`] immediately and keep their capsule. `TODO(EM-3.8d)`: the
+//! remaining bodies + real equipped gear from the inventory (v1 weapon is a
+//! fixed test sword) + lantern/back/glider bones.
 //!
 //! ## Purity
 //! 100% Bevy + `xindeler-render-voxel` (a shell crate) + `dot_vox`/`ron` — NO
@@ -43,14 +49,22 @@ use bevy::{
 use dot_vox::DotVoxData;
 use xindeler_protocol::{NetBody, NetVel};
 use xindeler_render_voxel::figure::{
-    self, FigureBody, LoadedPart, PartSpecRef, QS_CENTRAL_MANIFEST, QS_LATERAL_MANIFEST,
-    QsCentralManifest, QsLateralManifest,
+    self, FigureAnim, FigureBody, LoadedPart, PartSpecRef, QS_CENTRAL_MANIFEST,
+    QS_LATERAL_MANIFEST, QsCentralManifest, QsLateralManifest,
+    bird_medium::{
+        self, BM_CENTRAL_MANIFEST, BM_LATERAL_MANIFEST, BmBone, BmBoneTransforms,
+        BmCentralManifest, BmLateralManifest, BmPartSpecRef, LoadedBmPart,
+    },
     humanoid::{
         self, HUM_ARMOR_BELT_MANIFEST, HUM_ARMOR_CHEST_MANIFEST, HUM_ARMOR_FOOT_MANIFEST,
         HUM_ARMOR_HAND_MANIFEST, HUM_ARMOR_PANTS_MANIFEST, HUM_ARMOR_SHOULDER_MANIFEST,
         HUM_COLOR_MANIFEST, HUM_HEAD_MANIFEST, HumAnim, HumArmorBeltSpec, HumArmorChestSpec,
         HumArmorFootSpec, HumArmorHandSpec, HumArmorPantsSpec, HumArmorShoulderSpec, HumBone,
         HumColorSpec, HumHeadSpec, HumManifests, HumVoxRef, LoadedHumPart,
+    },
+    quadruped_medium::{
+        self, LoadedQmPart, QM_CENTRAL_MANIFEST, QM_LATERAL_MANIFEST, QmBone, QmBoneTransforms,
+        QmCentralManifest, QmLateralManifest, QmPartSpecRef,
     },
 };
 
@@ -63,6 +77,10 @@ impl Plugin for FigureViewPlugin {
         app.init_asset::<VoxAsset>()
             .init_asset::<QsCentralManifestAsset>()
             .init_asset::<QsLateralManifestAsset>()
+            .init_asset::<QmCentralManifestAsset>()
+            .init_asset::<QmLateralManifestAsset>()
+            .init_asset::<BmCentralManifestAsset>()
+            .init_asset::<BmLateralManifestAsset>()
             .init_asset::<HumColorManifestAsset>()
             .init_asset::<HumHeadManifestAsset>()
             .init_asset::<HumChestManifestAsset>()
@@ -74,6 +92,10 @@ impl Plugin for FigureViewPlugin {
             .init_asset_loader::<VoxLoader>()
             .init_asset_loader::<QsCentralManifestLoader>()
             .init_asset_loader::<QsLateralManifestLoader>()
+            .init_asset_loader::<QmCentralManifestLoader>()
+            .init_asset_loader::<QmLateralManifestLoader>()
+            .init_asset_loader::<BmCentralManifestLoader>()
+            .init_asset_loader::<BmLateralManifestLoader>()
             .init_asset_loader::<HumColorManifestLoader>()
             .init_asset_loader::<HumHeadManifestLoader>()
             .init_asset_loader::<HumChestManifestLoader>()
@@ -82,13 +104,26 @@ impl Plugin for FigureViewPlugin {
             .init_asset_loader::<HumFootManifestLoader>()
             .init_asset_loader::<HumHandManifestLoader>()
             .init_asset_loader::<HumShoulderManifestLoader>()
-            .add_systems(Startup, (load_figure_manifests, load_humanoid_manifests))
+            .add_systems(
+                Startup,
+                (
+                    load_figure_manifests,
+                    load_quadruped_medium_manifests,
+                    load_bird_medium_manifests,
+                    load_humanoid_manifests,
+                ),
+            )
             .add_systems(
                 Update,
                 (
                     classify_bodies,
                     build_pending_figures,
+                    build_pending_quadruped_mediums,
+                    build_pending_bird_mediums,
                     build_pending_humanoids,
+                    animate_quadruped_smalls,
+                    animate_quadruped_mediums,
+                    animate_bird_mediums,
                     animate_humanoids,
                 )
                     .chain(),
@@ -209,6 +244,89 @@ fn load_figure_manifests(mut commands: Commands, asset_server: Res<AssetServer>)
     });
 }
 
+// --- EM-3.8c: quadruped-medium + bird-medium manifest assets/loaders ---
+//
+// Reuse the same typed-`.ron`-by-asset-type trick the humanoid manifests use.
+// One Asset + Loader per manifest wrapper type; the loader parses the RON.
+
+macro_rules! ron_manifest_asset {
+    ($asset:ident, $loader:ident, $inner:ty) => {
+        #[derive(Asset, TypePath)]
+        pub struct $asset(pub $inner);
+
+        #[derive(Default, TypePath)]
+        struct $loader;
+
+        impl AssetLoader for $loader {
+            type Asset = $asset;
+            type Error = BevyError;
+            type Settings = ();
+
+            async fn load(
+                &self,
+                reader: &mut dyn Reader,
+                (): &Self::Settings,
+                _ctx: &mut LoadContext<'_>,
+            ) -> Result<Self::Asset, Self::Error> {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).await?;
+                Ok($asset(ron::de::from_bytes(&bytes)?))
+            }
+
+            fn extensions(&self) -> &[&str] { &["ron"] }
+        }
+    };
+}
+
+ron_manifest_asset!(
+    QmCentralManifestAsset,
+    QmCentralManifestLoader,
+    QmCentralManifest
+);
+ron_manifest_asset!(
+    QmLateralManifestAsset,
+    QmLateralManifestLoader,
+    QmLateralManifest
+);
+ron_manifest_asset!(
+    BmCentralManifestAsset,
+    BmCentralManifestLoader,
+    BmCentralManifest
+);
+ron_manifest_asset!(
+    BmLateralManifestAsset,
+    BmLateralManifestLoader,
+    BmLateralManifest
+);
+
+/// Strong handles to the quadruped-medium manifests.
+#[derive(Resource)]
+struct QmFigureManifests {
+    central: Handle<QmCentralManifestAsset>,
+    lateral: Handle<QmLateralManifestAsset>,
+}
+
+fn load_quadruped_medium_manifests(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(QmFigureManifests {
+        central: asset_server.load(asset_path(QM_CENTRAL_MANIFEST, "ron")),
+        lateral: asset_server.load(asset_path(QM_LATERAL_MANIFEST, "ron")),
+    });
+}
+
+/// Strong handles to the bird-medium manifests.
+#[derive(Resource)]
+struct BmFigureManifests {
+    central: Handle<BmCentralManifestAsset>,
+    lateral: Handle<BmLateralManifestAsset>,
+}
+
+fn load_bird_medium_manifests(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(BmFigureManifests {
+        central: asset_server.load(asset_path(BM_CENTRAL_MANIFEST, "ron")),
+        lateral: asset_server.load(asset_path(BM_LATERAL_MANIFEST, "ron")),
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Classify → load → build
 // ---------------------------------------------------------------------------
@@ -219,6 +337,14 @@ fn load_figure_manifests(mut commands: Commands, asset_server: Res<AssetServer>)
 fn resolve_figure_body(body: &NetBody) -> FigureBody {
     match body.0 {
         common::comp::Body::QuadrupedSmall(b) => FigureBody::QuadrupedSmall {
+            species: b.species,
+            body_type: b.body_type,
+        },
+        common::comp::Body::QuadrupedMedium(b) => FigureBody::QuadrupedMedium {
+            species: b.species,
+            body_type: b.body_type,
+        },
+        common::comp::Body::BirdMedium(b) => FigureBody::BirdMedium {
             species: b.species,
             body_type: b.body_type,
         },
@@ -239,23 +365,101 @@ struct PendingPart {
     handle: Handle<VoxAsset>,
 }
 
+/// A quadruped-medium entity whose real figure is still loading its parts.
+#[derive(Component)]
+struct PendingQuadrupedMedium {
+    parts: Vec<PendingQmPart>,
+    species: common::comp::quadruped_medium::Species,
+    body_type: common::comp::quadruped_medium::BodyType,
+}
+
+struct PendingQmPart {
+    spec: QmPartSpecRef,
+    handle: Handle<VoxAsset>,
+}
+
+/// A bird-medium entity whose real figure is still loading its parts.
+#[derive(Component)]
+struct PendingBirdMedium {
+    parts: Vec<PendingBmPart>,
+    species: common::comp::bird_medium::Species,
+    body_type: common::comp::bird_medium::BodyType,
+}
+
+struct PendingBmPart {
+    spec: BmPartSpecRef,
+    handle: Handle<VoxAsset>,
+}
+
 /// Marks an entity that has been finalised: it has a real figure OR is a
 /// deliberately-kept capsule (unsupported body). Neither figure nor capsule
 /// path re-processes it.
 #[derive(Component)]
 pub struct FigureBuilt;
 
+/// Per-figure locomotion animation state shared by every animated body
+/// (EM-3.8c). `acc` is the integrated distance (`speed * dt`) that drives the
+/// foot/flap cycle phase continuously across speed changes (polish minor a);
+/// `running` latches the idle↔run choice through a hysteresis band so an NPC
+/// hovering near the threshold doesn't flicker (polish minor b).
+#[derive(Component, Default)]
+struct FigureAnimState {
+    acc: f32,
+    running: bool,
+}
+
+/// Idle→run enter / run→idle exit speeds (blocks/s). The gap is the hysteresis
+/// band: below `EXIT` we idle, above `ENTER` we run, in-between we hold the
+/// current state (polish minor b — replaces the old single 0.4 threshold).
+const RUN_ENTER_SPEED: f32 = 0.5;
+const RUN_EXIT_SPEED: f32 = 0.3;
+
+/// Updates a figure's [`FigureAnimState`] from the current ground `speed` and
+/// frame `dt`, returning whether it should animate as running. Advances the
+/// phase accumulator and applies idle/run hysteresis.
+fn step_anim_state(state: &mut FigureAnimState, speed: f32, dt: f32) -> bool {
+    // Wrap the phase accumulator so f32 resolution can't coarsen over long
+    // sessions (acc in the 1e5–1e6 range → visible cycle stepping). 1024 is a
+    // multiple of 2π larger than every anim's phase multiplier, so cycle
+    // continuity is preserved across the wrap (reviewer minor, EM-3.8c).
+    state.acc = (state.acc + speed * dt).rem_euclid(1024.0);
+    if state.running {
+        if speed < RUN_EXIT_SPEED {
+            state.running = false;
+        }
+    } else if speed > RUN_ENTER_SPEED {
+        state.running = true;
+    }
+    state.running
+}
+
+/// Horizontal ground speed (blocks/s) from a replicated [`NetVel`] (Bevy axes;
+/// the ground plane is x/z, y is up).
+fn ground_speed(vel: Option<&NetVel>) -> f32 {
+    vel.map_or(0.0, |v| {
+        let h = v.0;
+        (h.x * h.x + h.z * h.z).sqrt()
+    })
+}
+
 /// Every frame, for any mirrored entity not yet finalised: classify its body.
 /// Unsupported → mark [`FigureBuilt`] (keeps its capsule). Supported → once the
 /// manifests are parsed, start loading its `.vox` parts ([`PendingFigure`]).
 /// Runs each frame (not just on `Added`) so it is robust to the manifests
 /// finishing loading AFTER the first NPCs are mirrored.
+#[allow(clippy::too_many_arguments)]
 fn classify_bodies(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     manifests: Option<Res<FigureManifests>>,
     central_assets: Res<Assets<QsCentralManifestAsset>>,
     lateral_assets: Res<Assets<QsLateralManifestAsset>>,
+    qm_manifests: Option<Res<QmFigureManifests>>,
+    qm_central_assets: Res<Assets<QmCentralManifestAsset>>,
+    qm_lateral_assets: Res<Assets<QmLateralManifestAsset>>,
+    bm_manifests: Option<Res<BmFigureManifests>>,
+    bm_central_assets: Res<Assets<BmCentralManifestAsset>>,
+    bm_lateral_assets: Res<Assets<BmLateralManifestAsset>>,
     hum: Option<Res<HumanoidManifests>>,
     hum_assets: HumManifestAssets,
     query: Query<
@@ -264,6 +468,8 @@ fn classify_bodies(
             With<NetBody>,
             Without<FigureBuilt>,
             Without<PendingFigure>,
+            Without<PendingQuadrupedMedium>,
+            Without<PendingBirdMedium>,
             Without<PendingHumanoid>,
         ),
     >,
@@ -272,6 +478,68 @@ fn classify_bodies(
         let figure_body = resolve_figure_body(body);
         let species_body_type = match figure_body {
             FigureBody::QuadrupedSmall { species, body_type } => (species, body_type),
+            FigureBody::QuadrupedMedium { species, body_type } => {
+                // QM path (EM-3.8c): once both QM manifests are parsed, resolve
+                // the part list and start loading each part's `.vox`.
+                let Some(qm_manifests) = &qm_manifests else {
+                    continue;
+                };
+                let (Some(central), Some(lateral)) = (
+                    qm_central_assets.get(&qm_manifests.central),
+                    qm_lateral_assets.get(&qm_manifests.lateral),
+                ) else {
+                    continue;
+                };
+                let Some(specs) = quadruped_medium::quadruped_medium_part_specs(
+                    &central.0, &lateral.0, species, body_type,
+                ) else {
+                    commands.entity(entity).insert(FigureBuilt);
+                    continue;
+                };
+                let parts: Vec<PendingQmPart> = specs
+                    .into_iter()
+                    .map(|spec| {
+                        let handle = asset_server.load(vox_path(&spec.vox_name));
+                        PendingQmPart { spec, handle }
+                    })
+                    .collect();
+                commands.entity(entity).insert(PendingQuadrupedMedium {
+                    parts,
+                    species,
+                    body_type,
+                });
+                continue;
+            },
+            FigureBody::BirdMedium { species, body_type } => {
+                let Some(bm_manifests) = &bm_manifests else {
+                    continue;
+                };
+                let (Some(central), Some(lateral)) = (
+                    bm_central_assets.get(&bm_manifests.central),
+                    bm_lateral_assets.get(&bm_manifests.lateral),
+                ) else {
+                    continue;
+                };
+                let Some(specs) =
+                    bird_medium::bird_medium_part_specs(&central.0, &lateral.0, species, body_type)
+                else {
+                    commands.entity(entity).insert(FigureBuilt);
+                    continue;
+                };
+                let parts: Vec<PendingBmPart> = specs
+                    .into_iter()
+                    .map(|spec| {
+                        let handle = asset_server.load(vox_path(&spec.vox_name));
+                        PendingBmPart { spec, handle }
+                    })
+                    .collect();
+                commands.entity(entity).insert(PendingBirdMedium {
+                    parts,
+                    species,
+                    body_type,
+                });
+                continue;
+            },
             FigureBody::Humanoid(hum_body) => {
                 // Humanoid path (EM-3.8b): once the humanoid manifests are all
                 // parsed, resolve the part `.vox` list and start loading them.
@@ -352,26 +620,28 @@ fn build_pending_figures(
     pending: Query<(Entity, &PendingFigure)>,
 ) {
     for (entity, figure) in &pending {
-        // Wait until all parts have loaded (or hard-failed).
-        let mut all_ready = true;
-        let mut any_failed = false;
-        for part in &figure.parts {
-            match asset_server.get_load_state(&part.handle) {
-                Some(LoadState::Loaded) => {},
-                Some(LoadState::Failed(_)) => any_failed = true,
-                _ => all_ready = false,
-            }
-        }
-        if any_failed {
-            warn!("figure: a .vox part failed to load; keeping the placeholder capsule");
-            commands
-                .entity(entity)
-                .remove::<PendingFigure>()
-                .insert(FigureBuilt);
-            continue;
-        }
-        if !all_ready {
-            continue;
+        // Per-part fallback (polish minor c): an OPTIONAL part that hard-fails
+        // is dropped and the figure still builds; an ESSENTIAL part that fails
+        // keeps the capsule. We wait until every part is either loaded or
+        // finished (failed).
+        let ready = poll_parts(
+            &asset_server,
+            figure
+                .parts
+                .iter()
+                .map(|p| (&p.handle, qs_part_essential(p.spec.bone))),
+        );
+        match ready {
+            PartsReady::Waiting => continue,
+            PartsReady::EssentialFailed => {
+                warn!("figure: an essential .vox part failed to load; keeping the capsule");
+                commands
+                    .entity(entity)
+                    .remove::<PendingFigure>()
+                    .insert(FigureBuilt);
+                continue;
+            },
+            PartsReady::Ready => {},
         }
 
         let FigureBody::QuadrupedSmall { species, body_type } = figure.body else {
@@ -383,6 +653,7 @@ fn build_pending_figures(
         };
         let rest = figure::quadruped_small_bone_rest(species, body_type);
 
+        // Skip any optional part whose `.vox` failed (its handle isn't Loaded).
         let loaded: Vec<LoadedPart> = figure
             .parts
             .iter()
@@ -396,16 +667,12 @@ fn build_pending_figures(
                 })
             })
             .collect();
-        let assembled = figure::assemble(&loaded, &rest);
+        let assembled = figure::assemble_with_bones(&loaded, &rest);
 
-        // One shared matte material for all vertex-coloured parts (bind-group
-        // reuse). base_color WHITE so the per-voxel vertex colour shows through.
-        let material = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.85,
-            ..default()
-        });
+        let material = figure_material(&mut materials);
 
+        let mut part_entities: Vec<(figure::FigureBoneName, Entity)> =
+            Vec::with_capacity(assembled.len());
         let mut ec = commands.entity(entity);
         // Drop the placeholder capsule geometry; keep the (interpolated) root
         // Transform + Visibility so the figure moves with the entity.
@@ -414,17 +681,277 @@ fn build_pending_figures(
             .remove::<PendingFigure>()
             .insert(FigureBuilt);
         ec.with_children(|root| {
-            for part in assembled {
-                root.spawn((
-                    Mesh3d(meshes.add(part.mesh)),
-                    MeshMaterial3d(material.clone()),
-                    part.transform,
-                    Name::new(part.name),
-                ));
+            for (bone, part) in assembled {
+                let child = root
+                    .spawn((
+                        Mesh3d(meshes.add(part.mesh)),
+                        MeshMaterial3d(material.clone()),
+                        part.transform,
+                        Name::new(part.name),
+                    ))
+                    .id();
+                part_entities.push((bone, child));
             }
         });
+        ec.insert((
+            QuadrupedSmallFigure {
+                species,
+                body_type,
+                parts: part_entities,
+            },
+            FigureAnimState::default(),
+        ));
 
         info!("figure: assembled a real .vox model for a quadruped-small NPC");
+    }
+}
+
+/// A finalised quadruped-small figure (EM-3.8c: now animated). Keeps the
+/// species/body-type + the bone→child map so [`animate_figures`] updates each
+/// part's `Transform` per frame.
+#[derive(Component)]
+struct QuadrupedSmallFigure {
+    species: common::comp::quadruped_small::Species,
+    body_type: common::comp::quadruped_small::BodyType,
+    parts: Vec<(figure::FigureBoneName, Entity)>,
+}
+
+/// A finalised quadruped-medium figure.
+#[derive(Component)]
+struct QuadrupedMediumFigure {
+    species: common::comp::quadruped_medium::Species,
+    body_type: common::comp::quadruped_medium::BodyType,
+    parts: Vec<(QmBone, Entity)>,
+}
+
+/// A finalised bird-medium figure.
+#[derive(Component)]
+struct BirdMediumFigure {
+    species: common::comp::bird_medium::Species,
+    body_type: common::comp::bird_medium::BodyType,
+    parts: Vec<(BmBone, Entity)>,
+}
+
+/// Is a quadruped-small bone essential? Everything but the tail is core; a
+/// missing tail still gives a recognisable animal (polish minor c).
+fn qs_part_essential(bone: figure::FigureBoneName) -> bool {
+    !matches!(bone, figure::FigureBoneName::Tail)
+}
+
+/// Is a quadruped-medium bone essential? Jaw/ears/tail are cosmetic extras.
+fn qm_part_essential(bone: QmBone) -> bool {
+    !matches!(bone, QmBone::Jaw | QmBone::Ears | QmBone::Tail)
+}
+
+/// Is a bird-medium bone essential? The tail is the only skippable part.
+fn bm_part_essential(bone: BmBone) -> bool { !matches!(bone, BmBone::Tail) }
+
+/// Outcome of polling a figure's parts (per-part fallback, polish minor c).
+enum PartsReady {
+    /// Some part is still loading — retry next frame.
+    Waiting,
+    /// An ESSENTIAL part hard-failed — the figure can't build.
+    EssentialFailed,
+    /// Every part is loaded, or the only failures were OPTIONAL parts.
+    Ready,
+}
+
+/// Polls `(handle, essential)` pairs: `Waiting` if any is still in flight,
+/// `EssentialFailed` if an essential part failed, else `Ready` (optional
+/// failures are tolerated and simply skipped at assembly).
+fn poll_parts<'a>(
+    asset_server: &AssetServer,
+    parts: impl Iterator<Item = (&'a Handle<VoxAsset>, bool)>,
+) -> PartsReady {
+    let mut essential_failed = false;
+    for (handle, essential) in parts {
+        match asset_server.get_load_state(handle) {
+            Some(LoadState::Loaded) => {},
+            Some(LoadState::Failed(_)) => {
+                if essential {
+                    essential_failed = true;
+                }
+            },
+            _ => return PartsReady::Waiting,
+        }
+    }
+    if essential_failed {
+        PartsReady::EssentialFailed
+    } else {
+        PartsReady::Ready
+    }
+}
+
+/// The shared matte material for vertex-coloured figure parts (bind-group
+/// reuse; base_color WHITE so per-voxel vertex colour shows through).
+fn figure_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.85,
+        ..default()
+    })
+}
+
+/// Once every part of a [`PendingQuadrupedMedium`] resolves (per-part
+/// fallback), assemble + place the QM figure and attach
+/// [`QuadrupedMediumFigure`].
+fn build_pending_quadruped_mediums(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    vox_assets: Res<Assets<VoxAsset>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    pending: Query<(Entity, &PendingQuadrupedMedium)>,
+) {
+    for (entity, figure) in &pending {
+        let ready = poll_parts(
+            &asset_server,
+            figure
+                .parts
+                .iter()
+                .map(|p| (&p.handle, qm_part_essential(p.spec.bone))),
+        );
+        match ready {
+            PartsReady::Waiting => continue,
+            PartsReady::EssentialFailed => {
+                warn!("qm figure: an essential .vox part failed; keeping the capsule");
+                commands
+                    .entity(entity)
+                    .remove::<PendingQuadrupedMedium>()
+                    .insert(FigureBuilt);
+                continue;
+            },
+            PartsReady::Ready => {},
+        }
+
+        let rest: QmBoneTransforms =
+            quadruped_medium::quadruped_medium_bone_rest(figure.species, figure.body_type);
+        let loaded: Vec<LoadedQmPart> = figure
+            .parts
+            .iter()
+            .filter_map(|part| {
+                vox_assets.get(&part.handle).map(|vox| LoadedQmPart {
+                    vox: &vox.0,
+                    model_index: part.spec.model_index,
+                    offset: part.spec.offset,
+                    flipped: part.spec.flipped,
+                    bone: part.spec.bone,
+                })
+            })
+            .collect();
+        let assembled = quadruped_medium::assemble(&loaded, &rest);
+        let material = figure_material(&mut materials);
+
+        let mut part_entities: Vec<(QmBone, Entity)> = Vec::with_capacity(assembled.len());
+        let mut ec = commands.entity(entity);
+        ec.remove::<Mesh3d>()
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .remove::<PendingQuadrupedMedium>()
+            .insert(FigureBuilt);
+        ec.with_children(|root| {
+            for (bone, part) in assembled {
+                let child = root
+                    .spawn((
+                        Mesh3d(meshes.add(part.mesh)),
+                        MeshMaterial3d(material.clone()),
+                        part.transform,
+                        Name::new(part.name),
+                    ))
+                    .id();
+                part_entities.push((bone, child));
+            }
+        });
+        ec.insert((
+            QuadrupedMediumFigure {
+                species: figure.species,
+                body_type: figure.body_type,
+                parts: part_entities,
+            },
+            FigureAnimState::default(),
+        ));
+
+        info!("figure: assembled a real .vox model for a quadruped-medium NPC");
+    }
+}
+
+/// Once every part of a [`PendingBirdMedium`] resolves, assemble + place the
+/// bird figure and attach [`BirdMediumFigure`].
+fn build_pending_bird_mediums(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    vox_assets: Res<Assets<VoxAsset>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    pending: Query<(Entity, &PendingBirdMedium)>,
+) {
+    for (entity, figure) in &pending {
+        let ready = poll_parts(
+            &asset_server,
+            figure
+                .parts
+                .iter()
+                .map(|p| (&p.handle, bm_part_essential(p.spec.bone))),
+        );
+        match ready {
+            PartsReady::Waiting => continue,
+            PartsReady::EssentialFailed => {
+                warn!("bird figure: an essential .vox part failed; keeping the capsule");
+                commands
+                    .entity(entity)
+                    .remove::<PendingBirdMedium>()
+                    .insert(FigureBuilt);
+                continue;
+            },
+            PartsReady::Ready => {},
+        }
+
+        let rest: BmBoneTransforms =
+            bird_medium::bird_medium_bone_rest(figure.species, figure.body_type);
+        let loaded: Vec<LoadedBmPart> = figure
+            .parts
+            .iter()
+            .filter_map(|part| {
+                vox_assets.get(&part.handle).map(|vox| LoadedBmPart {
+                    vox: &vox.0,
+                    model_index: part.spec.model_index,
+                    offset: part.spec.offset,
+                    flipped: part.spec.flipped,
+                    bone: part.spec.bone,
+                })
+            })
+            .collect();
+        let assembled = bird_medium::assemble(&loaded, &rest);
+        let material = figure_material(&mut materials);
+
+        let mut part_entities: Vec<(BmBone, Entity)> = Vec::with_capacity(assembled.len());
+        let mut ec = commands.entity(entity);
+        ec.remove::<Mesh3d>()
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .remove::<PendingBirdMedium>()
+            .insert(FigureBuilt);
+        ec.with_children(|root| {
+            for (bone, part) in assembled {
+                let child = root
+                    .spawn((
+                        Mesh3d(meshes.add(part.mesh)),
+                        MeshMaterial3d(material.clone()),
+                        part.transform,
+                        Name::new(part.name),
+                    ))
+                    .id();
+                part_entities.push((bone, child));
+            }
+        });
+        ec.insert((
+            BirdMediumFigure {
+                species: figure.species,
+                body_type: figure.body_type,
+                parts: part_entities,
+            },
+            FigureAnimState::default(),
+        ));
+
+        info!("figure: assembled a real .vox model for a bird-medium NPC");
     }
 }
 
@@ -592,8 +1119,10 @@ struct PendingHumPart {
 /// A finalised humanoid figure: keeps the `Body` (for per-frame animation) and
 /// the bone→child-entity map so [`animate_humanoids`] can update each part's
 /// `Transform` every frame. Present ⇒ the entity is also [`FigureBuilt`].
+/// `pub` so the smoke figure cam can prefer framing a humanoid (the richest
+/// figure — head recolour + clothing + weapon) when one is present.
 #[derive(Component)]
-struct HumanoidFigure {
+pub struct HumanoidFigure {
     body: common::comp::humanoid::Body,
     /// One (bone, child-entity) pair per assembled part.
     parts: Vec<(HumBone, Entity)>,
@@ -620,28 +1149,30 @@ fn build_pending_humanoids(
     };
 
     for (entity, figure) in &pending {
-        let mut all_ready = true;
-        let mut any_failed = false;
-        for part in &figure.parts {
-            match asset_server.get_load_state(&part.handle) {
-                Some(LoadState::Loaded) => {},
-                Some(LoadState::Failed(_)) => any_failed = true,
-                _ => all_ready = false,
-            }
-        }
-        if any_failed {
-            warn!("humanoid figure: a .vox part failed to load; keeping the placeholder capsule");
-            commands
-                .entity(entity)
-                .remove::<PendingHumanoid>()
-                .insert(FigureBuilt);
-            continue;
-        }
-        if !all_ready {
-            continue;
+        // Per-part fallback (polish minor c): a missing accessory/weapon/eye
+        // etc. is dropped; a missing core body part keeps the capsule.
+        let ready = poll_parts(
+            &asset_server,
+            figure
+                .parts
+                .iter()
+                .map(|p| (&p.handle, hum_role_essential(&p.spec.role))),
+        );
+        match ready {
+            PartsReady::Waiting => continue,
+            PartsReady::EssentialFailed => {
+                warn!("humanoid figure: an essential .vox part failed; keeping the capsule");
+                commands
+                    .entity(entity)
+                    .remove::<PendingHumanoid>()
+                    .insert(FigureBuilt);
+                continue;
+            },
+            PartsReady::Ready => {},
         }
 
         // Pair each loaded `.vox` back with its role, then recolour + assemble.
+        // A failed OPTIONAL part isn't in the store, so `filter_map` drops it.
         let loaded: Vec<LoadedHumPart> = figure
             .parts
             .iter()
@@ -655,16 +1186,10 @@ fn build_pending_humanoids(
             .collect();
         let assembled = humanoid::assemble_humanoid(&figure.body, &manifests, &loaded);
         // Rest pose (idle at t=0) for the initial placement; animation updates
-        // it every frame (`animate_humanoids`).
+        // it every frame (`animate_figures`).
         let rest = humanoid::humanoid_bone_rest(&figure.body);
 
-        // One shared matte material (bind-group reuse); base_color WHITE so the
-        // per-voxel vertex colour shows through (same as the quadruped path).
-        let material = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.85,
-            ..default()
-        });
+        let material = figure_material(&mut materials);
 
         let mut part_entities: Vec<(HumBone, Entity)> = Vec::with_capacity(assembled.len());
         let mut ec = commands.entity(entity);
@@ -686,48 +1211,216 @@ fn build_pending_humanoids(
                 part_entities.push((bone, child));
             }
         });
-        ec.insert(HumanoidFigure {
-            body: figure.body,
-            parts: part_entities,
-        });
+        ec.insert((
+            HumanoidFigure {
+                body: figure.body,
+                parts: part_entities,
+            },
+            FigureAnimState::default(),
+        ));
 
-        info!("humanoid figure: assembled a real .vox character (default loadout)");
+        info!("humanoid figure: assembled a real .vox character (default loadout + weapon)");
     }
 }
 
-/// Per-frame skeletal animation for assembled humanoids (EM-3.8b Part B): pick
-/// idle vs run from the entity's replicated velocity, recompute the character
-/// bone transforms at the current time, and write each part-child's
-/// `Transform`.
-///
-/// The whole figure already faces its heading (the entity root carries the
-/// interpolated orientation), so we drive the animation with a generic forward
-/// velocity of the right MAGNITUDE (`|NetVel|`), not its world direction — that
-/// keeps the stride speed matched without double-applying the heading.
-fn animate_humanoids(
+/// Is a humanoid part role essential? The bare head + torso + limbs (chest,
+/// pants, hands, feet) are core; hair/beard/eyes/accessory/belt/shoulders and
+/// the test weapon are cosmetic and may be dropped (polish minor c).
+fn hum_role_essential(role: &humanoid::HumVoxRole) -> bool {
+    use humanoid::HumVoxRole::*;
+    match role {
+        HeadBare { .. } | Chest | Pants => true,
+        Sided { bone, .. } => matches!(
+            bone,
+            HumBone::HandL | HumBone::HandR | HumBone::FootL | HumBone::FootR
+        ),
+        // Eyes, hair, beard, accessory, belt, shoulders, weapon — all optional.
+        _ => false,
+    }
+}
+
+// ===========================================================================
+// EM-3.8c — per-frame animation for every assembled figure
+// ===========================================================================
+//
+// One (chained) system per animated body. They're split rather than merged
+// because they all mutably borrow `FigureAnimState`: Bevy proves two queries in
+// ONE system disjoint only via `With`/`Without` filters, and it can't see that
+// the four figure-marker components are mutually exclusive — so a single system
+// holding four `&mut FigureAnimState` queries panics (B0001). Separate systems
+// each hold one figure query + their own `Query<&mut Transform>` (the figure
+// query doesn't touch `Transform`, so no intra-system conflict).
+//
+// Each figure carries a `FigureAnimState` (phase accumulator + hysteresis
+// latch) advanced by `speed * dt`, so the run cycle stays phase-continuous
+// across speed changes (minor a) and idle↔run doesn't flicker (minor b).
+//
+// The whole figure already faces its heading (the entity root carries the
+// interpolated orientation), so we drive the animations with a generic forward
+// velocity of the right MAGNITUDE (`|NetVel|`), never its world direction.
+
+/// Writes the given bone transforms onto each part child.
+fn apply_bones<B: Copy>(
+    parts: &[(B, Entity)],
+    transforms: &mut Query<&mut Transform>,
+    get: impl Fn(B) -> Transform,
+) {
+    for (bone, child) in parts {
+        if let Ok(mut tf) = transforms.get_mut(*child) {
+            *tf = get(*bone);
+        }
+    }
+}
+
+/// Animate quadruped-small figures (idle/run).
+fn animate_quadruped_smalls(
     time: Res<Time>,
-    figures: Query<(&HumanoidFigure, Option<&NetVel>)>,
+    mut figures: Query<(&QuadrupedSmallFigure, &mut FigureAnimState, Option<&NetVel>)>,
     mut transforms: Query<&mut Transform>,
 ) {
-    let t = time.elapsed_secs();
-    for (figure, vel) in &figures {
-        // Horizontal ground speed (blocks/s). NetVel is in Bevy axes; the
-        // ground plane is x/z (y is up), so ignore the vertical component.
-        let speed = vel.map_or(0.0, |v| {
-            let h = v.0;
-            (h.x * h.x + h.z * h.z).sqrt()
-        });
-        // Small deadzone so idle NPCs don't jitter into a run cycle.
-        let anim = if speed > 0.4 {
+    let (t, dt) = (time.elapsed_secs(), time.delta_secs());
+    for (figure, mut state, vel) in &mut figures {
+        let speed = ground_speed(vel);
+        let anim = if step_anim_state(&mut state, speed, dt) {
+            FigureAnim::Run
+        } else {
+            FigureAnim::Idle
+        };
+        let bones = figure::quadruped_small_bone_transforms(
+            figure.species,
+            figure.body_type,
+            anim,
+            state.acc,
+            t,
+            speed,
+        );
+        apply_bones(&figure.parts, &mut transforms, |b| bones.get(b));
+    }
+}
+
+/// Animate quadruped-medium figures (idle/run).
+fn animate_quadruped_mediums(
+    time: Res<Time>,
+    mut figures: Query<(
+        &QuadrupedMediumFigure,
+        &mut FigureAnimState,
+        Option<&NetVel>,
+    )>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let (t, dt) = (time.elapsed_secs(), time.delta_secs());
+    for (figure, mut state, vel) in &mut figures {
+        let speed = ground_speed(vel);
+        let anim = if step_anim_state(&mut state, speed, dt) {
+            FigureAnim::Run
+        } else {
+            FigureAnim::Idle
+        };
+        let bones = quadruped_medium::quadruped_medium_bone_transforms(
+            figure.species,
+            figure.body_type,
+            anim,
+            state.acc,
+            t,
+            speed,
+        );
+        apply_bones(&figure.parts, &mut transforms, |b| bones.get(b));
+    }
+}
+
+/// Animate bird-medium figures (idle/run/fly). A meaningful vertical velocity
+/// component → flight; grounded motion → run.
+fn animate_bird_mediums(
+    time: Res<Time>,
+    mut figures: Query<(&BirdMediumFigure, &mut FigureAnimState, Option<&NetVel>)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let (t, dt) = (time.elapsed_secs(), time.delta_secs());
+    for (figure, mut state, vel) in &mut figures {
+        let horiz = ground_speed(vel);
+        let vert = vel.map_or(0.0, |v| v.0.y.abs());
+        let running = step_anim_state(&mut state, horiz.max(vert), dt);
+        let anim = if vert > 1.0 {
+            FigureAnim::Fly
+        } else if running {
+            FigureAnim::Run
+        } else {
+            FigureAnim::Idle
+        };
+        let bones = bird_medium::bird_medium_bone_transforms(
+            figure.species,
+            figure.body_type,
+            anim,
+            state.acc,
+            t,
+            horiz,
+        );
+        apply_bones(&figure.parts, &mut transforms, |b| bones.get(b));
+    }
+}
+
+/// Animate humanoid figures (idle/run).
+fn animate_humanoids(
+    time: Res<Time>,
+    mut figures: Query<(&HumanoidFigure, &mut FigureAnimState, Option<&NetVel>)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let (t, dt) = (time.elapsed_secs(), time.delta_secs());
+    for (figure, mut state, vel) in &mut figures {
+        let speed = ground_speed(vel);
+        let anim = if step_anim_state(&mut state, speed, dt) {
             HumAnim::Run
         } else {
             HumAnim::Idle
         };
-        let bones = humanoid::humanoid_bone_transforms(&figure.body, anim, t, speed);
-        for (bone, child) in &figure.parts {
-            if let Ok(mut tf) = transforms.get_mut(*child) {
-                *tf = bones.get(*bone);
-            }
-        }
+        let bones = humanoid::humanoid_bone_transforms(&figure.body, anim, state.acc, t, speed);
+        apply_bones(&figure.parts, &mut transforms, |b| bones.get(b));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The idle/run hysteresis (polish minor b): entering run needs speed >
+    /// `RUN_ENTER_SPEED`, exiting needs speed < `RUN_EXIT_SPEED`; in the band
+    /// the state is held — no flicker.
+    #[test]
+    fn hysteresis_holds_state_in_the_band() {
+        let mut s = FigureAnimState::default();
+        // Below exit → idle.
+        assert!(!step_anim_state(&mut s, 0.1, 0.016));
+        // In the band (between exit and enter) → stays idle.
+        assert!(!step_anim_state(&mut s, 0.4, 0.016));
+        // Above enter → run.
+        assert!(step_anim_state(&mut s, 0.9, 0.016));
+        // Back into the band → stays running (hysteresis, no flicker).
+        assert!(step_anim_state(&mut s, 0.4, 0.016));
+        // Below exit → idle again.
+        assert!(!step_anim_state(&mut s, 0.2, 0.016));
+    }
+
+    /// The phase accumulator (polish minor a) integrates `speed * dt`, so it
+    /// advances even when the frame time is constant and reflects speed changes
+    /// continuously.
+    #[test]
+    fn acc_integrates_speed_over_time() {
+        let mut s = FigureAnimState::default();
+        step_anim_state(&mut s, 2.0, 0.5); // +1.0
+        step_anim_state(&mut s, 4.0, 0.25); // +1.0
+        assert!(
+            (s.acc - 2.0).abs() < 1e-5,
+            "acc must integrate speed*dt, got {}",
+            s.acc
+        );
+    }
+
+    /// Ground speed ignores the vertical (y) component — it's the horizontal
+    /// locomotion magnitude.
+    #[test]
+    fn ground_speed_is_horizontal() {
+        let vel = NetVel(Vec3::new(3.0, 100.0, 4.0));
+        assert!((ground_speed(Some(&vel)) - 5.0).abs() < 1e-5);
+        assert_eq!(ground_speed(None), 0.0);
     }
 }
