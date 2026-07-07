@@ -130,6 +130,8 @@ so an upgrade waits until the dep tree catches up.
 
 ## Phase 4 — Server shell, replicon transport & ORACLE foundations ⚪
 
+AI coordination note (2026-07-07): Phase 4 must leave the server ready to connect with the AI crown-track work without making Engine Migration responsible for implementing ORACLE/AURORA end-to-end. During server preparation, include the runtime seams needed by BL-83 (AURORA/NPC RAG + memory over the local vLLM node) and BL-85 (ORACLE/Bedrock world-director orchestration). Keep AWS account creation, Bedrock model access, Budgets, and paid setup pending until the server foundation is resolved and ORACLE is ready to consume the AWS startup credits effectively.
+
 | Task | What | Status |
 |---|---|---|
 | EM-4.1 | `xindeler-server-app` — headless `MinimalPlugins` shell embedding the sim; **dual-stack** (old client keeps connecting) | ⚪ |
@@ -137,6 +139,7 @@ so an upgrade waits until the dep tree catches up.
 | EM-4.2b | Transport backend spike — `renet2` vs `quinnet` (real network, not loopback) | ⚪ |
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |
 | EM-4.2d | Interest management — per-client visibility (region/distance + `DimensionId`); bandwidth vs old protocol | ⚪ |
+| EM-4.2e | AI gateway readiness handoff — server shell/config/metrics/fallback seams for BL-83 and BL-85; no AWS account or Bedrock setup yet | ⚪ |
 | EM-4.3 | `DmEventLoader` — `.dmevent.ron/json` AssetLoader + `oracle://` watch dir (ORACLE writes files) | ⚪ |
 | EM-4.4 | Anti-chaos validation layer (clamp tables for injected events) | ⚪ |
 | EM-4.5 | `DimensionRegistry` + `DimensionId` + instanced-dimension generation | ⚪ |
