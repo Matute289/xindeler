@@ -168,3 +168,18 @@ the private `docs/design/`.
 with `docs/design/session-notes.md` + `agenda.md`. The backlog is **multi-session**: `git pull`/re-sync
 `development` before editing, add+score new `BL-NN` rows **there** (not here), and commit only your own rows.
 
+
+## Comunicación asíncrona con Mati
+
+Si necesitás input y Mati no está disponible:
+
+MSG_ID=$(python /Users/mgrinberg/MyXindeler/Discord/scripts/discord_api.py notify \
+  --project "Nombre del proyecto" \
+  --session "descripción corta de esta tarea" \
+  --type blocked \
+  --message "Qué necesitás decidir y por qué estás bloqueado")
+
+# Polling hasta que responda (cada ~5 min)
+python /Users/mgrinberg/MyXindeler/Discord/scripts/discord_api.py poll --after $MSG_ID
+
+Tipos: blocked | question | done | info | error
