@@ -50,7 +50,7 @@ so an upgrade waits until the dep tree catches up.
 | **0** | Repos & clean environment | ✅ **complete** (PRs #1, #2, #149) |
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
-| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 done (PRs #7–#20): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with a weapon + vegetation sprites & translucent water render in Bevy, with frustum + distance-band culling**; EM-3.8d/3.9b/3.10b/3.11 pending |
+| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d done (PRs #7–#20, #26): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern + vegetation sprites & translucent water render in Bevy, with frustum + distance-band culling**; EM-3.8e/3.9b/3.10b/3.11 pending |
 | **4** | Server shell, replicon transport & ORACLE foundations | ⚪ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
@@ -121,7 +121,8 @@ so an upgrade waits until the dep tree catches up.
 | EM-3.8 | Figures (`.vox`) — real assembled voxel models replace capsules (quadruped end-to-end; `NetBody`→full `Body`) | ✅ PR #15 |
 | EM-3.8b | Humanoid figures + skeletal animation (armour/recolour/16-bone assembly + idle/walk/run bone matrices) | ✅ PR #17 |
 | EM-3.8c | Figure completion — animated quadrupeds/birds + more bodies (quadruped-medium, birds) + humanoid weapon + polish minors | ✅ PR #18 |
-| EM-3.8d | Figure gear + polish — real equipped gear from inventory + lantern/back/glider + bird fly hysteresis + dedup nits | ⚪ |
+| EM-3.8d | Figure gear + polish — real equipped gear from inventory + lantern/back/glider + bird fly hysteresis + dedup nits | ✅ PR #26 — real equipped weapon(s) + armor (new `NetLoadout` mirror comp) + lantern replace the EM-3.8c hardcoded sword; helmets/glider/bird-hysteresis/dedup deferred to EM-3.8e |
+| EM-3.8e | Figure gear polish v2 — head-slot helmets (species-keyed head-armour manifest), glider (needs `CharacterState` in the mirror), bird fly/run threshold hysteresis, VoxSimple/LoadedPart dedup nits | ⚪ |
 | EM-3.9 | Sprites (grass/props) + fluids v1 (`river_velocity`) | ✅ PR #19 — vegetation sprites (shared-mesh + whitelist + density cap) + translucent water render on streamed terrain; `river_velocity` carried for the EM-3.9b water shader |
 | EM-3.9b | Sprites/water polish — UV-scroll water shader, GPU-instanced sprites, sprite attr filters/LOD/wind, furniture/prop kinds, shared decoded-chunk store | ⚪ |
 | EM-3.10 | LOD & culling v1 (distance bands + GPU occlusion) | ✅ PR #20 — Bevy auto-frustum-culls all meshes (verified); added `LodCullingPlugin` distance bands (chunk + nearer sprite-parent, Visibility-toggle, data-driven `CullingConfig`) |
