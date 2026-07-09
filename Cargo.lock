@@ -11964,6 +11964,21 @@ name = "xindeler-server-app"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "num_cpus",
+ "portpicker",
+ "prometheus",
+ "prometheus-hyper",
+ "ron",
+ "signal-hook 0.4.4",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vek",
+ "xindeler-client-core",
+ "xindeler-common",
+ "xindeler-common-base",
+ "xindeler-server-core",
 ]
 
 [[package]]

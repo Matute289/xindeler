@@ -51,7 +51,7 @@ so an upgrade waits until the dep tree catches up.
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
 | **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d done (PRs #7–#20, #26): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern + vegetation sprites & translucent water render in Bevy, with frustum + distance-band culling**; EM-3.8e/3.9b/3.10b/3.11 pending |
-| **4** | Server shell, replicon transport & ORACLE foundations | ⚪ pending |
+| **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified; EM-4.2+ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
@@ -135,7 +135,7 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 
 | Task | What | Status |
 |---|---|---|
-| EM-4.1 | `xindeler-server-app` — headless `MinimalPlugins` shell embedding the sim; **dual-stack** (old client keeps connecting) | ⚪ |
+| EM-4.1 | `xindeler-server-app` — headless `MinimalPlugins` shell embedding the sim; **dual-stack** (old client keeps connecting) | ✅ PR #27 — real `Server::tick` @ 30Hz + SIGINT/SIGTERM graceful shutdown + `/metrics` Prometheus passthrough; dual-stack verified via a real separate-process client connect+play+logout ([Q?] plugins-on-by-default confirmed, Matías 2026-07-09) |
 | EM-4.2 | Persistence / rtsim / agent-dylib verified under the shell; 24h soak | ⚪ |
 | EM-4.2b | Transport backend spike — `renet2` vs `quinnet` (real network, not loopback) | ⚪ |
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |

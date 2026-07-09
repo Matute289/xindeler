@@ -8,4 +8,82 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-bevy = { version = "=0.19.0", default-features = false }
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR
+# (EM-6.3). Headless dedicated-server shell: no render/window/audio features
+# needed. `App`/`Plugin`/`MinimalPlugins`/`ScheduleRunnerPlugin`/`Time` are
+# mandatory (non-optional) bevy_internal deps, so — same discipline as
+# xindeler-sim-bridge's Cargo.toml — no extra feature flags are required
+# beyond `std`: `main() -> AppExit` needs `impl Termination for AppExit`,
+# which bevy_app gates on `#[cfg(feature = "std")]` (same feature
+# `bevy/xindeler-app`'s Cargo.toml enables for the same reason).
+bevy = { version = "=0.19.0", default-features = false, features = ["std"] }
+# The embedded specs simulation (EM-4.1, mirrors EM-1.5's non-send-resource
+# pattern in xindeler-sim-bridge). Default features (worldgen + plugins +
+# persistent_world + simd — same as xindeler-sim-bridge's `server` dep), NOT
+# server-cli's own `default-features = false` + `["simd"]` (which deliberately
+# leaves `plugins` off). This is a deliberate PRODUCT decision (Matías,
+# 2026-07-09), not a Cargo-resolver forced hand: `plugins` (WASM plugin
+# loading via wasmtime) ships ON by default in this dedicated-server binary,
+# matching xindeler-sim-bridge's posture rather than server-cli's opt-in one.
+# (`server`'s own `default = [..., "plugins", ...]` already turns this on
+# regardless of any dependency edge — verified via `cargo tree -e features
+# -i xindeler-common-state`, this is not something a dev-dependency forces.)
+server = { package = "xindeler-server-core", path = "../../server" }
+# `common::consts::MIN_RECOMMENDED_TOKIO_THREADS` — the tokio worker-thread
+# floor server-cli sizes its runtime with; taken directly for exact parity
+# rather than re-deriving/hardcoding it. Legal shell→logic type-library use
+# (same pattern xindeler-sim-bridge documents for `common`).
+common = { package = "xindeler-common", path = "../../common" }
+# `common_base::userdata_dir()` / `server::DEFAULT_DATA_DIR_NAME` — the SAME
+# `<userdata>/server` data dir server-cli uses ("Used so that different server
+# frontends can share the same server saves, etc." — server/src/data_dir.rs),
+# so this shell and server-cli are interchangeable frontends over one save set.
+common-base = { package = "xindeler-common-base", path = "../../common/base" }
+# `Server::new` requires an `Arc<tokio::Runtime>` it blocks on / spawns network
+# and persistence work onto (same recipe as server-cli / xindeler-sim-bridge).
+# `sync` → `tokio::sync::Notify` coordinates the metrics server's shutdown.
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+# SIGINT/SIGTERM → shared atomic flag: the same signal-hook mechanism
+# server-cli's `shutdown_coordinator` uses for its configurable signal list
+# (server-cli defaults to SIGUSR1 only; this shell hardcodes SIGINT+SIGTERM
+# per the EM-4.1 spec).
+signal-hook = { workspace = true }
+# Runtime worker-thread sizing (same formula + crate version server/server-cli
+# use: `(num_cpus::get() / 4).max(MIN_RECOMMENDED_TOKIO_THREADS)`).
+num_cpus = "1.0"
+tracing = { workspace = true }
+# Stdout-only logging (no file rotation / TUI ring buffer): mirrors
+# tools/smoke-bot's minimal harness rather than server-cli's
+# `common_frontend::init_split_logs`, which is coupled to its TUI `TuiLog`
+# console — out of scope for a headless shell (EM-4.1 scope discipline).
+tracing-subscriber = { workspace = true }
+# Metrics passthrough: serves `Server::metrics_registry()` at `/metrics` over
+# real HTTP — textually the SAME route server-cli's own axum `web` module
+# exposes (server-cli/src/web/mod.rs's `.nest("/metrics", ...)`), via the
+# already-pinned workspace `prometheus-hyper` crate (used identically in
+# `network/examples/network_speed.rs`) instead of porting server-cli's whole
+# axum module (chat relay + admin `ui_api` + TUI plumbing — console-integrated
+# features that are out of EM-4.1 scope; only the metrics passthrough itself
+# is in scope).
+prometheus = { workspace = true }
+prometheus-hyper = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# EM-4.1 dual-stack acceptance test (`tests/dual_stack.rs`): a REAL
+# `xindeler-client-core::Client` connects over REAL loopback TCP to a
+# genuinely SEPARATE `xindeler-server-app` OS process (spawned via
+# `CARGO_BIN_EXE_xindeler-server-app`), proving a wire-protocol-identical
+# client (voxygen / `xindeler-old` speaks the same protocol) can connect and
+# play against the shell. Dev-only, shell→logic type-library use — the same
+# legal direction `tools/xindeler-smoke-bot` and `xindeler-sim-bridge` use.
+client = { package = "xindeler-client-core", path = "../../client" }
+vek = { workspace = true }
+# Same pick-a-free-loopback-port trick `server::settings::Settings::singleplayer`
+# uses internally (server/src/settings/mod.rs) — the test pre-seeds a
+# `settings.ron` binding `gameserver_protocols` to a free port instead of the
+# hardcoded default 14004, so it can never silently attach to an unrelated
+# already-running server on that port (see the EM-4.1 review, should-fix #1).
+# Same git rev `server`'s own Cargo.toml pins, to avoid resolving two versions.
+portpicker = { git = "https://github.com/xMAC94x/portpicker-rs", rev = "e04e3a61d6c1645c865b36c57877f1f8e48e0cb7" }
+ron = { workspace = true }
