@@ -553,11 +553,15 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
     });
 }
 
-/// Builds a visible starter loadout (sword + worker clothes + lantern) as an
+/// Builds a visible starter loadout (sword + worker clothes + lantern + a
+/// bronze-mail head cap + a glider — EM-3.8e) as an
 /// [`Inventory`](comp::Inventory) for a test humanoid NPC (EM-3.8d). Mirrors
-/// the embedded player's default Warrior kit so the gear a test NPC shows
-/// matches the player's. Requires the asset tree (item defs) — only called on
-/// the live sim, which always has it.
+/// the embedded player's default Warrior kit (the head cap matches the
+/// Warrior's real `warrior.ron` bronze-mail set) so the gear a test NPC shows
+/// matches the player's, PLUS a helmet the Warrior's actual starter loadout
+/// doesn't include, so the smoke screenshot has something to show the new
+/// EM-3.8e helmet rendering on. Requires the asset tree (item defs) — only
+/// called on the live sim, which always has it.
 fn humanoid_test_inventory(body: comp::Body) -> comp::Inventory {
     use comp::inventory::loadout_builder::LoadoutBuilder;
 
@@ -570,6 +574,8 @@ fn humanoid_test_inventory(body: comp::Body) -> comp::Inventory {
         .pants(Some(item("common.items.armor.misc.pants.worker_brown")))
         .feet(Some(item("common.items.armor.misc.foot.sandals")))
         .lantern(Some(item("common.items.lantern.black_0")))
+        .head(Some(item("common.items.armor.mail.bronze.head")))
+        .glider(Some(item("common.items.glider.basic_white")))
         .build();
     comp::Inventory::with_loadout(loadout, body)
 }
@@ -706,7 +712,11 @@ fn net_tool(item: &comp::Item) -> Option<NetTool> {
 /// the humanoid figure assembly consumes (EM-3.8d). Reads the same equip slots
 /// voxygen's figure cache does; everything else in the inventory is irrelevant
 /// to the rendered model and stays server-side.
-fn net_loadout_from_inventory(inventory: &comp::Inventory) -> NetLoadout {
+///
+/// `gliding` (EM-3.8e) is NOT read from the inventory — it's the caller's
+/// `CharacterState`-derived signal (see [`is_gliding`]), passed straight
+/// through onto [`NetLoadout::gliding`].
+fn net_loadout_from_inventory(inventory: &comp::Inventory, gliding: bool) -> NetLoadout {
     NetLoadout {
         active_tool: inventory
             .equipped(EquipSlot::ActiveMainhand)
@@ -722,7 +732,24 @@ fn net_loadout_from_inventory(inventory: &comp::Inventory) -> NetLoadout {
         hand: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Hands)),
         foot: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Feet)),
         lantern: armor_key(inventory, EquipSlot::Lantern),
+        head: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Head)),
+        glider: armor_key(inventory, EquipSlot::Glider),
+        gliding,
     }
+}
+
+/// Whether a sim `CharacterState` is glide-shaped — the figure should show
+/// the glider mesh (EM-3.8e). Matches voxygen: both `Glide` (actively
+/// airborne) AND `GlideWield` (the glider-out, pre-jump pose) render the
+/// glider (`next.glider.scale = Vec3::one()` in both animations); the client
+/// approximates both with a single glide animation rather than modelling
+/// `GlideWield`'s distinct pose separately — a deliberate simplification, not
+/// a gating bug.
+fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
+    // Reuse the sim's own `Glide | GlideWield` predicate rather than
+    // hand-rolling the match, so a future upstream change to what counts as
+    // "glide-shaped" can't silently drift between the two copies.
+    character_state.is_some_and(comp::CharacterState::is_glide_wielded)
 }
 
 /// Reads the sim's client-visible entities off the specs storages and UPSERTs
@@ -769,6 +796,9 @@ fn mirror_sim_entities(
     let presences = ecs.read_storage::<comp::Presence>();
     // EM-3.8d: read the loadout so humanoids mirror their real equipped gear.
     let inventories = ecs.read_storage::<comp::Inventory>();
+    // EM-3.8e: read whether each entity is currently gliding, for the
+    // NetLoadout::gliding figure-visibility flag.
+    let character_states = ecs.read_storage::<comp::CharacterState>();
 
     // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
     // fresh every tick over all visible entities, and net_health below issues a
@@ -803,9 +833,12 @@ fn mirror_sim_entities(
         healths.maybe(),
         presences.maybe(),
         inventories.maybe(),
+        character_states.maybe(),
     )
         .lend_join();
-    while let Some((entity, pos, body, ori, vel, health, presence, inventory)) = it.next() {
+    while let Some((entity, pos, body, ori, vel, health, presence, inventory, character_state)) =
+        it.next()
+    {
         // Region-map visibility predicate (see doc comment).
         if !presence.is_none_or(|p| p.kind.sync_me()) {
             continue;
@@ -836,8 +869,16 @@ fn mirror_sim_entities(
         // (`figure_view::classify_bodies`) waits indefinitely for a humanoid's
         // `NetLoadout` to arrive, so a future humanoid-spawn path that skips
         // that invariant must not leave the figure stuck as a capsule forever.
-        let net_loadout = matches!(body, comp::Body::Humanoid(_))
-            .then(|| inventory.map_or_else(NetLoadout::default, net_loadout_from_inventory));
+        let gliding = is_gliding(character_state);
+        let net_loadout = matches!(body, comp::Body::Humanoid(_)).then(|| {
+            inventory.map_or_else(
+                || NetLoadout {
+                    gliding,
+                    ..NetLoadout::default()
+                },
+                |inv| net_loadout_from_inventory(inv, gliding),
+            )
+        });
         updates.push((
             entity,
             net_pos,
@@ -859,6 +900,7 @@ fn mirror_sim_entities(
         healths,
         presences,
         inventories,
+        character_states,
     ));
 
     for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout) in updates {
@@ -1146,7 +1188,7 @@ mod tests {
         }
         .into();
         let inventory = humanoid_test_inventory(body);
-        let loadout = net_loadout_from_inventory(&inventory);
+        let loadout = net_loadout_from_inventory(&inventory, false);
 
         let tool = loadout
             .active_tool
@@ -1173,10 +1215,44 @@ mod tests {
             loadout.lantern.as_deref(),
             Some("common.items.lantern.black_0")
         );
+        // EM-3.8e: the helmet + glider items resolve too.
+        assert_eq!(
+            loadout.head.as_deref(),
+            Some("common.items.armor.mail.bronze.head")
+        );
+        assert_eq!(
+            loadout.glider.as_deref(),
+            Some("common.items.glider.basic_white")
+        );
         // Slots we didn't equip stay empty (figure uses the manifest default).
         assert_eq!(loadout.belt, None);
         assert_eq!(loadout.shoulder, None);
         assert_eq!(loadout.second_tool, None);
+        // `gliding` passes straight through from the caller's argument.
+        assert!(!loadout.gliding);
+        let gliding_loadout = net_loadout_from_inventory(&inventory, true);
+        assert!(gliding_loadout.gliding);
+    }
+
+    /// EM-3.8e (no assets): `is_gliding` matches voxygen's own glider-mesh
+    /// gating — both `Glide` and `GlideWield` show the glider, everything
+    /// else (including no `CharacterState` at all) doesn't. `Glide` is
+    /// positive-tested with a real value (its `Data::new` constructor is
+    /// public); `GlideWield::Data` has no public constructor outside a full
+    /// `JoinData` (sim-tick context, not constructible in a unit test) — its
+    /// `true` branch is exercised by `is_gliding` delegating to
+    /// `CharacterState::is_glide_wielded`, which is unit-tested in
+    /// `common::comp::character_state` instead.
+    #[test]
+    fn is_gliding_matches_glide_and_glide_wield_only() {
+        assert!(!is_gliding(None));
+        assert!(!is_gliding(Some(&comp::CharacterState::Idle(
+            Default::default()
+        ))));
+        assert!(!is_gliding(Some(&comp::CharacterState::Sit)));
+        assert!(is_gliding(Some(&comp::CharacterState::Glide(
+            common::states::glide::Data::new(1.0, 1.0, comp::Ori::default())
+        ))));
     }
 
     /// The sim→Bevy position rotation matches the voxel converter's

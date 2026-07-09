@@ -35,10 +35,24 @@
 //!   real `ToolKind`/`Hands` pose; a carried lantern rides the `lantern` bone;
 //!   back armour the `back` bone. We deserialize the frozen RON verbatim
 //!   (isolation law rule 3 — the files are untouched).
-//! - Deferred to EM-3.8e: head-slot helmets (a species-keyed head-armour
-//!   manifest) and the glider (its visibility is gated on the glide
-//!   CharacterState, which the mirror does not carry — rendering it always
-//!   would show a large glider folded on a standing figure).
+//! - EM-3.8e: **head-slot helmets** — a species-keyed head-armour manifest
+//!   ([`HumArmorHeadSpec`], ported from voxygen's `HumArmorHeadSpec`/
+//!   `load_head`) resolves the equipped helmet's `.vox`, unioned into the SAME
+//!   head assembly as the bare head/eyes/hair/beard/accessory pieces (voxygen's
+//!   `mesh_head` — helmets are an EXTRA piece stacked on the bare head, not a
+//!   swap, and they can hollow out hair/parts underneath via the `Cell`
+//!   fill-override bits, ported verbatim as the unionizer's merge rule). **The
+//!   glider** — its bone is always computed, but the `Idle`/`Run` humanoid
+//!   animations force it to zero scale (ported unchanged from `xindeler-anim`'s
+//!   `idle.rs`/`run.rs`, which already do this upstream); only
+//!   [`HumAnim::Glide`] (driven by the mirror's new `NetLoadout::gliding` flag
+//!   — the smallest addition that lets the client pick the right animation
+//!   without replicating the whole `CharacterState`) scales it back to one.
+//!   `GlideWield`, the more specific pre-jump pose, and the glider's live
+//!   steering orientation (which needs physics data the mirror doesn't carry)
+//!   are both approximated by the plain `Glide` animation with an identity
+//!   orientation — a deliberate, documented simplification (see
+//!   [`HumAnim::Glide`]), not a rendering bug.
 //!
 //! ## Recolour: honest scope
 //! Skin, hair, eye and greyscale-armour recolour are all REAL here (ported from
@@ -58,7 +72,7 @@ use common::{
         humanoid::{Body, BodyType, EyeColor, Skin, Species},
         tool::{Hands, ToolKind},
     },
-    figure::{DynaUnionizer, MatSegment, Material, Segment},
+    figure::{Cell, DynaUnionizer, MatSegment, Material, Segment},
 };
 use dot_vox::DotVoxData;
 use serde::Deserialize;
@@ -80,6 +94,11 @@ pub const HUM_ARMOR_SHOULDER_MANIFEST: &str = "voxygen.voxel.humanoid_armor_shou
 pub const HUM_ARMOR_BACK_MANIFEST: &str = "voxygen.voxel.humanoid_armor_back_manifest";
 pub const HUM_MAIN_WEAPON_MANIFEST: &str = "voxygen.voxel.biped_weapon_manifest";
 pub const HUM_LANTERN_MANIFEST: &str = "voxygen.voxel.humanoid_lantern_manifest";
+/// The head-armour (helmet) manifest, keyed by `(species, body_type,
+/// item-def-id)` (EM-3.8e).
+pub const HUM_ARMOR_HEAD_MANIFEST: &str = "voxygen.voxel.humanoid_armor_head_manifest";
+/// The glider manifest (EM-3.8e).
+pub const HUM_GLIDER_MANIFEST: &str = "voxygen.voxel.humanoid_glider_manifest";
 
 /// `.vox` files whose names are relative to the `voxygen.voxel` namespace
 /// (`graceful_load_vox` prepends it in voxygen). The client prepends the same
@@ -243,6 +262,50 @@ pub type HumArmorBackSpec = ArmorManifest<ArmorVoxSpec>;
 pub type HumArmorHandSpec = ArmorManifest<SidedArmorVoxSpec>;
 pub type HumArmorShoulderSpec = ArmorManifest<SidedArmorVoxSpec>;
 pub type HumLanternSpec = ArmorManifest<ArmorVoxSpec>;
+/// The glider manifest (EM-3.8e) — same shape as lantern/back: a plain
+/// `String` item-def-id key, `default` = the empty (`armor.empty`) `.vox`
+/// (voxygen `HumArmorGliderSpec`; `mesh_glider` material-recolours it exactly
+/// like a body-slot armour piece, so it reuses [`HumVoxRole::Body`]).
+pub type HumGliderSpec = ArmorManifest<ArmorVoxSpec>;
+
+/// The head-armour (helmet) manifest inner map (voxygen's
+/// `HumArmorHeadSpec(ArmorVoxSpecMap<(Species, BodyType, String),
+/// ArmorVoxSpec>)`). Keyed on `(species, body_type, item-def-id)` because,
+/// unlike every other slot, a helmet's shape depends on the wearer's head
+/// (EM-3.8e).
+#[derive(Deserialize, Clone, Debug)]
+struct HumArmorHeadSpecMap {
+    /// Present in the frozen RON (every `ArmorVoxSpecMap` has one) but never
+    /// read — voxygen's `load_head` returns `None` for an unequipped head
+    /// rather than falling back to a generic default (there is no "bare
+    /// helmet" model; the bare head IS the head).
+    #[allow(dead_code)]
+    default: ArmorVoxSpec,
+    #[serde(default = "HashMap::new")]
+    map: HashMap<(Species, BodyType, String), ArmorVoxSpec>,
+}
+
+/// The head-armour (helmet) manifest (EM-3.8e). Deserializes the SAME frozen
+/// `humanoid_armor_head_manifest.ron` voxygen reads (isolation law rule 3).
+#[derive(Deserialize, Clone, Debug)]
+pub struct HumArmorHeadSpec(HumArmorHeadSpecMap);
+
+impl HumArmorHeadSpec {
+    /// Resolve the equipped helmet's spec for this `(species, body_type)`, or
+    /// `None` if no head item is equipped OR the manifest has no entry for
+    /// this exact `(species, body_type, item)` combination (voxygen's
+    /// `load_head`: an absent `head` short-circuits to no extra mesh at all —
+    /// there is no `default` fallback here, unlike every other armour slot).
+    fn resolve(
+        &self,
+        species: Species,
+        body_type: BodyType,
+        head: Option<&str>,
+    ) -> Option<&ArmorVoxSpec> {
+        let head = head?;
+        self.0.map.get(&(species, body_type, head.to_owned()))
+    }
+}
 
 /// The figure-manifest key of a tool (voxygen `ToolKey`): a simple item id or a
 /// modular weapon's `(primary, secondary, hands)` key. Deserializes the frozen
@@ -281,6 +344,10 @@ pub struct HumManifests<'a> {
     pub back: &'a HumArmorBackSpec,
     pub main_weapon: &'a HumMainWeaponSpec,
     pub lantern: &'a HumLanternSpec,
+    /// The head-armour (helmet) manifest (EM-3.8e).
+    pub armor_head: &'a HumArmorHeadSpec,
+    /// The glider manifest (EM-3.8e).
+    pub glider: &'a HumGliderSpec,
 }
 
 /// The figure-relevant equipped gear the humanoid assembly consumes (EM-3.8d) —
@@ -300,6 +367,12 @@ pub struct FigureLoadout {
     pub hand: Option<String>,
     pub foot: Option<String>,
     pub lantern: Option<String>,
+    /// Equipped helmet item-def-id (EM-3.8e). `None` = no extra head mesh.
+    pub head: Option<String>,
+    /// Equipped glider item-def-id (EM-3.8e). Only the ITEM — see
+    /// [`FigureLoadout`]'s caller (`NetLoadout::gliding`) for the transient
+    /// glide-visibility signal, which lives outside this protocol-free type.
+    pub glider: Option<String>,
 }
 
 /// An equipped tool for figure assembly: its manifest key plus the
@@ -364,6 +437,9 @@ pub enum HumBone {
     Back,
     /// The lantern bone (EM-3.8d). Holds a carried lantern at the hip.
     Lantern,
+    /// The glider bone (EM-3.8e). Holds the equipped glider; its scale is
+    /// zero outside [`HumAnim::Glide`] (see the module doc).
+    Glider,
 }
 
 impl HumBone {
@@ -383,6 +459,7 @@ impl HumBone {
             HumBone::Second => "second",
             HumBone::Back => "back",
             HumBone::Lantern => "lantern",
+            HumBone::Glider => "glider",
         }
     }
 }
@@ -425,6 +502,14 @@ pub enum HumVoxRole {
     },
     HeadAccessory {
         offset: [i32; 3],
+    },
+    /// An equipped helmet (EM-3.8e): a plain (non-material-recoloured)
+    /// segment, optionally grey-tinted, unioned into the SAME head assembly
+    /// as the bare head/eyes/hair/beard/accessory (voxygen `load_head` +
+    /// `mesh_head`'s `maybe_add(helmet)`).
+    HeadArmor {
+        offset: [i32; 3],
+        tint: Option<[u8; 3]>,
     },
     /// A material-recoloured body-slot armour (chest/belt/pants/back/lantern):
     /// skin/hair recolour + optional grey tint, on `bone` at `offset`.
@@ -503,6 +588,22 @@ pub fn humanoid_vox_refs(
             model_index: spec.2,
         });
     }
+    // --- Equipped helmet (EM-3.8e): an EXTRA piece unioned into the head, ---
+    // not a bone of its own — see `HumVoxRole::HeadArmor`.
+    if let Some(spec) =
+        manifests
+            .armor_head
+            .resolve(body.species, body.body_type, loadout.head.as_deref())
+    {
+        refs.push(HumVoxRef {
+            role: HumVoxRole::HeadArmor {
+                offset: Vec3::<f32>::from(spec.vox_spec.1).as_::<i32>().into_array(),
+                tint: spec.color,
+            },
+            vox_name: spec.vox_spec.0.clone(),
+            model_index: spec.vox_spec.2,
+        });
+    }
 
     // --- Body slots: resolve the equipped item (or the manifest default). ---
     // chest/belt/pants always render (their `default` is the bare torso/legs);
@@ -544,6 +645,16 @@ pub fn humanoid_vox_refs(
         refs.push(body_ref(
             HumBone::Lantern,
             manifests.lantern.resolve(loadout.lantern.as_deref()),
+        ));
+    }
+
+    // --- Glider (EM-3.8e): only when equipped; hangs on the `glider` bone at
+    // zero scale outside `HumAnim::Glide` (see the module doc) — same
+    // material-recoloured `Body` role as lantern (voxygen `mesh_glider`).
+    if loadout.glider.is_some() {
+        refs.push(body_ref(
+            HumBone::Glider,
+            manifests.glider.resolve(loadout.glider.as_deref()),
         ));
     }
 
@@ -692,11 +803,37 @@ pub fn assemble_humanoid(
                 let seg = plain_seg(p.vox, false, p.model_index);
                 unionizer = unionizer.add(seg, Vec3::from(offset));
             },
+            HumVoxRole::HeadArmor { offset, tint } => {
+                // EM-3.8e: a helmet is a plain segment (no skin/hair/eye
+                // material recolour — voxygen `load_head` uses
+                // `graceful_load_segment`, not `graceful_load_mat_segment`),
+                // optionally grey-tinted like a body-slot armour piece.
+                let mut seg = plain_seg(p.vox, false, p.model_index);
+                if let Some(c) = tint {
+                    let tint_rgb = Rgb::from(Vec3::from(c));
+                    seg = seg.map_rgb(|rgb| recolor_grey(rgb, tint_rgb));
+                }
+                unionizer = unionizer.add(seg, Vec3::from(offset));
+            },
             _ => {},
         }
     }
     if has_head {
-        let (head_seg, origin_offset) = unionizer.unify();
+        // EM-3.8e: the same hollow/override merge rule voxygen's `mesh_head`
+        // uses (`Cell`'s fill bits) so a helmet can correctly cut away hair/
+        // head geometry poking through it, instead of z-fighting or clipping
+        // (ported verbatim from `HumHeadSpec::mesh_head`'s `unify_with`).
+        let (head_seg, origin_offset) = unionizer.unify_with(|v: Cell, old_v: Cell| {
+            if old_v.is_override_hollow() {
+                old_v
+            } else if v.is_hollowing() && !old_v.is_override_hollow() {
+                Cell::empty()
+            } else if v.is_filled() {
+                v
+            } else {
+                old_v
+            }
+        });
         // voxygen: final offset = spec.offset + (-origin_offset) (the unionizer
         // re-origins to the min corner; shift back so the bone origin lines up).
         let offset = head_manifest_offset + origin_offset.map(|e| -(e as f32));
@@ -826,6 +963,9 @@ pub struct HumBoneTransforms {
     pub back: Transform,
     /// The lantern bone (EM-3.8d — carried lantern at the hip).
     pub lantern: Transform,
+    /// The glider bone (EM-3.8e — carried glider; zero-scaled outside
+    /// [`HumAnim::Glide`]).
+    pub glider: Transform,
 }
 
 impl HumBoneTransforms {
@@ -846,6 +986,7 @@ impl HumBoneTransforms {
             HumBone::Second => self.second,
             HumBone::Back => self.back,
             HumBone::Lantern => self.lantern,
+            HumBone::Glider => self.glider,
         }
     }
 }
@@ -859,6 +1000,16 @@ pub enum HumAnim {
     Idle,
     /// Moving on the ground (run cycle; also used for walk in v1).
     Run,
+    /// Airborne under an open glider (EM-3.8e), driven by the mirror's
+    /// `NetLoadout::gliding` flag. Dispatches to `xindeler-anim`'s
+    /// `GlidingAnimation`, which scales the glider bone back to one (`Idle`/
+    /// `Run` bake it to zero — see the module doc). Approximates BOTH
+    /// voxygen's `CharacterState::Glide` and `GlideWield` (the more specific
+    /// pre-jump pose isn't separately modelled) with an IDENTITY body/glider
+    /// orientation (the mirror doesn't carry the physics-computed bank
+    /// angle) — a deliberate simplification: the glider renders correctly
+    /// placed and visible, just without live steering/banking motion.
+    Glide,
 }
 
 /// Compute the humanoid bone transforms for `body` at animation `anim`, phase
@@ -888,7 +1039,9 @@ pub fn humanoid_bone_transforms(
 ) -> HumBoneTransforms {
     use xindeler_anim::{
         Animation, Skeleton,
-        character::{CharacterSkeleton, IdleAnimation, RunAnimation, SkeletonAttr},
+        character::{
+            CharacterSkeleton, GlidingAnimation, IdleAnimation, RunAnimation, SkeletonAttr,
+        },
     };
 
     let attr = SkeletonAttr::from(body);
@@ -959,6 +1112,24 @@ pub fn humanoid_bone_transforms(
                 &attr,
             )
         },
+        HumAnim::Glide => {
+            // GlidingAnimation::Dependency = (velocity, orientation,
+            // glider_orientation, global_time, acc_vel). Only `velocity`'s
+            // MAGNITUDE feeds the visible pose (a speed-based lean); its
+            // direction is irrelevant, so reuse the same forward-facing
+            // convention as Run. `orientation`/`glider_orientation` are
+            // identity — see `HumAnim::Glide`'s doc for why.
+            let speed = ground_speed.max(0.0);
+            let vel = Vec3::new(0.0, speed, 0.0);
+            let identity = vek::Quaternion::<f32>::identity();
+            GlidingAnimation::update_skeleton(
+                &base,
+                (vel, identity, identity, time, acc),
+                time,
+                &mut rate,
+                &attr,
+            )
+        },
     };
 
     let mut buf = [xindeler_anim::FigureBoneData::default(); xindeler_anim::MAX_BONE_COUNT];
@@ -968,6 +1139,23 @@ pub fn humanoid_bone_transforms(
     // the quadruped one, so the SHARED `mat_to_transform` (basis `C: x,y,z→
     // x,z,−y`) stands it upright in Bevy (y-up) — no extra rotation needed, and
     // bones stay consistent with the identically-`C`-converted vertices.
+    //
+    // The glider bone is special-cased (EM-3.8e): `xindeler-anim`'s `Idle`/
+    // `Run` (ported UNCHANGED from voxygen) bake its LOCAL scale to zero, so
+    // `computed.glider`'s linear part is a singular (non-invertible) matrix —
+    // decomposing that back into a `Transform` (`mat_to_transform` → glam's
+    // `Mat4::to_scale_rotation_translation`, which divides by axis length)
+    // yields a NaN rotation, even though the (harmless) scale comes out as
+    // zero. We only decompose `computed.glider` when we KNOW the anim gave it
+    // a real (non-singular) scale (`Glide`); otherwise we build a safe,
+    // explicit zero-scale `Transform` directly, never running the risky
+    // decomposition. This is belt-and-braces: it happens to also be exactly
+    // the behaviour voxygen gets "for free" by never decomposing its bone
+    // matrices at all.
+    let glider = match anim {
+        HumAnim::Glide => mat_to_transform(computed.glider),
+        HumAnim::Idle | HumAnim::Run => Transform::default().with_scale(bevy::math::Vec3::ZERO),
+    };
     HumBoneTransforms {
         head: mat_to_transform(computed.head),
         chest: mat_to_transform(computed.chest),
@@ -983,6 +1171,7 @@ pub fn humanoid_bone_transforms(
         second: mat_to_transform(computed.second),
         back: mat_to_transform(computed.back),
         lantern: mat_to_transform(computed.lantern),
+        glider,
     }
 }
 
@@ -1180,6 +1369,101 @@ mod tests {
         );
     }
 
+    /// EM-3.8e (pure, no assets): the glider bone is INVISIBLE (zero scale,
+    /// finite) in every anim state except [`HumAnim::Glide`], where it's
+    /// visible (scale ≈ one) — the core "no floating glider on a standing
+    /// figure" invariant this task explicitly must not violate. Also proves
+    /// the zero-scale `Transform` never leaks NaN (the risk flagged in
+    /// [`humanoid_bone_transforms`]'s doc comment: decomposing the anim's own
+    /// singular zero-scale matrix would).
+    #[test]
+    fn glider_scale_is_zero_outside_glide_and_one_in_glide() {
+        let body = test_body();
+        let t = sword_tools();
+        for anim in [HumAnim::Idle, HumAnim::Run] {
+            let bones = humanoid_bone_transforms(&body, anim, 1.0, 1.0, 3.0, t);
+            assert_eq!(
+                bones.glider.scale,
+                bevy::math::Vec3::ZERO,
+                "{anim:?}: the glider must be zero-scaled (invisible)"
+            );
+            assert!(
+                bones.glider.translation.is_finite() && bones.glider.rotation.is_finite(),
+                "{anim:?}: the glider transform must stay finite even at zero scale, got {:?}",
+                bones.glider
+            );
+        }
+        let gliding = humanoid_bone_transforms(&body, HumAnim::Glide, 1.0, 1.0, 3.0, t);
+        // The glider's LOCAL scale is 1.0 (voxygen `next.glider.scale =
+        // Vec3::one()`), but every bone matrix also carries the whole
+        // figure's per-body MODEL scale (chest included), so the absolute
+        // scale isn't exactly one — compare against another always-visible
+        // bone (`chest`) instead of a literal `Vec3::ONE`.
+        assert!(
+            (gliding.glider.scale - gliding.chest.scale).length() < 1e-3,
+            "Glide: the glider must be visible at the same model scale as the rest of the figure, \
+             got glider={:?} chest={:?}",
+            gliding.glider.scale,
+            gliding.chest.scale
+        );
+        assert!(
+            gliding.glider.translation.is_finite() && gliding.glider.rotation.is_finite(),
+            "Glide: the glider transform must be finite, got {:?}",
+            gliding.glider
+        );
+    }
+
+    /// EM-3.8e (pure, no assets): the head-armour manifest resolves a helmet
+    /// keyed on `(species, body_type, item)` — unlike every other slot, an
+    /// unequipped OR unknown head resolves to `None` (no generic "bare
+    /// helmet" fallback; voxygen's `load_head` behaviour).
+    #[test]
+    fn head_armor_manifest_resolves_species_body_and_item() {
+        let ron = r#"((
+            default: ( vox_spec: ("armor.empty", (0.0, 0.0, 0.0)), color: None ),
+            map: {
+                (Human, Male, "common.items.armor.mail.bronze.head"): (
+                    vox_spec: ("armor.mail.bronze.head", (-12.0, -11.0, 18.0)),
+                    color: None
+                ),
+            },
+        ))"#;
+        let head_armor: HumArmorHeadSpec = ron::de::from_str(ron).expect("head manifest parses");
+        assert_eq!(
+            head_armor
+                .resolve(
+                    Species::Human,
+                    BodyType::Male,
+                    Some("common.items.armor.mail.bronze.head")
+                )
+                .map(|s| s.vox_spec.0.as_str()),
+            Some("armor.mail.bronze.head"),
+            "an equipped, manifest-known helmet resolves"
+        );
+        assert!(
+            head_armor
+                .resolve(Species::Human, BodyType::Male, None)
+                .is_none(),
+            "no helmet equipped -> no extra head mesh (not a generic default)"
+        );
+        assert!(
+            head_armor
+                .resolve(
+                    Species::Human,
+                    BodyType::Female,
+                    Some("common.items.armor.mail.bronze.head")
+                )
+                .is_none(),
+            "the manifest is species/body_type-specific: a Female entry doesn't exist here"
+        );
+        assert!(
+            head_armor
+                .resolve(Species::Human, BodyType::Male, Some("nope"))
+                .is_none(),
+            "an unknown helmet id resolves to nothing (caller drops the mesh)"
+        );
+    }
+
     /// EM-3.8d (pure, no assets): the armour manifest parses `default` + the
     /// per-item `map`, and `resolve` picks the equipped item's spec, falling
     /// back to `default` for empty/unknown keys. Locks the map lookup that lets
@@ -1290,6 +1574,11 @@ mod tests {
             ron::de::from_str(&read_ron(HUM_MAIN_WEAPON_MANIFEST)).expect("weapon manifest");
         let lantern: HumLanternSpec =
             ron::de::from_str(&read_ron(HUM_LANTERN_MANIFEST)).expect("lantern manifest");
+        // EM-3.8e: the helmet + glider manifests.
+        let armor_head: HumArmorHeadSpec =
+            ron::de::from_str(&read_ron(HUM_ARMOR_HEAD_MANIFEST)).expect("head-armor manifest");
+        let glider: HumGliderSpec =
+            ron::de::from_str(&read_ron(HUM_GLIDER_MANIFEST)).expect("glider manifest");
         let manifests = HumManifests {
             color: &color,
             head: &head,
@@ -1302,11 +1591,16 @@ mod tests {
             back: &back,
             main_weapon: &main_weapon,
             lantern: &lantern,
+            armor_head: &armor_head,
+            glider: &glider,
         };
         let body = test_body();
         // EM-3.8d: the embedded Warrior's real starter kit — a starter sword +
         // worker chest/pants/sandals + a lantern. This exercises the REAL gear
         // resolution (per-item manifest map), not just the defaults.
+        // EM-3.8e adds a bronze mail head cap (the Warrior's starter armour
+        // set — see `warrior.ron`) + a basic glider, to exercise the new
+        // helmet/glider resolution end-to-end with real assets.
         let loadout = FigureLoadout {
             active_tool: Some(FigureTool {
                 key: WeaponKey::Tool("common.items.weapons.sword.starter".to_owned()),
@@ -1317,10 +1611,29 @@ mod tests {
             pants: Some("common.items.armor.misc.pants.worker_brown".to_owned()),
             foot: Some("common.items.armor.misc.foot.sandals".to_owned()),
             lantern: Some("common.items.lantern.black_0".to_owned()),
+            head: Some("common.items.armor.mail.bronze.head".to_owned()),
+            glider: Some("common.items.glider.basic_white".to_owned()),
             ..Default::default()
         };
         let refs = humanoid_vox_refs(&manifests, &body, &loadout)
             .expect("human has a head-manifest entry");
+        // The helmet resolves to a real (species, body_type)-keyed `.vox`,
+        // unioned into the head (not its own bone).
+        assert!(
+            refs.iter()
+                .any(|r| matches!(r.role, HumVoxRole::HeadArmor { .. })),
+            "the equipped bronze-mail head cap must resolve to a HeadArmor ref, got: {:?}",
+            refs.iter().map(|r| &r.vox_name).collect::<Vec<_>>()
+        );
+        // The glider resolves onto its own bone.
+        assert!(
+            refs.iter().any(|r| matches!(r.role, HumVoxRole::Body {
+                bone: HumBone::Glider,
+                ..
+            })),
+            "the equipped glider must resolve onto the glider bone, got: {:?}",
+            refs.iter().map(|r| &r.vox_name).collect::<Vec<_>>()
+        );
         // The resolved chest must be the EQUIPPED worker chest .vox, not the
         // default naked-torso model — proving real gear feeds the assembly.
         assert!(
@@ -1379,6 +1692,11 @@ mod tests {
             assembled.iter().any(|p| p.bone == HumBone::Head),
             "head part assembled"
         );
+        // The glider bone must have assembled a real, non-empty mesh too.
+        assert!(
+            assembled.iter().any(|p| p.bone == HumBone::Glider),
+            "glider part assembled"
+        );
         eprintln!(
             "assembled {} humanoid parts: {:?}",
             assembled.len(),
@@ -1386,6 +1704,62 @@ mod tests {
                 .iter()
                 .map(|p| (p.name, p.mesh.count_vertices()))
                 .collect::<Vec<_>>()
+        );
+
+        // EM-3.8e: prove the helmet actually contributes geometry to the head
+        // union (not just resolved-but-silently-dropped) by re-assembling the
+        // SAME head with `head: None` and asserting the bare head has FEWER
+        // vertices than the helmeted one.
+        let bare_loadout = FigureLoadout {
+            head: None,
+            ..loadout
+        };
+        let bare_refs = humanoid_vox_refs(&manifests, &body, &bare_loadout)
+            .expect("human has a head-manifest entry");
+        assert!(
+            !bare_refs
+                .iter()
+                .any(|r| matches!(r.role, HumVoxRole::HeadArmor { .. })),
+            "an unequipped head must not resolve a HeadArmor ref"
+        );
+        let bare_voxes: Vec<DotVoxData> = bare_refs
+            .iter()
+            .map(|r| {
+                let path = format!(
+                    "{root}/{}/{}.vox",
+                    VOX_NAMESPACE.replace('.', "/"),
+                    r.vox_name.replace('.', "/")
+                );
+                let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+                load_bytes(&bytes).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+            })
+            .collect();
+        let bare_loaded: Vec<LoadedHumPart> = bare_refs
+            .iter()
+            .zip(&bare_voxes)
+            .map(|(r, vox)| LoadedHumPart {
+                role: r.role.clone(),
+                vox,
+                model_index: r.model_index,
+            })
+            .collect();
+        let bare_assembled = assemble_humanoid(&body, &manifests, &bare_loaded);
+        let helmeted_head_verts = assembled
+            .iter()
+            .find(|p| p.bone == HumBone::Head)
+            .expect("helmeted head assembled")
+            .mesh
+            .count_vertices();
+        let bare_head_verts = bare_assembled
+            .iter()
+            .find(|p| p.bone == HumBone::Head)
+            .expect("bare head assembled")
+            .mesh
+            .count_vertices();
+        assert!(
+            helmeted_head_verts > bare_head_verts,
+            "the helmet must add geometry to the head union: helmeted={helmeted_head_verts} \
+             bare={bare_head_verts}"
         );
     }
 }

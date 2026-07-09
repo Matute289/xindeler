@@ -86,10 +86,16 @@ pub struct NetBody(pub common::comp::Body);
 /// mirror dedups, see `xindeler-sim-bridge`). The client
 /// (`xindeler-render-voxel`) resolves these keys against the manifests; it
 /// stays specs-free (this is plain data). Only humanoids carry it (armour/tools
-/// only reshape the humanoid figure). Head-slot helmets + the glider are
-/// deferred to EM-3.8e (they need a species-keyed head manifest /
-/// glide-state-gated visibility we don't mirror yet), so they are intentionally
-/// absent here.
+/// only reshape the humanoid figure).
+///
+/// EM-3.8e adds `head` (a helmet item-def-id, resolved against a
+/// species-keyed head-armour manifest) and `glider` + `gliding`. `gliding` is,
+/// strictly speaking, transient CHARACTER STATE rather than equipped GEAR —
+/// but it is bundled here (rather than as its own replicated component)
+/// because it needs exactly the change-diffing/dedup machinery this struct
+/// already has (`xindeler-sim-bridge::SimLoadoutCache`), and adding a whole
+/// second component + registration + query for one `bool` would be more
+/// machinery for no more correctness.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct NetLoadout {
     /// Active main-hand tool (drives the `main` weapon bone + its sheathe
@@ -114,6 +120,21 @@ pub struct NetLoadout {
     pub foot: Option<String>,
     /// Lantern item-def-id (meshed on the `lantern` bone at the hip).
     pub lantern: Option<String>,
+    /// Head armour (helmet) item-def-id (EM-3.8e). Unlike every other slot
+    /// there is no generic "bare helmet" default — an unequipped head shows
+    /// no extra mesh at all (the bare head model already IS the head), so
+    /// `None` means exactly that, not "use a default helmet".
+    pub head: Option<String>,
+    /// Equipped glider item-def-id (EM-3.8e). This is the ITEM, independent
+    /// of whether the character is currently airborne under it — see
+    /// `gliding` for the transient visibility signal.
+    pub glider: Option<String>,
+    /// Whether the character is currently in a glide-shaped `CharacterState`
+    /// (`Glide` or `GlideWield`) — the figure only shows the glider mesh
+    /// while this is `true` (EM-3.8e), matching voxygen's own gating (its
+    /// `Idle`/`Run` animations bake the glider bone's scale to zero; only
+    /// `Glide`/`GlideWield` scale it back to one).
+    pub gliding: bool,
 }
 
 /// A replicated equipped tool: the weapon-manifest key plus the `ToolKind`/
@@ -458,6 +479,10 @@ mod tests {
             pants: Some("common.items.armor.misc.pants.worker_brown".to_owned()),
             foot: Some("common.items.armor.misc.foot.sandals".to_owned()),
             lantern: Some("common.items.lantern.black_0".to_owned()),
+            // EM-3.8e: exercise the new head/glider/gliding fields too.
+            head: Some("common.items.armor.mail.bronze.head".to_owned()),
+            glider: Some("common.items.glider.basic_white".to_owned()),
+            gliding: true,
             ..Default::default()
         };
         let body = NetBody(common::comp::Body::Humanoid(common::comp::humanoid::Body {
