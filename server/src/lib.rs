@@ -1241,7 +1241,27 @@ impl Server {
                 );
             }
             if tick_ms > 50 {
-                warn!(tick_ms, entity_count, "Slow server tick");
+                // EM-3.11d: surface the phase breakdown that was already being
+                // computed for `TickMetrics.tick_time` (below) right into this
+                // warning, so a slow-tick investigation doesn't need a metrics
+                // scrape to see WHICH phase dominated (state-tick specs
+                // dispatch vs. world/rtsim tick vs. sync vs. persistence).
+                warn!(
+                    tick_ms,
+                    entity_count,
+                    state_ms = (before_handle_events - before_state_tick).as_millis() as u64,
+                    handle_events_ms = (before_update_terrain_and_regions - before_handle_events)
+                        .as_millis() as u64,
+                    terrain_and_regions_ms =
+                        (before_sync - before_update_terrain_and_regions).as_millis() as u64,
+                    sync_ms = (before_world_tick - before_sync).as_millis() as u64,
+                    world_tick_ms = (before_entity_cleanup - before_world_tick).as_millis() as u64,
+                    entity_cleanup_ms =
+                        (before_persistence_updates - before_entity_cleanup).as_millis() as u64,
+                    persistence_ms =
+                        (end_of_server_tick - before_persistence_updates).as_millis() as u64,
+                    "Slow server tick"
+                );
             }
         }
 
