@@ -35,6 +35,41 @@
 //! - Replacing a chunk despawns the old entities and spawns the new ones in the
 //!   SAME command batch, so there is no visible hole.
 //!
+//! ## BL-82 EM-3.11h fix: first-load placeholder (no more black frames)
+//! The "no visible hole" guarantee above only ever covered RE-meshing an
+//! already-spawned chunk (old entity stays up until the new one is ready).
+//! It said nothing about a chunk's FIRST ever mesh: between a fresh key
+//! being marked dirty and its `AsyncComputeTaskPool` task finishing +
+//! clearing the upload budget, that key had **no entity at all** — for
+//! however many frames the greedy mesher + the budget (default 2/`Update`)
+//! took. Bug report: BL-82 EM-3.11h, a real gameplay capture, showed ~2
+//! fully black frames (nothing drawn — no sky, no terrain, no character;
+//! only the UI overlay) while walking into a cave, immediately followed by
+//! the cave popping in fully rendered. Root cause, confirmed by reading
+//! `xindeler-client`'s `far_terrain.rs`: its far-mesh cutout hole is
+//! DELIBERATELY excluded within `chunk_render_distance` of the live camera
+//! (so the coarse LOD sheet never z-fights the block-accurate near terrain)
+//! — the near pipeline (this module) was trusted to always cover that
+//! band. It didn't, for a never-before-seen chunk: no near mesh (not ready
+//! yet) AND no far mesh (deliberately excluded) = the bare `ClearColor`,
+//! which reads as a hard black frame whenever the current atmosphere
+//! profile's sky colour is dark (dusk/night/cave shadow — exactly the
+//! reported moment).
+//!
+//! [`spawn_chunk_mesh_tasks`] now spawns a cheap, SYNCHRONOUS placeholder
+//! entity (a flat-shaded box spanning the chunk's footprint and z-range,
+//! `PlaceholderChunkMesh`, sharing a `TerrainChunkMesh` marker so it obeys
+//! the same distance culling as real chunks) the instant a never-before-
+//! indexed key starts its async task — so there is something solid to draw
+//! at that spot from frame 1, not after the mesh finishes. When the real
+//! mesh lands, [`apply_chunk_meshes`]'s existing despawn-old+spawn-new
+//! atomic swap replaces it exactly like any other re-mesh (zero special-
+//! casing needed there — a placeholder is just another `ChunkEntities`
+//! entry). Already-indexed keys (re-meshes of a chunk that already has real
+//! geometry, e.g. a border re-mesh when a neighbour streams in) are
+//! untouched — they keep relying on the pre-existing atomic swap, no
+//! placeholder ever inserted for them.
+//!
 //! Instrumentation: `tracing` spans around each mesh task
 //! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
 //! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
@@ -51,16 +86,18 @@ use std::{
 
 use bevy::{
     app::{App, Plugin, Update},
-    asset::Assets,
+    asset::{Assets, Handle, RenderAssetUsages},
+    color::Color,
     ecs::{
         component::Component,
         entity::Entity,
         resource::Resource,
         schedule::{IntoScheduleConfigs, SystemCondition, common_conditions::resource_exists},
-        system::{Commands, Res, ResMut},
+        system::{Commands, Local, Res, ResMut},
     },
-    mesh::{Mesh as BevyMesh, Mesh3d},
-    pbr::MeshMaterial3d,
+    math::Vec3,
+    mesh::{Indices, Mesh as BevyMesh, Mesh3d, PrimitiveTopology},
+    pbr::{MeshMaterial3d, StandardMaterial},
     tasks::{AsyncComputeTaskPool, Task, block_on},
     transform::components::Transform,
 };
@@ -244,6 +281,13 @@ pub struct ChunkMeshIndex(HashMap<ChunkKey, ChunkEntities>);
 pub struct ChunkEntities {
     pub terrain: Option<Entity>,
     pub fluid: Option<Entity>,
+    /// EM-3.11h: `true` while `terrain` is the synchronous first-load
+    /// placeholder box (see module docs), not the real greedy-meshed
+    /// geometry. Private — only this module ever needs to tell the
+    /// difference (the atomic despawn-old+spawn-new swap in
+    /// [`apply_chunk_meshes`] treats a placeholder exactly like any other
+    /// entry, on purpose).
+    is_placeholder: bool,
 }
 
 impl ChunkMeshIndex {
@@ -284,6 +328,15 @@ pub struct FluidChunkMesh {
     pub key: ChunkKey,
 }
 
+/// Marker on the EM-3.11h synchronous first-load placeholder (see module
+/// docs): a coarse box standing in for a chunk's real mesh while its async
+/// task runs. Always co-spawned with a `TerrainChunkMesh` (so it obeys
+/// whatever chunk-distance culling band the host applies) — this is an
+/// additional tag for callers that need to tell it apart from real
+/// geometry (debugging, tests), not a replacement for that marker.
+#[derive(Component)]
+pub struct PlaceholderChunkMesh;
+
 /// Entity transform for a chunk mesh: the mesher emits xy relative to the
 /// chunk origin and ABSOLUTE z (see [`ChunkVolume::range`]), so the entity
 /// sits at the chunk origin mapped through the converter's z-up → y-up
@@ -295,6 +348,95 @@ pub fn chunk_transform(key: ChunkKey) -> Transform {
     let sz = TerrainChunk::RECT_SIZE.map(|e| e as i32);
     #[expect(clippy::cast_precision_loss, reason = "chunk coords ≪ 2^24")]
     Transform::from_xyz((key.x * sz.x) as f32, 0.0, -(key.y * sz.y) as f32)
+}
+
+/// EM-3.11h — first-load placeholder assets, cached [`Local`] to
+/// [`spawn_chunk_mesh_tasks`]: every placeholder chunk reuses the SAME
+/// unit-box mesh (stretched to the chunk's footprint/height via its
+/// per-entity `Transform` scale, [`placeholder_transform`]) and the SAME
+/// material, so spawning one costs a component insert, not a fresh asset.
+#[derive(Default)]
+struct PlaceholderAssets {
+    mesh: Option<Handle<BevyMesh>>,
+    material: Option<Handle<StandardMaterial>>,
+}
+
+/// EM-3.11h — the placeholder's world transform: a unit box (built once by
+/// [`placeholder_box_mesh`]) scaled to the chunk's `32×32` footprint and
+/// `[z_lo, z_hi]` height range, positioned at the chunk's own origin (same
+/// xz convention as [`chunk_transform`] — Veloren `(32·kx, 32·ky)` → Bevy
+/// `(32·kx, −32·ky)`, box growing toward −z/+x/+y from there).
+fn placeholder_transform(key: ChunkKey, z_lo: f32, z_hi: f32) -> Transform {
+    let sz = TerrainChunk::RECT_SIZE.map(|e| e as f32);
+    let height = (z_hi - z_lo).max(1.0);
+    #[expect(clippy::cast_precision_loss, reason = "chunk coords ≪ 2^24")]
+    let origin = Vec3::new(key.x as f32 * sz.x, z_lo, -(key.y as f32 * sz.y) - sz.y);
+    Transform::from_translation(origin).with_scale(Vec3::new(sz.x, height, sz.y))
+}
+
+/// EM-3.11h — a flat-shaded, axis-aligned unit box (each face gets its own
+/// 4 duplicated vertices + normal). Reused for every placeholder via a
+/// non-uniform `Transform` scale ([`placeholder_transform`]) rather than
+/// rebuilt per chunk. Paired with [`placeholder_material`]'s `cull_mode:
+/// None` so a camera standing INSIDE a not-yet-meshed chunk (the exact
+/// "walked into a cave" case this fix targets) still sees the box's inner
+/// faces instead of nothing.
+fn placeholder_box_mesh() -> BevyMesh {
+    let corners = [
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(1.0, 1.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(1.0, 0.0, 1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(0.0, 1.0, 1.0),
+    ];
+    // (corner indices wound for an outward-facing first triangle, outward
+    // normal) per face of the unit cube.
+    let faces: [([usize; 4], Vec3); 6] = [
+        ([0, 1, 2, 3], Vec3::new(0.0, 0.0, -1.0)), // -Z
+        ([5, 4, 7, 6], Vec3::new(0.0, 0.0, 1.0)),  // +Z
+        ([4, 0, 3, 7], Vec3::new(-1.0, 0.0, 0.0)), // -X
+        ([1, 5, 6, 2], Vec3::new(1.0, 0.0, 0.0)),  // +X
+        ([4, 5, 1, 0], Vec3::new(0.0, -1.0, 0.0)), // -Y
+        ([3, 2, 6, 7], Vec3::new(0.0, 1.0, 0.0)),  // +Y
+    ];
+
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(24);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(24);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+    for (face_corners, normal) in faces {
+        let base = positions.len() as u32;
+        for corner_index in face_corners {
+            positions.push(corners[corner_index].to_array());
+            normals.push(normal.to_array());
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let mut mesh = BevyMesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// EM-3.11h — a neutral, unlit-ish rock grey so the placeholder reads as
+/// plausible (if crude) geometry rather than a garish debug colour; matches
+/// `far_terrain.rs`'s own placeholder-quality material (same
+/// `perceptual_roughness`/`reflectance`, same `cull_mode: None` rationale).
+fn placeholder_material() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::srgb(0.35, 0.33, 0.30),
+        cull_mode: None,
+        perceptual_roughness: 1.0,
+        reflectance: 0.02,
+        ..Default::default()
+    }
 }
 
 /// In-flight meshing cap factor: [`spawn_chunk_mesh_tasks`] stops draining
@@ -369,6 +511,11 @@ fn spawn_chunk_mesh_tasks(
     budget: Res<ChunkUploadBudget>,
     mut queue: ResMut<ChunkMeshQueue>,
     mut tasks: ResMut<ChunkMeshTasks>,
+    mut commands: Commands,
+    mut index: ResMut<ChunkMeshIndex>,
+    mut meshes: ResMut<Assets<BevyMesh>>,
+    mut placeholder_materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut placeholder_assets: Local<PlaceholderAssets>,
 ) {
     if queue.is_empty() {
         return;
@@ -383,9 +530,62 @@ fn spawn_chunk_mesh_tasks(
             // The provider no longer has this chunk: cancel any in-flight
             // task too, so a stale mesh can't land later (last write wins).
             tasks.0.remove(&key);
+            // EM-3.11h: also clean up an abandoned first-load placeholder —
+            // its real mesh is never coming now (the volume is gone), so
+            // nothing should be left behind to linger forever.
+            if index
+                .0
+                .get(&key)
+                .is_some_and(|entities| entities.is_placeholder)
+                && let Some(entity) = index.0.remove(&key).and_then(|entities| entities.terrain)
+            {
+                commands.entity(entity).despawn();
+            }
             tracing::debug!(?key, "chunk mesh request dropped: provider has no volume");
             continue;
         };
+
+        // EM-3.11h: a key with no entity at all yet — its first ever mesh —
+        // gets an instant, synchronous placeholder so there is always
+        // SOMETHING to draw at this chunk's footprint while the async task
+        // + upload budget catch up (module docs: this is what closes the
+        // "black frame" gap the far mesh's camera-proximity hole relied on
+        // the near pipeline to cover). A key that already has an entity
+        // (real geometry from a previous upload, OR a placeholder already
+        // up from an earlier mark of this same key) is left alone — this
+        // only ever fires once per chunk, on its very first mark.
+        if !index.0.contains_key(&key)
+            && let Some(materials) = placeholder_materials.as_deref_mut()
+        {
+            let mesh = placeholder_assets
+                .mesh
+                .get_or_insert_with(|| meshes.add(placeholder_box_mesh()))
+                .clone();
+            let material = placeholder_assets
+                .material
+                .get_or_insert_with(|| materials.add(placeholder_material()))
+                .clone();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "world z bounds ≪ 2^24, same contract as chunk_transform"
+            )]
+            let (z_lo, z_hi) = (volume.range.min.z as f32, volume.range.max.z as f32);
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    placeholder_transform(key, z_lo, z_hi),
+                    TerrainChunkMesh { key },
+                    PlaceholderChunkMesh,
+                ))
+                .id();
+            index.0.insert(key, ChunkEntities {
+                terrain: Some(entity),
+                fluid: None,
+                is_placeholder: true,
+            });
+        }
+
         let lut = layer_map.0.clone();
         let task = pool.spawn(async move {
             let _span =
@@ -473,7 +673,11 @@ fn apply_chunk_meshes(
                 ))
                 .id()
         });
-        index.0.insert(key, ChunkEntities { terrain, fluid });
+        index.0.insert(key, ChunkEntities {
+            terrain,
+            fluid,
+            is_placeholder: false,
+        });
         stats.uploads_last_frame += 1;
         stats.total_uploads += 1;
     }
