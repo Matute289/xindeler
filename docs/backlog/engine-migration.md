@@ -54,7 +54,7 @@ so an upgrade waits until the dep tree catches up.
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified. EM-4.2 correctness done (PR #33): persistence + rtsim REAL round-trip, `hot-agent` wired; full 24h soak + EM-4.2b+ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
-| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/birds) | 🔵 **started 2026-07-09** (Matías, running in parallel with Phase 4) — spec/plan/tasks authoring in progress, EM-7.1→7.8 scaffolded |
+| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/birds) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.8 scaffolded |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -173,12 +173,15 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-6.4 | Retire interim pieces per cutover (legacy quinn listener off, old client archived) | ⚪ |
 | EM-6.5 | Post-migration perf review (FPS/frame-time/RAM/VRAM/server-tick vs old client) | ⚪ |
 
-## Phase 7 — Visual detail & atmosphere polish 🔵
+## Phase 7 — Visual detail & atmosphere polish 🔒
 
-**Started 2026-07-09 (Matías, worksheet response to EM-3.11b re-test):** running IN PARALLEL with Phase 4,
-not gated on it. Scope = everything Matías flagged as "missing/flat" beyond the EM-3.11(b) bug fixes —
-this is new rendering *content*, not bug fixes. Spec/plan/tasks authoring in progress; each row below will
-link its spec/plan/task doc once drafted.
+**Sequencing decided 2026-07-09 (Matías):** scope = everything Matías flagged as "missing/flat" beyond
+the EM-3.11(b) bug fixes — new rendering *content*, not bug fixes. **Research + spec/plan/tasks authoring
+starts NOW** (Opus 4.8-authored, per this program's delegation convention — Opus authors specs/plans/
+tasks, Sonnet/Haiku implement), but **implementation is explicitly BLOCKED until Phase 6 completes** —
+Matías wants the phases done in order (finish the EM-3.11b re-test → Phase 4 → Phase 5 → Phase 6 →
+*then* Phase 7), not run in parallel as first floated. Each row below will link its spec/plan/task doc
+once drafted.
 
 | Task | What | Status |
 |---|---|---|
