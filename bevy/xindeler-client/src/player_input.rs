@@ -51,7 +51,6 @@ const CAMERA_TOGGLE_KEY: KeyCode = KeyCode::KeyF;
 /// in-game camera (EM-5.11). TODO(EM-5.11): eye-to-player raycast so the camera
 /// never clips into or hides behind terrain.
 const CAM_BACK: f32 = 9.0;
-const CAM_UP: f32 = 6.0;
 const CAM_LOOK_UP: f32 = 1.0;
 
 /// Whether the camera is currently following the player (vs. free fly-cam).
@@ -191,15 +190,18 @@ fn third_person_camera(
     let player_pos = interp.map_or(player_tf.translation, |i| i.pos);
 
     for (mut cam_tf, fly) in &mut cameras {
-        // Horizontal heading from the fly-cam yaw (mouse-orbit), pitch tilts the
-        // eye up/down a little via CAM_UP scaling.
-        let (sin_y, cos_y) = fly.yaw.sin_cos();
-        // Bevy: yaw 0 looks toward −z; forward = (sin(yaw)? ...) — derive the
-        // backward offset directly from the fly-cam yaw convention (yaw about
-        // +Y, EulerRot::YXZ): forward_xz = (−sin yaw, −cos yaw).
-        let back = Vec3::new(sin_y, 0.0, cos_y); // opposite of forward_xz
-        let eye = player_pos + back * CAM_BACK + Vec3::Y * CAM_UP;
+        // Full spherical orbit from BOTH yaw AND pitch (EM-3.11 smoke fix —
+        // this previously only read `fly.yaw`, so vertical mouse motion did
+        // nothing in third-person mode; only the horizontal orbit worked).
+        // Derive the SAME forward direction the fly-cam itself looks along
+        // (`fly_cam_look`'s `Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)`
+        // convention) and orbit the eye around the look-at point along that
+        // direction, so pitch swings the camera up/down exactly like it
+        // swings the fly-cam's own look direction — no separate vertical
+        // constant needed.
+        let forward = Quat::from_euler(EulerRot::YXZ, fly.yaw, fly.pitch, 0.0) * Vec3::NEG_Z;
         let look_at = player_pos + Vec3::Y * CAM_LOOK_UP;
+        let eye = look_at - forward * CAM_BACK;
         *cam_tf = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
     }
 }
