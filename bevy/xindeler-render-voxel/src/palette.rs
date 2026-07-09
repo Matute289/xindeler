@@ -566,6 +566,36 @@ mod tests {
             "Leaves base_color should be green-dominant, got {:?}",
             leaves.base_color
         );
+
+        // Regression (BL-82 EM-3.11, follow-up): ordinary terrain-column
+        // kinds must ALSO not resolve to Rock's default_layer — empirically
+        // confirmed (forcing a demo-world column to BlockKind::Grass renders
+        // Rock-gray, not green) that these carry no visual colour without an
+        // explicit entry, despite worldgen embedding real per-voxel colour
+        // that the render pipeline never reads.
+        for kind in [
+            BlockKind::Grass,
+            BlockKind::Sand,
+            BlockKind::Snow,
+            BlockKind::WeakRock,
+            BlockKind::GlowingWeakRock,
+            BlockKind::Ice,
+        ] {
+            assert_ne!(
+                layer(kind),
+                parsed.default_layer,
+                "{kind:?} must not fall back to the default (Rock-gray) layer"
+            );
+        }
+        // Grass must read distinctly green (not another gray/brown tone).
+        let grass = &parsed.blocks[&BlockKind::Grass];
+        assert!(
+            grass.base_color[1] > grass.base_color[0] && grass.base_color[1] > grass.base_color[2],
+            "Grass base_color should be green-dominant, got {:?}",
+            grass.base_color
+        );
+        // GlowingWeakRock must carry an emissive mask, same as GlowingRock.
+        assert!(parsed.blocks[&BlockKind::GlowingWeakRock].emissive_strength > 0.0);
     }
 
     /// Anti-chaos: hostile values come out finite and in-bounds.
