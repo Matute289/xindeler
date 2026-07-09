@@ -230,6 +230,187 @@ pub fn sprite_model_to_bevy(
 mod tests {
     use super::*;
 
+    /// EM-3.11j regression test: every whitelisted sprite kind (mirrors
+    /// `xindeler-client::sprite_view::SPRITE_KINDS`) must resolve to at least
+    /// one model variation, and EVERY model of EVERY variation must mesh to
+    /// real, non-black voxel colour through the SAME `Segment::from_vox` +
+    /// colour path the render pipeline uses (`sprite_model_to_bevy` /
+    /// `figure_part_to_bevy` both bottom out in `Segment::from_vox` reading
+    /// the `.vox`'s own embedded palette — see module docs).
+    ///
+    /// Guards the bug class this project has hit before (a kind with
+    /// geometry/whitelist coverage but no colour-source data falling back to
+    /// black) — but for SPRITES that data source is the `.vox` file's own
+    /// palette, not a per-kind table like `block_palette.ron`, so the
+    /// meaningful gap to catch here is "a whitelisted kind's `.vox` has no
+    /// authored colour" (a broken/placeholder asset), not a missing
+    /// palette/manifest row.
+    ///
+    /// `SpriteKind::Blueberry` is the sole documented exception: its
+    /// `sprite_manifest.ron` entry is `[()]` (the upstream "no model"
+    /// sentinel) with its real variations wrapped in a `/* */` block comment
+    /// — upstream Veloren's OWN choice to ship it disabled, not a Xindeler
+    /// gap. `sprite_view.rs` already treats "no variations" as a silent,
+    /// harmless skip (`SpriteKindState::Failed`), so this is expected, not a
+    /// black-rendering bug.
+    ///
+    /// `#[ignore]` — reads real assets; run with
+    /// `cargo test -p xindeler-render-voxel --features figure
+    /// sprite_kinds_have_non_black_colour_data -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads real .vox assets"]
+    fn sprite_kinds_have_non_black_colour_data() {
+        use common::{
+            terrain::SpriteKind,
+            vol::{IntoFullVolIterator, SizedVol},
+        };
+
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/voxygen/voxel/sprite_manifest.ron");
+        let bytes = std::fs::read(&manifest_path).expect("read sprite_manifest.ron");
+        let manifest: SpriteManifest =
+            ron::de::from_bytes(&bytes).expect("parse sprite_manifest.ron");
+
+        // Mirrors `xindeler_client::sprite_view::SPRITE_KINDS` (EM-3.9b's
+        // whole-Plant-category whitelist). Kept as a local literal rather than
+        // importing the client crate (this crate is the shell BELOW the
+        // client; `xindeler-client` depends on `xindeler-render-voxel`, not
+        // the reverse — isolation law direction).
+        const SPRITE_KINDS: &[SpriteKind] = &[
+            SpriteKind::BarrelCactus,
+            SpriteKind::RoundCactus,
+            SpriteKind::ShortCactus,
+            SpriteKind::MedFlatCactus,
+            SpriteKind::ShortFlatCactus,
+            SpriteKind::LargeCactus,
+            SpriteKind::TallCactus,
+            SpriteKind::BlueFlower,
+            SpriteKind::PinkFlower,
+            SpriteKind::PurpleFlower,
+            SpriteKind::RedFlower,
+            SpriteKind::WhiteFlower,
+            SpriteKind::YellowFlower,
+            SpriteKind::Sunflower,
+            SpriteKind::Moonbell,
+            SpriteKind::Pyrebloom,
+            SpriteKind::LushFlower,
+            SpriteKind::LanternFlower,
+            SpriteKind::LongGrass,
+            SpriteKind::MediumGrass,
+            SpriteKind::ShortGrass,
+            SpriteKind::Fern,
+            SpriteKind::LargeGrass,
+            SpriteKind::TaigaGrass,
+            SpriteKind::GrassBlue,
+            SpriteKind::SavannaGrass,
+            SpriteKind::TallSavannaGrass,
+            SpriteKind::RedSavannaGrass,
+            SpriteKind::SavannaBush,
+            SpriteKind::Welwitch,
+            SpriteKind::LeafyPlant,
+            SpriteKind::DeadBush,
+            SpriteKind::JungleFern,
+            SpriteKind::JungleRedGrass,
+            SpriteKind::DeadPlant,
+            SpriteKind::Corn,
+            SpriteKind::WheatYellow,
+            SpriteKind::WheatGreen,
+            SpriteKind::LingonBerry,
+            SpriteKind::Blueberry,
+            SpriteKind::Lettuce,
+            SpriteKind::Pumpkin,
+            SpriteKind::Carrot,
+            SpriteKind::Tomato,
+            SpriteKind::Radish,
+            SpriteKind::Turnip,
+            SpriteKind::Flax,
+            SpriteKind::WildFlax,
+            SpriteKind::Mushroom,
+            SpriteKind::CaveMushroom,
+            SpriteKind::Cotton,
+            SpriteKind::SewerMushroom,
+            SpriteKind::LushMushroom,
+            SpriteKind::RockyMushroom,
+            SpriteKind::GlowMushroom,
+        ];
+        // Only kind allowed to resolve to zero variations (see doc comment).
+        const EXPECTED_EMPTY: SpriteKind = SpriteKind::Blueberry;
+
+        let assets_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut checked_kinds = 0usize;
+        let mut checked_models = 0usize;
+
+        for &kind in SPRITE_KINDS {
+            let Some(vars) = manifest.variations(kind) else {
+                assert_eq!(
+                    kind, EXPECTED_EMPTY,
+                    "{kind:?}: manifest has no variations — new sprite-colour gap, not the \
+                     documented Blueberry exception"
+                );
+                continue;
+            };
+            assert!(
+                !vars.is_empty(),
+                "{kind:?}: variations() returned an empty slice"
+            );
+            checked_kinds += 1;
+
+            for var in vars {
+                let vox_path = assets_root.join(format!("{}.vox", var.model.replace('.', "/")));
+                let vox_bytes = std::fs::read(&vox_path)
+                    .unwrap_or_else(|e| panic!("{kind:?}: read {vox_path:?}: {e}"));
+                let vox = dot_vox::load_bytes(&vox_bytes)
+                    .unwrap_or_else(|e| panic!("{kind:?}: parse {vox_path:?}: {e}"));
+
+                // Every model bundled in the `.vox` (some files carry several
+                // LOD/variant models) must contribute real, non-black colour —
+                // exactly the data `sprite_model_to_bevy` bakes into the mesh.
+                let mut model_index = 0usize;
+                loop {
+                    let segment = common::figure::Segment::from_vox(&vox, false, model_index, None);
+                    if segment.size() == vek::Vec3::zero() {
+                        break; // ran past the last model in this .vox
+                    }
+                    let mut total = 0usize;
+                    let mut black = 0usize;
+                    for (_, cell) in segment.full_vol_iter() {
+                        if let Some(col) = cell.get_color() {
+                            total += 1;
+                            if col.r == 0 && col.g == 0 && col.b == 0 {
+                                black += 1;
+                            }
+                        }
+                    }
+                    assert!(
+                        total > 0,
+                        "{kind:?}: {} model {model_index} meshes to zero filled voxels",
+                        var.model
+                    );
+                    assert_eq!(
+                        black, 0,
+                        "{kind:?}: {} model {model_index} has {black}/{total} pure-black filled \
+                         voxels — this is the black-sprite bug class this test guards",
+                        var.model
+                    );
+                    checked_models += 1;
+                    model_index += 1;
+                    if model_index > 8 {
+                        break; // safety cap — no real sprite bundles this many models
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked_kinds >= SPRITE_KINDS.len() - 1,
+            "expected all but the documented Blueberry exception to have real variations"
+        );
+        assert!(
+            checked_models > 0,
+            "sanity: the test must actually check something"
+        );
+    }
+
     /// The manifest parses into our minimal portable shape and exposes grass
     /// variations. `#[ignore]` — needs the real asset; run locally with
     /// `XINDELER_ASSETS` pointing at `assets/`.
