@@ -40,7 +40,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bevy::{
-    app::{App, Plugin, Update},
+    app::{App, FixedUpdate, Plugin},
     ecs::{change_detection::NonSendMut, schedule::IntoScheduleConfigs, system::Res},
 };
 use client::{Client, ClientType, Event as ClientEvent, WorldData, addr::ConnectionArgs};
@@ -67,15 +67,20 @@ pub struct PlayerBridgePlugin;
 
 impl Plugin for PlayerBridgePlugin {
     fn build(&self, app: &mut App) {
+        // EM-3.11b: FixedUpdate, matching `tick_sim`'s move — `tick_player`
+        // drives the embedded Client's `Clock` (`PLAYER_TPS` below), which
+        // already assumed a steady 30 Hz call rate; `Update` in the windowed
+        // listen-server path gave it 60–144 Hz instead. See `tick_sim`'s doc
+        // in `lib.rs` for the full story.
         app.init_resource::<LocalPlayerInput>()
-            .add_systems(Update, tick_player.after(tick_sim));
+            .add_systems(FixedUpdate, tick_player.after(tick_sim));
     }
 }
 
 /// Client + server tick rate for the embedded player (matches the sim's TPS and
-/// the smoke bot). The Client is ticked once per Bevy frame; its `Clock`
-/// provides the `dt` its own sync loop expects.
-const PLAYER_TPS: f64 = 30.0;
+/// the smoke bot). The Client is ticked once per `FixedUpdate` step
+/// (EM-3.11b); its `Clock` provides the `dt` its own sync loop expects.
+const PLAYER_TPS: f64 = crate::SIM_TICK_HZ;
 
 /// Username the embedded player registers with (auth is disabled on the
 /// singleplayer sim, so it is used directly) and the character alias. Distinct
@@ -282,12 +287,14 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
     })
 }
 
-/// Advances the embedded player one frame: ticks its network/sync and walks the
-/// life-cycle state machine, applying [`LocalPlayerInput`] once in game.
+/// Advances the embedded player one fixed step: ticks its network/sync and
+/// walks the life-cycle state machine, applying [`LocalPlayerInput`] once in
+/// game.
 ///
-/// Runs on the main thread (non-send) every `Update`, after [`crate::tick_sim`]
-/// so the sim has already processed the previous frame's input. No-ops until
-/// the shell inserts an [`EmbeddedPlayer`] (listen-server only).
+/// Runs on the main thread (non-send) every `FixedUpdate` step (EM-3.11b),
+/// after [`crate::tick_sim`] so the sim has already processed the previous
+/// step's input. No-ops until the shell inserts an [`EmbeddedPlayer`]
+/// (listen-server only).
 pub fn tick_player(player: Option<NonSendMut<EmbeddedPlayer>>, input: Res<LocalPlayerInput>) {
     let Some(mut player) = player else { return };
     player.clock.tick();
@@ -483,7 +490,13 @@ pub(crate) fn player_sim_entity(sim: &SimServer, uid: Uid) -> Option<specs::Enti
 
 #[cfg(test)]
 mod tests {
-    use bevy::{MinimalPlugins, app::PluginGroup, math::Vec2 as BVec2, state::app::StatesPlugin};
+    use bevy::{
+        MinimalPlugins,
+        app::PluginGroup,
+        math::Vec2 as BVec2,
+        state::app::StatesPlugin,
+        time::{Fixed, Time, TimeUpdateStrategy},
+    };
     use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
     use xindeler_protocol::XindelerProtocolPlugin;
 
@@ -540,6 +553,14 @@ mod tests {
                 PlayerBridgePlugin,
             ))
             .finish();
+        // EM-3.11b: `tick_sim`/`tick_player` now run in `FixedUpdate` — pin
+        // the step to exactly `SIM_TICK_HZ` and feed a matching real-time
+        // delta each `app.update()` (see `SimBridgePlugin`'s tests in
+        // `lib.rs` for the full rationale) so this stays a per-tick loop.
+        app.insert_resource(Time::<Fixed>::from_hz(crate::SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / crate::SIM_TICK_HZ,
+        )));
         app.insert_non_send(sim);
         app.insert_non_send(player);
         // Constant forward (sim +y / north) walk.

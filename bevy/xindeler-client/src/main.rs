@@ -31,9 +31,46 @@ mod smoke;
 mod terrain_stream;
 mod voxel_demo;
 
-use bevy::{asset::AssetPlugin, image::ImagePlugin, prelude::*, window::WindowResolution};
+use bevy::{
+    asset::AssetPlugin,
+    image::ImagePlugin,
+    prelude::*,
+    window::{PresentMode, WindowResolution},
+};
 use xindeler_app::XindelerAppPlugin;
 use xindeler_render_voxel::VoxelRenderPlugin;
+
+/// Window present mode, overridable via `XINDELER_PRESENT_MODE` (EM-3.11b).
+///
+/// Bevy's `Window` default (unset here previously) is
+/// [`PresentMode::AutoVsync`] (`Fifo`/`FifoRelaxed` — hard-capped, quantised to
+/// whole multiples of the display's refresh interval). That default was the
+/// prime suspect for two reports on this exact listen-server smoke scene: a
+/// flat ~29 fps that did NOT move between a dev build and a `lto=true,
+/// opt-level=3` release build (a CPU speedup should have moved a CPU-bound
+/// number; it moved nothing — see the `OcclusionCullingConfig` doc on
+/// `camera.rs` for the original dev measurement this matches), plus visible
+/// judder ("titileo") panning the mouse and "robotic" movement. Kept as an env
+/// override (not a `GraphicsSettings` field yet — same deferral as
+/// `OcclusionCullingConfig`; `xindeler-app` settings integration is out of
+/// scope here) so re-measuring with vsync off doesn't need a code change:
+/// `XINDELER_PRESENT_MODE=novsync` (or `immediate`) to try it,
+/// unset/`auto`/`vsync` keeps the default.
+///
+/// ## EM-3.11b measurement (see the doc comment referenced above)
+/// See `docs/backlog/engine-migration.md` EM-3.11b for the full before/after
+/// numbers measured on this scene.
+fn present_mode_from_env() -> PresentMode {
+    match std::env::var("XINDELER_PRESENT_MODE").as_deref() {
+        Ok("novsync" | "immediate") => PresentMode::AutoNoVsync,
+        Ok("mailbox") => PresentMode::Mailbox,
+        Ok("fifo_relaxed") => PresentMode::FifoRelaxed,
+        Ok("fifo" | "vsync") => PresentMode::Fifo,
+        // Unset, "auto", or anything unrecognised: keep Bevy's own default
+        // rather than silently mis-parsing a typo into a different mode.
+        _ => PresentMode::AutoVsync,
+    }
+}
 
 fn main() -> AppExit {
     let smoke_mode = smoke::parse_smoke_args();
@@ -71,6 +108,7 @@ fn main() -> AppExit {
                 primary_window: Some(Window {
                     title: "Xindeler".to_owned(),
                     resolution: WindowResolution::new(1280, 720),
+                    present_mode: present_mode_from_env(),
                     ..Default::default()
                 }),
                 ..Default::default()

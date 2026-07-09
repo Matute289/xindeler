@@ -9,6 +9,13 @@
 //! comparison without a bespoke benchmark harness. Silent (zero overhead
 //! beyond one resource read) unless `XINDELER_PERF_LOG` is set, so it never
 //! affects normal runs or the smoke screenshot.
+//!
+//! EM-3.11b: a smoothed average alone can't distinguish a smooth hard cap
+//! from a janky one — a stutter complaint ("titileo") is about VARIANCE, not
+//! mean. [`log_frame_time`] now also tracks the raw (unsmoothed) per-frame
+//! min/max seen SINCE the last log line and reports them alongside the
+//! smoothed average/fps, so `max_frame_time_ms - frame_time_ms` shows spikes
+//! a flat average would hide.
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
@@ -23,10 +30,23 @@ const LOG_INTERVAL_FRAMES: u32 = 60;
 #[derive(Resource)]
 struct PerfLogEnabled(bool);
 
-/// Frame counter for the logging cadence.
-#[derive(Resource, Default)]
+/// Frame counter for the logging cadence + the raw min/max seen this window.
+#[derive(Resource)]
 struct PerfLogState {
     frame: u32,
+    /// Raw (unsmoothed) per-frame min/max ms since the last emitted line.
+    min_ms: f64,
+    max_ms: f64,
+}
+
+impl Default for PerfLogState {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            min_ms: f64::INFINITY,
+            max_ms: f64::NEG_INFINITY,
+        }
+    }
 }
 
 pub struct PerfLogPlugin;
@@ -48,6 +68,16 @@ fn log_frame_time(
     if !enabled.0 {
         return;
     }
+    // Track the raw per-frame instant (NOT smoothed) so a single-frame spike
+    // isn't averaged away before we can see it.
+    if let Some(instant_ms) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(bevy::diagnostic::Diagnostic::value)
+    {
+        state.min_ms = state.min_ms.min(instant_ms);
+        state.max_ms = state.max_ms.max(instant_ms);
+    }
+
     state.frame += 1;
     if !state.frame.is_multiple_of(LOG_INTERVAL_FRAMES) {
         return;
@@ -62,7 +92,11 @@ fn log_frame_time(
         target: "perf_log",
         frame = state.frame,
         frame_time_ms = frame_time_ms.unwrap_or(f64::NAN),
+        min_frame_time_ms = state.min_ms,
+        max_frame_time_ms = state.max_ms,
         fps = fps.unwrap_or(f64::NAN),
         "perf_log"
     );
+    state.min_ms = f64::INFINITY;
+    state.max_ms = f64::NEG_INFINITY;
 }
