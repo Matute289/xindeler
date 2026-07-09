@@ -137,7 +137,7 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | Task | What | Status |
 |---|---|---|
 | EM-4.1 | `xindeler-server-app` — headless `MinimalPlugins` shell embedding the sim; **dual-stack** (old client keeps connecting) | ✅ PR #27 — real `Server::tick` @ 30Hz + SIGINT/SIGTERM graceful shutdown + `/metrics` Prometheus passthrough; dual-stack verified via a real separate-process client connect+play+logout ([Q?] plugins-on-by-default confirmed, Matías 2026-07-09) |
-| EM-4.2 | Persistence / rtsim / agent-dylib verified under the shell; 24h soak | ⚪ |
+| EM-4.2 | Persistence / rtsim / agent-dylib verified under the shell; 24h soak | 🔵 correctness done (PR TBD) — persistence + rtsim REAL round-trip tests (genuine process stop/SIGTERM/restart, state proven to survive not regenerate); `hot-agent` feature wired (was missing entirely); dylib compile+load+watch confirmed, live reload cycle untestable on macOS (documented pre-existing platform limitation) + would need editing the forbidden `server/agent` crate; soak-readiness sanity (10min, RSS flat/declining, tick time well under budget) — full 24h soak run separately, duration reported honestly when it wraps |
 | EM-4.2b | Transport backend spike — `renet2` vs `quinnet` (real network, not loopback) | ⚪ |
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |
 | EM-4.2d | Interest management — per-client visibility (region/distance + `DimensionId`); bandwidth vs old protocol | ⚪ |
