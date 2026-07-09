@@ -1,6 +1,23 @@
 use crate::metrics::SysMetrics;
 use specs::{ReadExpect, RunNow};
-use std::{collections::HashMap, time::Instant};
+use std::{collections::HashMap, sync::OnceLock, time::Instant};
+
+/// Threshold (ms) above which [`Job::run`] logs `"slow system execution"` for
+/// an individual specs system. Defaults to 500ms (the long-standing Veloren
+/// default), but is overridable via `XINDELER_SLOW_SYS_MS` so a per-system
+/// breakdown can be pulled out of a slow-tick investigation without a
+/// recompile (EM-3.11d: this is how the 50-200ms listen-server tick was
+/// root-caused — see `docs/backlog/engine-migration.md` EM-3.11d). Read
+/// once and cached: this runs on the hot path (once per system per tick).
+fn slow_system_threshold_ms() -> u128 {
+    static THRESHOLD: OnceLock<u128> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("XINDELER_SLOW_SYS_MS")
+            .ok()
+            .and_then(|v| v.parse::<u128>().ok())
+            .unwrap_or(500)
+    })
+}
 
 /// measuring the level of threads a unit of code ran on. Use Rayon when it ran
 /// on their threadpool. Use Exact when you know on how many threads your code
@@ -282,7 +299,7 @@ where
         T::run(self, data.0);
         let millis = self.cpu_stats.end().as_millis();
         let name = T::NAME;
-        if millis > 500 {
+        if millis > slow_system_threshold_ms() {
             tracing::warn!(?millis, ?name, "slow system execution");
         }
         data.1

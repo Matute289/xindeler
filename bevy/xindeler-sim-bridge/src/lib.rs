@@ -595,7 +595,15 @@ impl Default for TestNpcState {
             warmup_ticks: 150,
             // 8 = two of each of the four figure paths (pig / human / wolf /
             // owl) so every EM-3.8c body type is on the ring.
-            count: 8,
+            //
+            // EM-3.11d: overridable via `XINDELER_TEST_NPC_COUNT` so a slow-tick
+            // profiling session can densify the scene (more entities → more
+            // physics/agent-AI/mirror work per tick) without a recompile. Unset
+            // keeps the original EM-3.8c default.
+            count: std::env::var("XINDELER_TEST_NPC_COUNT")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(8),
         }
     }
 }
