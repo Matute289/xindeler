@@ -6,6 +6,11 @@
 //! mesh. On hot reload it mutates the shared material assets in place and swaps
 //! the layer LUT, then re-marks every currently-indexed chunk dirty.
 //!
+//! The fluid material is the EM-3.9b [`WaterMaterial`] (animated scroll/
+//! ripple `ExtendedMaterial`) — its wrapped `StandardMaterial` base still
+//! comes from the palette's Water entry (translucent blue, wet-sheen
+//! roughness); only the extension's shader is new.
+//!
 //! Extracted from the EM-3.5 voxel demo so BOTH the synthetic demo AND the
 //! EM-3.6 listen-server (real streamed terrain) share it — without it, the
 //! listen-server path would install a `ChunkVolumeProvider` but no
@@ -18,7 +23,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use common::terrain::BlockKind;
 use xindeler_render_voxel::{
-    material::{VoxelMaterial, VoxelMaterialExt},
+    material::{VoxelMaterial, VoxelMaterialExt, WaterMaterial, WaterMaterialExt},
     palette::{BlockPalette, PALETTE_ASSET_PATH, build_block_texture_arrays},
     pipeline::{ChunkLayerMap, ChunkMaterials, ChunkMeshIndex, ChunkMeshQueue},
 };
@@ -59,7 +64,7 @@ fn apply_palette(
     handle: Res<PaletteHandle>,
     mut images: ResMut<Assets<Image>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut water_materials: ResMut<Assets<WaterMaterial>>,
     existing: Option<Res<ChunkMaterials>>,
     layer_map: Option<ResMut<ChunkLayerMap>>,
     index: Res<ChunkMeshIndex>,
@@ -86,14 +91,16 @@ fn apply_palette(
     let normal = images.add(arrays.normal);
     let mra = images.add(arrays.mra);
 
-    // The interim fluid material is palette data too (Water entry): stock
-    // transparent StandardMaterial until EM-3.9's dedicated water shader.
+    // The fluid material is palette data too (Water entry) driving the
+    // EM-3.9b `WaterMaterialExt` shader's wrapped `StandardMaterial` base
+    // (translucent blue, low roughness for a wet sheen — the extension adds
+    // the animated scroll/ripple/fresnel on top).
     let water = palette
         .blocks
         .get(&BlockKind::Water)
         .cloned()
         .unwrap_or_default();
-    let fluid_material = StandardMaterial {
+    let fluid_base = StandardMaterial {
         base_color: Color::srgba(
             water.base_color[0],
             water.base_color[1],
@@ -117,8 +124,8 @@ fn apply_palette(
             material.extension.emissive_strength = palette.material.emissive_strength;
             material.extension.ao_strength = palette.material.ao_strength;
         }
-        if let Some(mut material) = std_materials.get_mut(&materials.fluid) {
-            *material = fluid_material;
+        if let Some(mut material) = water_materials.get_mut(&materials.fluid) {
+            material.base = fluid_base;
         }
     } else {
         info!("block palette loaded; building terrain material");
@@ -135,7 +142,10 @@ fn apply_palette(
                 ao_strength: palette.material.ao_strength,
             },
         });
-        let fluid = std_materials.add(fluid_material);
+        let fluid = water_materials.add(WaterMaterial {
+            base: fluid_base,
+            extension: WaterMaterialExt::default(),
+        });
         commands.insert_resource(ChunkMaterials { terrain, fluid });
     }
 
