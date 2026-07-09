@@ -143,6 +143,7 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |
 | EM-4.2d | Interest management — per-client visibility (region/distance + `DimensionId`); bandwidth vs old protocol | ⚪ |
 | EM-4.2e | AI gateway readiness handoff — server shell/config/metrics/fallback seams for BL-83 and BL-85; no AWS account or Bedrock setup yet | ⚪ |
+| EM-4.2f | **AURORA/NPC entity-model readiness** (distinct from EM-4.2e's gateway/config plumbing) — ensure the migrated Bevy-mirrored NPC entity model exposes what BL-15 AURORA's social-sim layer will need (stable identity/uid, external-state injection points, a clean default/fallback behavior when AURORA is OFF so the game stays fully playable). NEW 2026-07-09 (Matías): "acomodar AURORA al nuevo sistema de NPC," scope left to technical judgment — kept narrow (entity-model seams only, no AURORA logic itself, that's BL-15/BL-83) | ⚪ |
 | EM-4.3 | `DmEventLoader` — `.dmevent.ron/json` AssetLoader + `oracle://` watch dir (ORACLE writes files) | ⚪ |
 | EM-4.4 | Anti-chaos validation layer (clamp tables for injected events) | ⚪ |
 | EM-4.5 | `DimensionRegistry` + `DimensionId` + instanced-dimension generation | ⚪ |
@@ -180,19 +181,35 @@ the EM-3.11(b) bug fixes — new rendering *content*, not bug fixes. **Research 
 starts NOW** (Opus 4.8-authored, per this program's delegation convention — Opus authors specs/plans/
 tasks, Sonnet/Haiku implement), but **implementation is explicitly BLOCKED until Phase 6 completes** —
 Matías wants the phases done in order (finish the EM-3.11b re-test → Phase 4 → Phase 5 → Phase 6 →
-*then* Phase 7), not run in parallel as first floated. Each row below will link its spec/plan/task doc
-once drafted.
+*then* Phase 7), not run in parallel as first floated.
+
+**Worksheet locked 2026-07-09 (maximalist v1 — no cost-cut, "no hay restricción de tiempo"):** every item
+below builds its full-fidelity form in v1 (real volumetric clouds, geometric instanced foliage, hybrid
+weather grid, wind vertex-displacement, wet-surface PBR, canopy rain interception, deterministic
+server-synced day/night). **Core principle (Matías): all graphics processing is CLIENT-SIDE — the server
+stays minimal**, holding only what's needed for player-relevant relationships/state and leaving knobs
+ORACLE can eventually adjust; it must never become a rendering/graphics workload. Given the **real,
+still-unresolved perf/stutter issue found in EM-3.11b** (measured ~29fps, real bug fixed but a residual
+"slow tick" root cause not yet nailed down), every one of these systems needs a measured perf gate before
+it ships enabled-by-default — this is not optional polish, it directly stacks on an open performance risk.
+**EM-7.8 (birds) was extracted out of this phase** — Matías wants real (non-AI) entities for it, which is
+gameplay/entity-model scope beyond "atmosphere polish"; tracked as its own epic, **BL-86**, in the general
+backlog. Each row below links its spec/plan/task doc once drafted.
 
 | Task | What | Status |
 |---|---|---|
-| EM-7.1 | Per-voxel color/texture variation (procedural noise/imperfections on top of the flat per-KIND palette colors from EM-3.4/EM-3.11 — grass/rock/etc. currently render as a single flat tone per block kind) | ⚪ |
-| EM-7.2 | Geometric foliage/ground detail (individual grass blades, denser tree canopies, small plants) beyond the current billboard-sprite pass (EM-3.9/3.9b) | ⚪ |
-| EM-7.3 | Clouds | ⚪ |
-| EM-7.4 | Rain (weather) | ⚪ |
-| EM-7.5 | Visible sun disc (not just directional-light illumination) | ⚪ |
-| EM-7.6 | Night sky — stars | ⚪ |
-| EM-7.7 | Moon | ⚪ |
-| EM-7.8 | Ambient wildlife — birds | ⚪ |
+| EM-7.1 | Per-voxel color/texture variation — v1 = read the mesher's authored per-voxel `ColLight.col` (currently computed then discarded) into the palette shader, plus position-hash jitter + procedural per-vertex AO at block seams (maximalist v1, worksheet 2026-07-09) | ⚪ |
+| EM-7.2 | Geometric foliage — v1 = real instanced 3D grass-blade/leaf meshes (not billboards), shadow-casting, independently wind-reactive (maximalist v1, worksheet 2026-07-09) | ⚪ |
+| EM-7.3 | Clouds — v1 = real raymarched volumetric clouds in Bevy's render graph, forward light scattering, physically traversable (maximalist v1, worksheet 2026-07-09) | ⚪ |
+| EM-7.4 | Rain (weather) — v1 = hybrid: minimal server-side low-res weather grid (state sync only) + full client GPU rendering (`bevy_hanabi`), wind-coupled diagonal rain, canopy interception/secondary drip, wet-surface dynamic PBR (maximalist v1, worksheet 2026-07-09) | ⚪ |
+| EM-7.5 | Visible sun disc — v1 = Bevy 0.19's first-party `SunDisk` component on the existing `Sun` light entity (nearly free once found) | ⚪ |
+| EM-7.6 | Night sky — stars — v1 = real astronomical star map + constellations, with clean (currently-empty) hooks for ORACLE to later mutate the sky during narrative events | ⚪ |
+| EM-7.7 | Moon — v1 = real dynamic lunar phases, deterministically clocked (maximalist v1, worksheet 2026-07-09) | ⚪ |
+| ~~EM-7.8~~ | ~~Ambient wildlife — birds~~ **moved to BL-86** (general backlog) — Matías wants real, non-AI entities; that's entity-model/gameplay scope, not atmosphere polish | ➡️ BL-86 |
+
+**Day/night ↔ sim sync:** `SunCycle` (client-local real-time stub) gets a read-only mirror of the sim's
+authoritative `TimeOfDay` as part of this phase — cheap correctness win Matías asked for explicitly (was
+previously unsynced, clients could each show a different sky).
 
 ---
 
