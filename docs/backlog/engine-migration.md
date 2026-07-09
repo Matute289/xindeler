@@ -50,7 +50,7 @@ so an upgrade waits until the dep tree catches up.
 | **0** | Repos & clean environment | ✅ **complete** (PRs #1, #2, #149) |
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
-| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d done (PRs #7–#20, #26): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern + vegetation sprites & translucent water render in Bevy, with frustum + distance-band culling**; EM-3.8e/3.9b/3.10b/3.11 pending |
+| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d + 3.10b done (PRs #7–#20, #26, #30): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern + vegetation sprites & translucent water render in Bevy, with frustum + distance-band culling + a real far-mesh horizon**; EM-3.8e/3.9b in flight (PRs #28/#29), EM-3.11 pending |
 | **4** | Server shell, replicon transport & ORACLE foundations | ⚪ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
@@ -126,7 +126,7 @@ so an upgrade waits until the dep tree catches up.
 | EM-3.9 | Sprites (grass/props) + fluids v1 (`river_velocity`) | ✅ PR #19 — vegetation sprites (shared-mesh + whitelist + density cap) + translucent water render on streamed terrain; `river_velocity` carried for the EM-3.9b water shader |
 | EM-3.9b | Sprites/water polish — UV-scroll water shader, GPU-instanced sprites, sprite attr filters/LOD/wind, furniture/prop kinds, shared decoded-chunk store | ⚪ |
 | EM-3.10 | LOD & culling v1 (distance bands + GPU occlusion) | ✅ PR #20 — Bevy auto-frustum-culls all meshes (verified); added `LodCullingPlugin` distance bands (chunk + nearer sprite-parent, Visibility-toggle, data-driven `CullingConfig`) |
-| EM-3.10b | LOD & culling v2 — GPU occlusion culling (DepthPrepass+HZB, measure-gated) + lod-alt far-mesh (needs a bridge→client lod_alt/horizon data path) + `CullingConfig`→RON | ⚪ |
+| EM-3.10b | LOD & culling v2 — GPU occlusion culling (DepthPrepass+HZB, measure-gated) + lod-alt far-mesh (needs a bridge→client lod_alt/horizon data path) + `CullingConfig`→RON | ✅ PR #30 — occlusion culling measured (no gain in the smoke scene, shipped opt-in default OFF) + real lod-alt far-mesh fills the horizon (new one-shot `NetLodAlt` bridge→protocol→client data path); `CullingConfig`→RON not attempted (small follow-up) |
 | EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | ⚪ |
 
 ## Phase 4 — Server shell, replicon transport & ORACLE foundations ⚪

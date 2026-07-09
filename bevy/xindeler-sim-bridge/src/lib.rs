@@ -73,8 +73,8 @@ use server::{
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool,
-    NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
+    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetLodAlt, NetOri, NetPos,
+    NetTool, NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -384,6 +384,114 @@ fn stream_terrain_changes(
             message: RemoveChunk { key },
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// EM-3.10b — far-terrain heightmap (one-shot lod_alt broadcast)
+// ---------------------------------------------------------------------------
+
+/// Downsample cap: the client far-mesh is a coarse LOD proxy, not full-res
+/// terrain, so the sent grid is bounded to at most this many samples per axis
+/// regardless of world size. A default Veloren world's `lod_alt` already
+/// packs only one sample per CHUNK (not per block) — but a default world is
+/// 1024×1024 chunks, which is still far too many quads for a "coarse"
+/// far-mesh and a needlessly large one-shot payload. [`send_lod_alt_once`]
+/// stride-samples down to this cap.
+const LOD_ALT_MAX_DIM: u32 = 128;
+
+/// One-shot latch for the EM-3.10b far-terrain heightmap broadcast.
+#[derive(Resource, Default)]
+pub struct LodAltState {
+    sent: bool,
+}
+
+/// Registers [`LodAltState`] + [`send_lod_alt_once`]. Same gate as the terrain
+/// stream (`ClientState::Disconnected`, i.e. this App is the terrain/entity
+/// SOURCE). Add AFTER [`PlayerBridgePlugin`] (reads [`EmbeddedPlayer`]).
+pub struct LodAltStreamPlugin;
+
+impl Plugin for LodAltStreamPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LodAltState>().add_systems(
+            Update,
+            send_lod_alt_once.run_if(in_state(ClientState::Disconnected)),
+        );
+    }
+}
+
+/// Pure stride/grid-dimension math for [`send_lod_alt_once`]'s downsample,
+/// split out so it's unit-testable without a real `WorldData`/`Client`
+/// (review should-fix #4 — this arithmetic had zero direct coverage).
+/// `stride` is how many chunks one sampled cell covers (≥1, so a world at or
+/// below [`LOD_ALT_MAX_DIM`] is sampled 1:1); `grid_w`/`grid_h` are the
+/// resulting sample-grid dimensions (each ≥1, even for a degenerate 0-sized
+/// input axis, so callers never divide by zero downstream).
+fn lod_alt_grid_dims(chunk_w: u16, chunk_h: u16) -> (u32, u32, u32) {
+    let stride = u32::from(chunk_w.max(chunk_h))
+        .div_ceil(LOD_ALT_MAX_DIM)
+        .max(1);
+    let grid_w = u32::from(chunk_w).div_ceil(stride).max(1);
+    let grid_h = u32::from(chunk_h).div_ceil(stride).max(1);
+    (stride, grid_w, grid_h)
+}
+
+/// Broadcasts the downsampled `lod_alt` heightmap ONCE, as soon as the
+/// embedded local-player [`EmbeddedPlayer`] exists (its `world_data()` is
+/// populated synchronously inside `Client::new`, well before the player
+/// reaches in-game — see [`EmbeddedPlayer::world_data`]).
+///
+/// v1 has no spectator-only path: without an embedded player (persister
+/// fallback only), there is no `Client`/`WorldData` to read from, so the far
+/// mesh simply never arrives and the client keeps the sky+fog fallback — the
+/// same acceptable degradation `xindeler_client::lod` documents for the
+/// culling-only v1.
+fn send_lod_alt_once(
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
+    mut state: bevy::ecs::system::ResMut<LodAltState>,
+    mut writer: MessageWriter<ToClients<NetLodAlt>>,
+) {
+    if state.sent {
+        return;
+    }
+    let Some(player) = player else { return };
+    let world_data = player.world_data();
+    let size = world_data.chunk_size(); // Vec2<u16>, chunk-grid dimensions
+    if size.x == 0 || size.y == 0 {
+        return; // not populated yet (shouldn't happen once the Client exists)
+    }
+
+    let (stride, grid_w, grid_h) = lod_alt_grid_dims(size.x, size.y);
+
+    let mut heights = Vec::with_capacity((grid_w * grid_h) as usize);
+    for j in 0..grid_h {
+        for i in 0..grid_w {
+            let cx = (i * stride).min(u32::from(size.x) - 1);
+            let cy = (j * stride).min(u32::from(size.y) - 1);
+            #[expect(clippy::cast_possible_wrap, reason = "chunk coords ≪ i32::MAX")]
+            let alt = world_data
+                .alt_at(vek::Vec2::new(cx as i32, cy as i32))
+                .unwrap_or(0.0);
+            heights.push(alt);
+        }
+    }
+
+    // TODO(EM-4.2d): `targets: All` + a global `sent` latch only reaches
+    // clients connected AT the single broadcast — a client joining after it
+    // never receives the far-terrain heightmap (same accepted limitation as
+    // `TerrainAnchor` above). Fine for v1's one-embedded-player world; needs
+    // a per-connection "have I sent this yet" once real multi-client join
+    // timing matters (interest management lands in EM-4.2d anyway).
+    writer.write(ToClients {
+        targets: SendTargets::All,
+        message: NetLodAlt::encode([grid_w, grid_h], stride, &heights),
+    });
+    state.sent = true;
+    tracing::info!(
+        grid_w,
+        grid_h,
+        stride,
+        "far-terrain lod-alt grid broadcast (EM-3.10b)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -990,6 +1098,56 @@ mod tests {
     use xindeler_protocol::XindelerProtocolPlugin;
 
     use super::*;
+
+    /// A world at/under the cap is sampled 1:1 (stride 1, grid == chunk
+    /// size) — the common case for any dev/test world smaller than 128×128.
+    #[test]
+    fn lod_alt_grid_dims_under_cap_is_1_to_1() {
+        assert_eq!(lod_alt_grid_dims(64, 64), (1, 64, 64));
+        assert_eq!(lod_alt_grid_dims(128, 128), (1, 128, 128));
+    }
+
+    /// Non-square world: stride is driven by the LARGER axis, and each axis
+    /// downsamples independently by that same stride (not two different
+    /// strides), matching `send_lod_alt_once`'s single `stride` field.
+    #[test]
+    fn lod_alt_grid_dims_non_square_world() {
+        // max(1024, 256) = 1024 -> stride = ceil(1024/128) = 8.
+        assert_eq!(lod_alt_grid_dims(1024, 256), (8, 128, 32));
+    }
+
+    /// The default production Veloren world size — the exact case that
+    /// motivated the downsample (1024×1024 chunks, uncapped, would be a
+    /// 1024×1024 = 1Mi-sample payload).
+    #[test]
+    fn lod_alt_grid_dims_default_world_size() {
+        assert_eq!(lod_alt_grid_dims(1024, 1024), (8, 128, 128));
+    }
+
+    /// A non-power-of-two size that doesn't divide the cap evenly still
+    /// yields a grid that covers the WHOLE world (`div_ceil`, not `/`) and
+    /// never exceeds `LOD_ALT_MAX_DIM` on either axis.
+    #[test]
+    fn lod_alt_grid_dims_non_power_of_two() {
+        let (stride, grid_w, grid_h) = lod_alt_grid_dims(1000, 777);
+        assert_eq!(stride, 8); // ceil(1000/128) = 8
+        assert_eq!(grid_w, 125); // ceil(1000/8) = 125
+        assert_eq!(grid_h, 98); // ceil(777/8) = 98 (covers all 777, not 776)
+        assert!(grid_w <= LOD_ALT_MAX_DIM && grid_h <= LOD_ALT_MAX_DIM);
+    }
+
+    /// A degenerate 0-sized axis still yields `grid >= 1` (never 0), so
+    /// `send_lod_alt_once`'s `heights` Vec is never empty by construction —
+    /// callers guard the *real* 0-size case earlier (`size.x == 0 ...
+    /// return`), but the pure function itself must not divide-by-zero or
+    /// underflow if ever called with one.
+    #[test]
+    fn lod_alt_grid_dims_zero_axis_never_yields_zero_grid() {
+        let (stride, grid_w, grid_h) = lod_alt_grid_dims(0, 64);
+        assert_eq!(stride, 1);
+        assert_eq!(grid_w, 1);
+        assert_eq!(grid_h, 64);
+    }
 
     /// EM-1.5 acceptance: boot a real test-world `Server` and tick it 100×
     /// inside a headless Bevy `App`.
