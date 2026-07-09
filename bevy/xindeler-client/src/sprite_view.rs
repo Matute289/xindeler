@@ -24,24 +24,57 @@
 //! ## Budget / performance strategy (task requirement)
 //! Sprites can be enormous (thousands of grass tufts per chunk). v1 keeps it
 //! cheap three ways, all documented and tunable:
-//! - **Kind whitelist** ([`SPRITE_KINDS`]): only common outdoor vegetation, so
-//!   the ~989-entry manifest doesn't spawn furniture/traps/props (→ EM-3.9b).
+//! - **Kind whitelist** ([`SPRITE_KINDS`]): common outdoor vegetation (grasses,
+//!   flowers, cacti, crops, mushrooms — EM-3.9b widened this from ~16 to the
+//!   whole `Plant` sprite category), so the ~989-entry manifest doesn't spawn
+//!   furniture/dungeon décor (`Furniture`/`Decor`/`Lamp`/`Container`/`Modular`
+//!   categories — deferred: those need per-kind placement review, not just a
+//!   list extension, since some assume interior/wall-adjacent placement the
+//!   outdoor density budget below isn't tuned for).
 //! - **Per-chunk cap** ([`MAX_SPRITES_PER_CHUNK`]): if a chunk exceeds it, the
 //!   instances are thinned by a deterministic stride so density scales down
 //!   gracefully rather than spiking the entity count.
 //! - **Shared meshes + one material**: N instances of a kind reuse ONE `Mesh3d`
-//!   asset + ONE `StandardMaterial`, so Bevy's batching collapses them into few
-//!   draw calls. (True GPU-instanced draws — a custom `SpecializedMeshPipeline`
-//!   with an instance buffer — are the EM-3.9b upgrade; shared-handle batching
-//!   is the viable, correct v1 per the task's "instancing OR shared mesh +
-//!   Transform per instance".)
+//!   asset + ONE `StandardMaterial` handle. **EM-3.9b verified (not just
+//!   assumed) that this is real GPU instancing, not merely "few draw calls"**:
+//!   Bevy's automatic batching (`bevy_render::batching` — opt-out via a
+//!   `NoAutomaticBatching` marker we never add) merges consecutive phase items
+//!   that share `(pipeline id, draw function, material bind group)` into ONE
+//!   indirect multi-draw where the backend supports it (`gpu_preprocessing`,
+//!   the default path). Because ALL sprite instances of a (kind, variation)
+//!   share the SAME mesh + material handle — and the material is IDENTICAL
+//!   across chunks (one handle total) — batching merges across chunk/parent
+//!   boundaries too: the whole visible world's sprites collapse to at most
+//!   ~(kinds × variations) draw calls, not one per chunk and NOT one per
+//!   instance. A hand-rolled `SpecializedMeshPipeline` with a manual instance
+//!   buffer would reimplement exactly this for no measurable win, so v1 keeps
+//!   the shared-handle approach and does not add one.
+//! - **Wind sway — attempted in EM-3.9b, REVERTED.** A per-vertex sine sway via
+//!   an `ExtendedMaterial<StandardMaterial, SpriteWindMaterialExt>` caused a
+//!   real visual regression: sprites lost most of their vertex colour and
+//!   rendered largely black once the vertex-stage position perturbation was
+//!   live (confirmed by disabling the effect — the render returned to an exact
+//!   match of the pre-EM-3.9b screenshot; the vertex shader's `world_normal`
+//!   output is the unperturbed stock normal, which no longer matches the swayed
+//!   surface for some instances/angles, driving the PBR diffuse term to ~0).
+//!   Root-caused but not re-attempted within EM-3.9b's budget — reverted to the
+//!   plain vertex-coloured `StandardMaterial` below (bit-identical to
+//!   pre-EM-3.9b) rather than ship a known lighting bug. Deferred to
+//!   **EM-3.9c**: either also perturb/recompute `world_normal` to stay
+//!   consistent with the swayed position, or use a cheaper effect that doesn't
+//!   touch geometry (e.g. a per-instance vertex-colour brightness pulse) to
+//!   sidestep normal/lighting correctness entirely.
 //!
 //! ## Purity
 //! 100% Bevy + `xindeler-render-voxel` (a shell crate), `common` terrain types
 //! and `dot_vox`/`ron` — NO specs. Compiled only under the `listen-server`
 //! feature. The decode here is independent of `terrain_stream`'s (a second lz4
-//! pass per chunk — accepted v1 cost, keeps the two consumers decoupled; a
-//! shared decoded store is an EM-3.9b optimisation).
+//! pass per chunk — accepted v1 cost, keeps the two consumers decoupled). This
+//! stayed a v1 cost in EM-3.9b too: a shared decoded-chunk cache would need
+//! both this module's pending/built lifecycle AND `terrain_stream`'s
+//! store/remesh lifecycle to agree on ownership/eviction timing, and both are
+//! subtle, already-correct, and independently tested — not worth the risk for
+//! a cost that is one lz4 decompress of a chunk-sized buffer, not a hot loop.
 
 use bevy::{
     asset::{Asset, AssetLoader, LoadContext, LoadState, io::Reader},
@@ -56,27 +89,76 @@ use xindeler_render_voxel::sprite::{
     SPRITE_MANIFEST, SPRITE_SCALE, SpriteManifest, collect_sprite_instances, sprite_model_to_bevy,
 };
 
-/// The sprite kinds v1 renders (common outdoor vegetation). Everything else in
-/// the ~989-entry manifest is skipped (furniture, dungeon décor, traps, crops,
-/// …) — a documented v1 scope, widened in EM-3.9b. Grasses + flowers populate
-/// the open highlands the smoke world spawns in, which is what we want to SEE.
+/// The sprite kinds v1 renders: the whole outdoor-safe `Plant` sprite category
+/// (`common::terrain::sprite` — grasses, flowers, cacti, crops, mushrooms).
+/// EM-3.9b widened this from the original ~16 (grasses + flowers only) to
+/// cover the REST of `Plant` — verified against `sprite_manifest.ron`
+/// (read-only) to have real `variations` entries in the SAME shape the
+/// original 16 use, so no new mesh-assembly logic was needed (`sprite.rs`
+/// already ignores per-kind `custom_indices`/filters generically).
+/// Furniture/dungeon décor (`Furniture`/`Decor`/`Lamp`/`Container`/`Modular`
+/// categories) is a SEPARATE, deferred widening (module docs) — those aren't
+/// simple list additions, they need placement-context review.
 pub const SPRITE_KINDS: &[SpriteKind] = &[
-    SpriteKind::ShortGrass,
-    SpriteKind::MediumGrass,
-    SpriteKind::LongGrass,
-    SpriteKind::LargeGrass,
-    SpriteKind::JungleRedGrass,
-    SpriteKind::WildFlax,
-    SpriteKind::RedFlower,
-    SpriteKind::WhiteFlower,
-    SpriteKind::YellowFlower,
+    // Cacti
+    SpriteKind::BarrelCactus,
+    SpriteKind::RoundCactus,
+    SpriteKind::ShortCactus,
+    SpriteKind::MedFlatCactus,
+    SpriteKind::ShortFlatCactus,
+    SpriteKind::LargeCactus,
+    SpriteKind::TallCactus,
+    // Flowers
     SpriteKind::BlueFlower,
     SpriteKind::PinkFlower,
     SpriteKind::PurpleFlower,
+    SpriteKind::RedFlower,
+    SpriteKind::WhiteFlower,
+    SpriteKind::YellowFlower,
     SpriteKind::Sunflower,
+    SpriteKind::Moonbell,
+    SpriteKind::Pyrebloom,
+    SpriteKind::LushFlower,
+    SpriteKind::LanternFlower,
+    // Grasses, ferns and other "wild" plants
+    SpriteKind::LongGrass,
+    SpriteKind::MediumGrass,
+    SpriteKind::ShortGrass,
     SpriteKind::Fern,
+    SpriteKind::LargeGrass,
+    SpriteKind::TaigaGrass,
+    SpriteKind::GrassBlue,
+    SpriteKind::SavannaGrass,
+    SpriteKind::TallSavannaGrass,
+    SpriteKind::RedSavannaGrass,
+    SpriteKind::SavannaBush,
+    SpriteKind::Welwitch,
+    SpriteKind::LeafyPlant,
+    SpriteKind::DeadBush,
+    SpriteKind::JungleFern,
+    SpriteKind::JungleRedGrass,
+    SpriteKind::DeadPlant,
+    // Crops, berries and fungi
+    SpriteKind::Corn,
+    SpriteKind::WheatYellow,
+    SpriteKind::WheatGreen,
+    SpriteKind::LingonBerry,
     SpriteKind::Blueberry,
+    SpriteKind::Lettuce,
+    SpriteKind::Pumpkin,
+    SpriteKind::Carrot,
+    SpriteKind::Tomato,
+    SpriteKind::Radish,
+    SpriteKind::Turnip,
+    SpriteKind::Flax,
+    SpriteKind::WildFlax,
     SpriteKind::Mushroom,
+    SpriteKind::CaveMushroom,
+    SpriteKind::Cotton,
+    SpriteKind::SewerMushroom,
+    SpriteKind::LushMushroom,
+    SpriteKind::RockyMushroom,
+    SpriteKind::GlowMushroom,
 ];
 
 /// Per-chunk sprite cap (v1 budget). A chunk with more whitelisted sprites is
@@ -191,7 +273,7 @@ struct SpriteMeshCache {
     /// manifest parsed).
     started: bool,
     /// Set once every kind has left `Loading` (all `Ready`/`Failed`), so
-    /// [`load_sprite_models`] can early-out instead of re-scanning all 16 kinds
+    /// [`load_sprite_models`] can early-out instead of re-scanning all kinds
     /// forever.
     all_settled: bool,
 }
@@ -199,14 +281,14 @@ struct SpriteMeshCache {
 /// The shared matte material for vertex-coloured sprites (base_color WHITE so
 /// per-voxel colour shows through; slightly rough, double-sided so thin grass
 /// cards are lit from both faces). One material for ALL sprites → batching.
-fn sprite_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
+fn sprite_material() -> StandardMaterial {
+    StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.9,
         double_sided: true,
         cull_mode: None,
         ..default()
-    })
+    }
 }
 
 /// Once the manifest is parsed, start loading the whitelisted kinds' `.vox`
@@ -234,7 +316,7 @@ fn load_sprite_models(
 
     // One-time material + kick off `.vox` loads for the whitelist.
     if !cache.started {
-        cache.material = Some(sprite_material(&mut materials));
+        cache.material = Some(materials.add(sprite_material()));
         for &kind in SPRITE_KINDS {
             let state = match manifest.0.variations(kind) {
                 Some(vars) if !vars.is_empty() => {
@@ -572,6 +654,25 @@ mod tests {
             mirror: VVec3::new(1.0, 1.0, 1.0),
             seed: 0,
         }
+    }
+
+    /// EM-3.9b whitelist expansion: no accidental duplicate `SpriteKind`
+    /// (would double-load/double-mesh a kind and silently overwrite its cache
+    /// slot) and the list actually grew past the original ~16 vegetation-only
+    /// set.
+    #[test]
+    fn sprite_kinds_whitelist_has_no_duplicates_and_grew() {
+        let mut seen = std::collections::HashSet::new();
+        for &kind in SPRITE_KINDS {
+            assert!(
+                seen.insert(kind),
+                "duplicate SpriteKind in SPRITE_KINDS: {kind:?}"
+            );
+        }
+        assert!(
+            SPRITE_KINDS.len() > 16,
+            "EM-3.9b widened the whitelist past the original 16 grasses/flowers"
+        );
     }
 
     #[test]

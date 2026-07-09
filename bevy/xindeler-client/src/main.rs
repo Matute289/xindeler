@@ -116,6 +116,12 @@ fn main() -> AppExit {
                 // densest vegetation patch on open lit terrain (the figure sits
                 // in the dark spawn interior). Runs after the figure cam.
                 app.add_plugins(player_input::SmokeSpriteCamPlugin);
+                // EM-3.9b: if a fluid (water) chunk meshed anywhere in the
+                // streamed window, override once more to frame it — shows the
+                // animated water shader. No-ops (keeps sprite/figure framing)
+                // when the world seed has no nearby water. Runs after the
+                // sprite cam.
+                app.add_plugins(player_input::SmokeWaterCamPlugin);
             }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {

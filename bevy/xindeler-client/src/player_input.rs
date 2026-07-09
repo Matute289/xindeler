@@ -402,6 +402,62 @@ fn smoke_sprite_cam(
     }
 }
 
+/// SCAFFOLDING for the EM-3.9b smoke screenshot (same spirit as
+/// [`SmokeSpriteCamPlugin`]): if the streamed window has meshed ANY fluid
+/// (water) chunk, frame the one nearest the world anchor from a close,
+/// elevated 3/4 angle, so the capture shows the animated water shader rather
+/// than whatever the sprite/figure cam happened to land on. Added ONLY under
+/// `--listen-server --smoke-screenshot`; runs after the sprite cam so it wins
+/// when water exists, and no-ops (keeps the sprite/figure framing) otherwise
+/// — not every world seed puts a river/lake inside the streamed window.
+/// Interactive play never adds it.
+pub struct SmokeWaterCamPlugin;
+
+impl Plugin for SmokeWaterCamPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            smoke_water_cam.after(smoke_sprite_cam).in_set(GameplaySet),
+        );
+    }
+}
+
+/// Elevated 3/4 vantage offset (Bevy metres) from the framed water chunk —
+/// further back than the sprite cam since a water surface reads better from
+/// a bit of height/distance (shows the ripple pattern over an area, not one
+/// quad close-up).
+const WATER_CAM_BACK: f32 = 12.0;
+const WATER_CAM_UP: f32 = 6.0;
+
+/// Points the smoke camera at the fluid chunk nearest the world anchor, from
+/// a close, elevated angle. Falls back to leaving the camera as-is (sprite or
+/// figure framing) when no fluid chunk has been meshed yet.
+fn smoke_water_cam(
+    fluids: Query<&xindeler_render_voxel::pipeline::FluidChunkMesh>,
+    anchor: Option<Res<crate::terrain_stream::TerrainCameraAnchor>>,
+    mut cameras: Query<&mut Transform, With<FlyCam>>,
+) {
+    let focus = anchor.map_or(Vec3::ZERO, |a| a.bevy_pos);
+    let half_edge = crate::terrain_stream::CHUNK_EDGE * 0.5;
+    let Some(target) = fluids
+        .iter()
+        .map(|f| {
+            xindeler_render_voxel::pipeline::chunk_transform(f.key).translation
+                + Vec3::new(half_edge, 0.0, -half_edge)
+        })
+        .min_by(|a, b| {
+            a.distance_squared(focus)
+                .total_cmp(&b.distance_squared(focus))
+        })
+    else {
+        return; // no water meshed yet — keep the sprite/figure framing
+    };
+    let eye = target + Vec3::new(WATER_CAM_BACK, WATER_CAM_UP, WATER_CAM_BACK);
+    for mut cam in &mut cameras {
+        *cam = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    }
+}
+
 /// Bevy y-up → sim z-up direction: inverse of the converter `(x,y,z)→(x,z,−y)`,
 /// i.e. bevy `(x, y, z)` → sim `(x, −z, y)`.
 fn bevy_to_sim(v: Vec3) -> Vec3 { Vec3::new(v.x, -v.z, v.y) }

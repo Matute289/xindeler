@@ -191,13 +191,13 @@ pub fn terrain_mesh_to_bevy(
 }
 
 /// Converts the fluid (water) mesh: `POSITION`/`NORMAL`/`UV_0` +
-/// [`ATTRIBUTE_RIVER_VELOCITY`] (EM-3.9). Fluids render with a stock
-/// transparent `StandardMaterial` (the palette's Water entry — translucent
-/// blue, low roughness for a wet sheen); the per-vertex river velocity is
-/// carried but not yet consumed (the stock material has no vertex-driven UV
-/// scroll). The dedicated water shader (EM-3.9b) reads it to advect the
-/// surface. `river_velocity` is in the Veloren xy plane; z-up→y-up maps that to
-/// Bevy's xz ground plane as `(vx, -vy)` (the same rotation `to_bevy` applies).
+/// [`ATTRIBUTE_RIVER_VELOCITY`] (EM-3.9). Fluids render with `WaterMaterial`
+/// (`material::water`, EM-3.9b) — a translucent blue extended material (the
+/// palette's Water entry) whose vertex shader reads the per-vertex river
+/// velocity carried here to advect the surface UVs (EM-3.9 only carried the
+/// attribute; EM-3.9b's dedicated water shader is what consumes it).
+/// `river_velocity` is in the Veloren xy plane; z-up→y-up maps that to Bevy's
+/// xz ground plane as `(vx, -vy)` (the same rotation `to_bevy` applies).
 pub fn fluid_mesh_to_bevy(mesh: &Mesh<FluidVertex>) -> BevyMesh {
     debug_assert!(FluidVertex::QUADS_INDEX.is_some());
 
