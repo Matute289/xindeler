@@ -125,9 +125,40 @@ pub struct AtmosphereProfile {
 impl Default for AtmosphereProfile {
     fn default() -> Self {
         Self {
-            // -ln(0.05) / 350.0 — Koschmieder density for ~350 m visibility.
-            fog_density: 0.00856,
-            fog_color: [0.55, 0.65, 0.75],
+            // -ln(0.05) / 230.0 — Koschmieder density for ~230 m visibility.
+            //
+            // BL-82 EM-3.11b (far-mesh "green wall"): re-tuned down from the
+            // original ~350 m visibility (density 0.00856). At 350 m the
+            // far-terrain mesh's cutout hole (`far_terrain::HOLE_MARGIN_
+            // CHUNKS` + `lod::CullingConfig::chunk_render_distance`, ~288 m at
+            // the default 7-chunk render distance) sat INSIDE the "still
+            // mostly clear" part of the exponential curve (only ~92% fogged
+            // at 288 m), so the coarse, flat-shaded, green-at-low-elevation
+            // far mesh (`far_terrain::height_tint`) read through almost fully
+            // saturated right at its own near edge — a hard-edged "wall",
+            // not a haze. At 230 m visibility the far mesh is ~97-98%
+            // fog-blended by the time it's ever visible (its hole never lets
+            // it draw closer than ~288 m), so its raw vertex colors barely
+            // survive the blend; the near/mid terrain (0..chunk_render_
+            // distance) picks up more haze too (~95% at the 224 m cutoff vs.
+            // ~85% before), which reads as natural atmospheric depth rather
+            // than a fog deficiency.
+            fog_density: 0.01302,
+            // Brighter, slightly less saturated than the original flat
+            // gray-blue (EM-3.11b): the old (0.55, 0.65, 0.75) read
+            // noticeably darker/flatter than the physically-based `Atmosphere`
+            // sky (`light.rs`'s `Atmosphere::earth` + `AtmosphereSettings` on
+            // the camera) that fills the background wherever nothing is
+            // drawn — `DistanceFog` and the sky are two independent render
+            // passes (fog only touches drawn StandardMaterial fragments, see
+            // bevy_pbr's `render_sky.wgsl`: it only shades pixels with
+            // `depth == 0.0`), so a mismatched, darker fog color created a
+            // visible seam exactly at the far mesh's horizon silhouette even
+            // once mostly fog-blended. Nudged toward the sky's paler
+            // mid-morning haze so the (now much more heavily fogged) far
+            // mesh's silhouette blends into the backdrop instead of standing
+            // out against it.
+            fog_color: [0.66, 0.73, 0.81],
             // bevy's stock ClearColor, srgb_u8(43, 44, 47).
             sky_color: [0.168_627, 0.172_549, 0.184_314],
             fog_volume_density: 0.15,

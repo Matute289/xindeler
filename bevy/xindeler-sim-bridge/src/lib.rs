@@ -44,7 +44,7 @@ pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use bevy::{
-    app::{App, Plugin, Update},
+    app::{App, FixedUpdate, Plugin, Update},
     ecs::{
         change_detection::NonSendMut,
         component::Component,
@@ -136,21 +136,40 @@ pub struct SimMirror(pub HashMap<specs::Entity, Entity>);
 #[derive(Resource, Default, Debug)]
 pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
 
-/// Advances the embedded sim by one tick using Bevy's frame `dt`, then drains
-/// the sim's frontend events and errors into `tracing`.
+/// Advances the embedded sim by one tick using the schedule's `dt`, then
+/// drains the sim's frontend events and errors into `tracing`.
 ///
-/// Runs in `Update` (the shell is expected to pace the whole `App` at the
-/// server TPS — `ScheduleRunnerPlugin::run_loop`); no-ops until the shell
-/// inserts a [`SimServer`] (there is no `resource_exists` equivalent for
-/// non-send data, so the gate is the `Option` param).
+/// Runs in `FixedUpdate` at [`SIM_TICK_HZ`] (EM-3.11b — see below); no-ops
+/// until the shell inserts a [`SimServer`] (there is no `resource_exists`
+/// equivalent for non-send data, so the gate is the `Option` param).
 ///
-/// TODO(EM-3.7/EM-4.1): in the WINDOWED listen-server path the App is paced at
-/// display rate, so this ticks at 60–144 Hz instead of the 30 TPS the headless
-/// shell uses. Game-time stays correct (dt-driven) but full sim work runs
-/// 2–5× too often and diverges from server cadence. Wire this onto a
-/// `FixedUpdate` / `Time::<Fixed>::from_hz(30.0)` schedule (moving
-/// `stream_terrain_changes` with it) when the playable path lands — it is a
-/// v1-visual-proof deferral, not a shipping cadence.
+/// ## EM-3.11b: FixedUpdate, not Update
+/// This system (plus its `.after(tick_sim)` chain: `ensure_terrain_anchor`,
+/// `stream_terrain_changes`, `spawn_test_npcs`, `mirror_sim_entities`, and
+/// [`crate::tick_player`]) used to run in `Update`. In the headless
+/// `xindeler-server-app` shell that's fine — `ScheduleRunnerPlugin::run_loop`
+/// paces the WHOLE App at 30 TPS, so `Update` only fires 30×/s. But in the
+/// WINDOWED listen-server path (`xindeler-client --listen-server`) `Update`
+/// fires at display rate (60–144 Hz on the dev machines that hit this), so a
+/// full `Server::tick` — the entire specs system graph: physics, agent AI,
+/// terrain streaming, economy, etc. — ran 2–5× more often than the sim (and
+/// the embedded player's `Clock`) was ever designed for. Two real-user
+/// symptoms traced back to this:
+/// - **Flat ~29 fps unmoved by a release+LTO rebuild** (see
+///   `xindeler-client::camera::OcclusionCullingConfig`'s EM-3.10b doc for the
+///   original dev-build measurement, and EM-3.11b's release-build follow-up in
+///   `docs/backlog/engine-migration.md`): a CPU speedup doesn't move a frame
+///   time dominated by 2–5× too much full-server-tick work.
+/// - **Visible judder / "robotic" movement**: variable-`dt` physics/character
+///   integration run once per (variable-length) render frame is a classic
+///   jitter source — very different motion quality than the fixed 1/30 s steps
+///   the sim's own systems (and voxygen's, historically) assume.
+///
+/// `FixedUpdate` decouples sim cadence from render cadence: `Time` inside a
+/// `FixedUpdate` system is Bevy's fixed-clock view (a clean `1 / SIM_TICK_HZ`
+/// every step, however many steps a given render frame does — 0, 1, or a
+/// short catch-up burst), so `tick_sim`'s `dt` is finally what the sim
+/// expects regardless of display refresh rate.
 pub fn tick_sim(time: Res<Time>, sim: Option<NonSendMut<SimServer>>) {
     let Some(mut sim) = sim else { return };
     let dt = time.delta();
@@ -194,6 +213,14 @@ pub fn tick_sim(time: Res<Time>, sim: Option<NonSendMut<SimServer>>) {
     sim.ticks += 1;
 }
 
+/// The sim's fixed tick rate (30 TPS — matches `xindeler-server-app::sim::
+/// SIM_TICK_INTERVAL` and server-cli's `TPS` const, and `player::PLAYER_TPS`
+/// the embedded player's `Clock` already assumed). The windowed listen-server
+/// shell configures `Time::<Fixed>::from_hz(SIM_TICK_HZ)` (EM-3.11b) so
+/// [`tick_sim`] (and [`crate::tick_player`], moved to the same schedule)
+/// finally run at the rate the sim was designed for instead of display rate.
+pub const SIM_TICK_HZ: f64 = 30.0;
+
 /// Registers the bridge types and the [`tick_sim`] system.
 ///
 /// Deliberately does NOT boot the sim: the shell (or a test) constructs a
@@ -204,7 +231,9 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimMirror>();
-        app.add_systems(Update, tick_sim);
+        // EM-3.11b: FixedUpdate, not Update — see `tick_sim`'s doc for why a
+        // display-rate `Update` tick was the wrong home for this.
+        app.add_systems(FixedUpdate, tick_sim);
     }
 }
 
@@ -251,8 +280,10 @@ pub struct SimTerrainStreamPlugin;
 
 impl Plugin for SimTerrainStreamPlugin {
     fn build(&self, app: &mut App) {
+        // EM-3.11b: FixedUpdate alongside `tick_sim` — see its doc. Chaining
+        // `.after(tick_sim)` requires both to live in the same schedule.
         app.init_resource::<TerrainAnchorState>().add_systems(
-            Update,
+            FixedUpdate,
             (ensure_terrain_anchor, stream_terrain_changes)
                 .chain()
                 .after(tick_sim)
@@ -527,11 +558,13 @@ pub struct SimEntityMirrorPlugin;
 
 impl Plugin for SimEntityMirrorPlugin {
     fn build(&self, app: &mut App) {
+        // EM-3.11b: FixedUpdate alongside `tick_sim` — see its doc. Chaining
+        // `.after(tick_sim)` requires both to live in the same schedule.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
             .init_resource::<TestNpcState>()
             .add_systems(
-                Update,
+                FixedUpdate,
                 (spawn_test_npcs, mirror_sim_entities)
                     .chain()
                     .after(tick_sim)
@@ -1134,7 +1167,11 @@ pub const SIM_TICK_INTERVAL: Duration = Duration::from_nanos(33_333_333); // exa
 #[cfg(test)]
 mod tests {
     use bevy::{
-        MinimalPlugins, app::PluginGroup, ecs::message::Messages, state::app::StatesPlugin,
+        MinimalPlugins,
+        app::PluginGroup,
+        ecs::message::Messages,
+        state::app::StatesPlugin,
+        time::{Fixed, TimeUpdateStrategy},
     };
     use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
     use xindeler_protocol::XindelerProtocolPlugin;
@@ -1202,6 +1239,17 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins.build());
         app.add_plugins(SimBridgePlugin);
+        // EM-3.11b: `tick_sim` now runs in `FixedUpdate`, decoupled from
+        // `Update`. Pin the fixed step to exactly `SIM_TICK_HZ` and feed a
+        // matching real-time delta each `app.update()` call (bevy_time's own
+        // test pattern) so one `app.update()` reliably runs FixedUpdate
+        // exactly once — otherwise a tight test loop advances real wall time
+        // by microseconds per call, far under the 1/30 s threshold, and
+        // FixedUpdate simply wouldn't fire.
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
         app.insert_non_send(sim);
 
         for _ in 0..100 {
@@ -1209,12 +1257,22 @@ mod tests {
         }
 
         let sim = app.world().non_send::<SimServer>();
-        assert_eq!(
-            sim.ticks, 100,
-            "every app.update() should have completed one successful sim tick"
+        // EM-3.11b: `tick_sim` now runs in `FixedUpdate`, which needs the
+        // accumulator to reach one full `1 / SIM_TICK_HZ` step before its
+        // first run — the very first `app.update()` establishes the
+        // baseline instant (0 accumulated time), so 100 update() calls with
+        // a steady per-call delta yield 99 fixed steps, not 100 (a one-step
+        // startup lag, not dropped ticks — see bevy_time's own fixed-timestep
+        // tests for the same off-by-one). Was a strict `== 100` pre-EM-3.11b
+        // (dt=0 on frame 1 still ran a — zero-length — `Update` tick).
+        assert!(
+            (99..=100).contains(&sim.ticks),
+            "100 app.update() calls should complete ~100 sim ticks (99 or 100, allowing the \
+             fixed-timestep accumulator's one-step startup lag), got {}",
+            sim.ticks
         );
-        // The sim's own game-time clock advanced with the Bevy dt (delta is 0
-        // only on the very first update), proving `Server::tick` really ran.
+        // The sim's own game-time clock advanced with the fixed dt, proving
+        // `Server::tick` really ran.
         assert!(
             sim.server.state().get_time() > 0.0,
             "sim game time should advance across 100 ticks"
@@ -1249,6 +1307,12 @@ mod tests {
             .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
             .add_plugins((XindelerProtocolPlugin, SimBridgePlugin, SimTerrainStreamPlugin))
             .finish();
+        // EM-3.11b: see `boots_and_ticks_100_times` — pin FixedUpdate to run
+        // exactly once per `app.update()` so this stays a per-tick loop.
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
         app.insert_non_send(sim);
 
         // A local sink: count the `CompressedChunk` / `RemoveChunk` /
@@ -1483,6 +1547,15 @@ mod tests {
                 SimEntityMirrorPlugin,
             ))
             .finish();
+        // EM-3.11b: see `boots_and_ticks_100_times` — pin FixedUpdate to run
+        // exactly once per `server_app.update()` so this stays a per-tick
+        // loop (a tight loop with no sleep otherwise starves the default
+        // real-time accumulator, which would make FixedUpdate — and thus the
+        // whole sim — never advance).
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
 
         // Pure client App: replicon client + the shared protocol (no sim).
         let mut client_app = App::new();

@@ -40,7 +40,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bevy::{
-    app::{App, Plugin, Update},
+    app::{App, FixedUpdate, Plugin},
     ecs::{change_detection::NonSendMut, schedule::IntoScheduleConfigs, system::Res},
 };
 use client::{Client, ClientType, Event as ClientEvent, WorldData, addr::ConnectionArgs};
@@ -67,15 +67,20 @@ pub struct PlayerBridgePlugin;
 
 impl Plugin for PlayerBridgePlugin {
     fn build(&self, app: &mut App) {
+        // EM-3.11b: FixedUpdate, matching `tick_sim`'s move — `tick_player`
+        // drives the embedded Client's `Clock` (`PLAYER_TPS` below), which
+        // already assumed a steady 30 Hz call rate; `Update` in the windowed
+        // listen-server path gave it 60–144 Hz instead. See `tick_sim`'s doc
+        // in `lib.rs` for the full story.
         app.init_resource::<LocalPlayerInput>()
-            .add_systems(Update, tick_player.after(tick_sim));
+            .add_systems(FixedUpdate, tick_player.after(tick_sim));
     }
 }
 
 /// Client + server tick rate for the embedded player (matches the sim's TPS and
-/// the smoke bot). The Client is ticked once per Bevy frame; its `Clock`
-/// provides the `dt` its own sync loop expects.
-const PLAYER_TPS: f64 = 30.0;
+/// the smoke bot). The Client is ticked once per `FixedUpdate` step
+/// (EM-3.11b); its `Clock` provides the `dt` its own sync loop expects.
+const PLAYER_TPS: f64 = crate::SIM_TICK_HZ;
 
 /// Username the embedded player registers with (auth is disabled on the
 /// singleplayer sim, so it is used directly) and the character alias. Distinct
@@ -282,12 +287,14 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
     })
 }
 
-/// Advances the embedded player one frame: ticks its network/sync and walks the
-/// life-cycle state machine, applying [`LocalPlayerInput`] once in game.
+/// Advances the embedded player one fixed step: ticks its network/sync and
+/// walks the life-cycle state machine, applying [`LocalPlayerInput`] once in
+/// game.
 ///
-/// Runs on the main thread (non-send) every `Update`, after [`crate::tick_sim`]
-/// so the sim has already processed the previous frame's input. No-ops until
-/// the shell inserts an [`EmbeddedPlayer`] (listen-server only).
+/// Runs on the main thread (non-send) every `FixedUpdate` step (EM-3.11b),
+/// after [`crate::tick_sim`] so the sim has already processed the previous
+/// step's input. No-ops until the shell inserts an [`EmbeddedPlayer`]
+/// (listen-server only).
 pub fn tick_player(player: Option<NonSendMut<EmbeddedPlayer>>, input: Res<LocalPlayerInput>) {
     let Some(mut player) = player else { return };
     player.clock.tick();
@@ -483,7 +490,13 @@ pub(crate) fn player_sim_entity(sim: &SimServer, uid: Uid) -> Option<specs::Enti
 
 #[cfg(test)]
 mod tests {
-    use bevy::{MinimalPlugins, app::PluginGroup, math::Vec2 as BVec2, state::app::StatesPlugin};
+    use bevy::{
+        MinimalPlugins,
+        app::PluginGroup,
+        math::Vec2 as BVec2,
+        state::app::StatesPlugin,
+        time::{Fixed, Time, TimeUpdateStrategy},
+    };
     use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
     use xindeler_protocol::XindelerProtocolPlugin;
 
@@ -540,6 +553,14 @@ mod tests {
                 PlayerBridgePlugin,
             ))
             .finish();
+        // EM-3.11b: `tick_sim`/`tick_player` now run in `FixedUpdate` — pin
+        // the step to exactly `SIM_TICK_HZ` and feed a matching real-time
+        // delta each `app.update()` (see `SimBridgePlugin`'s tests in
+        // `lib.rs` for the full rationale) so this stays a per-tick loop.
+        app.insert_resource(Time::<Fixed>::from_hz(crate::SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / crate::SIM_TICK_HZ,
+        )));
         app.insert_non_send(sim);
         app.insert_non_send(player);
         // Constant forward (sim +y / north) walk.
@@ -582,6 +603,134 @@ mod tests {
             moved_xy >= MIN_MOVED_XY,
             "the controllable player must move with input: start {start:?} → end {end:?} \
              ({moved_xy:.3} XY units)"
+        );
+    }
+
+    /// EM-3.11b regression test (BL-82 jump investigation): boots the REAL
+    /// sim plus embedded player exactly as `--listen-server` does, drives a
+    /// press-hold-release jump sequence through [`tick_player`] (the same
+    /// `LocalPlayerInput` → `handle_input(InputKind::Jump, ..)` edge-detect
+    /// path a real click uses), and asserts the sim-authoritative `Pos.z`
+    /// actually rises — i.e. the impulse is applied end-to-end through the
+    /// network/character-behavior/physics chain, not just queued.
+    ///
+    /// ## What this proved (and what it did NOT)
+    /// This test PASSES against an unmodified `player.rs`/legacy
+    /// `common::states::utils::handle_jump`: the player's `Vel.z` gets set to
+    /// the expected impulse (`0.4 * GRAVITY`, confirmed via
+    /// `Controller.queued_inputs`/`PhysicsState.on_ground` tracing while
+    /// developing this test) the tick after the `StartInput(Jump)` message
+    /// reaches the embedded loopback `Server`, and `Pos.z` rises well past
+    /// the ground-clearance threshold before falling back and re-landing. In
+    /// other words: **the sim-side jump plumbing this crate owns
+    /// (`tick_player`'s edge-detect, the embedded `Client`→loopback
+    /// `Server`→`Controller.queued_inputs`→`handle_jump`→`LocalEvent::Jump`→
+    /// `Vel.z` chain) is correct.** It does NOT cover — and therefore does
+    /// NOT rule out — a bug upstream of `LocalPlayerInput` (i.e.
+    /// `xindeler-client`'s `gather_input`, which reads the real
+    /// keyboard/cursor-grab state; this crate cannot depend on that crate,
+    /// see the module isolation law) or a purely visual/perception issue
+    /// (the jump is fast — well under a second — so it may just be hard to
+    /// notice at low fps). If jump still looks broken in play after this
+    /// test passes, look there next, not here.
+    #[test]
+    #[ignore = "boots a real world + embedded player: needs assets + LFS; run with VELOREN_ASSETS"]
+    fn jump_edge_raises_player_z() {
+        const MAX_SETTLE_TICKS: u32 = 6000;
+        /// Extra ticks to run once in-game before starting the jump, so the
+        /// character finishes falling onto the terrain and `on_ground` has
+        /// gone `Some` (a fresh spawn starts slightly above the ground).
+        const SETTLE_GRACE_TICKS: u32 = 90;
+        const JUMP_HOLD_TICKS: u32 = 30;
+        const POST_RELEASE_TICKS: u32 = 60;
+        /// Minimum rise (metres) that counts as "the jump visibly happened".
+        /// The observed rise while developing this test was ~1.9 m (a
+        /// default-scale humanoid's `jump_impulse`); 0.3 m has ample margin
+        /// over both jitter and any future balance retune.
+        const MIN_RISE: f32 = 0.3;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let player = boot_embedded_player(&mut sim).expect("failed to boot embedded player");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+                PlayerBridgePlugin,
+            ))
+            .finish();
+        app.insert_non_send(sim);
+        app.insert_non_send(player);
+        app.insert_resource(LocalPlayerInput {
+            move_dir: BVec2::ZERO,
+            jump: false,
+            look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
+        });
+
+        // Settle: wait for in-game, then a short fixed grace period. Breaks
+        // out as soon as both are satisfied instead of always burning the
+        // full `MAX_SETTLE_TICKS` budget (that budget is only a safety net
+        // against never reaching in-game at all).
+        let mut in_game_at: Option<u32> = None;
+        let mut settled: Option<vek::Vec3<f32>> = None;
+        for tick in 0..MAX_SETTLE_TICKS {
+            app.update();
+            let p = app.world().non_send::<EmbeddedPlayer>();
+            if p.is_in_game()
+                && let Some(pos) = p.position()
+            {
+                in_game_at.get_or_insert(tick);
+                settled = Some(pos);
+                if let Some(start_tick) = in_game_at
+                    && tick >= start_tick + SETTLE_GRACE_TICKS
+                {
+                    break;
+                }
+            }
+        }
+        let start = settled.expect("embedded player never reached in-game");
+
+        // Press jump (mirrors a real click: `LocalPlayerInput.jump` flips
+        // `true`, `tick_player`'s edge-detect sends `StartInput(Jump)` once).
+        app.insert_resource(LocalPlayerInput {
+            move_dir: BVec2::ZERO,
+            jump: true,
+            look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
+        });
+        let mut max_z = start.z;
+        for _ in 0..JUMP_HOLD_TICKS {
+            app.update();
+            if let Some(pos) = app.world().non_send::<EmbeddedPlayer>().position() {
+                max_z = max_z.max(pos.z);
+            }
+        }
+
+        // Release jump (edge-detect sends `CancelInput(Jump)` once) and keep
+        // sampling while the character falls back to the ground.
+        app.insert_resource(LocalPlayerInput {
+            move_dir: BVec2::ZERO,
+            jump: false,
+            look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
+        });
+        for _ in 0..POST_RELEASE_TICKS {
+            app.update();
+            if let Some(pos) = app.world().non_send::<EmbeddedPlayer>().position() {
+                max_z = max_z.max(pos.z);
+            }
+        }
+
+        assert!(
+            max_z > start.z + MIN_RISE,
+            "expected the player to rise off the ground while jump was held: start.z={:.3} \
+             max.z={:.3} (rose {:.3} m, needed >{MIN_RISE} m)",
+            start.z,
+            max_z,
+            max_z - start.z
         );
     }
 }

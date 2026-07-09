@@ -50,10 +50,11 @@ so an upgrade waits until the dep tree catches up.
 | **0** | Repos & clean environment | ✅ **complete** (PRs #1, #2, #149) |
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
-| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d + 3.8e + 3.9b + 3.10b done (PRs #7–#20, #26, #28, #29, #30): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling + a real far-mesh horizon**; only EM-3.11 **[M]** (Matías in-game smoke) pending |
+| **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d + 3.8e + 3.9b + 3.10b done (PRs #7–#20, #26, #28, #29, #30): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling + a real far-mesh horizon**; EM-3.11 **[M]** (Matías in-game smoke) 🔵 in progress — PR #32 (camera/tree/terrain-color/far-mesh fixes) landed, follow-up PR (perf/jump/fog) up next, re-test pending |
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified. EM-4.2 correctness done (PR #33): persistence + rtsim REAL round-trip, `hot-agent` wired; full 24h soak + EM-4.2b+ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
+| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/birds) | 🔵 **started 2026-07-09** (Matías, running in parallel with Phase 4) — spec/plan/tasks authoring in progress, EM-7.1→7.8 scaffolded |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -128,7 +129,7 @@ so an upgrade waits until the dep tree catches up.
 | EM-3.9c | Sprites polish v3 — wind-sway v2 (normal-consistent or non-geometric approach), furniture/prop/dungeon sprite kinds, shared decoded-chunk store | ⚪ |
 | EM-3.10 | LOD & culling v1 (distance bands + GPU occlusion) | ✅ PR #20 — Bevy auto-frustum-culls all meshes (verified); added `LodCullingPlugin` distance bands (chunk + nearer sprite-parent, Visibility-toggle, data-driven `CullingConfig`) |
 | EM-3.10b | LOD & culling v2 — GPU occlusion culling (DepthPrepass+HZB, measure-gated) + lod-alt far-mesh (needs a bridge→client lod_alt/horizon data path) + `CullingConfig`→RON | ✅ PR #30 — occlusion culling measured (no gain in the smoke scene, shipped opt-in default OFF) + real lod-alt far-mesh fills the horizon (new one-shot `NetLodAlt` bridge→protocol→client data path); `CullingConfig`→RON not attempted (small follow-up) |
-| EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | ⚪ |
+| EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | 🔵 PR #32 landed — Matías's first live playthrough found: 3rd-person camera pitch dead (mouse Y did nothing), trees/mushrooms/cave-flora rendering with zero color (palette had no entries → fell to Rock-gray default), ordinary terrain (grass/sand/snow/cave-rock/ice) ALSO zero-color for the same reason, and a walkable-through "green wall" at the horizon (root cause: the far-mesh's cutout hole was anchored at boot instead of following the camera). All 4 fixed + `block_palette.ron` extended with 10 new kind entries + water alpha/color retuned. **EM-3.11b follow-up (this PR):** re-test surfaced 3 more findings — flat ~29fps identical in dev AND `--release` w/ full LTO (real bug: `tick_sim`/`tick_player` ran in `Update` at display rate instead of `FixedUpdate` @ 30Hz, feeding the sim a jittery non-30Hz `dt` every frame; fixed + a `Slow server tick` root cause (50–200ms individual ticks, ~62-entity smoke scene, likely agent-AI/rtsim pathfinding cost) found and documented but NOT chased down — flagged as a follow-up profiling task), jump reported "not working" (sim-side plumbing proven correct end-to-end via a real embedded-sim integration test — `on_ground` gate, impulse, landing all fire correctly; most likely explained by the same stutter making a <1s jump arc hard to perceive, not a real jump bug), and the far-mesh horizon still reading as a hard "wall" (root cause: fog color didn't match the physically-based sky color at the mesh's silhouette edge, not missing fog — retuned fog density/color + far-mesh height-tint to reduce the mismatch, measured via pixel sampling). Remaining before EM-3.11 can close: Matías re-test of this PR + the slow-server-tick profiling follow-up. |
 
 ## Phase 4 — Server shell, replicon transport & ORACLE foundations ⚪
 
@@ -171,6 +172,24 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-6.3 | **Bevy version-bump rehearsal** (first EM-M1 exercise — proves churn is contained to `bevy/*`) | ⚪ |
 | EM-6.4 | Retire interim pieces per cutover (legacy quinn listener off, old client archived) | ⚪ |
 | EM-6.5 | Post-migration perf review (FPS/frame-time/RAM/VRAM/server-tick vs old client) | ⚪ |
+
+## Phase 7 — Visual detail & atmosphere polish 🔵
+
+**Started 2026-07-09 (Matías, worksheet response to EM-3.11b re-test):** running IN PARALLEL with Phase 4,
+not gated on it. Scope = everything Matías flagged as "missing/flat" beyond the EM-3.11(b) bug fixes —
+this is new rendering *content*, not bug fixes. Spec/plan/tasks authoring in progress; each row below will
+link its spec/plan/task doc once drafted.
+
+| Task | What | Status |
+|---|---|---|
+| EM-7.1 | Per-voxel color/texture variation (procedural noise/imperfections on top of the flat per-KIND palette colors from EM-3.4/EM-3.11 — grass/rock/etc. currently render as a single flat tone per block kind) | ⚪ |
+| EM-7.2 | Geometric foliage/ground detail (individual grass blades, denser tree canopies, small plants) beyond the current billboard-sprite pass (EM-3.9/3.9b) | ⚪ |
+| EM-7.3 | Clouds | ⚪ |
+| EM-7.4 | Rain (weather) | ⚪ |
+| EM-7.5 | Visible sun disc (not just directional-light illumination) | ⚪ |
+| EM-7.6 | Night sky — stars | ⚪ |
+| EM-7.7 | Moon | ⚪ |
+| EM-7.8 | Ambient wildlife — birds | ⚪ |
 
 ---
 

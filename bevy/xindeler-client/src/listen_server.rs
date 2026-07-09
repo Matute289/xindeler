@@ -34,7 +34,7 @@ use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
 use xindeler_app::settings::userdata_dir;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    LodAltStreamPlugin, PlayerBridgePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    LodAltStreamPlugin, PlayerBridgePlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
     SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
 };
 
@@ -79,16 +79,28 @@ pub struct ListenServerPlugin;
 
 impl Plugin for ListenServerPlugin {
     fn build(&self, app: &mut App) {
+        // EM-3.11b: pace the embedded sim + player at the sim's real 30 TPS
+        // via `FixedUpdate`, decoupled from the window's display-rate
+        // `Update`. Previously `tick_sim`/`tick_player` ran once per `Update`
+        // — 60–144 Hz on the dev machines that hit this — which ran the FULL
+        // specs system graph (physics, agent AI, terrain streaming, ...)
+        // 2–5× too often and fed it a variable, non-30-Hz `dt`. See
+        // `xindeler_sim_bridge::tick_sim`'s doc for the full root-cause
+        // writeup and `docs/backlog/engine-migration.md` EM-3.11b for the
+        // before/after measurement.
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+
         // Replicon SERVER role + the shared replication contract. `DefaultPlugins`
         // already provides `StatesPlugin` (needed by replicon's states). Terrain
         // messages are `make_message_independent`, so they flow regardless of the
         // entity replication tick; the listen-server loopback is driven by
         // `ClientState::Disconnected` (never a connected client here).
         app.add_plugins((
-            // Replication tick on `PostUpdate` (every frame in this windowed
-            // app — there is no fixed timestep configured; matches the
-            // frame-paced sim tick). `ServerPlugin::new` interns the label for
-            // us (same pattern as the protocol crate's tests).
+            // Replication tick on `PostUpdate` (every RENDER frame — display
+            // rate, deliberately NOT tied to the sim's `FixedUpdate` cadence,
+            // EM-3.11b: replicon just no-ops when nothing changed since the
+            // last check). `ServerPlugin::new` interns the label for us (same
+            // pattern as the protocol crate's tests).
             RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
             XindelerProtocolPlugin,
             // Server shell: sim tick + terrain drain (both server-side, specs

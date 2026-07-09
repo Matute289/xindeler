@@ -43,22 +43,31 @@ pub struct CameraRigPlugin;
 /// - ON:  **34.38 ms/frame** (≈29.1 fps)
 ///
 /// No measurable difference (< 0.1%, inside run-to-run noise) — both runs
-/// were also flat at ~30 fps throughout. This windowed listen-server App
-/// runs its own render loop at DISPLAY rate (not the embedded sim's 30 TPS,
-/// which only paces the *headless* `xindeler-server-app` shell — see
-/// `xindeler-sim-bridge::tick_sim`'s doc), so the flat ~29 fps here points to
-/// vsync/present-mode capping the frame, not necessarily "no GPU headroom" —
-/// this measurement does NOT rule out a genuine GPU-render-bound cost that
-/// vsync happens to be masking; re-measure with an uncapped present mode (or
-/// on a scene dense enough to blow past the vsync ceiling) before trusting
-/// "no headroom" as the reason occlusion culling didn't help here. What IS
-/// solid: occlusion culling made no measurable difference in THIS scene,
-/// matching EM-3.10's prediction that the smoke world's few/small occluders
-/// wouldn't earn back the two-phase depth prepass + HZB cost. Ships **opt-in,
-/// default OFF** (`XINDELER_OCCLUSION_CULLING=1` to try it; `GraphicsTier`
-/// presets can wire a real toggle once `xindeler-app` picks this up, and a
-/// denser scene — a real town/dungeon site — is the honest way to re-measure
-/// this later).
+/// were also flat at ~30 fps throughout. **This measurement predates EM-3.11b**
+/// (`xindeler-sim-bridge::tick_sim`'s doc): at the time, this windowed
+/// listen-server App ran the embedded sim's `tick_sim`/`tick_player` in
+/// `Update` (display rate, NOT the sim's intended 30 TPS — that was true only
+/// of the *headless* `xindeler-server-app` shell), so a real, non-render CPU
+/// cost (2–5× too much full-server-tick work) was baked into every one of
+/// these frames alongside whatever the GPU was doing; the flat ~29 fps here
+/// cannot be blamed on vsync/GPU-headroom alone. EM-3.11b moved the sim tick
+/// to `FixedUpdate` at a real 30 Hz and separately confirmed via
+/// `XINDELER_PERF_LOG` that the vsync/present-mode theory floated below was
+/// only a partial explanation — see `docs/backlog/engine-migration.md`
+/// EM-3.11b for the current numbers. Re-measuring occlusion culling itself on
+/// top of the EM-3.11b fix is still future work; what's solid from THIS run:
+/// occlusion culling made no measurable difference in this scene, matching
+/// EM-3.10's prediction that the smoke world's few/small occluders wouldn't
+/// earn back the two-phase depth prepass + HZB cost. Ships **opt-in, default
+/// OFF** (`XINDELER_OCCLUSION_CULLING=1` to try it; `GraphicsTier` presets can
+/// wire a real toggle once `xindeler-app` picks this up, and a denser scene —
+/// a real town/dungeon site — is the honest way to re-measure this later).
+///
+/// (Original note, now superseded by the above: "the flat ~29 fps here points
+/// to vsync/present-mode capping the frame, not necessarily 'no GPU
+/// headroom'... re-measure with an uncapped present mode... before trusting
+/// 'no headroom' as the reason" — re-measured in EM-3.11b; the sim-tick
+/// overrun was the bigger factor.)
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct OcclusionCullingConfig {
     pub enabled: bool,
