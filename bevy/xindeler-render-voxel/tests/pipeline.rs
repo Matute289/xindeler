@@ -25,9 +25,10 @@ use std::sync::{
 use bevy::{
     app::App,
     asset::{AssetApp, AssetPlugin, Assets, Handle},
+    color::Luminance,
     ecs::{entity::Entity, query::With},
     mesh::{Mesh3d, VertexAttributeValues},
-    pbr::StandardMaterial,
+    pbr::{MeshMaterial3d, StandardMaterial},
     prelude::MinimalPlugins,
 };
 use common::{
@@ -598,5 +599,58 @@ fn abandoned_placeholder_is_cleaned_up_when_the_volume_disappears() {
         placeholder_entity_count(&mut app),
         0,
         "no placeholder may survive a provider-None re-mark of its own key"
+    );
+}
+
+/// EM-3.11i regression: a real gameplay capture showed the placeholder could
+/// still render as a solid, hard-edged BLACK box in dim/cave terrain —
+/// exactly the black-frame symptom EM-3.11h existed to fix — because a
+/// normally-lit `StandardMaterial` box viewed from its own interior
+/// self-shadows to black regardless of `base_color` (pipeline module docs).
+/// This headless suite has no renderer, so it cannot measure on-screen
+/// pixels; what IS checkable at the material-definition level is the
+/// property that makes black-under-any-lighting impossible in the first
+/// place: `unlit: true` (an unlit fragment outputs `base_color`
+/// unconditionally, with no lighting term to zero out) plus a `base_color`
+/// whose own luminance sits comfortably above zero. Whether the result reads
+/// as "acceptably visible, not garish" in actual gameplay is a human call
+/// the module docs are honest about — this test only guards the regression
+/// that made the placeholder go pitch black.
+#[test]
+fn placeholder_material_is_unlit_with_a_visible_floor() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert!(
+        material.unlit,
+        "the placeholder material must be unlit: a normally-lit material can legitimately render \
+         fully black wherever the scene provides it no light (EM-3.11i finding — the camera \
+         routinely stands INSIDE this box, self-shadowing its own interior), which defeats the \
+         whole point of a first-load placeholder"
+    );
+    let floor = material.base_color.luminance();
+    assert!(
+        floor > 0.05,
+        "the placeholder's base_color must have a comfortably-visible floor luminance (got \
+         {floor}) — with `unlit: true` this IS its on-screen brightness in every scene, dark cave \
+         included"
     );
 }
