@@ -54,6 +54,7 @@ so an upgrade waits until the dep tree catches up.
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified. EM-4.2 correctness done (PR #33): persistence + rtsim REAL round-trip, `hot-agent` wired; full 24h soak + EM-4.2b+ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
+| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/birds) | 🔵 **started 2026-07-09** (Matías, running in parallel with Phase 4) — spec/plan/tasks authoring in progress, EM-7.1→7.8 scaffolded |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -171,6 +172,24 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-6.3 | **Bevy version-bump rehearsal** (first EM-M1 exercise — proves churn is contained to `bevy/*`) | ⚪ |
 | EM-6.4 | Retire interim pieces per cutover (legacy quinn listener off, old client archived) | ⚪ |
 | EM-6.5 | Post-migration perf review (FPS/frame-time/RAM/VRAM/server-tick vs old client) | ⚪ |
+
+## Phase 7 — Visual detail & atmosphere polish 🔵
+
+**Started 2026-07-09 (Matías, worksheet response to EM-3.11b re-test):** running IN PARALLEL with Phase 4,
+not gated on it. Scope = everything Matías flagged as "missing/flat" beyond the EM-3.11(b) bug fixes —
+this is new rendering *content*, not bug fixes. Spec/plan/tasks authoring in progress; each row below will
+link its spec/plan/task doc once drafted.
+
+| Task | What | Status |
+|---|---|---|
+| EM-7.1 | Per-voxel color/texture variation (procedural noise/imperfections on top of the flat per-KIND palette colors from EM-3.4/EM-3.11 — grass/rock/etc. currently render as a single flat tone per block kind) | ⚪ |
+| EM-7.2 | Geometric foliage/ground detail (individual grass blades, denser tree canopies, small plants) beyond the current billboard-sprite pass (EM-3.9/3.9b) | ⚪ |
+| EM-7.3 | Clouds | ⚪ |
+| EM-7.4 | Rain (weather) | ⚪ |
+| EM-7.5 | Visible sun disc (not just directional-light illumination) | ⚪ |
+| EM-7.6 | Night sky — stars | ⚪ |
+| EM-7.7 | Moon | ⚪ |
+| EM-7.8 | Ambient wildlife — birds | ⚪ |
 
 ---
 
