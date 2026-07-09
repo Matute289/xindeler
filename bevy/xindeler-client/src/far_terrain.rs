@@ -315,10 +315,20 @@ fn averaged_corner(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
 /// high ground reads paler/rockier. Cheap, data-free (no palette dependency),
 /// good enough to visually confirm relief without the near terrain's PBR
 /// block-palette treatment.
+///
+/// BL-82 EM-3.11b: lightened/desaturated from the original, quite saturated
+/// forest green (`(0.20, 0.35, 0.16)`) — the far mesh's own colour is what
+/// `DistanceFog` blends FROM, so a raw colour with high contrast against the
+/// fog (`atmosphere::AtmosphereProfile::default().fog_color`, a pale
+/// blue-grey haze) stayed visible as a distinct "wall" even at high fog
+/// blend factors; a softer, less saturated low tint minimises that residual
+/// contrast at the mesh's own near edge (still comfortably outside the
+/// near-terrain band per `HOLE_MARGIN_CHUNKS`) without touching per-quad
+/// colour variation (out of scope — this is still one flat 2-stop gradient).
 fn height_tint(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let low = Vec3::new(0.20, 0.35, 0.16);
-    let high = Vec3::new(0.55, 0.52, 0.46);
+    let low = Vec3::new(0.32, 0.42, 0.30);
+    let high = Vec3::new(0.58, 0.57, 0.53);
     let c = low.lerp(high, t);
     Color::srgb(c.x, c.y, c.z)
 }

@@ -6,10 +6,12 @@
 // this file is a visual no-op. Edit it while the client runs to watch the
 // atmosphere animate (hot reload via bevy's file_watcher).
 (
-    // Distance-fog extinction density (~350 m visibility).
-    fog_density: 0.00856,
-    // sRGB fog color.
-    fog_color: (0.55, 0.65, 0.75),
+    // Distance-fog extinction density (~230 m visibility; BL-82 EM-3.11b
+    // re-tune, see AtmosphereProfile::default()'s doc comment for why).
+    fog_density: 0.01302,
+    // sRGB fog color (brightened/desaturated in EM-3.11b to match the
+    // physically-based Atmosphere sky's horizon haze more closely).
+    fog_color: (0.66, 0.73, 0.81),
     // sRGB sky/void color (world ClearColor; bevy stock = srgb_u8(43, 44, 47)).
     sky_color: (0.168627, 0.172549, 0.184314),
     // Density factor for placed volumetric FogVolumes (engine extension).
