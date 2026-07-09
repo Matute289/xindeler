@@ -109,7 +109,12 @@ impl Plugin for ListenServerPlugin {
         // further. This does NOT fix the underlying slow-tick root cause
         // (still open, likely agent-AI/rtsim pathfinding cost per the perf
         // agent's PR #34 report) — it only removes the compounding-catchup
-        // amplifier on top of it.
+        // amplifier on top of it. **EM-3.11d** (this branch) profiles the
+        // underlying slow-tick cost itself — see
+        // `xindeler_sim_bridge::tick_sim` / `common_ecs::Job::run` /
+        // `server::Server::tick`'s "Slow server tick" log for the
+        // instrumentation and `docs/backlog/engine-migration.md` EM-3.11d for
+        // the findings.
         app.insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs_f64(
             1.0 / SIM_TICK_HZ,
         )));
