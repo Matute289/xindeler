@@ -7,7 +7,25 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# EM-4.2: mirrors server-cli's OWN `hot-agent` feature (`server-cli/Cargo.toml`
+# — also opt-in there, not part of its `default`) so `server-agent` (NPC AI)
+# can be hot-reloaded as a dylib under THIS shell too, per CLAUDE.md's
+# "Hot-reloading" section. `server/hot-agent` flips `server-agent` itself into
+# `use-dyn-lib` mode; `dep:agent` pulls in the same crate as an explicit
+# top-level dependency so `main.rs` can call `agent::init()` at boot (forces
+# the FIRST compile+load+watcher-start to happen eagerly at startup, matching
+# server-cli's own `agent::init()` call in `server-cli/src/main.rs`, instead
+# of lazily on the first NPC AI decision).
+hot-agent = ["server/hot-agent", "dep:agent"]
+
 [dependencies]
+# Optional — only pulled in by the `hot-agent` feature above, purely to call
+# `agent::init()` at boot. `server` already depends on this crate statically
+# regardless of this feature; this is just the extra top-level edge needed to
+# reach its `init()` entry point (same reason server-cli takes the same
+# extra dependency for the same feature).
+agent = { package = "xindeler-server-agent", path = "../../server/agent", optional = true }
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR
 # (EM-6.3). Headless dedicated-server shell: no render/window/audio features
 # needed. `App`/`Plugin`/`MinimalPlugins`/`ScheduleRunnerPlugin`/`Time` are
@@ -87,3 +105,10 @@ vek = { workspace = true }
 # Same git rev `server`'s own Cargo.toml pins, to avoid resolving two versions.
 portpicker = { git = "https://github.com/xMAC94x/portpicker-rs", rev = "e04e3a61d6c1645c865b36c57877f1f8e48e0cb7" }
 ron = { workspace = true }
+# EM-4.2 rtsim verification test (`tests/rtsim_roundtrip.rs`): decodes the
+# real persisted `<userdata>/server/rtsim/data.dat` via the SAME
+# `rtsim::data::Data::from_reader` production deserialization path
+# `server::rtsim::RtSim::new` uses, rather than re-implementing the msgpack
+# format — dev-only, shell→logic type-library use (same legal direction as
+# the `client`/`server` dev-deps above).
+rtsim = { package = "xindeler-rtsim", path = "../../rtsim" }

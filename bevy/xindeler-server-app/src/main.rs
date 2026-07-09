@@ -33,6 +33,18 @@ use crate::{
 fn main() -> AppExit {
     tracing_subscriber::fmt::init();
 
+    // EM-4.2: mirrors server-cli's own `#[cfg(feature = "hot-agent")]
+    // agent::init()` call (`server-cli/src/main.rs`) — eagerly starts the
+    // `server-agent` dylib compile+load+file-watcher BEFORE `Server::new`
+    // boots the sim, so NPC AI is already hot-reloadable from the first
+    // tick rather than lazily on the first AI decision. No-op (compiled out
+    // entirely) unless built with `--features hot-agent`, matching
+    // server-cli's own opt-in (not default) posture for this feature.
+    #[cfg(feature = "hot-agent")]
+    {
+        agent::init();
+    }
+
     // Mirrors server-cli's `--no-auth` CLI flag as an env var: this shell has
     // no CLI parser yet (EM-4.1 scope is the shell + dual-stack + signal
     // handling + metrics, not a `clap` port of server-cli's `ArgvApp`).
