@@ -33,11 +33,40 @@
         Earth:       (layer: 1, base_color: (0.55, 0.38, 0.22), roughness: 0.96, metallic: 0.0, emissive_strength: 0.0),
         // Cyan crystal veins (emissive mask -> bloom).
         GlowingRock: (layer: 2, base_color: (0.35, 0.88, 1.0), roughness: 0.35, metallic: 0.05, emissive_strength: 0.85),
-        // Water: the fluid mesh renders with a stock transparent material
-        // until EM-3.9's water shader, but its color/roughness/alpha come
-        // from HERE (the client builds that material from this entry;
-        // `alpha` defaults to 1.0 and is only consumed by fluid kinds).
-        Water:       (layer: 3, base_color: (0.15, 0.35, 0.6), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.6),
+        // Water: the fluid mesh renders with the EM-3.9b animated scroll/
+        // ripple shader (`WaterMaterialExt`), but its color/roughness/alpha
+        // come from HERE (the client builds the wrapped `StandardMaterial`
+        // base from this entry; `alpha` defaults to 1.0 and is only consumed
+        // by fluid kinds).
+        //
+        // BL-82 EM-3.11 fix: `alpha` raised 0.6 -> 0.85 and `base_color`
+        // deepened/de-greened. The EM-3.9b smoke screenshot verified this
+        // material over PALE terrain (sand/rock near the deterministic demo
+        // anchor) and looked correctly blue — but a live playthrough (BL-82
+        // EM-3.11 bug report) found the SAME material reading as murky
+        // green-gray wherever the water sat over or in front of saturated
+        // green terrain/vegetation (a river cutting a grassy slope: viewed
+        // near edge-on, the ray crosses very little actual water before
+        // hitting that green background, so 60% alpha let the background
+        // dominate the blend — `out = blue*alpha + background*(1-alpha)`, and
+        // at alpha 0.6 a moderately saturated green background out-weighs a
+        // moderately saturated blue). Confirmed independently: alpha_mode is
+        // `Blend` and applies correctly everywhere (real screenshots from the
+        // bug report show genuine layered translucency, not a flat opaque
+        // fill), and the palette read/HashMap lookup is correct (existing
+        // `shipped_palette_parses_and_resolves_demo_kinds` test) — this was a
+        // TUNING gap, not a misread/broken default. 0.85 alpha + a deeper,
+        // less green-leaning blue keeps blue dominant over backgrounds up to
+        // fairly saturated greens (worked through in the EM-3.11 task report)
+        // while still reading as translucent (the shimmer/fresnel + the
+        // remaining 15% background bleed preserve the "you can see a little
+        // into it" look) — and can only make the ALREADY-blue smoke-test pool
+        // read MORE solidly blue, never regressing it. NOTE: a separate,
+        // likely-more-significant EM-3.11 fix (`far_terrain.rs`'s cutout hole
+        // now follows the camera) independently explains the walkable-through
+        // "green wall" behaviour Matías reported — this Water tuning is a
+        // defensive improvement on top, not the sole/primary fix.
+        Water:       (layer: 3, base_color: (0.08, 0.28, 0.65), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.85),
 
         // --- BL-82 EM-3.11 fix: structure-sourced solid content (trees,
         // giant mushrooms, cave flora) was falling through to `default_layer`

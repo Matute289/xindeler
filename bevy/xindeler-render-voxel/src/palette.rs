@@ -598,6 +598,59 @@ mod tests {
         assert!(parsed.blocks[&BlockKind::GlowingWeakRock].emissive_strength > 0.0);
     }
 
+    /// BL-82 EM-3.11 regression: the water entry's `alpha` must be high
+    /// enough that its blue reads as dominant even when alpha-blended (`out =
+    /// water*alpha + bg*(1-alpha)`, the exact `AlphaMode::Blend` compositing
+    /// `palette_material.rs` wires up) over a fairly saturated GREEN
+    /// background — a grassy river-bank / lakebed, or a moss-dark rock wall,
+    /// both realistic terrain the fluid mesh renders in front of. The
+    /// original 0.6-alpha, (0.15, 0.35, 0.6) tuning passed the EM-3.9b smoke
+    /// screenshot (verified over pale sand/rock near the demo anchor) but a
+    /// live playthrough found the SAME material reading as murky green over
+    /// vegetation-heavy terrain (BL-82 EM-3.11 bug report — see
+    /// `block_palette.ron`'s Water comment for the full writeup and the
+    /// blend-math derivation this test encodes). This is a data guard, not a
+    /// code-path check: it fails loudly if a future palette edit ever
+    /// re-introduces a too-transparent or too-green Water tuning, without
+    /// needing a screenshot to notice.
+    #[test]
+    fn shipped_palette_water_reads_blue_over_a_saturated_green_background() {
+        let text = include_str!("../../../assets/xindeler/render/block_palette.ron");
+        let parsed: BlockPalette = ron::from_str(text).expect("block_palette.ron parses");
+        let water = &parsed.blocks[&BlockKind::Water];
+
+        assert!(
+            water.alpha >= 0.8,
+            "water alpha {} is too low to stay blue-dominant against saturated backgrounds \
+             (EM-3.11): the background contributes (1 - alpha) of the blend, so a low alpha lets \
+             a green background wash the blue out",
+            water.alpha
+        );
+
+        // A fairly saturated grass/moss green (matches the range Xindeler's
+        // worldgen actually paints terrain — e.g. `world/src/layer/mod.rs`'s
+        // `Rgb::new(10, 75, 90)`-family grass tones, generalized to a
+        // stronger, more adversarial green so this is a real stress test).
+        let bg = [0.15_f32, 0.75, 0.20];
+        let a = water.alpha;
+        let blended: Vec<f32> = (0..3)
+            .map(|i| water.base_color[i] * a + bg[i] * (1.0 - a))
+            .collect();
+        assert!(
+            blended[2] > blended[1] * 1.3,
+            "blue ({}) must clearly dominate green ({}) once blended over a saturated green \
+             background — this is the EM-3.11 bug reproduced in miniature: blended = {blended:?}",
+            blended[2],
+            blended[1]
+        );
+        assert!(
+            blended[2] > blended[0],
+            "blue ({}) must dominate red ({}) too — blended = {blended:?}",
+            blended[2],
+            blended[0]
+        );
+    }
+
     /// Anti-chaos: hostile values come out finite and in-bounds.
     #[test]
     fn sanitize_defuses_hostile_palettes() {
