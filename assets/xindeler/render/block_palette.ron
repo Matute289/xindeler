@@ -33,10 +33,99 @@
         Earth:       (layer: 1, base_color: (0.55, 0.38, 0.22), roughness: 0.96, metallic: 0.0, emissive_strength: 0.0),
         // Cyan crystal veins (emissive mask -> bloom).
         GlowingRock: (layer: 2, base_color: (0.35, 0.88, 1.0), roughness: 0.35, metallic: 0.05, emissive_strength: 0.85),
-        // Water: the fluid mesh renders with a stock transparent material
-        // until EM-3.9's water shader, but its color/roughness/alpha come
-        // from HERE (the client builds that material from this entry;
-        // `alpha` defaults to 1.0 and is only consumed by fluid kinds).
-        Water:       (layer: 3, base_color: (0.15, 0.35, 0.6), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.6),
+        // Water: the fluid mesh renders with the EM-3.9b animated scroll/
+        // ripple shader (`WaterMaterialExt`), but its color/roughness/alpha
+        // come from HERE (the client builds the wrapped `StandardMaterial`
+        // base from this entry; `alpha` defaults to 1.0 and is only consumed
+        // by fluid kinds).
+        //
+        // BL-82 EM-3.11 fix: `alpha` raised 0.6 -> 0.85 and `base_color`
+        // deepened/de-greened. The EM-3.9b smoke screenshot verified this
+        // material over PALE terrain (sand/rock near the deterministic demo
+        // anchor) and looked correctly blue — but a live playthrough (BL-82
+        // EM-3.11 bug report) found the SAME material reading as murky
+        // green-gray wherever the water sat over or in front of saturated
+        // green terrain/vegetation (a river cutting a grassy slope: viewed
+        // near edge-on, the ray crosses very little actual water before
+        // hitting that green background, so 60% alpha let the background
+        // dominate the blend — `out = blue*alpha + background*(1-alpha)`, and
+        // at alpha 0.6 a moderately saturated green background out-weighs a
+        // moderately saturated blue). Confirmed independently: alpha_mode is
+        // `Blend` and applies correctly everywhere (real screenshots from the
+        // bug report show genuine layered translucency, not a flat opaque
+        // fill), and the palette read/HashMap lookup is correct (existing
+        // `shipped_palette_parses_and_resolves_demo_kinds` test) — this was a
+        // TUNING gap, not a misread/broken default. 0.85 alpha + a deeper,
+        // less green-leaning blue keeps blue dominant over backgrounds up to
+        // fairly saturated greens (worked through in the EM-3.11 task report)
+        // while still reading as translucent (the shimmer/fresnel + the
+        // remaining 15% background bleed preserve the "you can see a little
+        // into it" look) — and can only make the ALREADY-blue smoke-test pool
+        // read MORE solidly blue, never regressing it. NOTE: a separate,
+        // likely-more-significant EM-3.11 fix (`far_terrain.rs`'s cutout hole
+        // now follows the camera) independently explains the walkable-through
+        // "green wall" behaviour Matías reported — this Water tuning is a
+        // defensive improvement on top, not the sole/primary fix.
+        Water:       (layer: 3, base_color: (0.08, 0.28, 0.65), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.85),
+
+        // --- BL-82 EM-3.11 fix: structure-sourced solid content (trees,
+        // giant mushrooms, cave flora) was falling through to `default_layer`
+        // (Rock's gray look) because these kinds had no entry here — every
+        // tree rendered as a monochrome gray silhouette. Colors are v1
+        // single-tone approximations sampled from the real per-species/
+        // per-biome ranges `world/` embeds per voxel (`world/src/layer/
+        // tree.rs` trunk colors, `assets/world/style/colors.ron`
+        // `TemperateLeaves`/`GlowingMushroom` — this palette is per-KIND, not
+        // per-voxel, same v1 simplification already accepted for Rock/Earth/
+        // GlowingRock above).
+        // Trunk: warm mid-brown (mean of the 12 per-species trunk colors in
+        // world/src/layer/tree.rs).
+        Wood:            (layer: 4, base_color: (0.38, 0.23, 0.15), roughness: 0.9,  metallic: 0.0, emissive_strength: 0.0),
+        // Canopy: mid forest green (midpoint of colors.ron's TemperateLeaves
+        // lerp range (20,100,40)..(60,120,0)).
+        Leaves:          (layer: 5, base_color: (0.16, 0.43, 0.08), roughness: 0.85, metallic: 0.0, emissive_strength: 0.0),
+        // Cave glowing mushroom caps: midpoint of the mushroom-head range
+        // (world/src/layer/mod.rs Rgb::new(30, 50..150, 50..100)) — teal-green
+        // with a soft glow. A second, bluer cavern-moss variant also exists
+        // (mod.rs Rgb::new(50, 120, 160)); this v1 single tone favors the
+        // more common mushroom-head range.
+        GlowingMushroom: (layer: 6, base_color: (0.12, 0.39, 0.29), roughness: 0.55, metallic: 0.0, emissive_strength: 0.5),
+        // Cave decorative "flower" structures (world/src/layer/cave.rs) span
+        // reds/pinks/purples; a single pink-magenta tone beats gray.
+        ArtLeaves:       (layer: 7, base_color: (0.85, 0.35, 0.55), roughness: 0.8,  metallic: 0.0, emissive_strength: 0.0),
+
+        // --- follow-up fix (same EM-3.11 smoke pass): ordinary TERRAIN-column
+        // kinds (Grass/Sand/Snow/WeakRock/GlowingWeakRock/Ice) were ALSO
+        // falling through to `default_layer` — empirically confirmed by
+        // temporarily forcing a demo-world column to `BlockKind::Grass` and
+        // observing it render Rock-gray, not green. `world/`'s worldgen DOES
+        // embed real per-voxel colour on these blocks (`Block::new(kind,
+        // rgb)` in `world/src/block.rs`), but that embedded colour has ZERO
+        // effect on the render (independently confirmed by a second agent:
+        // `voxel.wgsl`'s fragment shader only does `base_color *= albedo`
+        // from the palette's per-layer procedural texture; `convert.rs` never
+        // emits a vertex-colour attribute at all) — so per-KIND palette
+        // entries are the ONLY way any of these render with real colour,
+        // same as the tree fix above. This directly explains Matías's
+        // "todo se ve gris, sin detalle" (everything looks flat gray) smoke
+        // finding beyond just the trees.
+        // Grass: mean of colors.ron's 4 grass variants (cold/warm/dark/wet).
+        Grass:           (layer: 8,  base_color: (0.19, 0.51, 0.10), roughness: 0.92, metallic: 0.0, emissive_strength: 0.0),
+        // Sand: mean of colors.ron's beach_sand/desert_sand.
+        Sand:            (layer: 9,  base_color: (0.70, 0.58, 0.35), roughness: 0.85, metallic: 0.0, emissive_strength: 0.0),
+        // Snow: colors.ron's `snow` tuple (its blue channel is an HDR-ish
+        // >1.0 brightness boost, not a 0..1 tone — clamped to 1.0 by the
+        // loader's sanitizer, same effect: a bright, slightly-blue white).
+        Snow:            (layer: 10, base_color: (0.75, 0.80, 1.0),  roughness: 0.7,  metallic: 0.0, emissive_strength: 0.0),
+        // Cave floor/wall rock: mean of its two real call sites
+        // (world/src/layer/mod.rs Rgb::new(110,120,150),
+        // world/src/layer/cave.rs Rgb::new(80,100,150)) — cooler/bluer than
+        // surface Rock, distinguishing cave stone from overworld stone.
+        WeakRock:        (layer: 11, base_color: (0.37, 0.43, 0.59), roughness: 0.88, metallic: 0.0, emissive_strength: 0.0),
+        // Glowing cave rock (world/src/layer/cave.rs Rgb::new(120,140,255)) —
+        // same emissive treatment as GlowingRock.
+        GlowingWeakRock: (layer: 12, base_color: (0.47, 0.55, 1.0),  roughness: 0.4,  metallic: 0.05, emissive_strength: 0.85),
+        // Ice (world/src/layer/cave.rs Rgb::new(120,160,255)).
+        Ice:             (layer: 13, base_color: (0.47, 0.63, 1.0),  roughness: 0.15, metallic: 0.0, emissive_strength: 0.0),
     },
 )

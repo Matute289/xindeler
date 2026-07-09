@@ -10,15 +10,38 @@
 //! terrain to fill that gap.
 //!
 //! ## Why a hole, not a full disc
-//! The far mesh is built ONCE, in WORLD space, and never rebuilt as the camera
-//! moves (no per-frame cost, no re-streaming). To avoid z-fighting / visible
-//! seams against the near, block-accurate chunk meshes, we cut a circular hole
-//! out of it around the (also one-shot) [`TerrainCameraAnchor`] position, sized
-//! to comfortably exceed the near [`crate::lod::CullingConfig::
-//! chunk_render_distance`] band. Because v1's player stays near that single
-//! anchor (no interest-management roaming yet — EM-4.2d), a fixed hole is
-//! correct today; a camera-following hole (rebuilt/shader-masked) is future
-//! work once the player can roam far from the boot anchor (EM-3.10c).
+//! The far mesh is built in WORLD space and only rebuilt when the camera has
+//! drifted far enough that the current cutout could stop covering the near
+//! band (not every frame — see [`retile_far_mesh`]). To avoid z-fighting /
+//! visible seams against the near, block-accurate chunk meshes, we cut a
+//! circular hole out of it around the CAMERA's current position, sized to
+//! comfortably exceed the near [`crate::lod::CullingConfig::
+//! chunk_render_distance`] band.
+//!
+//! ## EM-3.11 fix: the hole must follow the camera, not the boot anchor
+//! v1 (EM-3.10b) centred the hole on the one-shot [`TerrainCameraAnchor`] and
+//! never moved it, reasoning the player would stay near spawn until
+//! interest-management roaming (EM-4.2d) landed. In a real, unscripted
+//! playthrough that assumption broke: [`crate::lod::cull_chunk_meshes`]
+//! ALREADY re-centres the near chunk/fluid band on the live camera every
+//! frame (chunks stream in from the server around the player, independent of
+//! any anchor), so once a roaming player got more than
+//! `chunk_render_distance + HOLE_MARGIN_CHUNKS` from the boot anchor, the
+//! anchor-fixed hole no longer covered their surroundings — exposing this
+//! coarse, fully OPAQUE, vertex-coloured mesh (green at low/water elevations,
+//! see [`height_tint`]) right where they stood, in front of (and, having no
+//! collider, walkable through) whatever real, correctly translucent-blue
+//! fluid chunk had
+//! streamed in for that spot. Bug report: BL-82 EM-3.11 ("water renders green
+//! and opaque, and you can walk straight through it, during live free-roam
+//! play — never during the anchor-framed smoke screenshot").
+//! [`retile_far_mesh`] now re-centres the hole on the camera whenever it drifts
+//! past that same margin — the exact slack the hole was originally over-sized
+//! by — so the far mesh is geometrically guaranteed to never draw within
+//! `chunk_render_distance` of the camera (module math in
+//! [`retile_far_mesh`]'s doc comment). This is the scoped-down EM-3.10c
+//! follow-up the v1 comment above pointed at: only the hole's centre needed to
+//! track the camera — the near-terrain streaming/culling already did.
 //!
 //! ## Precision / look
 //! One sample in [`NetLodAlt`] covers `chunk_stride` chunks — already coarse
@@ -50,18 +73,19 @@ use crate::{
 
 /// Safety margin (in chunks) added on top of [`CullingConfig::
 /// chunk_render_distance`] when sizing the far-mesh's cutout hole, so the two
-/// meshes overlap rather than leaving a gap at the boundary even though the
-/// hole is centred on the static boot anchor rather than the live camera.
+/// meshes overlap rather than leaving a gap at the boundary. ALSO doubles as
+/// [`retile_far_mesh`]'s re-tile threshold (its doc comment proves that reuse
+/// is exactly what keeps the far mesh from ever overlapping the near band).
 const HOLE_MARGIN_CHUNKS: f32 = 2.0;
 
 /// Installs the EM-3.10b far-terrain consumer: receives [`NetLodAlt`] once,
-/// builds the mesh once (as soon as the anchor is also known), spawns it.
+/// then builds/re-tiles the mesh (see [`retile_far_mesh`]) as soon as, and for
+/// as long as, a camera exists.
 pub struct FarTerrainPlugin;
 
 impl Plugin for FarTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PendingLodAlt>()
-            .add_systems(Update, (receive_lod_alt, build_far_mesh_when_ready));
+        app.add_systems(Update, (receive_lod_alt, retile_far_mesh));
 
         // Debug-only, opt-in (`XINDELER_SMOKE_FAR_MESH_CAM=1`): parks the
         // camera high above the anchor looking outward so a
@@ -96,10 +120,12 @@ fn smoke_horizon_cam(
     }
 }
 
-/// The decoded (but not-yet-meshed) heightmap, held until the anchor arrives
-/// too (message order between the two one-shot broadcasts is not guaranteed).
-#[derive(Resource, Default)]
-struct PendingLodAlt(Option<DecodedLodAlt>);
+/// The decoded far-terrain heightmap. Installed once, the first time the
+/// one-shot [`NetLodAlt`] message arrives, and then kept alive for the whole
+/// session (NOT consumed after the first mesh build) — [`retile_far_mesh`]
+/// re-reads it every time the camera drifts far enough to need a fresh hole.
+#[derive(Resource)]
+struct FarTerrainData(DecodedLodAlt);
 
 struct DecodedLodAlt {
     grid_w: u32,
@@ -108,15 +134,33 @@ struct DecodedLodAlt {
     heights: Vec<f32>,
 }
 
-/// Marks the spawned far-terrain mesh entity (so [`build_far_mesh_when_ready`]
-/// never spawns a second one, and so a smoke/debug harness can find it).
+/// Marks the currently-spawned far-terrain mesh entity (so a smoke/debug
+/// harness can find it). [`retile_far_mesh`] tracks the entity itself via
+/// [`FarMeshState`] (it must despawn the OLD one precisely, not "any" one, on
+/// every re-tile), so this component is a passive marker only.
 #[derive(Component)]
 pub struct FarTerrainMesh;
 
-/// Decodes the one-shot [`NetLodAlt`] message into [`PendingLodAlt`].
-fn receive_lod_alt(mut messages: MessageReader<NetLodAlt>, mut pending: ResMut<PendingLodAlt>) {
-    if pending.0.is_some() {
-        return; // already have it (or already meshed and consumed)
+/// Tracks the world-xz point the CURRENT far-mesh entity's cutout hole is
+/// centred on, plus that entity (`None` if the grid was small enough that the
+/// hole swallowed every quad — the degenerate case `retile_far_mesh` already
+/// handled by drawing nothing). Absent entirely until the first tile builds.
+#[derive(Resource)]
+struct FarMeshState {
+    hole_center: Vec2,
+    entity: Option<Entity>,
+}
+
+/// Decodes the one-shot [`NetLodAlt`] message into [`FarTerrainData`] (once —
+/// the payload is never resent, so a resource already present means we
+/// already have it).
+fn receive_lod_alt(
+    mut commands: Commands,
+    mut messages: MessageReader<NetLodAlt>,
+    existing: Option<Res<FarTerrainData>>,
+) {
+    if existing.is_some() {
+        return;
     }
     let Some(msg) = messages.read().next() else {
         return;
@@ -125,65 +169,117 @@ fn receive_lod_alt(mut messages: MessageReader<NetLodAlt>, mut pending: ResMut<P
         warn!("dropping undecodable far-terrain lod-alt grid");
         return;
     };
-    pending.0 = Some(DecodedLodAlt {
+    commands.insert_resource(FarTerrainData(DecodedLodAlt {
         grid_w: msg.grid_size[0],
         grid_h: msg.grid_size[1],
         chunk_stride: msg.chunk_stride,
         heights,
-    });
+    }));
 }
 
-/// Once BOTH the decoded heightmap and the [`TerrainCameraAnchor`] (for the
-/// hole centre) are available, builds and spawns the far-terrain mesh exactly
-/// once, then drops [`PendingLodAlt`]'s payload so this never re-runs.
-fn build_far_mesh_when_ready(
+/// Builds the far-terrain mesh once [`FarTerrainData`] has arrived, then
+/// RE-CENTRES its cutout hole on the camera's live position whenever it has
+/// drifted more than [`HOLE_MARGIN_CHUNKS`] chunks from the hole the CURRENT
+/// mesh was built around.
+///
+/// ## Why that exact threshold is safe (EM-3.11 fix)
+/// The hole is built with `hole_radius = chunk_render_distance +
+/// HOLE_MARGIN_CHUNKS · CHUNK_EDGE` around some centre `C`. The near terrain/
+/// fluid band ([`crate::lod::cull_chunk_meshes`]) independently keeps
+/// everything within `chunk_render_distance` of the LIVE camera `P` visible
+/// every frame. For the far mesh to never draw inside that near band we need
+/// `dist(P, C) + chunk_render_distance <= hole_radius`, i.e. `dist(P, C) <=
+/// HOLE_MARGIN_CHUNKS · CHUNK_EDGE`. So re-tiling as soon as the camera
+/// crosses exactly that distance from the hole's last centre keeps the
+/// invariant true at all times — the far mesh is geometrically guaranteed to
+/// never overlap the near band, however far or long the player roams. This
+/// replaces the v1 fixed-at-boot-anchor hole (module docs), which broke that
+/// invariant the moment a live playthrough wandered `chunk_render_distance +
+/// HOLE_MARGIN_CHUNKS` from spawn: the coarse, opaque, green-at-low-elevation
+/// far mesh (`height_tint`) became visible right around the player, in front
+/// of (and walkable through, having no collider) the real translucent-blue
+/// water that should have been showing there instead.
+///
+/// Re-tiling is rare (only on ~`HOLE_MARGIN_CHUNKS`-chunk-sized camera
+/// excursions, not every frame) and bounded in cost (the grid is capped at
+/// `LOD_ALT_MAX_DIM`² samples server-side), so this keeps the "no per-frame
+/// cost" property the original design wanted — it just no longer trades that
+/// for correctness once the player leaves the boot vicinity.
+fn retile_far_mesh(
     mut commands: Commands,
-    mut pending: ResMut<PendingLodAlt>,
-    anchor: Option<Res<TerrainCameraAnchor>>,
+    data: Option<Res<FarTerrainData>>,
+    mut state: Option<ResMut<FarMeshState>>,
     culling: Res<CullingConfig>,
+    camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    existing: Query<(), With<FarTerrainMesh>>,
 ) {
-    if !existing.is_empty() {
-        return;
-    }
-    let Some(anchor) = anchor else { return };
-    let Some(data) = pending.0.take() else { return };
-
-    let hole_radius = culling.chunk_render_distance + HOLE_MARGIN_CHUNKS * CHUNK_EDGE;
-    let hole_center = Vec2::new(anchor.bevy_pos.x, anchor.bevy_pos.z);
-
-    let Some(mesh) = far_mesh_from_heights(&data, hole_center, hole_radius) else {
-        // Every quad fell inside the hole (tiny world) — nothing to draw; the
-        // sky+fog fallback stays in effect, which is the documented
-        // acceptable outcome for a degenerate case, not a bug.
-        info!("far-terrain grid entirely inside the near band; skipping the far mesh");
+    let Some(data) = data else { return };
+    let Some(eye) = camera.iter().next().map(GlobalTransform::translation) else {
         return;
     };
+    let hole_center = Vec2::new(eye.x, eye.z);
+    let rebuild_slack = HOLE_MARGIN_CHUNKS * CHUNK_EDGE;
 
-    commands.spawn((
-        FarTerrainMesh,
-        Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            // The mesh is a single coarse sheet with no interior — both faces
-            // must shade the same way regardless of which side the (fixed,
-            // one-shot) winding ends up facing.
-            cull_mode: None,
-            perceptual_roughness: 1.0,
-            reflectance: 0.02,
-            ..default()
-        })),
-        Transform::IDENTITY, // positions are already absolute world-space
-        Visibility::Visible,
-    ));
-    info!(
-        grid_w = data.grid_w,
-        grid_h = data.grid_h,
-        stride = data.chunk_stride,
-        "far-terrain mesh built (EM-3.10b)"
-    );
+    if let Some(state) = &state
+        && state.hole_center.distance(hole_center) <= rebuild_slack
+    {
+        return; // still safely inside the current hole — nothing to do
+    }
+
+    let hole_radius = culling.chunk_render_distance + rebuild_slack;
+    let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius);
+    let new_entity = mesh.map(|mesh| {
+        commands
+            .spawn((
+                FarTerrainMesh,
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    // The mesh is a single coarse sheet with no interior —
+                    // both faces must shade the same way regardless of which
+                    // side the winding ends up facing.
+                    cull_mode: None,
+                    perceptual_roughness: 1.0,
+                    reflectance: 0.02,
+                    ..default()
+                })),
+                Transform::IDENTITY, // positions are already absolute world-space
+                Visibility::Visible,
+            ))
+            .id()
+    });
+    if new_entity.is_none() {
+        // Every quad fell inside the hole (tiny world, or the camera is deep
+        // in it) — nothing to draw; the sky+fog fallback stays in effect,
+        // which is the documented acceptable outcome for a degenerate case,
+        // not a bug.
+        info!("far-terrain grid entirely inside the near band; skipping the far mesh");
+    }
+
+    if let Some(old) = state.as_ref().and_then(|s| s.entity) {
+        // `try_despawn` (silently no-ops if `old` is already gone), not
+        // `despawn` (panics/logs an error) — EM-3.11 fix: an observed, rare,
+        // hard-to-pin-precisely race let a re-tile target an entity some
+        // other path had already despawned (e.g. a chunk-scale event racing
+        // this system in the same frame), crashing the whole client. Losing
+        // this despawn is harmless either way: the entity is already gone,
+        // which is exactly the outcome we wanted.
+        commands.entity(old).try_despawn();
+    }
+
+    match &mut state {
+        Some(state) => {
+            state.hole_center = hole_center;
+            state.entity = new_entity;
+        },
+        None => {
+            commands.insert_resource(FarMeshState {
+                hole_center,
+                entity: new_entity,
+            });
+        },
+    }
 }
 
 /// Height-only-known corner (grid coordinate space, before world placement).
@@ -315,7 +411,89 @@ fn far_mesh_from_heights(
 
 #[cfg(test)]
 mod tests {
+    use bevy::{app::App, asset::AssetPlugin, prelude::MinimalPlugins};
+
     use super::*;
+
+    /// Headless App exercising [`retile_far_mesh`] directly (no NetLodAlt
+    /// plumbing, no window/render) — regression coverage for the EM-3.11 fix:
+    /// a small camera drift must NOT re-tile (the "no per-frame cost"
+    /// property), but a drift past [`HOLE_MARGIN_CHUNKS`] MUST re-tile with a
+    /// fresh hole centred on the camera and despawn the stale mesh entity —
+    /// the exact behaviour that keeps the far mesh from ever being visible
+    /// within `chunk_render_distance` of a roaming player (this module's
+    /// "EM-3.11 fix" doc section proves the threshold is exact, not just
+    /// generous).
+    #[test]
+    fn retile_recentres_hole_only_once_camera_drifts_past_margin() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<BevyMesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(CullingConfig {
+                chunk_render_distance: 100.0,
+                sprite_render_distance: 50.0,
+            })
+            // A big flat grid (physical extent 8*4*32 = 1024 m per axis) so a
+            // ~164 m-radius hole never swallows the whole thing.
+            .insert_resource(FarTerrainData(flat_grid(8, 8, 0.0, 4)))
+            .add_systems(Update, retile_far_mesh);
+
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::from_translation(Vec3::new(512.0, 0.0, -512.0)),
+            ))
+            .id();
+
+        app.update();
+        let (first_entity, first_center) = {
+            let state = app.world().resource::<FarMeshState>();
+            (
+                state.entity.expect("grid far larger than the hole"),
+                state.hole_center,
+            )
+        };
+        assert_eq!(first_center, Vec2::new(512.0, -512.0));
+
+        // Drift LESS than the rebuild slack (HOLE_MARGIN_CHUNKS·CHUNK_EDGE =
+        // 2·32 = 64 m) — must NOT re-tile.
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(camera)
+            .expect("camera entity") =
+            GlobalTransform::from_translation(Vec3::new(522.0, 0.0, -512.0));
+        app.update();
+        {
+            let state = app.world().resource::<FarMeshState>();
+            assert_eq!(
+                state.entity,
+                Some(first_entity),
+                "a drift under the margin must not re-tile"
+            );
+            assert_eq!(state.hole_center, first_center, "hole must stay put");
+        }
+
+        // Drift MORE than the rebuild slack — MUST re-tile: fresh entity,
+        // hole re-centred on the camera, stale entity despawned.
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(camera)
+            .expect("camera entity") =
+            GlobalTransform::from_translation(Vec3::new(612.0, 0.0, -512.0));
+        app.update();
+        let state = app.world().resource::<FarMeshState>();
+        let second_entity = state.entity.expect("grid still far larger than the hole");
+        assert_ne!(
+            second_entity, first_entity,
+            "a drift past the margin must re-tile with a fresh entity"
+        );
+        assert_eq!(state.hole_center, Vec2::new(612.0, -512.0));
+        assert!(
+            app.world().get_entity(first_entity).is_err(),
+            "the stale far-mesh entity must be despawned on re-tile"
+        );
+    }
 
     fn flat_grid(w: u32, h: u32, height: f32, stride: u32) -> DecodedLodAlt {
         DecodedLodAlt {

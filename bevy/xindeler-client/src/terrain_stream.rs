@@ -27,12 +27,12 @@ use std::{
 
 use bevy::prelude::*;
 use common::{
-    terrain::{Block, MapSizeLg, TerrainChunk, TerrainChunkMeta},
-    vol::RectRasterableVol,
+    terrain::{Block, BlockKind, MapSizeLg, TerrainChunk, TerrainChunkMeta},
+    vol::{ReadVol, RectRasterableVol},
     volumes::vol_grid_2d::VolGrid2d,
 };
 // vek only for the terrain grid keys/coords; `Vec3` here is Bevy's (prelude).
-use vek::Vec2 as VVec2;
+use vek::{Vec2 as VVec2, Vec3 as VVec3};
 use xindeler_protocol::{CompressedChunk, RemoveChunk, TerrainAnchor};
 use xindeler_render_voxel::pipeline::{ChunkKey, ChunkMeshQueue, ChunkVolume, ChunkVolumeProvider};
 
@@ -131,6 +131,17 @@ pub struct TerrainCameraAnchor {
 #[derive(Resource, Default)]
 pub struct FirstChunkReceived(pub bool);
 
+/// Debug-only, opt-in (`XINDELER_SMOKE_TREE_CAM=1`, BL-82 EM-3.11): world
+/// position (Bevy space) of the first `Wood`/`Leaves` block found in any
+/// streamed chunk. The default anchor cam (`place_camera_on_anchor`) frames
+/// open terrain near spawn, which is why the tree-color bug was never caught
+/// by an earlier `--smoke-screenshot` — this lets a smoke run instead verify
+/// tree rendering specifically. Only present as a resource when the env var
+/// is set (see [`TerrainStreamPlugin::build`]); `None` until a tree block is
+/// found (one-shot, first hit wins, matching [`TerrainCameraAnchor`]).
+#[derive(Resource, Default)]
+pub struct SmokeTreeAnchor(pub Option<Vec3>);
+
 /// EM-3.6 client terrain consumer. Installs the shared store + provider and the
 /// receive systems. Enabled only in listen-server mode; the synthetic demo
 /// (`voxel_demo`) is NOT added then, so the pipeline meshes real terrain.
@@ -151,6 +162,18 @@ impl Plugin for TerrainStreamPlugin {
                     place_camera_on_anchor,
                 ),
             );
+
+        // Debug-only, opt-in (`XINDELER_SMOKE_TREE_CAM=1`, BL-82 EM-3.11):
+        // `SmokeTreeAnchor` only exists as a resource when this is set, so
+        // `receive_chunks`'s `Option<ResMut<SmokeTreeAnchor>>` param is `None`
+        // (zero scan cost) otherwise. `smoke_tree_cam` runs in `PostUpdate`,
+        // after every `Update` camera system (fly-cam / third-person /
+        // `place_camera_on_anchor` / the other smoke cams), so it always wins
+        // once a tree is found; a no-op (target still `None`) until then.
+        if std::env::var("XINDELER_SMOKE_TREE_CAM").is_ok_and(|v| v != "0") {
+            app.init_resource::<SmokeTreeAnchor>()
+                .add_systems(bevy::app::PostUpdate, smoke_tree_cam);
+        }
     }
 }
 
@@ -171,6 +194,8 @@ fn receive_chunks(
     shared: Res<SharedTerrain>,
     mut queue: ResMut<ChunkMeshQueue>,
     mut first: ResMut<FirstChunkReceived>,
+    mut tree_anchor: Option<ResMut<SmokeTreeAnchor>>,
+    camera_anchor: Option<Res<TerrainCameraAnchor>>,
 ) {
     let mut touched: Vec<[i32; 2]> = Vec::new();
     {
@@ -206,6 +231,71 @@ fn receive_chunks(
         }
     }
     first.0 = true;
+
+    // `XINDELER_SMOKE_TREE_CAM` (see `TerrainStreamPlugin::build`): scan
+    // EVERY currently-stored chunk (not just the ones that just arrived —
+    // whether a candidate qualifies can change as more neighbours stream in,
+    // see below) for a Wood/Leaves block, until one is found. Only runs at
+    // all when the resource exists (env var set); a no-op every call after
+    // that (bounded scan of a debug-only, opt-in feature).
+    if let Some(tree_anchor) = tree_anchor.as_deref_mut()
+        && tree_anchor.0.is_none()
+        && let Ok(store) = shared.0.read()
+    {
+        let edge = TerrainChunk::RECT_SIZE.x as i32;
+        let mut best: Option<(f32, Vec3)> = None;
+        for (key, chunk) in &store.chunks {
+            // Require the full 3x3 neighbourhood too: the greedy mesher reads
+            // across chunk borders (pipeline.rs), so a frontier-of-streaming
+            // chunk missing neighbours meshes with broken/partial borders —
+            // exactly the kind of misleading artifact a bug-verification
+            // screenshot must not show. Skip until the whole neighbourhood is
+            // in (re-checked every call, since it fills in over time).
+            let neighbours_complete = (-1..=1).all(|dy| {
+                (-1..=1).all(|dx| {
+                    (dx, dy) == (0, 0) || store.chunks.contains_key(&[key[0] + dx, key[1] + dy])
+                })
+            });
+            if !neighbours_complete {
+                continue;
+            }
+            'chunk: for lx in 0..edge {
+                for ly in 0..edge {
+                    for z in chunk.get_min_z()..chunk.get_max_z() {
+                        let Ok(block) = chunk.get(VVec3::new(lx, ly, z)) else {
+                            continue;
+                        };
+                        if matches!(block.kind(), BlockKind::Wood | BlockKind::Leaves) {
+                            let wx = key[0] * edge + lx;
+                            let wy = key[1] * edge + ly;
+                            // Converter contract: Veloren (x, y, z) -> Bevy (x, z, -y).
+                            let bevy_pos = Vec3::new(wx as f32, z as f32, -(wy as f32));
+                            // Prefer the candidate closest to the spawn
+                            // anchor: it sits comfortably inside the normal
+                            // near-chunk render band, avoiding the far-mesh
+                            // hole boundary (`far_terrain.rs`) that a distant
+                            // pick could land on/near and render misleadingly.
+                            let dist_key = camera_anchor
+                                .as_ref()
+                                .map_or(0.0, |a| a.bevy_pos.distance_squared(bevy_pos));
+                            if best.is_none_or(|(d, _)| dist_key < d) {
+                                best = Some((dist_key, bevy_pos));
+                            }
+                            continue 'chunk;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, bevy_pos)) = best {
+            info!(
+                ?bevy_pos,
+                "XINDELER_SMOKE_TREE_CAM: found a Wood/Leaves block with a complete \
+                 neighbourhood, snapping camera"
+            );
+            tree_anchor.0 = Some(bevy_pos);
+        }
+    }
 }
 
 /// Drops unloaded chunks from the store and the mesh pipeline, re-meshing the
@@ -293,6 +383,40 @@ fn place_camera_on_anchor(
 /// `RectRasterableVol` genuinely used (it is needed transitively by
 /// `with_z_bounds`), so no unused-import guard is required.
 pub const CHUNK_EDGE: f32 = TerrainChunk::RECT_SIZE.x as f32;
+
+/// See [`TerrainStreamPlugin::build`]'s `XINDELER_SMOKE_TREE_CAM` note.
+/// Frames the found tree from ~34 m away and ~28 m up. `target` is wherever a
+/// Wood/Leaves block happened to be found — often deep INSIDE a trunk or
+/// canopy, not its exterior — so the offset has to comfortably clear a full
+/// tree's canopy radius (temperate/redwood canopies commonly span 10-20+
+/// blocks) or the shot ends up with the near clip plane slicing through
+/// foliage/branches a few blocks from the lens (large flat mis-shaded panels
+/// with hard seams — a camera-placement artifact, not the color bug this is
+/// meant to verify). Re-runs every frame (cheap: a no-op until
+/// `SmokeTreeAnchor` is `Some`), so it wins over `place_camera_on_anchor` and
+/// the fly-cam the instant a tree is found, and keeps holding once found.
+fn smoke_tree_cam(
+    tree_anchor: Option<Res<SmokeTreeAnchor>>,
+    // Non-optional `&mut FlyCam` (review should-fix #1): the previous
+    // `Option<&mut FlyCam>` matched EVERY `Transform`-bearing entity, not
+    // just the camera — including every streamed chunk mesh (`pipeline.rs`'s
+    // `chunk_transform` gives each one a world-space `Transform`) — so once a
+    // tree was found this system collapsed the whole scene's transforms onto
+    // one point every frame. Mirrors `place_camera_on_anchor`'s query shape.
+    mut cameras: Query<(&mut Transform, &mut FlyCam)>,
+) {
+    let Some(target) = tree_anchor.and_then(|a| a.0) else {
+        return;
+    };
+    let eye = target + Vec3::new(-24.0, 28.0, 24.0);
+    let look_at = target + Vec3::new(0.0, 6.0, 0.0);
+    for (mut transform, mut cam) in &mut cameras {
+        *transform = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
+        let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+        cam.yaw = yaw;
+        cam.pitch = pitch;
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -533,6 +533,122 @@ mod tests {
         assert!(parsed.layer_count() <= MAX_LAYERS);
         // The glow kind actually carries an emissive mask.
         assert!(parsed.blocks[&BlockKind::GlowingRock].emissive_strength > 0.0);
+
+        // Regression (BL-82 EM-3.11): tree wood/leaves (and other
+        // structure-sourced solid content) must NOT resolve to Rock's
+        // `default_layer` — that was the monochrome-gray-trees bug.
+        assert_ne!(
+            layer(BlockKind::Wood),
+            parsed.default_layer,
+            "Wood must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(
+            layer(BlockKind::Leaves),
+            parsed.default_layer,
+            "Leaves must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(layer(BlockKind::Wood), layer(BlockKind::Leaves));
+        assert_ne!(
+            layer(BlockKind::GlowingMushroom),
+            parsed.default_layer,
+            "GlowingMushroom must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(
+            layer(BlockKind::ArtLeaves),
+            parsed.default_layer,
+            "ArtLeaves must not fall back to the default (Rock-gray) layer"
+        );
+        // Leaves must read distinctly green (not another gray tone).
+        let leaves = &parsed.blocks[&BlockKind::Leaves];
+        assert!(
+            leaves.base_color[1] > leaves.base_color[0]
+                && leaves.base_color[1] > leaves.base_color[2],
+            "Leaves base_color should be green-dominant, got {:?}",
+            leaves.base_color
+        );
+
+        // Regression (BL-82 EM-3.11, follow-up): ordinary terrain-column
+        // kinds must ALSO not resolve to Rock's default_layer — empirically
+        // confirmed (forcing a demo-world column to BlockKind::Grass renders
+        // Rock-gray, not green) that these carry no visual colour without an
+        // explicit entry, despite worldgen embedding real per-voxel colour
+        // that the render pipeline never reads.
+        for kind in [
+            BlockKind::Grass,
+            BlockKind::Sand,
+            BlockKind::Snow,
+            BlockKind::WeakRock,
+            BlockKind::GlowingWeakRock,
+            BlockKind::Ice,
+        ] {
+            assert_ne!(
+                layer(kind),
+                parsed.default_layer,
+                "{kind:?} must not fall back to the default (Rock-gray) layer"
+            );
+        }
+        // Grass must read distinctly green (not another gray/brown tone).
+        let grass = &parsed.blocks[&BlockKind::Grass];
+        assert!(
+            grass.base_color[1] > grass.base_color[0] && grass.base_color[1] > grass.base_color[2],
+            "Grass base_color should be green-dominant, got {:?}",
+            grass.base_color
+        );
+        // GlowingWeakRock must carry an emissive mask, same as GlowingRock.
+        assert!(parsed.blocks[&BlockKind::GlowingWeakRock].emissive_strength > 0.0);
+    }
+
+    /// BL-82 EM-3.11 regression: the water entry's `alpha` must be high
+    /// enough that its blue reads as dominant even when alpha-blended (`out =
+    /// water*alpha + bg*(1-alpha)`, the exact `AlphaMode::Blend` compositing
+    /// `palette_material.rs` wires up) over a fairly saturated GREEN
+    /// background — a grassy river-bank / lakebed, or a moss-dark rock wall,
+    /// both realistic terrain the fluid mesh renders in front of. The
+    /// original 0.6-alpha, (0.15, 0.35, 0.6) tuning passed the EM-3.9b smoke
+    /// screenshot (verified over pale sand/rock near the demo anchor) but a
+    /// live playthrough found the SAME material reading as murky green over
+    /// vegetation-heavy terrain (BL-82 EM-3.11 bug report — see
+    /// `block_palette.ron`'s Water comment for the full writeup and the
+    /// blend-math derivation this test encodes). This is a data guard, not a
+    /// code-path check: it fails loudly if a future palette edit ever
+    /// re-introduces a too-transparent or too-green Water tuning, without
+    /// needing a screenshot to notice.
+    #[test]
+    fn shipped_palette_water_reads_blue_over_a_saturated_green_background() {
+        let text = include_str!("../../../assets/xindeler/render/block_palette.ron");
+        let parsed: BlockPalette = ron::from_str(text).expect("block_palette.ron parses");
+        let water = &parsed.blocks[&BlockKind::Water];
+
+        assert!(
+            water.alpha >= 0.8,
+            "water alpha {} is too low to stay blue-dominant against saturated backgrounds \
+             (EM-3.11): the background contributes (1 - alpha) of the blend, so a low alpha lets \
+             a green background wash the blue out",
+            water.alpha
+        );
+
+        // A fairly saturated grass/moss green (matches the range Xindeler's
+        // worldgen actually paints terrain — e.g. `world/src/layer/mod.rs`'s
+        // `Rgb::new(10, 75, 90)`-family grass tones, generalized to a
+        // stronger, more adversarial green so this is a real stress test).
+        let bg = [0.15_f32, 0.75, 0.20];
+        let a = water.alpha;
+        let blended: Vec<f32> = (0..3)
+            .map(|i| water.base_color[i] * a + bg[i] * (1.0 - a))
+            .collect();
+        assert!(
+            blended[2] > blended[1] * 1.3,
+            "blue ({}) must clearly dominate green ({}) once blended over a saturated green \
+             background — this is the EM-3.11 bug reproduced in miniature: blended = {blended:?}",
+            blended[2],
+            blended[1]
+        );
+        assert!(
+            blended[2] > blended[0],
+            "blue ({}) must dominate red ({}) too — blended = {blended:?}",
+            blended[2],
+            blended[0]
+        );
     }
 
     /// Anti-chaos: hostile values come out finite and in-bounds.
