@@ -51,7 +51,7 @@ so an upgrade waits until the dep tree catches up.
 | **1** | Logic-crate extraction & modularization | ✅ **complete** (PRs #3, #4, #5) |
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
 | **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10 + 3.8d + 3.8e + 3.9b + 3.10b done (PRs #7–#20, #26, #28, #29, #30): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling + a real far-mesh horizon**; only EM-3.11 **[M]** (Matías in-game smoke) pending |
-| **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified; EM-4.2+ pending |
+| **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress** — EM-4.1 done (PR #27): headless `xindeler-server-app` shell, dual-stack verified. EM-4.2 correctness done (PR #33): persistence + rtsim REAL round-trip, `hot-agent` wired; full 24h soak + EM-4.2b+ pending |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
@@ -137,7 +137,7 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | Task | What | Status |
 |---|---|---|
 | EM-4.1 | `xindeler-server-app` — headless `MinimalPlugins` shell embedding the sim; **dual-stack** (old client keeps connecting) | ✅ PR #27 — real `Server::tick` @ 30Hz + SIGINT/SIGTERM graceful shutdown + `/metrics` Prometheus passthrough; dual-stack verified via a real separate-process client connect+play+logout ([Q?] plugins-on-by-default confirmed, Matías 2026-07-09) |
-| EM-4.2 | Persistence / rtsim / agent-dylib verified under the shell; 24h soak | 🔵 correctness done (PR TBD) — persistence + rtsim REAL round-trip tests (genuine process stop/SIGTERM/restart, state proven to survive not regenerate); `hot-agent` feature wired (was missing entirely); dylib compile+load+watch confirmed, live reload cycle untestable on macOS (documented pre-existing platform limitation) + would need editing the forbidden `server/agent` crate; soak-readiness sanity (10min, RSS flat/declining, tick time well under budget) — full 24h soak run separately, duration reported honestly when it wraps |
+| EM-4.2 | Persistence / rtsim / agent-dylib verified under the shell; 24h soak | 🔵 correctness done (PR #33) — persistence + rtsim REAL round-trip tests (genuine process stop/SIGTERM/restart, state proven to survive not regenerate); `hot-agent` feature wired (was missing entirely); dylib compile+load+watch confirmed, live reload cycle untestable on macOS (documented pre-existing platform limitation) + would need editing the forbidden `server/agent` crate; soak-readiness sanity (10min, RSS flat/declining, tick time well under budget) — full 24h soak run separately, duration reported honestly when it wraps |
 | EM-4.2b | Transport backend spike — `renet2` vs `quinnet` (real network, not loopback) | ⚪ |
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |
 | EM-4.2d | Interest management — per-client visibility (region/distance + `DimensionId`); bandwidth vs old protocol | ⚪ |
