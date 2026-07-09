@@ -17,14 +17,18 @@
 //!    (`voxygen/src/ecs/sys/interpolation.rs`): exponential lerp at rate 10/s
 //!    toward `pos + vel·0.03`, slerp orientation at rate 10/s, and a hard SNAP
 //!    when the target jumps more than 64 m (teleports / first frame) so we
-//!    never "drift" across the whole map.
+//!    never "drift" across the whole map. **EM-3.11g:** a SNAP also clears
+//!    [`bevy::pbr::PreviousGlobalTransform`] on the entity + every figure-part
+//!    child, so Bevy reports zero motion for that one teleport frame instead of
+//!    the true, extreme jump — see [`interpolate_entities`]'s doc comment for
+//!    the TAA-ghosting bug this fixes ("detached ghost hand" report).
 //!
 //! ## Purity
 //! This module is 100% Bevy + `xindeler-protocol` — NO `specs`, no server
 //! crate. The engine-isolation guard greps this crate's `src` for `specs`; it
 //! stays clean. Compiled only under the `listen-server` feature.
 
-use bevy::prelude::*;
+use bevy::{pbr::PreviousGlobalTransform, prelude::*};
 use xindeler_protocol::{NetBody, NetOri, NetPos, NetVel};
 
 /// Per-frame exponential-lerp rate for position (voxygen
@@ -133,18 +137,54 @@ fn add_presentation(
 /// Eases each mirrored entity's presentation `Transform` toward its latest net
 /// sample, dead-reckoned by velocity, and SNAPS on large jumps. Ported from
 /// voxygen's interpolation system (see module docs).
+///
+/// ## EM-3.11g: suppressing the motion-vector ghost on a SNAP
+/// A SNAP is a legitimate, deliberate one-frame teleport of the WHOLE
+/// presentation hierarchy (this entity's `Transform` plus every figure-part
+/// child `figure_view` parents under it — head/limbs/weapon/…, EM-3.8b). Bevy
+/// computes each mesh's TAA motion vector from `GlobalTransform` vs the
+/// previous frame's `PreviousGlobalTransform` (`bevy_pbr::prepass`); a snap
+/// reports that whole-hierarchy jump as a real, extreme one-frame motion
+/// vector, which is exactly the kind of discontinuity that makes a TAA
+/// reprojection accept a bogus history sample instead of rejecting it — a
+/// SMALL, high-contrast part (a skin/glove-coloured hand against a
+/// differently-coloured torso/background) is far more likely to visibly
+/// "ghost" this way than the larger, more uniform torso, which reads as a hand
+/// detaching from the body and sitting frozen at its pre-snap ground position
+/// for the ~1 s the TAA history takes to wash the bad sample out (Matías's
+/// 2026-07-04 report; `docs/backlog/engine-migration.md` EM-3.11f logged an
+/// earlier, unreproduced sighting of the same thing as a "ghost/teleport"
+/// blip). A render-frame interpolation buffer only advances a few centimetres
+/// per frame (`POS_LERP_RATE`), so crossing `SNAP_DISTANCE` needs it to fall
+/// badly behind the sim's authoritative `NetPos` — exactly what the
+/// documented, still-open frame-hitch/stutter issue (EM-3.11c/d) can cause.
+///
+/// The fix does not touch WHY a snap fires (that is EM-3.11c/d's job); it
+/// suppresses the motion-vector artifact a snap causes REGARDLESS of cause,
+/// the same way Bevy itself treats a brand-new mesh: `update_mesh_previous_
+/// global_transforms` (`bevy_pbr::prepass`) only seeds
+/// `PreviousGlobalTransform` for entities that lack it, and the GPU-instance
+/// builder falls back to `world_from_local` (i.e. "no motion this frame")
+/// whenever it's absent. So on a snap we REMOVE `PreviousGlobalTransform` from
+/// this entity and every descendant (the figure parts, if already assembled):
+/// the snap frame renders with a suppressed (zero) motion vector instead of the
+/// true, extreme one, and Bevy re-seeds it correctly the very next frame —
+/// normal small per-frame motion vectors resume immediately after.
 fn interpolate_entities(
     time: Res<Time>,
+    mut commands: Commands,
     mut query: Query<(
+        Entity,
         &NetPos,
         &NetOri,
         Option<&NetVel>,
         &mut Interpolated,
         &mut Transform,
     )>,
+    children_query: Query<&Children>,
 ) {
     let dt = time.delta_secs();
-    for (pos, ori, vel, mut interp, mut transform) in &mut query {
+    for (entity, pos, ori, vel, mut interp, mut transform) in &mut query {
         let target = pos.0;
         let far = interp.pos.distance_squared(target) >= SNAP_DISTANCE * SNAP_DISTANCE;
         interp.pos = step_pos(interp.pos, target, vel.map_or(Vec3::ZERO, |v| v.0), dt);
@@ -156,6 +196,29 @@ fn interpolate_entities(
         };
         transform.translation = interp.pos;
         transform.rotation = interp.ori;
+
+        if far {
+            clear_previous_transform(&mut commands, entity, &children_query);
+        }
+    }
+}
+
+/// Removes [`PreviousGlobalTransform`] from `entity` and every descendant
+/// (recursively), so Bevy treats their next frame's motion vector as zero
+/// instead of the true, one-frame teleport delta a SNAP just caused (see
+/// [`interpolate_entities`]'s doc comment). A no-op on entities that never had
+/// the component (e.g. a figure not yet assembled — still just the
+/// placeholder capsule on the root entity itself).
+fn clear_previous_transform(
+    commands: &mut Commands,
+    entity: Entity,
+    children_query: &Query<&Children>,
+) {
+    commands.entity(entity).remove::<PreviousGlobalTransform>();
+    if let Ok(children) = children_query.get(entity) {
+        for &child in children {
+            clear_previous_transform(commands, child, children_query);
+        }
     }
 }
 
@@ -223,6 +286,100 @@ mod tests {
         assert!(
             with_vel.x > no_vel.x,
             "dead-reckoning must lead the raw sample"
+        );
+    }
+
+    /// EM-3.11g regression: a SNAP (far jump) must clear
+    /// [`PreviousGlobalTransform`] on the mirrored entity AND every figure-part
+    /// child, so Bevy reports zero motion for the teleport frame instead of a
+    /// bogus, extreme one-frame motion vector a TAA reprojection can turn into
+    /// a lingering ghost (see [`interpolate_entities`]'s doc comment). A small
+    /// in-band move must NOT touch it — only an actual snap should.
+    #[test]
+    fn snap_clears_previous_transform_on_self_and_children() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, interpolate_entities);
+
+        // Beyond SNAP_DISTANCE from the seeded Interpolated position.
+        let target = Vec3::new(200.0, 0.0, 0.0);
+
+        let child = app
+            .world_mut()
+            .spawn((Transform::default(), PreviousGlobalTransform::default()))
+            .id();
+        let grandchild = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                PreviousGlobalTransform::default(),
+                ChildOf(child),
+            ))
+            .id();
+        let root = app
+            .world_mut()
+            .spawn((
+                NetPos(target),
+                NetOri(Quat::IDENTITY),
+                Interpolated {
+                    pos: Vec3::ZERO,
+                    ori: Quat::IDENTITY,
+                },
+                Transform::default(),
+                PreviousGlobalTransform::default(),
+            ))
+            .id();
+        app.world_mut().entity_mut(child).insert(ChildOf(root));
+
+        app.update();
+
+        assert!(
+            app.world().get::<PreviousGlobalTransform>(root).is_none(),
+            "the snapped root must have PreviousGlobalTransform cleared"
+        );
+        assert!(
+            app.world().get::<PreviousGlobalTransform>(child).is_none(),
+            "a direct figure-part child must have PreviousGlobalTransform cleared too"
+        );
+        assert!(
+            app.world()
+                .get::<PreviousGlobalTransform>(grandchild)
+                .is_none(),
+            "the clear must recurse past one level of hierarchy"
+        );
+    }
+
+    /// The non-snap path (small in-band move) must leave
+    /// [`PreviousGlobalTransform`] untouched — only a genuine teleport should
+    /// suppress the motion vector.
+    #[test]
+    fn small_move_leaves_previous_transform_untouched() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, interpolate_entities);
+
+        // Well within SNAP_DISTANCE.
+        let target = Vec3::new(1.0, 0.0, 0.0);
+
+        let root = app
+            .world_mut()
+            .spawn((
+                NetPos(target),
+                NetOri(Quat::IDENTITY),
+                Interpolated {
+                    pos: Vec3::ZERO,
+                    ori: Quat::IDENTITY,
+                },
+                Transform::default(),
+                PreviousGlobalTransform::default(),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world().get::<PreviousGlobalTransform>(root).is_some(),
+            "a normal eased move must not clear PreviousGlobalTransform"
         );
     }
 }
