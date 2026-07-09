@@ -27,6 +27,7 @@ use bevy::{
     asset::{AssetApp, AssetPlugin, Assets, Handle},
     ecs::{entity::Entity, query::With},
     mesh::{Mesh3d, VertexAttributeValues},
+    pbr::StandardMaterial,
     prelude::MinimalPlugins,
 };
 use common::{
@@ -40,7 +41,7 @@ use xindeler_render_voxel::{
     pipeline::{
         ChunkLayerMap, ChunkMaterials, ChunkMeshIndex, ChunkMeshPipelinePlugin, ChunkMeshQueue,
         ChunkUploadBudget, ChunkUploadStats, ChunkVolume, ChunkVolumeProvider, FluidChunkMesh,
-        TerrainChunkMesh,
+        PlaceholderChunkMesh, TerrainChunkMesh,
     },
 };
 
@@ -465,5 +466,137 @@ fn remove_chunk_cancels_and_despawns() {
     assert!(
         final_uploads <= uploads_after_remove + 1,
         "at most the phase-C pre-flip apply may have landed (got {final_uploads})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BL-82 EM-3.11h — first-load placeholder (the "black frame" fix)
+// ---------------------------------------------------------------------------
+
+/// App identical to [`test_app`] but ALSO registers `Assets<StandardMaterial>`
+/// — [`spawn_chunk_mesh_tasks`]'s first-load placeholder only spawns when
+/// that asset store exists (a deliberately defensive gate so hosts/tests
+/// that don't register it, like every OTHER test in this file, are
+/// unaffected — see the pipeline module docs). Every EM-3.11h-specific test
+/// below uses this builder instead of the plain one.
+///
+/// [`spawn_chunk_mesh_tasks`]: xindeler_render_voxel::pipeline
+fn test_app_with_placeholders(budget: u32, available: Arc<AtomicBool>) -> App {
+    let mut app = test_app(budget, available);
+    app.init_asset::<StandardMaterial>();
+    app
+}
+
+fn placeholder_entity_count(app: &mut App) -> usize {
+    let world = app.world_mut();
+    world
+        .query_filtered::<Entity, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .count()
+}
+
+/// The core BL-82 EM-3.11h regression: a key's FIRST ever mark must never
+/// leave a frame where NOTHING is indexed for it — that gap is exactly what
+/// let a real gameplay capture show ~2 fully black frames (only the UI
+/// overlay visible) while walking into a cave, because the far-mesh's
+/// camera-proximity cutout (`xindeler-client::far_terrain`) deliberately
+/// never covers this band either, trusting the near pipeline to. One
+/// `app.update()` after `mark_dirty` must already show a spawned, indexed
+/// entity (the synchronous placeholder in the common case — real
+/// completion within one update is not impossible but never observed
+/// elsewhere in this suite's much larger 25-chunk timing tests, which all
+/// need many updates + sleeps to converge, so either outcome proves the
+/// invariant this test cares about: never nothing).
+#[test]
+fn first_mark_never_leaves_a_frame_with_nothing_indexed() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    assert!(
+        app.world().resource::<ChunkMeshIndex>().get(key).is_some(),
+        "the very first update after marking a NEW key dirty must already index an entity for it \
+         (placeholder or real) — never nothing"
+    );
+    assert_eq!(
+        terrain_entity_count(&mut app),
+        1,
+        "exactly one TerrainChunkMesh entity must cover the key's footprint"
+    );
+
+    // Eventually the real mesh replaces the placeholder (the pre-existing
+    // atomic despawn-old+spawn-new swap, unmodified) — no leftover
+    // placeholder once the pipeline settles.
+    run_until_complete(&mut app, 1);
+    assert_eq!(
+        placeholder_entity_count(&mut app),
+        0,
+        "the placeholder must be gone once the real mesh has uploaded"
+    );
+    assert_eq!(terrain_entity_count(&mut app), 1);
+}
+
+/// A SECOND `mark_dirty` of the SAME never-yet-indexed key (e.g. a border
+/// re-mark racing the first one) must not spawn a second placeholder:
+/// `spawn_chunk_mesh_tasks` only inserts one while the key is absent from
+/// the index, and the index already gained an entry in the same update the
+/// first placeholder spawned.
+#[test]
+fn repeated_marks_of_a_pending_key_spawn_only_one_placeholder() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    assert!(
+        placeholder_entity_count(&mut app) <= 1,
+        "a repeated mark of the same pending key must never spawn a second placeholder"
+    );
+}
+
+/// EM-3.11h cleanup edge case: if the volume disappears (provider starts
+/// returning `None` for the key) WHILE its first-load placeholder is still
+/// up (task not yet finished — the common case; see
+/// `first_mark_never_leaves_a_frame_with_nothing_indexed`'s doc for why a
+/// single-update completion race is possible but unlikely), the same
+/// provider-`None` re-mark path that already cancelled the in-flight task
+/// (pre-existing behaviour, `remove_chunk_cancels_and_despawns`'s Phase C)
+/// must ALSO despawn the placeholder — not leak it forever. Asserting
+/// `placeholder_entity_count == 0` (rather than a stronger, race-prone
+/// `ChunkMeshIndex` emptiness check) stays deterministic even in the rare
+/// case the task finished first: either way, no placeholder may survive a
+/// provider-`None` re-mark of its own key.
+#[test]
+fn abandoned_placeholder_is_cleaned_up_when_the_volume_disappears() {
+    let available = Arc::new(AtomicBool::new(true));
+    let key = VVec2::new(3, 3);
+    let mut app = test_app_with_placeholders(1, available.clone());
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    available.store(false, Ordering::Relaxed);
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    assert_eq!(
+        placeholder_entity_count(&mut app),
+        0,
+        "no placeholder may survive a provider-None re-mark of its own key"
     );
 }
