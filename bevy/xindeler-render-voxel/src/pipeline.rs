@@ -70,6 +70,51 @@
 //! untouched — they keep relying on the pre-existing atomic swap, no
 //! placeholder ever inserted for them.
 //!
+//! ## BL-82 EM-3.11i follow-up: the placeholder could still read as a black
+//! ## hole (lighting, not throughput)
+//! A later real gameplay capture (Matías, walking cave-adjacent terrain at
+//! speed) showed the black-frame bug was gone but replaced by something
+//! Matías rated MORE visible: a solid, hard-edged, box-shaped dark region
+//! that grew over ~0.5-0.7s then popped away all at once. Two hypotheses
+//! were checked against the evidence instead of assumed:
+//!
+//! 1. **Throughput/backlog** — is mesh generation too slow to keep up with fast
+//!    movement, so several placeholders are up at once for an extended time?
+//!    Ruled out as the PRIMARY driver: `spawn_chunk_mesh_tasks`'s placeholder
+//!    spawn is synchronous and per-key, so it cannot itself be backlogged; a
+//!    burst of newly-streamed chunks (`terrain_stream.rs` marks a new key's
+//!    full 3×3 neighbourhood dirty every arrival) can genuinely have several
+//!    placeholders up simultaneously, and the ALREADY-DOCUMENTED, still-open
+//!    sim-tick stutter (EM-3.11c/d/e, `docs/backlog/engine-migration.md`)
+//!    stretches however many frames that takes into real wall-clock seconds
+//!    when frame time spikes to 30-200+ms — but the budget/pipeline mechanics
+//!    themselves are unchanged and not the thing that made the box read as
+//!    BLACK.
+//! 2. **Lighting** — a `StandardMaterial` is normally lit: with no direct light
+//!    reaching a fragment and no usable indirect/ambient term, its physically
+//!    correct output is exactly zero, regardless of `base_color`.
+//!    [`placeholder_transform`] scales the box to the chunk's FULL
+//!    footprint/height, so the reported walking-into-a-cave case routinely puts
+//!    the camera INSIDE the box, surrounded by its own inner faces
+//!    (intentionally rendered via `cull_mode: None`). A closed box viewed from
+//!    its interior self-shadows against the sun from nearly every direction and
+//!    starves whatever indirect/SSAO light would otherwise reach it — textbook
+//!    conditions for a lit surface to render fully black. Confirmed as the
+//!    primary cause: [`placeholder_material`] is now `unlit: true`, so its
+//!    fragment output is `base_color` unconditionally — no lighting term, no
+//!    self-shadow, no ambient/SSAO dependency, hence no path to black. It stays
+//!    a flat, obviously-crude mid-grey box under any scene condition (bright
+//!    noon through a pitch cave), which is what "there's a placeholder here"
+//!    was always supposed to look like.
+//!
+//! Net: the "growing region" perception is real and (per the evidence
+//! above) tracks the pre-existing, still-open perf issue rather than a new
+//! meshing-throughput bug introduced here — that part is a tuning/perf
+//! question for EM-3.11c/d/e, not this task. What made it look like a
+//! second black-frame bug — the box actually rendering as solid black — is
+//! fixed here at the material level, independent of how large or long that
+//! backlog ever gets.
+//!
 //! Instrumentation: `tracing` spans around each mesh task
 //! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
 //! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
@@ -425,16 +470,33 @@ fn placeholder_box_mesh() -> BevyMesh {
     mesh
 }
 
-/// EM-3.11h — a neutral, unlit-ish rock grey so the placeholder reads as
-/// plausible (if crude) geometry rather than a garish debug colour; matches
-/// `far_terrain.rs`'s own placeholder-quality material (same
-/// `perceptual_roughness`/`reflectance`, same `cull_mode: None` rationale).
+/// EM-3.11i — a neutral rock-grey, genuinely `unlit`. See the module docs'
+/// EM-3.11i section for the full story: the original EM-3.11h material was
+/// a normally-lit `StandardMaterial`, which a real gameplay capture proved
+/// can render fully BLACK — indistinguishable from the black-frame bug this
+/// placeholder exists to fix — whenever the scene provides it no usable
+/// light. That is not a tuning miss, it is what physically-based lighting is
+/// SUPPOSED to do (`indirect + direct == 0` ⇒ output `== 0`, whatever the
+/// albedo), and this box hits that case squarely: [`placeholder_transform`]
+/// scales it to the chunk's FULL footprint/height, so a camera walking into
+/// a never-before-meshed chunk (the exact scenario this fix targets) is
+/// routinely standing INSIDE the box, surrounded by its own inner faces
+/// (`cull_mode: None` renders them on purpose — module docs above). A closed
+/// box viewed from its own interior self-shadows against the sun from
+/// nearly every angle and starves indirect/SSAO light the same way any
+/// fully-enclosed interior does — a real StandardMaterial box in that
+/// geometry goes dark regardless of `base_color`. `unlit: true` makes the
+/// fragment output `base_color` directly, with NO lighting term at all, so
+/// it stays a flat, clearly-a-placeholder mid-grey under every scene
+/// condition (bright noon, dusk, night, deep cave) instead of only some of
+/// them — the guarantee EM-3.11h was meant to provide in the first place.
+/// `perceptual_roughness`/`reflectance` are dropped: both are lit-material
+/// knobs with no effect once `unlit` is set.
 fn placeholder_material() -> StandardMaterial {
     StandardMaterial {
         base_color: Color::srgb(0.35, 0.33, 0.30),
+        unlit: true,
         cull_mode: None,
-        perceptual_roughness: 1.0,
-        reflectance: 0.02,
         ..Default::default()
     }
 }
