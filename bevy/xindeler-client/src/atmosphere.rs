@@ -82,7 +82,18 @@ pub fn distance_fog_from(profile: &AtmosphereProfile) -> DistanceFog {
         color: profile_fog_color(profile),
         directional_light_color: Color::srgba(1.0, 0.95, 0.85, 0.5),
         directional_light_exponent: 30.0,
-        falloff: FogFalloff::Exponential {
+        // EM-3.11f: `ExponentialSquared`, not `Exponential` — plain exponential
+        // fog has NO near-field grace period (transmittance already visibly
+        // drops within the first ~30-50m, per Matías's "feels foggy all the
+        // time, not just far away" report), because `1 - exp(-d·density)`
+        // rises fast right from distance 0. `ExponentialSquared`'s
+        // `1 - exp(-(d·density)²)` rises much more slowly near the camera
+        // (quadratic in the exponent) and accelerates further out, so nearby
+        // terrain/trees stay clear while the far-mesh horizon (the thing this
+        // fog exists to mask, EM-3.11b) is still fully hidden by ~200-250m.
+        // Same profile field (`fog_density`), same schema — just a curve swap
+        // + retuned constant (see `default.atmo.ron`'s comment for the numbers).
+        falloff: FogFalloff::ExponentialSquared {
             density: profile.fog_density,
         },
     }
@@ -133,7 +144,8 @@ fn apply_atmosphere(
 
     for mut fog in &mut distance_fogs {
         fog.color = profile_fog_color(profile);
-        fog.falloff = FogFalloff::Exponential {
+        // EM-3.11f: keep in sync with `distance_fog_from`'s curve choice.
+        fog.falloff = FogFalloff::ExponentialSquared {
             density: profile.fog_density,
         };
     }

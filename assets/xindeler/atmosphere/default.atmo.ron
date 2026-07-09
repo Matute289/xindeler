@@ -6,9 +6,11 @@
 // this file is a visual no-op. Edit it while the client runs to watch the
 // atmosphere animate (hot reload via bevy's file_watcher).
 (
-    // Distance-fog extinction density (~230 m visibility; BL-82 EM-3.11b
-    // re-tune, see AtmosphereProfile::default()'s doc comment for why).
-    fog_density: 0.01302,
+    // Distance-fog extinction density for `FogFalloff::ExponentialSquared`
+    // (BL-82 EM-3.11f re-tune — clear near/mid field, ~97.5% fogged by the
+    // far-mesh's ~288m cutout hole; see AtmosphereProfile::default()'s doc
+    // comment for the full rationale + curve-shape reasoning).
+    fog_density: 0.00667,
     // sRGB fog color (brightened/desaturated in EM-3.11b to match the
     // physically-based Atmosphere sky's horizon haze more closely).
     fog_color: (0.66, 0.73, 0.81),
