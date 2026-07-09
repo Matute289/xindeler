@@ -29,6 +29,8 @@
 //! registers the shared `xindeler-protocol`. The engine-isolation guard's
 //! `specs` grep over `bevy/xindeler-client/src` stays clean.
 
+use std::time::Duration;
+
 use bevy::prelude::*;
 use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
 use xindeler_app::settings::userdata_dir;
@@ -89,6 +91,28 @@ impl Plugin for ListenServerPlugin {
         // writeup and `docs/backlog/engine-migration.md` EM-3.11b for the
         // before/after measurement.
         app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+
+        // EM-3.11c (hotfix, 2026-07-09): `Time<Fixed>`'s catch-up accumulator
+        // follows `Time<Virtual>`'s `max_delta`, which Bevy defaults to 250ms
+        // — Bevy's own docs name the failure mode this enables verbatim: a
+        // "death spiral" where, if a single FixedUpdate step already takes
+        // longer than its 1/SIM_TICK_HZ budget (confirmed: the still-open
+        // EM-3.11b "slow server tick" finding measured 50-200ms/tick, already
+        // over the ~33ms budget at 30Hz), the accumulator lets MULTIPLE
+        // catch-up ticks queue and run back-to-back in one render frame,
+        // each one itself slow, falling further behind every frame — this is
+        // exactly what turned the EM-3.11b FixedUpdate migration into a
+        // regression from ~29fps to ~3-4fps (Matías, in-game, same day).
+        // Clamping `max_delta` to one tick's own period caps FixedUpdate to
+        // AT MOST one catch-up step per render frame — the game degrades to
+        // "as slow as a single tick takes" under load instead of spiraling
+        // further. This does NOT fix the underlying slow-tick root cause
+        // (still open, likely agent-AI/rtsim pathfinding cost per the perf
+        // agent's PR #34 report) — it only removes the compounding-catchup
+        // amplifier on top of it.
+        app.insert_resource(Time::<Virtual>::from_max_delta(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
 
         // Replicon SERVER role + the shared replication contract. `DefaultPlugins`
         // already provides `StatesPlugin` (needed by replicon's states). Terrain
