@@ -88,9 +88,9 @@ impl Default for AmbientSky {
 #[derive(Asset, TypePath, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AtmosphereProfile {
-    /// Distance-fog extinction density (`FogFalloff::Exponential`). The
-    /// default corresponds to ~350 m visibility (Koschmieder,
-    /// `-ln(0.05) / 350`).
+    /// Distance-fog extinction density (`FogFalloff::ExponentialSquared` as
+    /// of EM-3.11f — see `Default`'s doc comment for the curve-choice
+    /// rationale and the concrete near/far transmittance this tunes for).
     pub fog_density: f32,
     /// Fog color, sRGB triple. Drives `DistanceFog.color`.
     pub fog_color: [f32; 3],
@@ -125,25 +125,30 @@ pub struct AtmosphereProfile {
 impl Default for AtmosphereProfile {
     fn default() -> Self {
         Self {
-            // -ln(0.05) / 230.0 — Koschmieder density for ~230 m visibility.
-            //
-            // BL-82 EM-3.11b (far-mesh "green wall"): re-tuned down from the
-            // original ~350 m visibility (density 0.00856). At 350 m the
-            // far-terrain mesh's cutout hole (`far_terrain::HOLE_MARGIN_
-            // CHUNKS` + `lod::CullingConfig::chunk_render_distance`, ~288 m at
-            // the default 7-chunk render distance) sat INSIDE the "still
-            // mostly clear" part of the exponential curve (only ~92% fogged
-            // at 288 m), so the coarse, flat-shaded, green-at-low-elevation
-            // far mesh (`far_terrain::height_tint`) read through almost fully
-            // saturated right at its own near edge — a hard-edged "wall",
-            // not a haze. At 230 m visibility the far mesh is ~97-98%
-            // fog-blended by the time it's ever visible (its hole never lets
-            // it draw closer than ~288 m), so its raw vertex colors barely
-            // survive the blend; the near/mid terrain (0..chunk_render_
-            // distance) picks up more haze too (~95% at the 224 m cutoff vs.
-            // ~85% before), which reads as natural atmospheric depth rather
-            // than a fog deficiency.
-            fog_density: 0.01302,
+            // BL-82 EM-3.11f (2026-07-09): switched the render side
+            // (`xindeler-client/src/atmosphere.rs`) from `FogFalloff::
+            // Exponential` to `FogFalloff::ExponentialSquared` — same
+            // `density` field, different curve shape. Plain exponential fog
+            // (`1 - exp(-d·density)`) has no near-field grace period; it was
+            // already ~30-48% fogged by 30-50m, which Matías's in-game
+            // playtest correctly called out as "feels foggy all the time,
+            // not just far away" — nearby trees/terrain were visibly hazed,
+            // not just the horizon this fog exists to mask (EM-3.11b).
+            // `ExponentialSquared` (`1 - exp(-(d·density)²)`) rises much more
+            // slowly near the camera (quadratic in the exponent) and
+            // accelerates further out, so the SAME density can be retuned to
+            // give a genuinely clear near/mid field while still fully
+            // opacifying by the far-mesh's ~288 m cutout-hole distance
+            // (`far_terrain::HOLE_MARGIN_CHUNKS` + `lod::CullingConfig::
+            // chunk_render_distance` at the default 7-chunk render distance —
+            // see EM-3.11b's original writeup for why that distance matters:
+            // the far mesh must be ~97%+ fog-blended by the time its hole
+            // ever lets it draw, or its raw vertex colors read as a hard-edged
+            // "wall" instead of a haze). Density picked so `exp(-(d·density)²)`
+            // (fraction still CLEAR) ≈ 0.90 at 50 m (~10% haze — a mild sense
+            // of depth, not fog), ≈ 0.64 at 100 m, and ≈ 0.025 at 288 m
+            // (~97.5% fogged, same masking strength as the EM-3.11b tuning).
+            fog_density: 0.00667,
             // Brighter, slightly less saturated than the original flat
             // gray-blue (EM-3.11b): the old (0.55, 0.65, 0.75) read
             // noticeably darker/flatter than the physically-based `Atmosphere`
