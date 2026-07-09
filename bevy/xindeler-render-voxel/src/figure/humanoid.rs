@@ -21,25 +21,28 @@
 //!    `CharacterSkeleton`), each bone matrix already carrying the per-body
 //!    model scale (`body.height() / 25`).
 //!
-//! ## What v1 (this module) does
+//! ## What this module does (EM-3.8b + EM-3.8d)
 //! - Ports the colour manifest + recolour EXACTLY (`HumColorSpec`,
 //!   `recolor_grey`) — so skin/hair/eye colour is REAL, per-body.
 //! - Ports the head manifest fully (bare head + eyes + hair + beard +
 //!   accessory, unified like voxygen's `DynaUnionizer`).
-//! - Uses the **default loadout** for the body slots (no inventory/equipment
-//!   yet — that needs more of the sim than the mirror carries): each armour
-//!   manifest's `default` entry for chest/belt/pants/shoulders(L,R)/hands(L,R)/
-//!   feet(L,R). We deliberately deserialize ONLY the `default` field of each
-//!   armour manifest (a strict subset of the frozen RON — isolation law rule 3
-//!   keeps the file untouched; we just read less of it).
-//! - Skips (v1) back/glider/lantern/weapons/hold — additive later; a bare
-//!   humanoid with default clothing is the visual milestone.
+//! - EM-3.8d: uses the character's **real equipped gear** (mirrored from the
+//!   sim inventory as a [`FigureLoadout`]) — the equipped item's key selects
+//!   its `.vox` from each armour manifest's `map`, falling back to `default`
+//!   for empty slots (voxygen's `CharacterCacheKey`/`ArmorVoxSpecMap` mapping).
+//!   The equipped weapon(s) ride the `main`/`second` bones (keyed by
+//!   [`WeaponKey`] in `biped_weapon_manifest`), sheathed on the back with the
+//!   real `ToolKind`/`Hands` pose; a carried lantern rides the `lantern` bone;
+//!   back armour the `back` bone. We deserialize the frozen RON verbatim
+//!   (isolation law rule 3 — the files are untouched).
+//! - Deferred to EM-3.8e: head-slot helmets (a species-keyed head-armour
+//!   manifest) and the glider (its visibility is gated on the glide
+//!   CharacterState, which the mirror does not carry — rendering it always
+//!   would show a large glider folded on a standing figure).
 //!
 //! ## Recolour: honest scope
 //! Skin, hair, eye and greyscale-armour recolour are all REAL here (ported from
-//! `HumColorSpec` + `recolor_grey`). What is NOT modelled in v1 is real
-//! equipped gear (everything is the default clothing) and the weapon/lantern
-//! bones — documented as `TODO(EM-3.8c)`.
+//! `HumColorSpec` + `recolor_grey`).
 //!
 //! ## Purity
 //! Same as the parent module: this is engine-shell code depending on the LOGIC
@@ -47,9 +50,14 @@
 //! in `common::util`) + `xindeler-anim` (rest-pose + animation bone matrices).
 //! It takes parsed `.vox` bytes from the caller; it never loads assets itself.
 
+use std::collections::HashMap;
+
 use bevy::transform::components::Transform;
 use common::{
-    comp::humanoid::{Body, BodyType, EyeColor, Skin, Species},
+    comp::{
+        humanoid::{Body, BodyType, EyeColor, Skin, Species},
+        tool::{Hands, ToolKind},
+    },
     figure::{DynaUnionizer, MatSegment, Material, Segment},
 };
 use dot_vox::DotVoxData;
@@ -69,6 +77,9 @@ pub const HUM_ARMOR_PANTS_MANIFEST: &str = "voxygen.voxel.humanoid_armor_pants_m
 pub const HUM_ARMOR_HAND_MANIFEST: &str = "voxygen.voxel.humanoid_armor_hand_manifest";
 pub const HUM_ARMOR_FOOT_MANIFEST: &str = "voxygen.voxel.humanoid_armor_foot_manifest";
 pub const HUM_ARMOR_SHOULDER_MANIFEST: &str = "voxygen.voxel.humanoid_armor_shoulder_manifest";
+pub const HUM_ARMOR_BACK_MANIFEST: &str = "voxygen.voxel.humanoid_armor_back_manifest";
+pub const HUM_MAIN_WEAPON_MANIFEST: &str = "voxygen.voxel.biped_weapon_manifest";
+pub const HUM_LANTERN_MANIFEST: &str = "voxygen.voxel.humanoid_lantern_manifest";
 
 /// `.vox` files whose names are relative to the `voxygen.voxel` namespace
 /// (`graceful_load_vox` prepends it in voxygen). The client prepends the same
@@ -172,7 +183,7 @@ pub struct HumHeadSubSpec {
 pub struct HumHeadSpec(std::collections::HashMap<(Species, BodyType), HumHeadSubSpec>);
 
 // ---------------------------------------------------------------------------
-// Armour manifests — DEFAULT loadout only (subset of the frozen RON)
+// Armour + weapon manifests — real equipped gear (EM-3.8d)
 // ---------------------------------------------------------------------------
 
 /// A `.vox` reference with a float offset (voxygen `VoxSpec<f32>`).
@@ -193,34 +204,66 @@ pub struct SidedArmorVoxSpec {
     right: ArmorVoxSpec,
 }
 
-/// The `default` loadout slot of an armour manifest (voxygen `ArmorVoxSpecMap`,
-/// of which v1 reads ONLY `default`). The frozen RON also carries `map: { … }`
-/// of equippable variants; serde ignores that unknown field, so this reads just
-/// the default loadout (isolation law rule 3: the file is untouched — we
-/// deserialize a subset).
+/// An armour manifest's inner map: the `default` slot plus the per-item `map`
+/// of equippable variants keyed by item-definition-id (voxygen
+/// `ArmorVoxSpecMap<String, S>`). EM-3.8d reads BOTH — the equipped item's key
+/// selects its variant, falling back to `default` when the slot is empty or the
+/// item has no entry.
 #[derive(Deserialize, Clone, Debug)]
-pub struct ArmorDefaultMap<S> {
+pub struct ArmorSpecMap<S> {
     default: S,
+    #[serde(default = "HashMap::new")]
+    map: HashMap<String, S>,
 }
 
 /// An armour manifest as a NEWTYPE around its map (voxygen wraps each manifest
 /// in a 1-tuple struct — e.g. `HumArmorChestSpec(ArmorVoxSpecMap)` — so the RON
-/// begins `( ( default: … ) )`). We mirror that outer wrapper so the SAME
-/// frozen RON parses.
+/// begins `( ( default: … , map: { … } ) )`). We mirror that outer wrapper so
+/// the SAME frozen RON parses.
 #[derive(Deserialize, Clone, Debug)]
-pub struct ArmorDefault<S>(ArmorDefaultMap<S>);
+pub struct ArmorManifest<S>(ArmorSpecMap<S>);
 
-impl<S> ArmorDefault<S> {
-    fn default_slot(&self) -> &S { &self.0.default }
+impl<S> ArmorManifest<S> {
+    /// Resolve the spec for an equipped item `key` (its item-definition-id),
+    /// falling back to the `default` slot when the slot is empty or the item
+    /// has no manifest entry (voxygen's `map.get(key).unwrap_or(&default)`
+    /// + `not_found` fallback, minus the debug mesh).
+    fn resolve(&self, key: Option<&str>) -> &S {
+        key.and_then(|k| self.0.map.get(k))
+            .unwrap_or(&self.0.default)
+    }
 }
 
-/// The armour manifests v1 uses (default loadout only).
-pub type HumArmorChestSpec = ArmorDefault<ArmorVoxSpec>;
-pub type HumArmorBeltSpec = ArmorDefault<ArmorVoxSpec>;
-pub type HumArmorPantsSpec = ArmorDefault<ArmorVoxSpec>;
-pub type HumArmorFootSpec = ArmorDefault<ArmorVoxSpec>;
-pub type HumArmorHandSpec = ArmorDefault<SidedArmorVoxSpec>;
-pub type HumArmorShoulderSpec = ArmorDefault<SidedArmorVoxSpec>;
+/// The armour manifests (default + per-item map).
+pub type HumArmorChestSpec = ArmorManifest<ArmorVoxSpec>;
+pub type HumArmorBeltSpec = ArmorManifest<ArmorVoxSpec>;
+pub type HumArmorPantsSpec = ArmorManifest<ArmorVoxSpec>;
+pub type HumArmorFootSpec = ArmorManifest<ArmorVoxSpec>;
+pub type HumArmorBackSpec = ArmorManifest<ArmorVoxSpec>;
+pub type HumArmorHandSpec = ArmorManifest<SidedArmorVoxSpec>;
+pub type HumArmorShoulderSpec = ArmorManifest<SidedArmorVoxSpec>;
+pub type HumLanternSpec = ArmorManifest<ArmorVoxSpec>;
+
+/// The figure-manifest key of a tool (voxygen `ToolKey`): a simple item id or a
+/// modular weapon's `(primary, secondary, hands)` key. Deserializes the frozen
+/// `biped_weapon_manifest` map keys verbatim (`Tool("…")` / `Modular((…))`).
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum WeaponKey {
+    /// A non-modular tool, keyed by its item-definition-id.
+    Tool(String),
+    /// A modular weapon, keyed by `(primary, secondary, hands)`.
+    Modular((String, String, Hands)),
+}
+
+/// The main-weapon manifest (`biped_weapon_manifest`): each `.vox` + offset
+/// keyed by [`WeaponKey`]. The RON is a 1-tuple around the map (`({ key: …
+/// })`).
+#[derive(Deserialize, Clone, Debug)]
+pub struct HumMainWeaponSpec(HashMap<WeaponKey, ArmorVoxSpec>);
+
+impl HumMainWeaponSpec {
+    fn get(&self, key: &WeaponKey) -> Option<&ArmorVoxSpec> { self.0.get(key) }
+}
 
 /// The parsed humanoid manifests, bundled by BORROW so the caller hands
 /// references straight from wherever it stored them (e.g. Bevy asset stores)
@@ -235,6 +278,64 @@ pub struct HumManifests<'a> {
     pub foot: &'a HumArmorFootSpec,
     pub hand: &'a HumArmorHandSpec,
     pub shoulder: &'a HumArmorShoulderSpec,
+    pub back: &'a HumArmorBackSpec,
+    pub main_weapon: &'a HumMainWeaponSpec,
+    pub lantern: &'a HumLanternSpec,
+}
+
+/// The figure-relevant equipped gear the humanoid assembly consumes (EM-3.8d) —
+/// the render-crate-native mirror of the client's replicated loadout, so this
+/// crate stays protocol-free. The client builds it from `NetLoadout`. Armour
+/// slots carry the equipped item-definition-id (`None` = default/empty); tools
+/// carry their [`WeaponKey`] + `ToolKind`/`Hands`.
+#[derive(Clone, Debug, Default)]
+pub struct FigureLoadout {
+    pub active_tool: Option<FigureTool>,
+    pub second_tool: Option<FigureTool>,
+    pub chest: Option<String>,
+    pub belt: Option<String>,
+    pub back: Option<String>,
+    pub pants: Option<String>,
+    pub shoulder: Option<String>,
+    pub hand: Option<String>,
+    pub foot: Option<String>,
+    pub lantern: Option<String>,
+}
+
+/// An equipped tool for figure assembly: its manifest key plus the
+/// `ToolKind`/`Hands` the animation needs to sheathe it.
+#[derive(Clone, Debug)]
+pub struct FigureTool {
+    pub key: WeaponKey,
+    pub kind: ToolKind,
+    pub hands: Hands,
+}
+
+/// The active/second tool KINDS (+ hands), extracted from a [`FigureLoadout`],
+/// that drive the character animation's back-sheathe pose (`do_tools_on_back`).
+/// Kept separate from the `.vox` refs so the per-frame animation needs only
+/// this tiny `Copy` value (stored on the figure), not the whole loadout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FigureToolKinds {
+    pub active: Option<ToolKind>,
+    pub second: Option<ToolKind>,
+    /// `(main-hand hands, off-hand hands)` — the tuple the anim dep expects.
+    pub hands: (Option<Hands>, Option<Hands>),
+}
+
+impl FigureLoadout {
+    /// The tool kinds/hands this loadout implies (for the animation).
+    #[must_use]
+    pub fn tool_kinds(&self) -> FigureToolKinds {
+        FigureToolKinds {
+            active: self.active_tool.as_ref().map(|t| t.kind),
+            second: self.second_tool.as_ref().map(|t| t.kind),
+            hands: (
+                self.active_tool.as_ref().map(|t| t.hands),
+                self.second_tool.as_ref().map(|t| t.hands),
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,8 +356,14 @@ pub enum HumBone {
     FootR,
     ShoulderL,
     ShoulderR,
-    /// The main-hand weapon bone (EM-3.8c). Holds the equipped tool `.vox`.
+    /// The main-hand weapon bone (EM-3.8c). Holds the active tool `.vox`.
     Main,
+    /// The off-hand weapon bone (EM-3.8d). Holds the second/off-hand tool.
+    Second,
+    /// The back bone (EM-3.8d). Holds back armour (cape / pack).
+    Back,
+    /// The lantern bone (EM-3.8d). Holds a carried lantern at the hip.
+    Lantern,
 }
 
 impl HumBone {
@@ -273,6 +380,9 @@ impl HumBone {
             HumBone::ShoulderL => "shoulder_l",
             HumBone::ShoulderR => "shoulder_r",
             HumBone::Main => "main",
+            HumBone::Second => "second",
+            HumBone::Back => "back",
+            HumBone::Lantern => "lantern",
         }
     }
 }
@@ -296,7 +406,9 @@ pub struct HumVoxRef {
 }
 
 /// The role a loaded `.vox` plays, so the assembler knows how to recolour +
-/// where to place it. Head sub-parts carry their own local offset.
+/// where to place it. Each role now carries the resolved manifest offset/tint
+/// (EM-3.8d), so assembly needs only the roles — not the manifests — for
+/// placement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HumVoxRole {
     HeadBare {
@@ -314,46 +426,44 @@ pub enum HumVoxRole {
     HeadAccessory {
         offset: [i32; 3],
     },
-    Chest,
-    Belt,
-    Pants,
+    /// A material-recoloured body-slot armour (chest/belt/pants/back/lantern):
+    /// skin/hair recolour + optional grey tint, on `bone` at `offset`.
+    Body {
+        bone: HumBone,
+        offset: [f32; 3],
+        tint: Option<[u8; 3]>,
+    },
     /// A hand/foot/shoulder — sided (left parts are the right `.vox` mirrored).
     Sided {
         bone: HumBone,
         flipped: bool,
         tint: Option<[u8; 3]>,
+        offset: [f32; 3],
     },
-    /// The main-hand weapon (EM-3.8c). v1 uses a fixed TEST tool (a sword) at a
-    /// hardcoded offset, since the mirror does not carry equipped-inventory
-    /// data yet — real equipped gear is a later follow-up. `offset` recentres
-    /// the tool around the `main` bone (voxygen `HumMainWeaponSpec` `vox_spec`
-    /// offset).
-    MainWeapon {
+    /// A weapon on the `main`/`second` bone (plain colour, no recolour).
+    /// `flipped` mirrors the off-hand tool (voxygen `mesh_main_weapon(_,
+    /// true)`).
+    Weapon {
+        bone: HumBone,
+        flipped: bool,
         offset: [f32; 3],
     },
 }
 
-/// The TEST main-hand weapon v1 hangs on the humanoid's `main` bone (EM-3.8c).
-/// A concrete bronze longsword from the frozen `biped_weapon_manifest` — chosen
-/// as a stand-in until real equipped gear rides the mirror. Name relative to
-/// `voxygen.voxel` (`graceful_load_vox` namespace); offset copied from that
-/// tool's manifest `vox_spec` entry so it sits in the hand correctly.
-pub const TEST_MAIN_WEAPON_VOX: &str = "weapon.sword.longsword.bronze-2h";
-/// The frozen manifest offset for [`TEST_MAIN_WEAPON_VOX`]
-/// (`biped_weapon_manifest.ron`: `vox_spec: ("...longsword.bronze-2h", (-1.5,
-/// -3.5, -5.0))`). Kept as a literal — the ToolKey-keyed manifest is not worth
-/// deserialising just for one test tool (isolation law rule 3: we read the
-/// value, not the file, for the v1 stand-in).
-pub const TEST_MAIN_WEAPON_OFFSET: [f32; 3] = [-1.5, -3.5, -5.0];
-
 /// The list of `.vox` files (+ their roles) a humanoid figure needs, in the
 /// order the assembler expects. The caller loads each `vox_name`, then calls
-/// [`assemble_humanoid`] with the parsed data in the SAME order.
+/// [`assemble_humanoid`] with the parsed data in the SAME order. `loadout`
+/// picks the REAL equipped `.vox` per slot (EM-3.8d), falling back to each
+/// manifest's `default` for empty slots.
 ///
 /// Returns `None` if the head manifest has no entry for this `(species,
 /// body_type)` (voxygen's `not_found` fallback — the caller keeps its capsule).
 #[must_use]
-pub fn humanoid_vox_refs(manifests: &HumManifests<'_>, body: &Body) -> Option<Vec<HumVoxRef>> {
+pub fn humanoid_vox_refs(
+    manifests: &HumManifests<'_>,
+    body: &Body,
+    loadout: &FigureLoadout,
+) -> Option<Vec<HumVoxRef>> {
     let head = manifests.head.0.get(&(body.species, body.body_type))?;
     let mut refs = Vec::new();
 
@@ -394,52 +504,85 @@ pub fn humanoid_vox_refs(manifests: &HumManifests<'_>, body: &Body) -> Option<Ve
         });
     }
 
-    // --- Body slots (default loadout) ---
-    let chest = &manifests.chest.default_slot();
-    refs.push(HumVoxRef {
-        role: HumVoxRole::Chest,
-        vox_name: chest.vox_spec.0.clone(),
-        model_index: chest.vox_spec.2,
-    });
-    let belt = &manifests.belt.default_slot();
-    refs.push(HumVoxRef {
-        role: HumVoxRole::Belt,
-        vox_name: belt.vox_spec.0.clone(),
-        model_index: belt.vox_spec.2,
-    });
-    let pants = &manifests.pants.default_slot();
-    refs.push(HumVoxRef {
-        role: HumVoxRole::Pants,
-        vox_name: pants.vox_spec.0.clone(),
-        model_index: pants.vox_spec.2,
-    });
+    // --- Body slots: resolve the equipped item (or the manifest default). ---
+    // chest/belt/pants always render (their `default` is the bare torso/legs);
+    // back only when equipped (its `default` is the empty `armor.empty`).
+    refs.push(body_ref(
+        HumBone::Chest,
+        manifests.chest.resolve(loadout.chest.as_deref()),
+    ));
+    refs.push(body_ref(
+        HumBone::Belt,
+        manifests.belt.resolve(loadout.belt.as_deref()),
+    ));
+    refs.push(body_ref(
+        HumBone::Shorts,
+        manifests.pants.resolve(loadout.pants.as_deref()),
+    ));
+    if loadout.back.is_some() {
+        refs.push(body_ref(
+            HumBone::Back,
+            manifests.back.resolve(loadout.back.as_deref()),
+        ));
+    }
 
     // Sided: hands, feet, shoulders (left = right `.vox` mirrored for
     // hands/feet; shoulders have distinct left/right specs).
-    let hand = &manifests.hand.default_slot();
+    let hand = manifests.hand.resolve(loadout.hand.as_deref());
     refs.push(sided_ref(HumBone::HandL, &hand.left, true));
     refs.push(sided_ref(HumBone::HandR, &hand.right, false));
-    let foot = &manifests.foot.default_slot();
+    let foot = manifests.foot.resolve(loadout.foot.as_deref());
     // Feet share one spec, left mirrored (voxygen `mesh_foot(flipped)`).
     refs.push(sided_ref(HumBone::FootL, foot, true));
     refs.push(sided_ref(HumBone::FootR, foot, false));
-    let shoulder = &manifests.shoulder.default_slot();
+    let shoulder = manifests.shoulder.resolve(loadout.shoulder.as_deref());
     refs.push(sided_ref(HumBone::ShoulderL, &shoulder.left, true));
     refs.push(sided_ref(HumBone::ShoulderR, &shoulder.right, false));
 
-    // --- Main-hand weapon (EM-3.8c): a fixed TEST tool on the `main` bone. ---
-    // v1 always gives the humanoid the stand-in sword (no equipped-gear data in
-    // the mirror yet). It's a plain-colour `.vox` (no material recolour), placed
-    // by the character skeleton's `main` bone.
-    refs.push(HumVoxRef {
-        role: HumVoxRole::MainWeapon {
-            offset: TEST_MAIN_WEAPON_OFFSET,
-        },
-        vox_name: TEST_MAIN_WEAPON_VOX.to_string(),
-        model_index: 0,
-    });
+    // --- Lantern (EM-3.8d): only when carried; hangs on the `lantern` bone. ---
+    if loadout.lantern.is_some() {
+        refs.push(body_ref(
+            HumBone::Lantern,
+            manifests.lantern.resolve(loadout.lantern.as_deref()),
+        ));
+    }
+
+    // --- Equipped weapons (EM-3.8d): active on `main`, off-hand on `second`. ---
+    if let Some(tool) = &loadout.active_tool {
+        if let Some(spec) = manifests.main_weapon.get(&tool.key) {
+            refs.push(weapon_ref(HumBone::Main, spec, false));
+        } else {
+            tracing::warn!(
+                tool_key = ?tool.key,
+                "no biped_weapon_manifest entry for equipped active tool; rendering unarmed"
+            );
+        }
+    }
+    if let Some(tool) = &loadout.second_tool {
+        if let Some(spec) = manifests.main_weapon.get(&tool.key) {
+            refs.push(weapon_ref(HumBone::Second, spec, true));
+        } else {
+            tracing::warn!(
+                tool_key = ?tool.key,
+                "no biped_weapon_manifest entry for equipped second tool; rendering unarmed"
+            );
+        }
+    }
 
     Some(refs)
+}
+
+/// A material-recoloured body-slot `.vox` ref (chest/belt/pants/back/lantern).
+fn body_ref(bone: HumBone, spec: &ArmorVoxSpec) -> HumVoxRef {
+    HumVoxRef {
+        role: HumVoxRole::Body {
+            bone,
+            offset: spec.vox_spec.1,
+            tint: spec.color,
+        },
+        vox_name: spec.vox_spec.0.clone(),
+        model_index: spec.vox_spec.2,
+    }
 }
 
 fn sided_ref(bone: HumBone, spec: &ArmorVoxSpec, flipped: bool) -> HumVoxRef {
@@ -448,6 +591,19 @@ fn sided_ref(bone: HumBone, spec: &ArmorVoxSpec, flipped: bool) -> HumVoxRef {
             bone,
             flipped,
             tint: spec.color,
+            offset: spec.vox_spec.1,
+        },
+        vox_name: spec.vox_spec.0.clone(),
+        model_index: spec.vox_spec.2,
+    }
+}
+
+fn weapon_ref(bone: HumBone, spec: &ArmorVoxSpec, flipped: bool) -> HumVoxRef {
+    HumVoxRef {
+        role: HumVoxRole::Weapon {
+            bone,
+            flipped,
+            offset: spec.vox_spec.1,
         },
         vox_name: spec.vox_spec.0.clone(),
         model_index: spec.vox_spec.2,
@@ -465,34 +621,6 @@ pub struct LoadedHumPart<'a> {
     pub model_index: u32,
 }
 
-/// The manifest offsets (float, voxel units) for the default body slots, read
-/// once so the assembler can position chest/belt/pants/hands/feet/shoulders.
-struct SlotOffsets {
-    chest: Vec3<f32>,
-    belt: Vec3<f32>,
-    pants: Vec3<f32>,
-    hand_l: Vec3<f32>,
-    hand_r: Vec3<f32>,
-    foot: Vec3<f32>,
-    shoulder_l: Vec3<f32>,
-    shoulder_r: Vec3<f32>,
-}
-
-impl SlotOffsets {
-    fn from(m: &HumManifests<'_>) -> Self {
-        Self {
-            chest: Vec3::from(m.chest.default_slot().vox_spec.1),
-            belt: Vec3::from(m.belt.default_slot().vox_spec.1),
-            pants: Vec3::from(m.pants.default_slot().vox_spec.1),
-            hand_l: Vec3::from(m.hand.default_slot().left.vox_spec.1),
-            hand_r: Vec3::from(m.hand.default_slot().right.vox_spec.1),
-            foot: Vec3::from(m.foot.default_slot().vox_spec.1),
-            shoulder_l: Vec3::from(m.shoulder.default_slot().left.vox_spec.1),
-            shoulder_r: Vec3::from(m.shoulder.default_slot().right.vox_spec.1),
-        }
-    }
-}
-
 /// One assembled humanoid part: a coloured `bevy::Mesh` + the bone it parents
 /// to. The mesh is already in the part's LOCAL voxel frame (offset baked in);
 /// the caller places it with the bone's [`Transform`] from
@@ -504,7 +632,9 @@ pub struct HumAssembledPart {
 }
 
 /// Assembles the loaded humanoid `.vox` parts into placed, recoloured meshes
-/// (voxygen's per-slot `mesh_*` functions, condensed to the default loadout).
+/// (voxygen's per-slot `mesh_*` functions). Each part's placement/tint comes
+/// from its role (resolved in [`humanoid_vox_refs`] from the real loadout —
+/// EM-3.8d), so this needs only the colour spec, not the manifests.
 ///
 /// The head is unified (bare + eyes + hair + beard + accessory) into ONE mesh
 /// exactly like voxygen's `DynaUnionizer` in `mesh_head`; every other slot is
@@ -520,7 +650,6 @@ pub fn assemble_humanoid(
     let hair_color = color.hair_color(body.species, body.hair_color);
     let hair_rgb: Rgb<u8> = hair_color.into();
     let eye = body.species.eye_color(body.eye_color);
-    let offsets = SlotOffsets::from(manifests);
 
     let mut out = Vec::new();
 
@@ -580,77 +709,41 @@ pub fn assemble_humanoid(
         }
     }
 
-    // --- Body slots ---
-    // NOTE (v1): voxygen unions each chest/pants with a separate `armor.empty`
-    // bare-torso base; the `default` loadout uses the self-contained
-    // `armor.misc.{chest,pants}.none` models (naked torso/legs already in the
-    // voxels), so we recolour+tint the slot `.vox` directly. Equipping real
-    // armour (which the mirror doesn't carry yet) → TODO(EM-3.8c).
+    // --- Body / sided / weapon slots ---
+    // Body + sided armour are material-recoloured (skin/hair) + optionally
+    // grey-tinted from the manifest `color`; weapons are plain colour. The
+    // resolved `.vox` (default OR the real equipped item) already rode in via
+    // the role (EM-3.8d).
     for p in parts {
         let (bone, seg, offset) = match &p.role {
-            HumVoxRole::Chest => {
-                let seg = tinted_body_seg(
-                    color,
-                    p,
-                    skin,
-                    hair_color,
-                    eye,
-                    manifests.chest.default_slot().color,
-                );
-                (HumBone::Chest, seg, offsets.chest)
-            },
-            HumVoxRole::Pants => {
-                let seg = tinted_body_seg(
-                    color,
-                    p,
-                    skin,
-                    hair_color,
-                    eye,
-                    manifests.pants.default_slot().color,
-                );
-                (HumBone::Shorts, seg, offsets.pants)
-            },
-            HumVoxRole::Belt => {
-                let seg = tinted_body_seg(
-                    color,
-                    p,
-                    skin,
-                    hair_color,
-                    eye,
-                    manifests.belt.default_slot().color,
-                );
-                (HumBone::Belt, seg, offsets.belt)
+            HumVoxRole::Body { bone, offset, tint } => {
+                let seg = tinted_body_seg(color, p, false, skin, hair_color, eye, *tint);
+                (*bone, seg, Vec3::from(*offset))
             },
             HumVoxRole::Sided {
                 bone,
                 flipped,
                 tint,
+                offset,
             } => {
-                let mut seg = color.color_segment(
-                    mat_seg(p.vox, *flipped, p.model_index),
-                    skin,
-                    hair_color,
-                    eye,
-                );
-                if let Some(c) = tint {
-                    let tint_rgb = Rgb::from(Vec3::from(*c));
-                    seg = seg.map_rgb(|rgb| recolor_grey(rgb, tint_rgb));
-                }
-                let offset = match bone {
-                    HumBone::HandL => offsets.hand_l,
-                    HumBone::HandR => offsets.hand_r,
-                    HumBone::FootL | HumBone::FootR => offsets.foot,
-                    HumBone::ShoulderL => offsets.shoulder_l,
-                    HumBone::ShoulderR => offsets.shoulder_r,
-                    _ => Vec3::zero(),
-                };
-                (*bone, seg, offset)
+                let seg = tinted_body_seg(color, p, *flipped, skin, hair_color, eye, *tint);
+                (*bone, seg, Vec3::from(*offset))
             },
-            HumVoxRole::MainWeapon { offset } => {
+            HumVoxRole::Weapon {
+                bone,
+                flipped,
+                offset,
+            } => {
                 // The weapon is a plain-colour `.vox` (no material recolour),
-                // placed on the `main` bone (voxygen `mesh_main_weapon`).
-                let seg = plain_seg(p.vox, false, p.model_index);
-                (HumBone::Main, seg, Vec3::from(*offset))
+                // placed on the `main`/`second` bone (voxygen `mesh_main_weapon`).
+                let seg = plain_seg(p.vox, *flipped, p.model_index);
+                let mut off: Vec3<f32> = Vec3::from(*offset);
+                if *flipped {
+                    // voxygen: mirroring the off-hand `.vox` also mirrors its
+                    // x-offset about the segment width.
+                    off.x = -off.x - seg.sz.x as f32;
+                }
+                (*bone, seg, off)
             },
             _ => continue,
         };
@@ -666,16 +759,19 @@ pub fn assemble_humanoid(
     out
 }
 
-/// A greyscale-tinted body-slot armour segment (voxygen chest/belt/pants tint).
+/// A material-recoloured body-slot armour segment (voxygen
+/// chest/belt/pants/back tint): parse (optionally mirrored) → optional grey
+/// tint → skin/hair recolour.
 fn tinted_body_seg(
     color: &HumColorSpec,
     p: &LoadedHumPart,
+    flipped: bool,
     skin: Skin,
     hair_color: (u8, u8, u8),
     eye: EyeColor,
     tint: Option<[u8; 3]>,
 ) -> Segment {
-    let mut seg = mat_seg(p.vox, false, p.model_index);
+    let mut seg = mat_seg(p.vox, flipped, p.model_index);
     if let Some(c) = tint {
         let tint_rgb = Rgb::from(Vec3::from(c));
         seg = seg.map_rgb(|rgb| recolor_grey(rgb, tint_rgb));
@@ -724,6 +820,12 @@ pub struct HumBoneTransforms {
     pub shoulder_r: Transform,
     /// The main-hand weapon bone (EM-3.8c).
     pub main: Transform,
+    /// The off-hand weapon bone (EM-3.8d).
+    pub second: Transform,
+    /// The back bone (EM-3.8d — back armour).
+    pub back: Transform,
+    /// The lantern bone (EM-3.8d — carried lantern at the hip).
+    pub lantern: Transform,
 }
 
 impl HumBoneTransforms {
@@ -741,6 +843,9 @@ impl HumBoneTransforms {
             HumBone::ShoulderL => self.shoulder_l,
             HumBone::ShoulderR => self.shoulder_r,
             HumBone::Main => self.main,
+            HumBone::Second => self.second,
+            HumBone::Back => self.back,
+            HumBone::Lantern => self.lantern,
         }
     }
 }
@@ -766,6 +871,12 @@ pub enum HumAnim {
 ///
 /// `ground_speed` (blocks/s, from the entity's replicated velocity) scales the
 /// run cycle so a slow walk animates slower than a sprint.
+///
+/// `tools` are the REAL equipped tool kinds/hands (EM-3.8d — from the mirrored
+/// loadout), so the idle/run animation's `do_tools_on_back(hands,
+/// active_tool_kind, ..)` step sheathes the actual weapon(s) on the back with
+/// the right pose (a 2H sword lies flat high on the back, a 1H axe hangs at the
+/// hip, …). An empty `tools` = an unarmed figure (bare hands, no back weapon).
 #[must_use]
 pub fn humanoid_bone_transforms(
     body: &Body,
@@ -773,6 +884,7 @@ pub fn humanoid_bone_transforms(
     acc: f32,
     time: f32,
     ground_speed: f32,
+    tools: FigureToolKinds,
 ) -> HumBoneTransforms {
     use xindeler_anim::{
         Animation, Skeleton,
@@ -786,29 +898,29 @@ pub fn humanoid_bone_transforms(
     // `squash_limb` closures treat as an EXTREME squash — rotating the chest
     // ~2 rad about x and zeroing the vertical offsets, which lays the whole
     // figure flat. Voxygen always constructs it via `CharacterSkeleton::new(..,
-    // squash = 1.0)`; we must match that. (`holding_lantern = false`,
-    // `back_carry_offset = 0.0` are the v1 no-loadout defaults.)
+    // squash = 1.0)`; we must match that. (`holding_lantern = false` — a carried
+    // lantern rides the hip, not the hand; `back_carry_offset = 0.0` — no
+    // backpack detection yet.)
     let base = CharacterSkeleton::new(false, 0.0, 1.0);
 
-    // EM-3.8c: the humanoid carries a fixed TEST 2-handed sword (see
-    // [`TEST_MAIN_WEAPON_VOX`]). We MUST tell the idle/run animations that so
-    // their `do_tools_on_back(hands, active_tool_kind, ..)` step places the
-    // `main` bone correctly — SHEATHED on the back with the 2H-sword pose
-    // (`position (-7,-5,15)`, `rotation_y(2.5)·rotation_z(π/2)`). Without this
-    // the `main` bone stays at its raw skeleton default (unrotated at the
-    // hand), so the long flat sword `.vox` renders as a big vertical slab (the
-    // EM-3.8c-review bug). We do NOT drive a wield/attack pose (no live tool
-    // state in the mirror) — "sword on the back" is the correct neutral pose
-    // for a non-attacking character, exactly what voxygen shows.
-    use common::comp::tool::{Hands, ToolKind};
-    let active_tool = Some(ToolKind::Sword);
-    let hands = (Some(Hands::Two), None);
+    // EM-3.8d: drive the sheathe pose from the REAL equipped tools. The
+    // idle/run animations call `do_tools_on_back(hands, active_tool_kind,
+    // second_tool_kind, ..)` internally, which places the `main`/`second` bones
+    // SHEATHED on the back with a per-`ToolKind` pose. Without the right kind the
+    // long flat weapon `.vox` would render as a big vertical slab at the hand
+    // (the EM-3.8c-review bug); with it the weapon sits correctly on the back.
+    // We do NOT drive a wield/attack pose (no live CharacterState in the mirror)
+    // — "weapon on the back" is the correct neutral pose for a non-attacking
+    // character, exactly what voxygen shows for an idle figure.
+    let active_tool = tools.active;
+    let second_tool = tools.second;
+    let hands = tools.hands;
 
     let skeleton = match anim {
         HumAnim::Idle => IdleAnimation::update_skeleton(
             &base,
             // (active_tool, second_tool, hands, global_time)
-            (active_tool, None, hands, time),
+            (active_tool, second_tool, hands, time),
             time,
             &mut rate,
             &attr,
@@ -830,9 +942,9 @@ pub fn humanoid_bone_transforms(
             RunAnimation::update_skeleton(
                 &base,
                 (
-                    active_tool,    // active_tool_kind (sheathes the sword)
-                    None,           // second_tool_kind
-                    hands,          // hands (Two → 2H back pose)
+                    active_tool,    // active_tool_kind (sheathes the main weapon)
+                    second_tool,    // second_tool_kind (sheathes the off-hand)
+                    hands,          // hands (drives the back-sheathe pose)
                     vel,            // velocity
                     ori,            // orientation
                     ori,            // last_ori
@@ -868,26 +980,27 @@ pub fn humanoid_bone_transforms(
         shoulder_l: mat_to_transform(computed.shoulder_l),
         shoulder_r: mat_to_transform(computed.shoulder_r),
         main: mat_to_transform(computed.main),
+        second: mat_to_transform(computed.second),
+        back: mat_to_transform(computed.back),
+        lantern: mat_to_transform(computed.lantern),
     }
 }
 
 /// The static rest pose (EM-3.8-style): idle at `time = 0`, deterministic
-/// (`sin(0) = 0`). Convenience wrapper over [`humanoid_bone_transforms`].
+/// (`sin(0) = 0`), with the given equipped `tools` (EM-3.8d). Convenience
+/// wrapper over [`humanoid_bone_transforms`].
 #[must_use]
-pub fn humanoid_bone_rest(body: &Body) -> HumBoneTransforms {
-    humanoid_bone_transforms(body, HumAnim::Idle, 0.0, 0.0, 0.0)
+pub fn humanoid_bone_rest(body: &Body, tools: FigureToolKinds) -> HumBoneTransforms {
+    humanoid_bone_transforms(body, HumAnim::Idle, 0.0, 0.0, 0.0, tools)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The rest pose is deterministic + sane: a standing human's head is above
-    /// its feet, all bones finite, model-scaled (within a couple metres of the
-    /// root). Pure `xindeler-anim` — no assets.
-    #[test]
-    fn human_rest_pose_is_sane() {
-        let body = Body {
+    /// A default (Human male, no cosmetics) test body.
+    fn test_body() -> Body {
+        Body {
             species: Species::Human,
             body_type: BodyType::Male,
             hair_style: 0,
@@ -897,8 +1010,25 @@ mod tests {
             hair_color: 0,
             skin: 0,
             eye_color: 0,
-        };
-        let rest = humanoid_bone_rest(&body);
+        }
+    }
+
+    /// A 2-handed sword tool kinds set (what the starter Warrior carries).
+    fn sword_tools() -> FigureToolKinds {
+        FigureToolKinds {
+            active: Some(ToolKind::Sword),
+            second: None,
+            hands: (Some(Hands::Two), None),
+        }
+    }
+
+    /// The rest pose is deterministic + sane: a standing human's head is above
+    /// its feet, all bones finite, model-scaled (within a couple metres of the
+    /// root). Pure `xindeler-anim` — no assets.
+    #[test]
+    fn human_rest_pose_is_sane() {
+        let body = test_body();
+        let rest = humanoid_bone_rest(&body, FigureToolKinds::default());
         for (name, t) in [
             ("head", rest.head),
             ("chest", rest.chest),
@@ -928,21 +1058,12 @@ mod tests {
     /// actually does something), and run advances with time.
     #[test]
     fn run_differs_from_idle_and_advances() {
-        let body = Body {
-            species: Species::Human,
-            body_type: BodyType::Male,
-            hair_style: 0,
-            beard: 0,
-            eyes: 0,
-            accessory: 0,
-            hair_color: 0,
-            skin: 0,
-            eye_color: 0,
-        };
-        let idle = humanoid_bone_transforms(&body, HumAnim::Idle, 0.0, 1.0, 0.0);
-        let run_a = humanoid_bone_transforms(&body, HumAnim::Run, 4.0, 1.0, 4.0);
+        let body = test_body();
+        let t = sword_tools();
+        let idle = humanoid_bone_transforms(&body, HumAnim::Idle, 0.0, 1.0, 0.0, t);
+        let run_a = humanoid_bone_transforms(&body, HumAnim::Run, 4.0, 1.0, 4.0, t);
         // Advance the accumulator (not just `time`) to prove acc drives phase.
-        let run_b = humanoid_bone_transforms(&body, HumAnim::Run, 5.2, 1.3, 4.0);
+        let run_b = humanoid_bone_transforms(&body, HumAnim::Run, 5.2, 1.3, 4.0, t);
         // A running foot is placed differently than an idle one.
         assert_ne!(
             idle.foot_l.translation, run_a.foot_l.translation,
@@ -955,13 +1076,17 @@ mod tests {
         );
     }
 
-    /// EM-3.8c: a `MainWeapon` role meshes to a real (non-empty) `bevy::Mesh`
-    /// on the `main` bone, WITHOUT needing the (ToolKey-keyed) weapon manifest
-    /// — v1 uses a fixed test-tool `.vox`. A tiny synthetic `.vox` stands
-    /// in for the real sword so the test needs no assets.
+    /// EM-3.8d: a weapon `.vox` meshes to a real (non-empty) `bevy::Mesh`, and
+    /// the `main` bone — fed the REAL equipped tool kind/hands (Sword/Two) —
+    /// sheathes it on the back (not at the raw skeleton default at the hand). A
+    /// tiny synthetic `.vox` stands in for the real sword so no assets are
+    /// needed.
     #[test]
     fn main_weapon_meshes_on_the_main_bone() {
         use super::super::LoadedPart;
+
+        /// The starter sword's manifest offset (`biped_weapon_manifest.ron`).
+        const STARTER_SWORD_OFFSET: [f32; 3] = [-2.5, -4.0, -4.0];
 
         // Reuse the parent module's 1-voxel `.vox` helper via a local build.
         let mut palette = vec![
@@ -997,11 +1122,11 @@ mod tests {
             index_map: Vec::new(),
         };
         // The weapon is a plain-colour segment (no recolour) placed at its
-        // offset — exactly what `assemble_humanoid` does for `MainWeapon`.
+        // offset — exactly what `assemble_humanoid` does for a `Weapon` role.
         let part = LoadedPart {
             vox: &vox,
             model_index: 0,
-            offset: Vec3::from(TEST_MAIN_WEAPON_OFFSET),
+            offset: Vec3::from(STARTER_SWORD_OFFSET),
             flipped: false,
             bone: super::super::FigureBoneName::Chest, // unused for direct mesh
         };
@@ -1009,25 +1134,15 @@ mod tests {
         assert_eq!(mesh.count_vertices(), 24, "a cube is 6 quads × 4 verts");
 
         // And the `main` bone transform exists + is finite in a full pose.
-        let body = Body {
-            species: Species::Human,
-            body_type: BodyType::Male,
-            hair_style: 0,
-            beard: 0,
-            eyes: 0,
-            accessory: 0,
-            hair_color: 0,
-            skin: 0,
-            eye_color: 0,
-        };
-        let bones = humanoid_bone_rest(&body);
+        let body = test_body();
+        let bones = humanoid_bone_rest(&body, sword_tools());
         let main = bones.get(HumBone::Main).translation;
         assert!(
             main.is_finite(),
             "the main-weapon bone transform must be finite"
         );
-        // EM-3.8c bug fix: the 2H sword must be SHEATHED ON THE BACK, not stuck
-        // at the raw skeleton default. `do_tools_on_back` (fed
+        // EM-3.8c/d: the 2H sword must be SHEATHED ON THE BACK, not stuck
+        // at the raw skeleton default. `do_tools_on_back` (fed the REAL
         // `ToolKind::Sword` + `Hands::Two`) moves `main` well BEHIND the chest
         // (negative sim-y = Bevy +z, i.e. behind), high up the back — clearly
         // separated from the hand. Assert it moved off the chest centre so the
@@ -1054,23 +1169,84 @@ mod tests {
     /// the speed (and thus `d(acc)/dt`) changes.
     #[test]
     fn run_phase_follows_acc_not_time() {
-        let body = Body {
-            species: Species::Human,
-            body_type: BodyType::Male,
-            hair_style: 0,
-            beard: 0,
-            eyes: 0,
-            accessory: 0,
-            hair_color: 0,
-            skin: 0,
-            eye_color: 0,
-        };
+        let body = test_body();
+        let t = sword_tools();
         // Same `time`, different `acc` → different foot placement.
-        let a = humanoid_bone_transforms(&body, HumAnim::Run, 2.0, 1.0, 4.0);
-        let b = humanoid_bone_transforms(&body, HumAnim::Run, 6.0, 1.0, 4.0);
+        let a = humanoid_bone_transforms(&body, HumAnim::Run, 2.0, 1.0, 4.0, t);
+        let b = humanoid_bone_transforms(&body, HumAnim::Run, 6.0, 1.0, 4.0, t);
         assert_ne!(
             a.foot_l.translation, b.foot_l.translation,
             "acc must drive the foot cycle independently of the wall clock"
+        );
+    }
+
+    /// EM-3.8d (pure, no assets): the armour manifest parses `default` + the
+    /// per-item `map`, and `resolve` picks the equipped item's spec, falling
+    /// back to `default` for empty/unknown keys. Locks the map lookup that lets
+    /// real equipped gear select its `.vox`.
+    #[test]
+    fn armor_manifest_resolves_equipped_item() {
+        let ron = r#"((
+            default: ( vox_spec: ("armor.misc.chest.none", (-7.0, -3.5, 2.0)), color: None ),
+            map: {
+                "common.items.armor.misc.chest.worker_purple_brown": (
+                    vox_spec: ("armor.misc.chest.worker_purp_brown", (-7.0, -3.5, 2.0)),
+                    color: None
+                ),
+            },
+        ))"#;
+        let chest: HumArmorChestSpec = ron::de::from_str(ron).expect("chest manifest parses");
+        // Empty slot → default naked-torso model.
+        assert_eq!(chest.resolve(None).vox_spec.0, "armor.misc.chest.none");
+        // Equipped item → its variant .vox.
+        assert_eq!(
+            chest
+                .resolve(Some("common.items.armor.misc.chest.worker_purple_brown"))
+                .vox_spec
+                .0,
+            "armor.misc.chest.worker_purp_brown"
+        );
+        // Unknown item → default fallback (voxygen `not_found` behaviour).
+        assert_eq!(
+            chest.resolve(Some("nope")).vox_spec.0,
+            "armor.misc.chest.none"
+        );
+    }
+
+    /// EM-3.8d (pure, no assets): the weapon manifest parses its
+    /// `ToolKey`-shaped keys (`Tool("…")` / `Modular((…))`) and looks a
+    /// tool up by its [`WeaponKey`]. Locks the weapon `.vox` selection from
+    /// the equipped tool.
+    #[test]
+    fn weapon_manifest_resolves_tool_key() {
+        let ron = r#"({
+            Tool("common.items.weapons.sword.starter"): (
+                vox_spec: ("weapon.sword.starter", (-2.5, -4.0, -4.0)), color: None
+            ),
+            Modular(("common.items.modular.weapon.primary.sword.longsword", "common.items.mineral.ingot.bronze", Two)): (
+                vox_spec: ("weapon.sword.longsword.bronze-2h", (-1.5, -3.5, -5.0)), color: None
+            ),
+        })"#;
+        let weapons: HumMainWeaponSpec = ron::de::from_str(ron).expect("weapon manifest parses");
+        let starter = weapons
+            .get(&WeaponKey::Tool(
+                "common.items.weapons.sword.starter".to_owned(),
+            ))
+            .expect("starter sword resolves");
+        assert_eq!(starter.vox_spec.0, "weapon.sword.starter");
+        let modular = weapons
+            .get(&WeaponKey::Modular((
+                "common.items.modular.weapon.primary.sword.longsword".to_owned(),
+                "common.items.mineral.ingot.bronze".to_owned(),
+                Hands::Two,
+            )))
+            .expect("modular longsword resolves");
+        assert_eq!(modular.vox_spec.0, "weapon.sword.longsword.bronze-2h");
+        // An unequipped/unknown key resolves to nothing (caller drops the mesh).
+        assert!(
+            weapons
+                .get(&WeaponKey::Tool("missing".to_owned()))
+                .is_none()
         );
     }
 
@@ -1108,6 +1284,12 @@ mod tests {
             ron::de::from_str(&read_ron(HUM_ARMOR_HAND_MANIFEST)).expect("hand manifest");
         let shoulder: HumArmorShoulderSpec =
             ron::de::from_str(&read_ron(HUM_ARMOR_SHOULDER_MANIFEST)).expect("shoulder manifest");
+        let back: HumArmorBackSpec =
+            ron::de::from_str(&read_ron(HUM_ARMOR_BACK_MANIFEST)).expect("back manifest");
+        let main_weapon: HumMainWeaponSpec =
+            ron::de::from_str(&read_ron(HUM_MAIN_WEAPON_MANIFEST)).expect("weapon manifest");
+        let lantern: HumLanternSpec =
+            ron::de::from_str(&read_ron(HUM_LANTERN_MANIFEST)).expect("lantern manifest");
         let manifests = HumManifests {
             color: &color,
             head: &head,
@@ -1117,19 +1299,44 @@ mod tests {
             foot: &foot,
             hand: &hand,
             shoulder: &shoulder,
+            back: &back,
+            main_weapon: &main_weapon,
+            lantern: &lantern,
         };
-        let body = Body {
-            species: Species::Human,
-            body_type: BodyType::Male,
-            hair_style: 0,
-            beard: 0,
-            eyes: 0,
-            accessory: 0,
-            hair_color: 0,
-            skin: 0,
-            eye_color: 0,
+        let body = test_body();
+        // EM-3.8d: the embedded Warrior's real starter kit — a starter sword +
+        // worker chest/pants/sandals + a lantern. This exercises the REAL gear
+        // resolution (per-item manifest map), not just the defaults.
+        let loadout = FigureLoadout {
+            active_tool: Some(FigureTool {
+                key: WeaponKey::Tool("common.items.weapons.sword.starter".to_owned()),
+                kind: ToolKind::Sword,
+                hands: Hands::Two,
+            }),
+            chest: Some("common.items.armor.misc.chest.worker_purple_brown".to_owned()),
+            pants: Some("common.items.armor.misc.pants.worker_brown".to_owned()),
+            foot: Some("common.items.armor.misc.foot.sandals".to_owned()),
+            lantern: Some("common.items.lantern.black_0".to_owned()),
+            ..Default::default()
         };
-        let refs = humanoid_vox_refs(&manifests, &body).expect("human has a head-manifest entry");
+        let refs = humanoid_vox_refs(&manifests, &body, &loadout)
+            .expect("human has a head-manifest entry");
+        // The resolved chest must be the EQUIPPED worker chest .vox, not the
+        // default naked-torso model — proving real gear feeds the assembly.
+        assert!(
+            refs.iter()
+                .any(|r| r.vox_name == "armor.misc.chest.worker_purp_brown"),
+            "the equipped worker chest .vox must be selected, got: {:?}",
+            refs.iter().map(|r| &r.vox_name).collect::<Vec<_>>()
+        );
+        // And the starter sword .vox rides the `main` weapon bone.
+        assert!(
+            refs.iter().any(|r| matches!(r.role, HumVoxRole::Weapon {
+                bone: HumBone::Main,
+                ..
+            }) && r.vox_name == "weapon.sword.starter"),
+            "the equipped starter sword must be on the main bone"
+        );
         // Load every `.vox` (relative to voxygen.voxel).
         let voxes: Vec<DotVoxData> = refs
             .iter()

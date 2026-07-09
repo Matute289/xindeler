@@ -31,9 +31,14 @@
 //!    (humanoids additionally get a [`HumanoidFigure`] the animation drives).
 //!
 //! Still-unsupported bodies (quadruped-low, bipeds, dragons, …) are marked
-//! [`FigureBuilt`] immediately and keep their capsule. `TODO(EM-3.8d)`: the
-//! remaining bodies + real equipped gear from the inventory (v1 weapon is a
-//! fixed test sword) + lantern/back/glider bones.
+//! [`FigureBuilt`] immediately and keep their capsule.
+//!
+//! EM-3.8d: humanoids now assemble their REAL equipped gear — the mirror sends
+//! each humanoid's [`NetLoadout`] (weapon(s) + armour + lantern), which this
+//! module translates to a `FigureLoadout` and feeds to the humanoid assembly,
+//! so equipping different items on the sim character changes the Bevy figure.
+//! `TODO(EM-3.8e)`: head-slot helmets + the glider (glide-state-gated) + the
+//! remaining bodies.
 //!
 //! ## Purity
 //! 100% Bevy + `xindeler-render-voxel` (a shell crate) + `dot_vox`/`ron` — NO
@@ -47,7 +52,7 @@ use bevy::{
     reflect::TypePath,
 };
 use dot_vox::DotVoxData;
-use xindeler_protocol::{NetBody, NetVel};
+use xindeler_protocol::{NetBody, NetLoadout, NetTool, NetToolKey, NetVel};
 use xindeler_render_voxel::figure::{
     self, FigureAnim, FigureBody, LoadedPart, PartSpecRef, QS_CENTRAL_MANIFEST,
     QS_LATERAL_MANIFEST, QsCentralManifest, QsLateralManifest,
@@ -56,11 +61,14 @@ use xindeler_render_voxel::figure::{
         BmCentralManifest, BmLateralManifest, BmPartSpecRef, LoadedBmPart,
     },
     humanoid::{
-        self, HUM_ARMOR_BELT_MANIFEST, HUM_ARMOR_CHEST_MANIFEST, HUM_ARMOR_FOOT_MANIFEST,
+        self, FigureLoadout, FigureTool, FigureToolKinds, HUM_ARMOR_BACK_MANIFEST,
+        HUM_ARMOR_BELT_MANIFEST, HUM_ARMOR_CHEST_MANIFEST, HUM_ARMOR_FOOT_MANIFEST,
         HUM_ARMOR_HAND_MANIFEST, HUM_ARMOR_PANTS_MANIFEST, HUM_ARMOR_SHOULDER_MANIFEST,
-        HUM_COLOR_MANIFEST, HUM_HEAD_MANIFEST, HumAnim, HumArmorBeltSpec, HumArmorChestSpec,
-        HumArmorFootSpec, HumArmorHandSpec, HumArmorPantsSpec, HumArmorShoulderSpec, HumBone,
-        HumColorSpec, HumHeadSpec, HumManifests, HumVoxRef, LoadedHumPart,
+        HUM_COLOR_MANIFEST, HUM_HEAD_MANIFEST, HUM_LANTERN_MANIFEST, HUM_MAIN_WEAPON_MANIFEST,
+        HumAnim, HumArmorBackSpec, HumArmorBeltSpec, HumArmorChestSpec, HumArmorFootSpec,
+        HumArmorHandSpec, HumArmorPantsSpec, HumArmorShoulderSpec, HumBone, HumColorSpec,
+        HumHeadSpec, HumLanternSpec, HumMainWeaponSpec, HumManifests, HumVoxRef, LoadedHumPart,
+        WeaponKey,
     },
     quadruped_medium::{
         self, LoadedQmPart, QM_CENTRAL_MANIFEST, QM_LATERAL_MANIFEST, QmBone, QmBoneTransforms,
@@ -89,6 +97,9 @@ impl Plugin for FigureViewPlugin {
             .init_asset::<HumFootManifestAsset>()
             .init_asset::<HumHandManifestAsset>()
             .init_asset::<HumShoulderManifestAsset>()
+            .init_asset::<HumBackManifestAsset>()
+            .init_asset::<HumWeaponManifestAsset>()
+            .init_asset::<HumLanternManifestAsset>()
             .init_asset_loader::<VoxLoader>()
             .init_asset_loader::<QsCentralManifestLoader>()
             .init_asset_loader::<QsLateralManifestLoader>()
@@ -104,6 +115,9 @@ impl Plugin for FigureViewPlugin {
             .init_asset_loader::<HumFootManifestLoader>()
             .init_asset_loader::<HumHandManifestLoader>()
             .init_asset_loader::<HumShoulderManifestLoader>()
+            .init_asset_loader::<HumBackManifestLoader>()
+            .init_asset_loader::<HumWeaponManifestLoader>()
+            .init_asset_loader::<HumLanternManifestLoader>()
             .add_systems(
                 Startup,
                 (
@@ -463,7 +477,7 @@ fn classify_bodies(
     hum: Option<Res<HumanoidManifests>>,
     hum_assets: HumManifestAssets,
     query: Query<
-        (Entity, &NetBody),
+        (Entity, &NetBody, Option<&NetLoadout>),
         (
             With<NetBody>,
             Without<FigureBuilt>,
@@ -474,7 +488,7 @@ fn classify_bodies(
         ),
     >,
 ) {
-    for (entity, body) in &query {
+    for (entity, body, net_loadout) in &query {
         let figure_body = resolve_figure_body(body);
         let species_body_type = match figure_body {
             FigureBody::QuadrupedSmall { species, body_type } => (species, body_type),
@@ -541,13 +555,23 @@ fn classify_bodies(
                 continue;
             },
             FigureBody::Humanoid(hum_body) => {
-                // Humanoid path (EM-3.8b): once the humanoid manifests are all
-                // parsed, resolve the part `.vox` list and start loading them.
+                // Humanoid path (EM-3.8b/d): once the humanoid manifests are all
+                // parsed AND the entity's loadout has arrived, resolve the part
+                // `.vox` list (real equipped gear) and start loading them.
                 let (Some(hum), Some(manifests)) = (&hum, hum_assets.get()) else {
                     continue; // manifests still loading — keep the capsule, retry
                 };
                 let _ = hum; // handles kept alive by the resource
-                let Some(refs) = humanoid::humanoid_vox_refs(&manifests, &hum_body) else {
+                // EM-3.8d: the mirror gives every humanoid a `NetLoadout` at
+                // spawn; wait for it so we assemble the REAL gear (not a default
+                // stand-in). An empty loadout is still `Some(default)` → default
+                // clothing, so this only waits out the one-frame replication gap.
+                let Some(net_loadout) = net_loadout else {
+                    continue;
+                };
+                let loadout = figure_loadout_from_net(net_loadout);
+                let Some(refs) = humanoid::humanoid_vox_refs(&manifests, &hum_body, &loadout)
+                else {
                     // No head-manifest entry for this species: keep the capsule.
                     commands.entity(entity).insert(FigureBuilt);
                     continue;
@@ -562,6 +586,7 @@ fn classify_bodies(
                 commands.entity(entity).insert(PendingHumanoid {
                     parts,
                     body: hum_body,
+                    loadout,
                 });
                 continue;
             },
@@ -1041,6 +1066,21 @@ hum_manifest_asset!(
     HumShoulderManifestLoader,
     HumArmorShoulderSpec
 );
+hum_manifest_asset!(
+    HumBackManifestAsset,
+    HumBackManifestLoader,
+    HumArmorBackSpec
+);
+hum_manifest_asset!(
+    HumWeaponManifestAsset,
+    HumWeaponManifestLoader,
+    HumMainWeaponSpec
+);
+hum_manifest_asset!(
+    HumLanternManifestAsset,
+    HumLanternManifestLoader,
+    HumLanternSpec
+);
 
 /// Strong handles to the eight parsed humanoid manifests (kept alive + polled).
 #[derive(Resource)]
@@ -1053,6 +1093,9 @@ struct HumanoidManifests {
     foot: Handle<HumFootManifestAsset>,
     hand: Handle<HumHandManifestAsset>,
     shoulder: Handle<HumShoulderManifestAsset>,
+    back: Handle<HumBackManifestAsset>,
+    main_weapon: Handle<HumWeaponManifestAsset>,
+    lantern: Handle<HumLanternManifestAsset>,
 }
 
 fn load_humanoid_manifests(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -1065,6 +1108,9 @@ fn load_humanoid_manifests(mut commands: Commands, asset_server: Res<AssetServer
         foot: asset_server.load(asset_path(HUM_ARMOR_FOOT_MANIFEST, "ron")),
         hand: asset_server.load(asset_path(HUM_ARMOR_HAND_MANIFEST, "ron")),
         shoulder: asset_server.load(asset_path(HUM_ARMOR_SHOULDER_MANIFEST, "ron")),
+        back: asset_server.load(asset_path(HUM_ARMOR_BACK_MANIFEST, "ron")),
+        main_weapon: asset_server.load(asset_path(HUM_MAIN_WEAPON_MANIFEST, "ron")),
+        lantern: asset_server.load(asset_path(HUM_LANTERN_MANIFEST, "ron")),
     });
 }
 
@@ -1082,6 +1128,9 @@ struct HumManifestAssets<'w> {
     foot: Res<'w, Assets<HumFootManifestAsset>>,
     hand: Res<'w, Assets<HumHandManifestAsset>>,
     shoulder: Res<'w, Assets<HumShoulderManifestAsset>>,
+    back: Res<'w, Assets<HumBackManifestAsset>>,
+    main_weapon: Res<'w, Assets<HumWeaponManifestAsset>>,
+    lantern: Res<'w, Assets<HumLanternManifestAsset>>,
 }
 impl<'w> HumManifestAssets<'w> {
     /// Build a borrowed [`HumManifests`] once EVERY manifest has parsed; `None`
@@ -1100,7 +1149,47 @@ impl<'w> HumManifestAssets<'w> {
             foot: &self.foot.get(&m.foot)?.0,
             hand: &self.hand.get(&m.hand)?.0,
             shoulder: &self.shoulder.get(&m.shoulder)?.0,
+            back: &self.back.get(&m.back)?.0,
+            main_weapon: &self.main_weapon.get(&m.main_weapon)?.0,
+            lantern: &self.lantern.get(&m.lantern)?.0,
         })
+    }
+}
+
+/// Translates a replicated [`NetLoadout`] into the render crate's native
+/// [`FigureLoadout`] (EM-3.8d) — the client's ONE place that maps protocol data
+/// to figure input, keeping `xindeler-render-voxel` protocol-free. Armour keys
+/// pass straight through; the tool key's `NetToolKey` becomes the manifest
+/// [`WeaponKey`].
+fn figure_loadout_from_net(net: &NetLoadout) -> FigureLoadout {
+    FigureLoadout {
+        active_tool: net.active_tool.as_ref().map(figure_tool_from_net),
+        second_tool: net.second_tool.as_ref().map(figure_tool_from_net),
+        chest: net.chest.clone(),
+        belt: net.belt.clone(),
+        back: net.back.clone(),
+        pants: net.pants.clone(),
+        shoulder: net.shoulder.clone(),
+        hand: net.hand.clone(),
+        foot: net.foot.clone(),
+        lantern: net.lantern.clone(),
+    }
+}
+
+/// Maps a replicated [`NetTool`] to a render-crate [`FigureTool`].
+fn figure_tool_from_net(tool: &NetTool) -> FigureTool {
+    let key = match &tool.key {
+        NetToolKey::Tool(id) => WeaponKey::Tool(id.clone()),
+        NetToolKey::Modular {
+            primary,
+            secondary,
+            hands,
+        } => WeaponKey::Modular((primary.clone(), secondary.clone(), *hands)),
+    };
+    FigureTool {
+        key,
+        kind: tool.kind,
+        hands: tool.hands,
     }
 }
 
@@ -1109,6 +1198,9 @@ impl<'w> HumManifestAssets<'w> {
 struct PendingHumanoid {
     parts: Vec<PendingHumPart>,
     body: common::comp::humanoid::Body,
+    /// The resolved equipped gear (EM-3.8d) — drives the weapon sheathe pose at
+    /// assembly + is distilled to [`FigureToolKinds`] for per-frame animation.
+    loadout: FigureLoadout,
 }
 
 struct PendingHumPart {
@@ -1126,6 +1218,9 @@ pub struct HumanoidFigure {
     body: common::comp::humanoid::Body,
     /// One (bone, child-entity) pair per assembled part.
     parts: Vec<(HumBone, Entity)>,
+    /// The equipped tool kinds/hands (EM-3.8d) so per-frame animation sheathes
+    /// the real weapon(s) on the back with the right pose.
+    tools: FigureToolKinds,
 }
 
 /// Once every `.vox` handle of a [`PendingHumanoid`] has loaded, RECOLOUR +
@@ -1185,9 +1280,11 @@ fn build_pending_humanoids(
             })
             .collect();
         let assembled = humanoid::assemble_humanoid(&figure.body, &manifests, &loaded);
-        // Rest pose (idle at t=0) for the initial placement; animation updates
-        // it every frame (`animate_figures`).
-        let rest = humanoid::humanoid_bone_rest(&figure.body);
+        // Rest pose (idle at t=0) for the initial placement, with the REAL
+        // equipped tools so the weapon sheathes correctly from frame 0;
+        // animation updates it every frame (`animate_humanoids`).
+        let tools = figure.loadout.tool_kinds();
+        let rest = humanoid::humanoid_bone_rest(&figure.body, tools);
 
         let material = figure_material(&mut materials);
 
@@ -1215,11 +1312,12 @@ fn build_pending_humanoids(
             HumanoidFigure {
                 body: figure.body,
                 parts: part_entities,
+                tools,
             },
             FigureAnimState::default(),
         ));
 
-        info!("humanoid figure: assembled a real .vox character (default loadout + weapon)");
+        info!("humanoid figure: assembled a real .vox character (equipped gear from the sim)");
     }
 }
 
@@ -1229,12 +1327,16 @@ fn build_pending_humanoids(
 fn hum_role_essential(role: &humanoid::HumVoxRole) -> bool {
     use humanoid::HumVoxRole::*;
     match role {
-        HeadBare { .. } | Chest | Pants => true,
+        HeadBare { .. } => true,
+        // Chest + legs (the naked-torso/legs base) are core; belt/back/lantern
+        // are optional body-slot parts.
+        Body { bone, .. } => matches!(bone, HumBone::Chest | HumBone::Shorts),
         Sided { bone, .. } => matches!(
             bone,
             HumBone::HandL | HumBone::HandR | HumBone::FootL | HumBone::FootR
         ),
-        // Eyes, hair, beard, accessory, belt, shoulders, weapon — all optional.
+        // Eyes, hair, beard, accessory, belt, back, lantern, shoulders, weapon —
+        // all optional (a missing one just drops that part).
         _ => false,
     }
 }
@@ -1373,7 +1475,14 @@ fn animate_humanoids(
         } else {
             HumAnim::Idle
         };
-        let bones = humanoid::humanoid_bone_transforms(&figure.body, anim, state.acc, t, speed);
+        let bones = humanoid::humanoid_bone_transforms(
+            &figure.body,
+            anim,
+            state.acc,
+            t,
+            speed,
+            figure.tools,
+        );
         apply_bones(&figure.parts, &mut transforms, |b| bones.get(b));
     }
 }

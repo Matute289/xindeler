@@ -69,6 +69,83 @@ pub struct NetHealth {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct NetBody(pub common::comp::Body);
 
+/// Replicated figure-relevant equipped gear of a humanoid entity (EM-3.8d).
+///
+/// This is the COMPACT projection of the sim's `comp::Inventory`/loadout that
+/// the humanoid figure assembly needs — NOT the whole inventory. It carries
+/// exactly what changes the rendered figure model:
+/// - the active/second **tools** as `(ToolKey, ToolKind, Hands)` so the right
+///   weapon `.vox` sheathes on the back bone with the correct pose;
+/// - the equipped **armour** pieces per figure slot, as their
+///   item-definition-id **string** (the same key voxygen's `CharacterCacheKey`
+///   uses to look up the per-item `.vox` in the frozen armour manifests) —
+///   chest/belt/back/pants/ shoulder/hand/foot plus the lantern.
+///
+/// Everything is a plain item-id string or a small enum, so the wire cost is a
+/// handful of short strings per humanoid (sent only when it changes — the
+/// mirror dedups, see `xindeler-sim-bridge`). The client
+/// (`xindeler-render-voxel`) resolves these keys against the manifests; it
+/// stays specs-free (this is plain data). Only humanoids carry it (armour/tools
+/// only reshape the humanoid figure). Head-slot helmets + the glider are
+/// deferred to EM-3.8e (they need a species-keyed head manifest /
+/// glide-state-gated visibility we don't mirror yet), so they are intentionally
+/// absent here.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct NetLoadout {
+    /// Active main-hand tool (drives the `main` weapon bone + its sheathe
+    /// pose).
+    pub active_tool: Option<NetTool>,
+    /// Active off-hand tool (drives the `second` weapon bone), if
+    /// dual-wielding.
+    pub second_tool: Option<NetTool>,
+    /// Chest armour item-def-id (`None` = default/naked torso model).
+    pub chest: Option<String>,
+    /// Belt armour item-def-id.
+    pub belt: Option<String>,
+    /// Back armour item-def-id (cape/pack meshed on the `back` bone).
+    pub back: Option<String>,
+    /// Leg armour item-def-id (rides the `shorts` bone).
+    pub pants: Option<String>,
+    /// Shoulder armour item-def-id (sided).
+    pub shoulder: Option<String>,
+    /// Hand armour item-def-id (sided).
+    pub hand: Option<String>,
+    /// Foot armour item-def-id (sided).
+    pub foot: Option<String>,
+    /// Lantern item-def-id (meshed on the `lantern` bone at the hip).
+    pub lantern: Option<String>,
+}
+
+/// A replicated equipped tool: the weapon-manifest key plus the `ToolKind`/
+/// `Hands` the animation needs to pose it (EM-3.8d). `ToolKind`/`Hands` are the
+/// plain `common` data enums (this crate already links `common`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NetTool {
+    /// Key into the frozen `biped_weapon_manifest` (the `.vox` + offset).
+    pub key: NetToolKey,
+    /// Weapon category (Sword/Axe/…), for the back-sheathe pose.
+    pub kind: common::comp::tool::ToolKind,
+    /// One- vs two-handed (drives the sheathe placement).
+    pub hands: common::comp::tool::Hands,
+}
+
+/// The figure-manifest key of a tool, mirroring voxygen's `ToolKey` shape so
+/// the render crate can reconstruct the exact map key (EM-3.8d): a simple item
+/// id, or a modular weapon's `(primary, secondary, hands)` key.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum NetToolKey {
+    /// A non-modular tool, keyed by its item-definition-id.
+    Tool(String),
+    /// A modular weapon, keyed by `(primary-component, secondary-component,
+    /// hands)` — the
+    /// `common::comp::inventory::item::modular::ModularWeaponKey`.
+    Modular {
+        primary: String,
+        secondary: String,
+        hands: common::comp::tool::Hands,
+    },
+}
+
 /// Marks the mirrored entity that is THIS client's own player (EM-3.7b).
 ///
 /// The listen-server bridge hosts an embedded `xindeler-client-core::Client`
@@ -257,6 +334,10 @@ impl Plugin for XindelerProtocolPlugin {
             .replicate::<NetVel>()
             .replicate::<NetHealth>()
             .replicate::<NetBody>()
+            // EM-3.8d: the humanoid's figure-relevant equipped gear (weapon(s) +
+            // armour) so the client assembles the real character, not a fixed
+            // test loadout. Only humanoids carry it; a plain-data component.
+            .replicate::<NetLoadout>()
             // EM-3.7b: the local-player marker on the mirror entity so the
             // client's third-person camera knows which capsule to follow.
             .replicate::<NetLocalPlayer>();
@@ -352,6 +433,57 @@ mod tests {
         assert_eq!(*got_vel, vel);
         assert_eq!(*got_health, health);
         assert_eq!(*got_body, body);
+    }
+
+    /// EM-3.8d: `NetLoadout` (weapon + armour keys) replicates server → client
+    /// verbatim over the loopback — it is registered + serde-safe like the
+    /// other Net* comps, just carrying `String`/enum data rather than
+    /// `Copy` scalars.
+    #[test]
+    fn net_loadout_replicates() {
+        use common::comp::tool::{Hands, ToolKind};
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let loadout = NetLoadout {
+            active_tool: Some(NetTool {
+                key: NetToolKey::Tool("common.items.weapons.sword.starter".to_owned()),
+                kind: ToolKind::Sword,
+                hands: Hands::Two,
+            }),
+            second_tool: None,
+            chest: Some("common.items.armor.misc.chest.worker_purple_brown".to_owned()),
+            pants: Some("common.items.armor.misc.pants.worker_brown".to_owned()),
+            foot: Some("common.items.armor.misc.foot.sandals".to_owned()),
+            lantern: Some("common.items.lantern.black_0".to_owned()),
+            ..Default::default()
+        };
+        let body = NetBody(common::comp::Body::Humanoid(common::comp::humanoid::Body {
+            species: common::comp::humanoid::Species::Human,
+            body_type: common::comp::humanoid::BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+        }));
+        server_app
+            .world_mut()
+            .spawn((Replicated, body, loadout.clone()));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let mut q = client_app.world_mut().query::<&NetLoadout>();
+        let got = q
+            .single(client_app.world())
+            .expect("the humanoid loadout reaches the client");
+        assert_eq!(*got, loadout, "the loadout round-trips byte-for-byte");
     }
 
     /// `PlayerInput` travels client → server and surfaces as `FromClient<_>`.

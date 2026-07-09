@@ -61,6 +61,10 @@ use bevy::{
 use bevy_replicon::prelude::{ClientState, Replicated, SendTargets, ToClients};
 use common::{
     comp,
+    comp::inventory::{
+        item::{ItemDefinitionId, ItemKind, modular},
+        slot::{ArmorSlot, EquipSlot},
+    },
     event::{CreateNpcEvent, NpcBuilder},
 };
 use server::{
@@ -69,8 +73,8 @@ use server::{
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetLocalPlayer, NetOri, NetPos, NetVel, RemoveChunk,
-    TerrainAnchor,
+    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool,
+    NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -123,6 +127,14 @@ pub struct SimEntity(pub specs::Entity);
 /// entity; pruned when a sim entity disappears.
 #[derive(Resource, Default, Debug)]
 pub struct SimMirror(pub HashMap<specs::Entity, Entity>);
+
+/// Last-mirrored [`NetLoadout`] per sim entity (EM-3.8d). The loadout is a
+/// handful of `String`s, so — unlike the `Copy` position/body comps that the
+/// mirror re-inserts every tick — we only re-insert (and thus re-replicate) it
+/// when the equipped gear actually CHANGES. This cache holds the last value we
+/// sent; entries are pruned alongside [`SimMirror`] when an entity disappears.
+#[derive(Resource, Default, Debug)]
+pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
 
 /// Advances the embedded sim by one tick using Bevy's frame `dt`, then drains
 /// the sim's frontend events and errors into `tracing`.
@@ -408,6 +420,7 @@ pub struct SimEntityMirrorPlugin;
 impl Plugin for SimEntityMirrorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimMirror>()
+            .init_resource::<SimLoadoutCache>()
             .init_resource::<TestNpcState>()
             .add_systems(
                 Update,
@@ -517,12 +530,20 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
     hum.validate();
     let body: comp::Body = hum.into();
 
+    // EM-3.8d: give the test humanoid a real equipped loadout (starter sword +
+    // worker armour), so the client assembles REAL gear on it — the same gear
+    // the embedded player carries. This makes the wandering-NPC ring an
+    // independent demonstration of equipped gear even when the smoke camera
+    // frames an NPC rather than the player.
+    let inventory = humanoid_test_inventory(body);
+
     let npc = NpcBuilder::new(
         comp::Stats::new(comp::Content::Plain(format!("Test Human {index}")), body),
         body,
         comp::Alignment::Wild,
     )
     .with_health(comp::Health::new(body))
+    .with_inventory(inventory)
     .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
 
     server.state().emit_event_now(CreateNpcEvent {
@@ -530,6 +551,27 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
         ori: comp::Ori::default(),
         npc,
     });
+}
+
+/// Builds a visible starter loadout (sword + worker clothes + lantern) as an
+/// [`Inventory`](comp::Inventory) for a test humanoid NPC (EM-3.8d). Mirrors
+/// the embedded player's default Warrior kit so the gear a test NPC shows
+/// matches the player's. Requires the asset tree (item defs) — only called on
+/// the live sim, which always has it.
+fn humanoid_test_inventory(body: comp::Body) -> comp::Inventory {
+    use comp::inventory::loadout_builder::LoadoutBuilder;
+
+    let item = comp::Item::new_from_asset_expect;
+    let loadout = LoadoutBuilder::empty()
+        .active_mainhand(Some(item("common.items.weapons.sword.starter")))
+        .chest(Some(item(
+            "common.items.armor.misc.chest.worker_purple_brown",
+        )))
+        .pants(Some(item("common.items.armor.misc.pants.worker_brown")))
+        .feet(Some(item("common.items.armor.misc.foot.sandals")))
+        .lantern(Some(item("common.items.lantern.black_0")))
+        .build();
+    comp::Inventory::with_loadout(loadout, body)
 }
 
 /// Requests one wandering QUADRUPED-MEDIUM (a Wolf) at `wpos` through the sim's
@@ -617,6 +659,72 @@ impl SimServer {
     }
 }
 
+/// The item-definition-id string an armour slot's equipped item resolves to —
+/// the SAME key voxygen's `CharacterCacheKey::key_from_slot` uses to look up
+/// the per-item `.vox` in the frozen armour manifests (EM-3.8d). `None` = the
+/// slot is empty (the figure uses the manifest `default`).
+fn armor_key(inventory: &comp::Inventory, slot: EquipSlot) -> Option<String> {
+    inventory
+        .equipped(slot)
+        .map(|item| match item.item_definition_id() {
+            ItemDefinitionId::Simple(id) => id.into_owned(),
+            ItemDefinitionId::Compound { simple_base, .. } => simple_base.to_owned(),
+            ItemDefinitionId::Modular { pseudo_base, .. } => pseudo_base.to_owned(),
+        })
+}
+
+/// Builds the replicated [`NetTool`] for an equipped tool item — its
+/// weapon-manifest key ([`NetToolKey`], mirroring voxygen's `ToolKey`) plus the
+/// `ToolKind`/`Hands` the animation needs to sheathe it. `None` if the item is
+/// not actually a tool (defensive; the tool slots only hold tools).
+fn net_tool(item: &comp::Item) -> Option<NetTool> {
+    let ItemKind::Tool(tool) = &*item.kind() else {
+        return None;
+    };
+    let key = match item.item_definition_id() {
+        ItemDefinitionId::Simple(id) => NetToolKey::Tool(id.into_owned()),
+        ItemDefinitionId::Compound { simple_base, .. } => NetToolKey::Tool(simple_base.to_owned()),
+        ItemDefinitionId::Modular { .. } => {
+            // Modular weapons key on `(primary, secondary, hands)` — the same
+            // `ModularWeaponKey` the frozen weapon manifest is keyed by.
+            let (primary, secondary, hands) = modular::weapon_to_key(item);
+            NetToolKey::Modular {
+                primary,
+                secondary,
+                hands,
+            }
+        },
+    };
+    Some(NetTool {
+        key,
+        kind: tool.kind,
+        hands: tool.hands,
+    })
+}
+
+/// Projects a sim `comp::Inventory` down to the figure-relevant equipped gear
+/// the humanoid figure assembly consumes (EM-3.8d). Reads the same equip slots
+/// voxygen's figure cache does; everything else in the inventory is irrelevant
+/// to the rendered model and stays server-side.
+fn net_loadout_from_inventory(inventory: &comp::Inventory) -> NetLoadout {
+    NetLoadout {
+        active_tool: inventory
+            .equipped(EquipSlot::ActiveMainhand)
+            .and_then(net_tool),
+        second_tool: inventory
+            .equipped(EquipSlot::ActiveOffhand)
+            .and_then(net_tool),
+        chest: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Chest)),
+        belt: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Belt)),
+        back: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Back)),
+        pants: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Legs)),
+        shoulder: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Shoulders)),
+        hand: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Hands)),
+        foot: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Feet)),
+        lantern: armor_key(inventory, EquipSlot::Lantern),
+    }
+}
+
 /// Reads the sim's client-visible entities off the specs storages and UPSERTs
 /// one `Replicated` Bevy entity per sim entity carrying the replicated net
 /// components. Despawns mirrors whose sim entity has disappeared.
@@ -639,6 +747,7 @@ fn mirror_sim_entities(
     // with `NetLocalPlayer` so the client's third-person camera follows it.
     player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut mirror: bevy::ecs::system::ResMut<SimMirror>,
+    mut loadout_cache: bevy::ecs::system::ResMut<SimLoadoutCache>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
@@ -658,6 +767,8 @@ fn mirror_sim_entities(
     let bodies = ecs.read_storage::<comp::Body>();
     let healths = ecs.read_storage::<comp::Health>();
     let presences = ecs.read_storage::<comp::Presence>();
+    // EM-3.8d: read the loadout so humanoids mirror their real equipped gear.
+    let inventories = ecs.read_storage::<comp::Inventory>();
 
     // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
     // fresh every tick over all visible entities, and net_health below issues a
@@ -677,6 +788,7 @@ fn mirror_sim_entities(
         NetVel,
         NetBody,
         Option<NetHealth>,
+        Option<NetLoadout>,
     )> = Vec::new();
 
     // `maybe()` makes these MaybeJoin members, so this is a `LendJoin` (lending
@@ -690,9 +802,10 @@ fn mirror_sim_entities(
         velocities.maybe(),
         healths.maybe(),
         presences.maybe(),
+        inventories.maybe(),
     )
         .lend_join();
-    while let Some((entity, pos, body, ori, vel, health, presence)) = it.next() {
+    while let Some((entity, pos, body, ori, vel, health, presence, inventory)) = it.next() {
         // Region-map visibility predicate (see doc comment).
         if !presence.is_none_or(|p| p.kind.sync_me()) {
             continue;
@@ -714,7 +827,26 @@ fn mirror_sim_entities(
             current: h.current(),
             max: h.maximum(),
         });
-        updates.push((entity, net_pos, net_ori, net_vel, net_body, net_health));
+        // EM-3.8d: only humanoids have a figure that armour/tools reshape, so
+        // only they carry a loadout: `Body::Humanoid` → `Some(NetLoadout)`,
+        // built from the real `Inventory` when present. Every humanoid spawn
+        // path today attaches an `Inventory` atomically with `Body` (see
+        // `state_ext::create_npc`), but we still fall back to
+        // `NetLoadout::default()` rather than `None` here — the client
+        // (`figure_view::classify_bodies`) waits indefinitely for a humanoid's
+        // `NetLoadout` to arrive, so a future humanoid-spawn path that skips
+        // that invariant must not leave the figure stuck as a capsule forever.
+        let net_loadout = matches!(body, comp::Body::Humanoid(_))
+            .then(|| inventory.map_or_else(NetLoadout::default, net_loadout_from_inventory));
+        updates.push((
+            entity,
+            net_pos,
+            net_ori,
+            net_vel,
+            net_body,
+            net_health,
+            net_loadout,
+        ));
     }
     drop(it);
     // Storages borrow `ecs`; drop them before touching `commands`/`mirror`.
@@ -726,10 +858,17 @@ fn mirror_sim_entities(
         bodies,
         healths,
         presences,
+        inventories,
     ));
 
-    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health) in updates {
+    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout) in updates {
         let is_local_player = player_sim_entity == Some(sim_entity);
+        // EM-3.8d: (re-)insert the loadout ONLY when it changed since we last
+        // mirrored it (it is a few Strings — re-inserting every tick would
+        // needlessly re-replicate them). `changed` is also true on first sight.
+        let loadout_changed = net_loadout
+            .as_ref()
+            .is_some_and(|l| loadout_cache.0.get(&sim_entity) != Some(l));
         match mirror.0.get(&sim_entity).copied() {
             Some(bevy_entity) => {
                 // UPSERT: overwrite the net comps every tick (server-authoritative
@@ -743,6 +882,9 @@ fn mirror_sim_entities(
                     None => {
                         ec.remove::<NetHealth>();
                     },
+                }
+                if loadout_changed && let Some(l) = &net_loadout {
+                    ec.insert(l.clone());
                 }
                 // EM-3.7b: keep the local-player marker in sync (it never moves
                 // between entities in a session, but stay robust).
@@ -765,11 +907,18 @@ fn mirror_sim_entities(
                 if let Some(h) = net_health {
                     ec.insert(h);
                 }
+                if let Some(l) = &net_loadout {
+                    ec.insert(l.clone());
+                }
                 if is_local_player {
                     ec.insert(NetLocalPlayer);
                 }
                 mirror.0.insert(sim_entity, ec.id());
             },
+        }
+        // Refresh the dedup cache for this entity's loadout.
+        if let Some(l) = net_loadout {
+            loadout_cache.0.insert(sim_entity, l);
         }
     }
 
@@ -785,6 +934,9 @@ fn mirror_sim_entities(
         if let Some(bevy_entity) = mirror.0.remove(&sim_entity) {
             commands.entity(bevy_entity).despawn();
         }
+        // Drop the cached loadout too, so a re-used specs index doesn't inherit
+        // a stale entry (EM-3.8d).
+        loadout_cache.0.remove(&sim_entity);
     }
 }
 
@@ -968,6 +1120,63 @@ mod tests {
             },
             other => panic!("expected a QuadrupedSmall body, got {other:?}"),
         }
+    }
+
+    /// EM-3.8d: the loadout projection reads the figure-relevant equipped items
+    /// off a real `Inventory` and maps them to the right `NetLoadout` keys —
+    /// the weapon as `NetToolKey::Tool(id)` with its `ToolKind`/`Hands`,
+    /// and each armour slot as its item-definition-id string. Builds the
+    /// same starter kit the embedded player carries. Needs the asset tree
+    /// (item defs).
+    #[test]
+    #[ignore = "loads real item defs: needs the asset tree; run with XINDELER_ASSETS"]
+    fn net_loadout_reads_equipped_gear() {
+        use common::comp::tool::{Hands, ToolKind};
+
+        let body: comp::Body = comp::humanoid::Body {
+            species: comp::humanoid::Species::Human,
+            body_type: comp::humanoid::BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+        }
+        .into();
+        let inventory = humanoid_test_inventory(body);
+        let loadout = net_loadout_from_inventory(&inventory);
+
+        let tool = loadout
+            .active_tool
+            .expect("mainhand starter sword equipped");
+        assert_eq!(
+            tool.key,
+            NetToolKey::Tool("common.items.weapons.sword.starter".to_owned())
+        );
+        assert_eq!(tool.kind, ToolKind::Sword);
+        assert_eq!(tool.hands, Hands::Two);
+        assert_eq!(
+            loadout.chest.as_deref(),
+            Some("common.items.armor.misc.chest.worker_purple_brown")
+        );
+        assert_eq!(
+            loadout.pants.as_deref(),
+            Some("common.items.armor.misc.pants.worker_brown")
+        );
+        assert_eq!(
+            loadout.foot.as_deref(),
+            Some("common.items.armor.misc.foot.sandals")
+        );
+        assert_eq!(
+            loadout.lantern.as_deref(),
+            Some("common.items.lantern.black_0")
+        );
+        // Slots we didn't equip stay empty (figure uses the manifest default).
+        assert_eq!(loadout.belt, None);
+        assert_eq!(loadout.shoulder, None);
+        assert_eq!(loadout.second_tool, None);
     }
 
     /// The sim→Bevy position rotation matches the voxel converter's
