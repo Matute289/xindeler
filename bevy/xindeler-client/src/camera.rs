@@ -6,10 +6,12 @@
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, Hdr},
+    core_pipeline::prepass::DepthPrepass,
     input::mouse::AccumulatedMouseMotion,
     pbr::{AtmosphereSettings, ContactShadows, ScreenSpaceAmbientOcclusion},
     post_process::bloom::Bloom,
     prelude::*,
+    render::occlusion_culling::OcclusionCulling,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use xindeler_app::{GameplaySet, XindelerSettings};
@@ -18,6 +20,62 @@ use xindeler_oracle_host::AtmosphereProfile;
 use crate::{atmosphere, post::VignettePost};
 
 pub struct CameraRigPlugin;
+
+/// GPU occlusion culling opt-in (EM-3.10b).
+///
+/// Bevy's own docs frame `OcclusionCulling` as a *measured* optimisation:
+/// "Only enable it if you measure it to be a speedup on your scene" — it adds
+/// a two-phase depth prepass + a per-frame HZB build, so it can cost more than
+/// it saves on a scene with few/small occluders. Kept as a small local
+/// resource (like `lod::CullingConfig`), not a `GraphicsSettings` toggle,
+/// until it earns one (`xindeler-app` is out of scope for this crate's
+/// changes — see the `lod::CullingConfig` TODO for the same deferral).
+///
+/// ## EM-3.10b measurement
+/// Measured on the listen-server smoke scene (open highlands terrain +
+/// streamed chunk/fluid/sprite meshes + ~8 wandering test-NPC figures — the
+/// densest occluder set this branch could construct without altering
+/// worldgen), dev-profile build, via the `XINDELER_PERF_LOG=1` rolling
+/// frame-time log (`perf_log.rs`): two 100 s runs (`XINDELER_OCCLUSION_
+/// CULLING=0` vs `=1`), averaging the last 20 steady-state samples (~40 s,
+/// well past the terrain/figure/NPC warmup) of each:
+/// - OFF: **34.35 ms/frame** (≈29.1 fps)
+/// - ON:  **34.38 ms/frame** (≈29.1 fps)
+///
+/// No measurable difference (< 0.1%, inside run-to-run noise) — both runs
+/// were also flat at ~30 fps throughout. This windowed listen-server App
+/// runs its own render loop at DISPLAY rate (not the embedded sim's 30 TPS,
+/// which only paces the *headless* `xindeler-server-app` shell — see
+/// `xindeler-sim-bridge::tick_sim`'s doc), so the flat ~29 fps here points to
+/// vsync/present-mode capping the frame, not necessarily "no GPU headroom" —
+/// this measurement does NOT rule out a genuine GPU-render-bound cost that
+/// vsync happens to be masking; re-measure with an uncapped present mode (or
+/// on a scene dense enough to blow past the vsync ceiling) before trusting
+/// "no headroom" as the reason occlusion culling didn't help here. What IS
+/// solid: occlusion culling made no measurable difference in THIS scene,
+/// matching EM-3.10's prediction that the smoke world's few/small occluders
+/// wouldn't earn back the two-phase depth prepass + HZB cost. Ships **opt-in,
+/// default OFF** (`XINDELER_OCCLUSION_CULLING=1` to try it; `GraphicsTier`
+/// presets can wire a real toggle once `xindeler-app` picks this up, and a
+/// denser scene — a real town/dungeon site — is the honest way to re-measure
+/// this later).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct OcclusionCullingConfig {
+    pub enabled: bool,
+}
+
+impl Default for OcclusionCullingConfig {
+    fn default() -> Self {
+        // Env override so the A/B measurement above (and any future re-check
+        // on a denser scene) doesn't need a code change.
+        let enabled = std::env::var("XINDELER_OCCLUSION_CULLING")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(false);
+        Self { enabled }
+    }
+}
 
 /// System set covering the fly-cam controller (cursor grab + look + move). The
 /// listen-server player rig (`player_input`) orders its follow-camera AFTER
@@ -40,6 +98,7 @@ impl Default for FlyCamMovementEnabled {
 impl Plugin for CameraRigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlyCamMovementEnabled>()
+            .init_resource::<OcclusionCullingConfig>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -78,7 +137,11 @@ impl Default for FlyCam {
     }
 }
 
-fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
+fn spawn_camera(
+    mut commands: Commands,
+    settings: Res<XindelerSettings>,
+    occlusion: Res<OcclusionCullingConfig>,
+) {
     let graphics = &settings.graphics;
     // Spawn-time fog matches the default profile so EM-2.4's first applied
     // AtmosphereController state is a visual no-op (no boot pop).
@@ -131,6 +194,13 @@ fn spawn_camera(mut commands: Commands, settings: Res<XindelerSettings>) {
     if graphics.vignette {
         // EM-2.6: custom post-process pass (vignette + gamma placeholder).
         camera.insert(VignettePost::default());
+    }
+    if occlusion.enabled {
+        // `OcclusionCulling` requires a `DepthPrepass` on the view (Bevy
+        // ignores it otherwise); TAA already requires one via `#[require]`
+        // when enabled, but insert it explicitly so occlusion culling works
+        // even with TAA off. Idempotent — Bevy no-ops a duplicate insert.
+        camera.insert((DepthPrepass, OcclusionCulling));
     }
 }
 
