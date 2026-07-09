@@ -23,7 +23,7 @@ use bevy::transform::components::Transform;
 use serde::Deserialize;
 use vek::*;
 
-use super::{FigureAnim, FigurePart, LoadedPart, mat_to_transform};
+use super::{FigureAnim, FigurePart, LoadedPart, VoxSimple, mat_to_transform};
 use common::comp::quadruped_medium::{BodyType, Species};
 
 /// The manifest ASSET PATHS (upstream names, frozen — isolation law rule 3).
@@ -33,10 +33,9 @@ pub const QM_LATERAL_MANIFEST: &str = "voxygen.voxel.quadruped_medium_lateral_ma
 // ---------------------------------------------------------------------------
 // Manifest deser (minimal read of the frozen RON — mirrors load.rs shapes)
 // ---------------------------------------------------------------------------
-
-/// A `.vox` reference in a manifest: `("model.name")`.
-#[derive(Deserialize, Clone, Debug, Default)]
-pub struct VoxSimple(pub String);
+//
+// `VoxSimple` is imported from the parent module (EM-3.8e dedup — it used to
+// be redefined identically in every additive body module).
 
 /// One central/lateral sub-part: offset + which `.vox` + model index.
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -300,14 +299,10 @@ pub fn quadruped_medium_bone_rest(species: Species, body_type: BodyType) -> QmBo
 // Assemble
 // ---------------------------------------------------------------------------
 
-/// A loaded QM `.vox` paired back with its bone/offset/flip, ready to mesh.
-pub struct LoadedQmPart<'a> {
-    pub vox: &'a dot_vox::DotVoxData,
-    pub model_index: u32,
-    pub offset: Vec3<f32>,
-    pub flipped: bool,
-    pub bone: QmBone,
-}
+/// A loaded QM `.vox` paired back with its bone/offset/flip, ready to mesh
+/// (EM-3.8e dedup: a type alias over the shared, bone-generic [`LoadedPart`]
+/// rather than a hand-duplicated struct).
+pub type LoadedQmPart<'a> = LoadedPart<'a, QmBone>;
 
 /// Meshes each loaded part (shared figure mesher) and pairs it with its bone's
 /// transform. Parts that mesh to nothing are dropped. `bones` is the pose
@@ -319,14 +314,7 @@ pub fn assemble(parts: &[LoadedQmPart], bones: &QmBoneTransforms) -> Vec<(QmBone
     parts
         .iter()
         .filter_map(|part| {
-            let loaded = LoadedPart {
-                vox: part.vox,
-                model_index: part.model_index,
-                offset: part.offset,
-                flipped: part.flipped,
-                bone: super::FigureBoneName::Chest, // unused: we mesh directly
-            };
-            let mesh = super::figure_part_to_bevy(&loaded)?;
+            let mesh = super::figure_part_to_bevy(part)?;
             Some((part.bone, FigurePart {
                 mesh,
                 transform: bones.get(part.bone),

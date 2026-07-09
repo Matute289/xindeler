@@ -37,8 +37,10 @@
 //! each humanoid's [`NetLoadout`] (weapon(s) + armour + lantern), which this
 //! module translates to a `FigureLoadout` and feeds to the humanoid assembly,
 //! so equipping different items on the sim character changes the Bevy figure.
-//! `TODO(EM-3.8e)`: head-slot helmets + the glider (glide-state-gated) + the
-//! remaining bodies.
+//! EM-3.8e adds the two manifests EM-3.8d deferred (head-armour + glider) and
+//! reads `NetLoadout::gliding` in [`animate_humanoids`] to pick
+//! `HumAnim::Glide`. `TODO(EM-3.8f)`: the remaining bodies (quadruped-low,
+//! bipeds, dragons, …).
 //!
 //! ## Purity
 //! 100% Bevy + `xindeler-render-voxel` (a shell crate) + `dot_vox`/`ron` — NO
@@ -63,12 +65,12 @@ use xindeler_render_voxel::figure::{
     humanoid::{
         self, FigureLoadout, FigureTool, FigureToolKinds, HUM_ARMOR_BACK_MANIFEST,
         HUM_ARMOR_BELT_MANIFEST, HUM_ARMOR_CHEST_MANIFEST, HUM_ARMOR_FOOT_MANIFEST,
-        HUM_ARMOR_HAND_MANIFEST, HUM_ARMOR_PANTS_MANIFEST, HUM_ARMOR_SHOULDER_MANIFEST,
-        HUM_COLOR_MANIFEST, HUM_HEAD_MANIFEST, HUM_LANTERN_MANIFEST, HUM_MAIN_WEAPON_MANIFEST,
-        HumAnim, HumArmorBackSpec, HumArmorBeltSpec, HumArmorChestSpec, HumArmorFootSpec,
-        HumArmorHandSpec, HumArmorPantsSpec, HumArmorShoulderSpec, HumBone, HumColorSpec,
-        HumHeadSpec, HumLanternSpec, HumMainWeaponSpec, HumManifests, HumVoxRef, LoadedHumPart,
-        WeaponKey,
+        HUM_ARMOR_HAND_MANIFEST, HUM_ARMOR_HEAD_MANIFEST, HUM_ARMOR_PANTS_MANIFEST,
+        HUM_ARMOR_SHOULDER_MANIFEST, HUM_COLOR_MANIFEST, HUM_GLIDER_MANIFEST, HUM_HEAD_MANIFEST,
+        HUM_LANTERN_MANIFEST, HUM_MAIN_WEAPON_MANIFEST, HumAnim, HumArmorBackSpec,
+        HumArmorBeltSpec, HumArmorChestSpec, HumArmorFootSpec, HumArmorHandSpec, HumArmorHeadSpec,
+        HumArmorPantsSpec, HumArmorShoulderSpec, HumBone, HumColorSpec, HumGliderSpec, HumHeadSpec,
+        HumLanternSpec, HumMainWeaponSpec, HumManifests, HumVoxRef, LoadedHumPart, WeaponKey,
     },
     quadruped_medium::{
         self, LoadedQmPart, QM_CENTRAL_MANIFEST, QM_LATERAL_MANIFEST, QmBone, QmBoneTransforms,
@@ -100,6 +102,8 @@ impl Plugin for FigureViewPlugin {
             .init_asset::<HumBackManifestAsset>()
             .init_asset::<HumWeaponManifestAsset>()
             .init_asset::<HumLanternManifestAsset>()
+            .init_asset::<HumArmorHeadManifestAsset>()
+            .init_asset::<HumGliderManifestAsset>()
             .init_asset_loader::<VoxLoader>()
             .init_asset_loader::<QsCentralManifestLoader>()
             .init_asset_loader::<QsLateralManifestLoader>()
@@ -118,6 +122,8 @@ impl Plugin for FigureViewPlugin {
             .init_asset_loader::<HumBackManifestLoader>()
             .init_asset_loader::<HumWeaponManifestLoader>()
             .init_asset_loader::<HumLanternManifestLoader>()
+            .init_asset_loader::<HumArmorHeadManifestLoader>()
+            .init_asset_loader::<HumGliderManifestLoader>()
             .add_systems(
                 Startup,
                 (
@@ -415,11 +421,15 @@ pub struct FigureBuilt;
 /// (EM-3.8c). `acc` is the integrated distance (`speed * dt`) that drives the
 /// foot/flap cycle phase continuously across speed changes (polish minor a);
 /// `running` latches the idle↔run choice through a hysteresis band so an NPC
-/// hovering near the threshold doesn't flicker (polish minor b).
+/// hovering near the threshold doesn't flicker (polish minor b). `flying`
+/// (EM-3.8e) is the SAME idea for the bird-medium fly↔ground choice — birds
+/// are the only body with a third locomotion state, so this field is unused
+/// (always `false`) for every other animated body.
 #[derive(Component, Default)]
 struct FigureAnimState {
     acc: f32,
     running: bool,
+    flying: bool,
 }
 
 /// Idle→run enter / run→idle exit speeds (blocks/s). The gap is the hysteresis
@@ -427,6 +437,14 @@ struct FigureAnimState {
 /// current state (polish minor b — replaces the old single 0.4 threshold).
 const RUN_ENTER_SPEED: f32 = 0.5;
 const RUN_EXIT_SPEED: f32 = 0.3;
+
+/// Ground→fly enter / fly→ground exit VERTICAL speeds (blocks/s), the
+/// bird-medium analogue of [`RUN_ENTER_SPEED`]/[`RUN_EXIT_SPEED`] (EM-3.8e).
+/// The old single `vert > 1.0` threshold let a bird hovering right at the
+/// boundary (e.g. cresting a hop) flip fly/run every frame; the gap between
+/// `EXIT` and `ENTER` is a hold band, same hysteresis idea as the run latch.
+const FLY_ENTER_SPEED: f32 = 1.2;
+const FLY_EXIT_SPEED: f32 = 0.8;
 
 /// Updates a figure's [`FigureAnimState`] from the current ground `speed` and
 /// frame `dt`, returning whether it should animate as running. Advances the
@@ -445,6 +463,21 @@ fn step_anim_state(state: &mut FigureAnimState, speed: f32, dt: f32) -> bool {
         state.running = true;
     }
     state.running
+}
+
+/// Updates a figure's `flying` latch from the current vertical `speed`,
+/// returning whether it should animate as flying. Same hysteresis-band shape
+/// as [`step_anim_state`]'s run latch, just gated on a different signal
+/// (vertical speed, not horizontal) and threshold pair (EM-3.8e).
+fn step_fly_state(state: &mut FigureAnimState, vert: f32) -> bool {
+    if state.flying {
+        if vert < FLY_EXIT_SPEED {
+            state.flying = false;
+        }
+    } else if vert > FLY_ENTER_SPEED {
+        state.flying = true;
+    }
+    state.flying
 }
 
 /// Horizontal ground speed (blocks/s) from a replicated [`NetVel`] (Bevy axes;
@@ -1081,8 +1114,19 @@ hum_manifest_asset!(
     HumLanternManifestLoader,
     HumLanternSpec
 );
+// EM-3.8e: helmet + glider manifests.
+hum_manifest_asset!(
+    HumArmorHeadManifestAsset,
+    HumArmorHeadManifestLoader,
+    HumArmorHeadSpec
+);
+hum_manifest_asset!(
+    HumGliderManifestAsset,
+    HumGliderManifestLoader,
+    HumGliderSpec
+);
 
-/// Strong handles to the eight parsed humanoid manifests (kept alive + polled).
+/// Strong handles to the ten parsed humanoid manifests (kept alive + polled).
 #[derive(Resource)]
 struct HumanoidManifests {
     color: Handle<HumColorManifestAsset>,
@@ -1096,6 +1140,8 @@ struct HumanoidManifests {
     back: Handle<HumBackManifestAsset>,
     main_weapon: Handle<HumWeaponManifestAsset>,
     lantern: Handle<HumLanternManifestAsset>,
+    armor_head: Handle<HumArmorHeadManifestAsset>,
+    glider: Handle<HumGliderManifestAsset>,
 }
 
 fn load_humanoid_manifests(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -1111,10 +1157,12 @@ fn load_humanoid_manifests(mut commands: Commands, asset_server: Res<AssetServer
         back: asset_server.load(asset_path(HUM_ARMOR_BACK_MANIFEST, "ron")),
         main_weapon: asset_server.load(asset_path(HUM_MAIN_WEAPON_MANIFEST, "ron")),
         lantern: asset_server.load(asset_path(HUM_LANTERN_MANIFEST, "ron")),
+        armor_head: asset_server.load(asset_path(HUM_ARMOR_HEAD_MANIFEST, "ron")),
+        glider: asset_server.load(asset_path(HUM_GLIDER_MANIFEST, "ron")),
     });
 }
 
-/// A `SystemParam` bundling the eight humanoid manifest asset stores so the
+/// A `SystemParam` bundling the ten humanoid manifest asset stores so the
 /// classify system can, in one call, check they're all parsed and borrow a
 /// [`HumManifests`] view built from them.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -1131,6 +1179,8 @@ struct HumManifestAssets<'w> {
     back: Res<'w, Assets<HumBackManifestAsset>>,
     main_weapon: Res<'w, Assets<HumWeaponManifestAsset>>,
     lantern: Res<'w, Assets<HumLanternManifestAsset>>,
+    armor_head: Res<'w, Assets<HumArmorHeadManifestAsset>>,
+    glider: Res<'w, Assets<HumGliderManifestAsset>>,
 }
 impl<'w> HumManifestAssets<'w> {
     /// Build a borrowed [`HumManifests`] once EVERY manifest has parsed; `None`
@@ -1152,6 +1202,8 @@ impl<'w> HumManifestAssets<'w> {
             back: &self.back.get(&m.back)?.0,
             main_weapon: &self.main_weapon.get(&m.main_weapon)?.0,
             lantern: &self.lantern.get(&m.lantern)?.0,
+            armor_head: &self.armor_head.get(&m.armor_head)?.0,
+            glider: &self.glider.get(&m.glider)?.0,
         })
     }
 }
@@ -1173,6 +1225,8 @@ fn figure_loadout_from_net(net: &NetLoadout) -> FigureLoadout {
         hand: net.hand.clone(),
         foot: net.foot.clone(),
         lantern: net.lantern.clone(),
+        head: net.head.clone(),
+        glider: net.glider.clone(),
     }
 }
 
@@ -1442,7 +1496,11 @@ fn animate_bird_mediums(
         let horiz = ground_speed(vel);
         let vert = vel.map_or(0.0, |v| v.0.y.abs());
         let running = step_anim_state(&mut state, horiz.max(vert), dt);
-        let anim = if vert > 1.0 {
+        // EM-3.8e: hysteresis on the fly↔ground choice (was a single `vert >
+        // 1.0` threshold — flickered when a bird hovered right at the
+        // boundary).
+        let flying = step_fly_state(&mut state, vert);
+        let anim = if flying {
             FigureAnim::Fly
         } else if running {
             FigureAnim::Run
@@ -1461,16 +1519,30 @@ fn animate_bird_mediums(
     }
 }
 
-/// Animate humanoid figures (idle/run).
+/// Animate humanoid figures (idle/run/glide).
 fn animate_humanoids(
     time: Res<Time>,
-    mut figures: Query<(&HumanoidFigure, &mut FigureAnimState, Option<&NetVel>)>,
+    mut figures: Query<(
+        &HumanoidFigure,
+        &mut FigureAnimState,
+        Option<&NetVel>,
+        Option<&NetLoadout>,
+    )>,
     mut transforms: Query<&mut Transform>,
 ) {
     let (t, dt) = (time.elapsed_secs(), time.delta_secs());
-    for (figure, mut state, vel) in &mut figures {
+    for (figure, mut state, vel, net_loadout) in &mut figures {
         let speed = ground_speed(vel);
-        let anim = if step_anim_state(&mut state, speed, dt) {
+        // Advance the phase accumulator + idle/run latch every frame
+        // regardless of gliding (so it's continuous whenever gliding ends),
+        // but a glide-shaped `CharacterState` (EM-3.8e) always wins the anim
+        // choice — the mirror's `NetLoadout::gliding` flag IS the signal
+        // (see the `NetLoadout` doc comment for why it lives there).
+        let running = step_anim_state(&mut state, speed, dt);
+        let gliding = net_loadout.is_some_and(|l| l.gliding);
+        let anim = if gliding {
+            HumAnim::Glide
+        } else if running {
             HumAnim::Run
         } else {
             HumAnim::Idle
@@ -1531,5 +1603,24 @@ mod tests {
         let vel = NetVel(Vec3::new(3.0, 100.0, 4.0));
         assert!((ground_speed(Some(&vel)) - 5.0).abs() < 1e-5);
         assert_eq!(ground_speed(None), 0.0);
+    }
+
+    /// EM-3.8e: the bird fly/ground hysteresis holds state in the band between
+    /// `FLY_EXIT_SPEED` and `FLY_ENTER_SPEED`, exactly like the run latch —
+    /// replaces the old single `vert > 1.0` threshold that could flip every
+    /// frame for a bird hovering right at the boundary.
+    #[test]
+    fn fly_hysteresis_holds_state_in_the_band() {
+        let mut s = FigureAnimState::default();
+        // Below exit → grounded.
+        assert!(!step_fly_state(&mut s, 0.3));
+        // In the band (between exit and enter) → stays grounded.
+        assert!(!step_fly_state(&mut s, 1.0));
+        // Above enter → flying.
+        assert!(step_fly_state(&mut s, 1.5));
+        // Back into the band → stays flying (hysteresis, no flicker).
+        assert!(step_fly_state(&mut s, 1.0));
+        // Below exit → grounded again.
+        assert!(!step_fly_state(&mut s, 0.5));
     }
 }

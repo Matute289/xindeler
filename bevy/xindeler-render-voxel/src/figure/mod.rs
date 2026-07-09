@@ -126,7 +126,16 @@ pub struct FigurePart {
 /// manifest metadata for ONE part. Keeps this crate ignorant of the asset
 /// system: the client resolves `spec.vox` → bytes → [`DotVoxData`] and hands
 /// the parsed data in.
-pub struct LoadedPart<'a> {
+///
+/// Generic over the bone type `B` (EM-3.8e dedup — was three near-identical
+/// structs, one per additive body: [`bird_medium::LoadedBmPart`],
+/// [`quadruped_medium::LoadedQmPart`], plus this one). `B` defaults to
+/// [`FigureBoneName`] (the quadruped-small path, the type's original shape),
+/// so every existing bare `LoadedPart` reference keeps compiling unchanged;
+/// [`figure_part_to_bevy`] — the only function that actually reads this
+/// struct — never touches `bone` (it's carried purely for the CALLER to place
+/// the meshed part), so it's generic over any `B`.
+pub struct LoadedPart<'a, B = FigureBoneName> {
     /// Parsed `.vox` data for the part's model file.
     pub vox: &'a DotVoxData,
     /// Which model inside the `.vox` (upstream `model_index`).
@@ -139,7 +148,7 @@ pub struct LoadedPart<'a> {
     pub flipped: bool,
     /// Which skeleton bone this part is parented to (rest matrix looked up by
     /// the caller-provided bone table).
-    pub bone: FigureBoneName,
+    pub bone: B,
 }
 
 /// The bones a manifest-driven quadruped-small figure has (matches the
@@ -297,8 +306,12 @@ impl PartSpecRef {
 /// figure cache calls it with `Vec3::one()`), finalises the per-figure colour
 /// atlas, then samples each vertex's `atlas_pos` into `ATTRIBUTE_COLOR`.
 /// Returns `None` if the part meshes to nothing (empty `.vox`).
+///
+/// Generic over [`LoadedPart`]'s bone type — this function never reads
+/// `part.bone`, so it works unchanged for every body's own bone enum
+/// (EM-3.8e dedup).
 #[must_use]
-pub fn figure_part_to_bevy(part: &LoadedPart) -> Option<BevyMesh> {
+pub fn figure_part_to_bevy<B>(part: &LoadedPart<'_, B>) -> Option<BevyMesh> {
     let segment = Segment::from_vox(part.vox, part.flipped, part.model_index as usize, None);
     segment_to_bevy(&segment, part.offset)
 }
