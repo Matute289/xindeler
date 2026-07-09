@@ -533,6 +533,39 @@ mod tests {
         assert!(parsed.layer_count() <= MAX_LAYERS);
         // The glow kind actually carries an emissive mask.
         assert!(parsed.blocks[&BlockKind::GlowingRock].emissive_strength > 0.0);
+
+        // Regression (BL-82 EM-3.11): tree wood/leaves (and other
+        // structure-sourced solid content) must NOT resolve to Rock's
+        // `default_layer` — that was the monochrome-gray-trees bug.
+        assert_ne!(
+            layer(BlockKind::Wood),
+            parsed.default_layer,
+            "Wood must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(
+            layer(BlockKind::Leaves),
+            parsed.default_layer,
+            "Leaves must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(layer(BlockKind::Wood), layer(BlockKind::Leaves));
+        assert_ne!(
+            layer(BlockKind::GlowingMushroom),
+            parsed.default_layer,
+            "GlowingMushroom must not fall back to the default (Rock-gray) layer"
+        );
+        assert_ne!(
+            layer(BlockKind::ArtLeaves),
+            parsed.default_layer,
+            "ArtLeaves must not fall back to the default (Rock-gray) layer"
+        );
+        // Leaves must read distinctly green (not another gray tone).
+        let leaves = &parsed.blocks[&BlockKind::Leaves];
+        assert!(
+            leaves.base_color[1] > leaves.base_color[0]
+                && leaves.base_color[1] > leaves.base_color[2],
+            "Leaves base_color should be green-dominant, got {:?}",
+            leaves.base_color
+        );
     }
 
     /// Anti-chaos: hostile values come out finite and in-bounds.

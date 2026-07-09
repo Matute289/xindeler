@@ -38,5 +38,31 @@
         // from HERE (the client builds that material from this entry;
         // `alpha` defaults to 1.0 and is only consumed by fluid kinds).
         Water:       (layer: 3, base_color: (0.15, 0.35, 0.6), roughness: 0.08, metallic: 0.0, emissive_strength: 0.0, alpha: 0.6),
+
+        // --- BL-82 EM-3.11 fix: structure-sourced solid content (trees,
+        // giant mushrooms, cave flora) was falling through to `default_layer`
+        // (Rock's gray look) because these kinds had no entry here — every
+        // tree rendered as a monochrome gray silhouette. Colors are v1
+        // single-tone approximations sampled from the real per-species/
+        // per-biome ranges `world/` embeds per voxel (`world/src/layer/
+        // tree.rs` trunk colors, `assets/world/style/colors.ron`
+        // `TemperateLeaves`/`GlowingMushroom` — this palette is per-KIND, not
+        // per-voxel, same v1 simplification already accepted for Rock/Earth/
+        // GlowingRock above).
+        // Trunk: warm mid-brown (mean of the 12 per-species trunk colors in
+        // world/src/layer/tree.rs).
+        Wood:            (layer: 4, base_color: (0.38, 0.23, 0.15), roughness: 0.9,  metallic: 0.0, emissive_strength: 0.0),
+        // Canopy: mid forest green (midpoint of colors.ron's TemperateLeaves
+        // lerp range (20,100,40)..(60,120,0)).
+        Leaves:          (layer: 5, base_color: (0.16, 0.43, 0.08), roughness: 0.85, metallic: 0.0, emissive_strength: 0.0),
+        // Cave glowing mushroom caps: midpoint of the mushroom-head range
+        // (world/src/layer/mod.rs Rgb::new(30, 50..150, 50..100)) — teal-green
+        // with a soft glow. A second, bluer cavern-moss variant also exists
+        // (mod.rs Rgb::new(50, 120, 160)); this v1 single tone favors the
+        // more common mushroom-head range.
+        GlowingMushroom: (layer: 6, base_color: (0.12, 0.39, 0.29), roughness: 0.55, metallic: 0.0, emissive_strength: 0.5),
+        // Cave decorative "flower" structures (world/src/layer/cave.rs) span
+        // reds/pinks/purples; a single pink-magenta tone beats gray.
+        ArtLeaves:       (layer: 7, base_color: (0.85, 0.35, 0.55), roughness: 0.8,  metallic: 0.0, emissive_strength: 0.0),
     },
 )
