@@ -19,7 +19,7 @@ use bevy::transform::components::Transform;
 use serde::Deserialize;
 use vek::*;
 
-use super::{FigureAnim, FigurePart, LoadedPart, mat_to_transform};
+use super::{FigureAnim, FigurePart, LoadedPart, VoxSimple, mat_to_transform};
 use common::comp::bird_medium::{BodyType, Species};
 
 /// The manifest ASSET PATHS (upstream names, frozen — isolation law rule 3).
@@ -29,10 +29,9 @@ pub const BM_LATERAL_MANIFEST: &str = "voxygen.voxel.bird_medium_lateral_manifes
 // ---------------------------------------------------------------------------
 // Manifest deser
 // ---------------------------------------------------------------------------
-
-/// A `.vox` reference in a manifest: `("model.name")`.
-#[derive(Deserialize, Clone, Debug, Default)]
-pub struct VoxSimple(pub String);
+//
+// `VoxSimple` is imported from the parent module (EM-3.8e dedup — it used to
+// be redefined identically in every additive body module).
 
 /// One central/lateral sub-part: offset + which `.vox` + model index.
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -251,14 +250,10 @@ pub fn bird_medium_bone_rest(species: Species, body_type: BodyType) -> BmBoneTra
 // Assemble
 // ---------------------------------------------------------------------------
 
-/// A loaded bird `.vox` paired back with its bone/offset/flip.
-pub struct LoadedBmPart<'a> {
-    pub vox: &'a dot_vox::DotVoxData,
-    pub model_index: u32,
-    pub offset: Vec3<f32>,
-    pub flipped: bool,
-    pub bone: BmBone,
-}
+/// A loaded bird `.vox` paired back with its bone/offset/flip (EM-3.8e dedup:
+/// a type alias over the shared, bone-generic [`LoadedPart`] rather than a
+/// hand-duplicated struct).
+pub type LoadedBmPart<'a> = LoadedPart<'a, BmBone>;
 
 /// Meshes each loaded part and pairs it with its bone's transform. Empty parts
 /// dropped.
@@ -267,14 +262,7 @@ pub fn assemble(parts: &[LoadedBmPart], bones: &BmBoneTransforms) -> Vec<(BmBone
     parts
         .iter()
         .filter_map(|part| {
-            let loaded = LoadedPart {
-                vox: part.vox,
-                model_index: part.model_index,
-                offset: part.offset,
-                flipped: part.flipped,
-                bone: super::FigureBoneName::Chest, // unused: we mesh directly
-            };
-            let mesh = super::figure_part_to_bevy(&loaded)?;
+            let mesh = super::figure_part_to_bevy(part)?;
             Some((part.bone, FigurePart {
                 mesh,
                 transform: bones.get(part.bone),

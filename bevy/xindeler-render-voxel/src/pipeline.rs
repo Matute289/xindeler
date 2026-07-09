@@ -60,7 +60,7 @@ use bevy::{
         system::{Commands, Res, ResMut},
     },
     mesh::{Mesh as BevyMesh, Mesh3d},
-    pbr::{MeshMaterial3d, StandardMaterial},
+    pbr::MeshMaterial3d,
     tasks::{AsyncComputeTaskPool, Task, block_on},
     transform::components::Transform,
 };
@@ -69,7 +69,7 @@ use vek::{Aabb, Vec2 as VVec2, Vec3 as VVec3};
 
 use crate::{
     convert::{fluid_mesh_to_bevy, terrain_mesh_to_bevy},
-    material::VoxelMaterial,
+    material::{VoxelMaterial, WaterMaterial},
     mesh::terrain::generate_mesh,
 };
 
@@ -153,11 +153,12 @@ impl Default for ChunkLayerMap {
 
 /// Materials for spawned chunk entities. ONE shared terrain material for all
 /// chunks (bind-group reuse is what keeps budgeted uploads cheap) + the
-/// interim fluid material (stock transparent until EM-3.9).
+/// shared water material (EM-3.9b — animated scroll/ripple, see
+/// [`crate::material::WaterMaterialExt`]).
 #[derive(Resource, Clone)]
 pub struct ChunkMaterials {
     pub terrain: bevy::asset::Handle<VoxelMaterial>,
-    pub fluid: bevy::asset::Handle<StandardMaterial>,
+    pub fluid: bevy::asset::Handle<WaterMaterial>,
 }
 
 /// Per-frame upload budget. Default 2 (EM-3.5). Belongs in

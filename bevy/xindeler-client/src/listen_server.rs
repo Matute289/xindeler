@@ -34,13 +34,13 @@ use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
 use xindeler_app::settings::userdata_dir;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    PlayerBridgePlugin, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    boot_embedded_player, boot_test_server,
+    LodAltStreamPlugin, PlayerBridgePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
-    entity_view::EntityViewPlugin, figure_view::FigureViewPlugin, lod::LodCullingPlugin,
-    player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
+    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
+    lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
     terrain_stream::TerrainStreamPlugin,
 };
 
@@ -101,6 +101,10 @@ impl Plugin for ListenServerPlugin {
             // Server shell: the embedded local-player Client tick + input apply
             // (EM-3.7b). Specs/client crate stays inside the bridge.
             PlayerBridgePlugin,
+            // Server shell: one-shot far-terrain heightmap broadcast (EM-3.10b).
+            // Reads the embedded player's `world_data()`, so it's added after
+            // `PlayerBridgePlugin`. Specs/client-core stays inside the bridge.
+            LodAltStreamPlugin,
             // Client-side consumer of the streamed terrain.
             TerrainStreamPlugin,
             // Client-side presentation of the mirrored entities: placeholder
@@ -115,6 +119,9 @@ impl Plugin for ListenServerPlugin {
             // EM-3.10: distance-band culling of the streamed chunks + sprites
             // (frustum culling is already automatic via mesh Aabbs). Pure Bevy.
             LodCullingPlugin,
+            // EM-3.10b: coarse far-terrain mesh from the one-shot lod-alt
+            // heightmap, filling the horizon beyond the chunk band. Pure Bevy.
+            FarTerrainPlugin,
             // Client-side: keyboard/mouse → LocalPlayerInput + third-person
             // camera following the player's mirror (EM-3.7b). Pure Bevy.
             PlayerInputPlugin,

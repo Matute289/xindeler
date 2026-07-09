@@ -86,10 +86,16 @@ pub struct NetBody(pub common::comp::Body);
 /// mirror dedups, see `xindeler-sim-bridge`). The client
 /// (`xindeler-render-voxel`) resolves these keys against the manifests; it
 /// stays specs-free (this is plain data). Only humanoids carry it (armour/tools
-/// only reshape the humanoid figure). Head-slot helmets + the glider are
-/// deferred to EM-3.8e (they need a species-keyed head manifest /
-/// glide-state-gated visibility we don't mirror yet), so they are intentionally
-/// absent here.
+/// only reshape the humanoid figure).
+///
+/// EM-3.8e adds `head` (a helmet item-def-id, resolved against a
+/// species-keyed head-armour manifest) and `glider` + `gliding`. `gliding` is,
+/// strictly speaking, transient CHARACTER STATE rather than equipped GEAR —
+/// but it is bundled here (rather than as its own replicated component)
+/// because it needs exactly the change-diffing/dedup machinery this struct
+/// already has (`xindeler-sim-bridge::SimLoadoutCache`), and adding a whole
+/// second component + registration + query for one `bool` would be more
+/// machinery for no more correctness.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct NetLoadout {
     /// Active main-hand tool (drives the `main` weapon bone + its sheathe
@@ -114,6 +120,21 @@ pub struct NetLoadout {
     pub foot: Option<String>,
     /// Lantern item-def-id (meshed on the `lantern` bone at the hip).
     pub lantern: Option<String>,
+    /// Head armour (helmet) item-def-id (EM-3.8e). Unlike every other slot
+    /// there is no generic "bare helmet" default — an unequipped head shows
+    /// no extra mesh at all (the bare head model already IS the head), so
+    /// `None` means exactly that, not "use a default helmet".
+    pub head: Option<String>,
+    /// Equipped glider item-def-id (EM-3.8e). This is the ITEM, independent
+    /// of whether the character is currently airborne under it — see
+    /// `gliding` for the transient visibility signal.
+    pub glider: Option<String>,
+    /// Whether the character is currently in a glide-shaped `CharacterState`
+    /// (`Glide` or `GlideWield`) — the figure only shows the glider mesh
+    /// while this is `true` (EM-3.8e), matching voxygen's own gating (its
+    /// `Idle`/`Run` animations bake the glider bone's scale to zero; only
+    /// `Glide`/`GlideWield` scale it back to one).
+    pub gliding: bool,
 }
 
 /// A replicated equipped tool: the weapon-manifest key plus the `ToolKind`/
@@ -270,6 +291,66 @@ pub struct TerrainAnchor {
     pub wpos: [f32; 3],
 }
 
+/// Server → client: the coarse far-terrain heightmap (EM-3.10b), one
+/// downsampled altitude sample per [`Self::chunk_stride`]² chunks. Sent ONCE at
+/// boot — like [`TerrainAnchor`] — since the far terrain never changes during a
+/// session, so there is no per-tick replication cost.
+///
+/// ## Source + downsampling
+/// The embedded `client::Client`'s `world_data().lod_alt` already packs one
+/// sample per CHUNK (not per block), but a default Veloren world is
+/// 1024×1024 chunks — far too many quads for a "coarse" far-mesh. The
+/// server-side bridge (`xindeler-sim-bridge`) therefore downsamples it (simple
+/// stride-pick, capped grid dimension) and decodes each sample to a plain
+/// world-space altitude (metres, sim z-up) via the public `WorldData::alt_at`
+/// BEFORE sending, so the client does zero Veloren-specific unpacking — it
+/// just reads floats.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NetLodAlt {
+    /// Downsampled grid width/height, in samples (row-major storage below).
+    pub grid_size: [u32; 2],
+    /// How many original chunk-grid cells one downsampled sample covers, on
+    /// each axis. The client mesh spaces samples `chunk_stride *
+    /// CHUNK_EDGE` Bevy metres apart.
+    pub chunk_stride: u32,
+    /// lz4-compressed bincode of the row-major `Vec<f32>` altitude samples
+    /// (world-space metres). Row-major: `heights[y * grid_size[0] + x]`,
+    /// matching `common::grid::Grid`'s convention.
+    pub bytes: Vec<u8>,
+}
+
+impl NetLodAlt {
+    /// Serializes (bincode `legacy()`) + compresses (lz4, same scheme as
+    /// [`CompressedChunk`]) a downsampled altitude grid.
+    #[must_use]
+    pub fn encode(grid_size: [u32; 2], chunk_stride: u32, heights: &[f32]) -> Self {
+        let raw = bincode::serde::encode_to_vec(heights, bincode::config::legacy())
+            .expect("bincode serialization can only fail if a byte limit is set");
+        let mut bytes = Vec::with_capacity(raw.len() / 4 + 16);
+        let mut table = lz_fear::raw::U32Table::default();
+        lz_fear::raw::compress2(&raw, 0, &mut table, &mut bytes)
+            .expect("lz4 compression into a Vec<u8> is infallible");
+        Self {
+            grid_size,
+            chunk_stride,
+            bytes,
+        }
+    }
+
+    /// Decompresses + deserializes the payload. `None` = corrupt payload or a
+    /// length mismatch against [`Self::grid_size`] (defensive; the local
+    /// loopback can't corrupt).
+    #[must_use]
+    pub fn decode(&self) -> Option<Vec<f32>> {
+        let mut raw = Vec::with_capacity(self.bytes.len() * 2);
+        lz_fear::raw::decompress_raw(&self.bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+        let (heights, _): (Vec<f32>, _) =
+            bincode::serde::decode_from_slice(&raw, bincode::config::legacy()).ok()?;
+        let expected = self.grid_size[0] as usize * self.grid_size[1] as usize;
+        (heights.len() == expected).then_some(heights)
+    }
+}
+
 /// Logical channel lanes of the Xindeler protocol.
 ///
 /// bevy_replicon 0.41 has **no named custom-channel registry**: component
@@ -364,6 +445,16 @@ impl Plugin for XindelerProtocolPlugin {
             .make_message_independent::<RemoveChunk>();
         app.add_server_message::<TerrainAnchor>(XindelerChannel::Events.delivery())
             .make_message_independent::<TerrainAnchor>();
+        // EM-3.10b: the far-terrain heightmap, sent once (same ONE-SHOT
+        // TIMING as TerrainAnchor — decoupled from entity replication) but
+        // on the `Terrain` channel, NOT `Events` (review should-fix #3): its
+        // payload is up to ~64 KB compressed (128×128 f32 samples), size-
+        // class-comparable to `CompressedChunk` above, not a small discrete
+        // event. `Events` is Ordered/reliable — a multi-KB blob there would
+        // head-of-line-block chat/connect/disconnect messages behind it,
+        // exactly what `Terrain` (Unordered/reliable) exists to avoid.
+        app.add_server_message::<NetLodAlt>(XindelerChannel::Terrain.delivery())
+            .make_message_independent::<NetLodAlt>();
     }
 }
 
@@ -458,6 +549,10 @@ mod tests {
             pants: Some("common.items.armor.misc.pants.worker_brown".to_owned()),
             foot: Some("common.items.armor.misc.foot.sandals".to_owned()),
             lantern: Some("common.items.lantern.black_0".to_owned()),
+            // EM-3.8e: exercise the new head/glider/gliding fields too.
+            head: Some("common.items.armor.mail.bronze.head".to_owned()),
+            glider: Some("common.items.glider.basic_white".to_owned()),
+            gliding: true,
             ..Default::default()
         };
         let body = NetBody(common::comp::Body::Humanoid(common::comp::humanoid::Body {
@@ -536,6 +631,55 @@ mod tests {
 
         let decoded = encoded.decode().expect("round-trips");
         assert_eq!(decoded.get(VVec3::new(3, 4, 5)).ok(), Some(&block));
+    }
+
+    /// EM-3.10b: a downsampled altitude grid survives `encode` → `decode`
+    /// byte-for-byte (row-major, matching [`NetLodAlt::grid_size`]).
+    #[test]
+    fn net_lod_alt_round_trips() {
+        let heights: Vec<f32> = (0..12).map(|i| i as f32 * 1.5).collect();
+        let encoded = NetLodAlt::encode([4, 3], 8, &heights);
+        assert_eq!(encoded.grid_size, [4, 3]);
+        assert_eq!(encoded.chunk_stride, 8);
+        assert!(!encoded.bytes.is_empty());
+
+        let decoded = encoded.decode().expect("round-trips");
+        assert_eq!(decoded, heights);
+    }
+
+    /// A payload whose decoded length doesn't match `grid_size` is rejected
+    /// rather than silently misinterpreted (defensive against a future bug in
+    /// the sender).
+    #[test]
+    fn net_lod_alt_rejects_length_mismatch() {
+        let heights: Vec<f32> = vec![1.0, 2.0, 3.0];
+        // `encode` doesn't validate its own input — 3 elements into a
+        // declared 2×2=4 grid — so `decode` must catch the mismatch instead.
+        let encoded = NetLodAlt::encode([2, 2], 4, &heights);
+        assert_eq!(encoded.decode(), None);
+    }
+
+    /// `NetLodAlt` replicates server → client over the loopback exactly like
+    /// [`TerrainAnchor`] (a plain one-shot server message).
+    #[test]
+    fn net_lod_alt_replicates() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut app = new_app();
+        let heights = vec![10.0, 20.0, 30.0, 40.0];
+        let payload = NetLodAlt::encode([2, 2], 16, &heights);
+        app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: payload.clone(),
+        });
+        app.update();
+
+        let received: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<NetLodAlt>>()
+            .drain()
+            .collect();
+        assert_eq!(received, vec![payload]);
     }
 
     /// Listen-server path: a server writing `ToClients<CompressedChunk>` in an

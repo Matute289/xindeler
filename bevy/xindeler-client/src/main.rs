@@ -13,12 +13,14 @@
 mod atmosphere;
 mod camera;
 #[cfg(feature = "listen-server")] mod entity_view;
+#[cfg(feature = "listen-server")] mod far_terrain;
 #[cfg(feature = "listen-server")] mod figure_view;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
 #[cfg(feature = "listen-server")] mod lod;
 mod palette_material;
+mod perf_log;
 #[cfg(feature = "listen-server")]
 mod player_input;
 mod post;
@@ -83,6 +85,10 @@ fn main() -> AppExit {
         scene::DemoScenePlugin,
         // EM-3.3: VoxelMaterialExt registration + the async chunk pipeline.
         VoxelRenderPlugin,
+        // EM-3.10b: opt-in (`XINDELER_PERF_LOG=1`) periodic frame-time log,
+        // used to measure the GPU occlusion-culling toggle; a no-op system
+        // otherwise.
+        perf_log::PerfLogPlugin,
     ));
 
     // The synthetic 5×5 demo and the real listen-server terrain are mutually
@@ -116,6 +122,12 @@ fn main() -> AppExit {
                 // densest vegetation patch on open lit terrain (the figure sits
                 // in the dark spawn interior). Runs after the figure cam.
                 app.add_plugins(player_input::SmokeSpriteCamPlugin);
+                // EM-3.9b: if a fluid (water) chunk meshed anywhere in the
+                // streamed window, override once more to frame it — shows the
+                // animated water shader. No-ops (keeps sprite/figure framing)
+                // when the world seed has no nearby water. Runs after the
+                // sprite cam.
+                app.add_plugins(player_input::SmokeWaterCamPlugin);
             }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {

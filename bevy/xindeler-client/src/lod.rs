@@ -36,27 +36,27 @@
 //!   component write — the single biggest per-frame win, and far cheaper than
 //!   letting `check_visibility` frustum-test every distant grass blade.
 //!
-//! ## Deferred to EM-3.10b (documented, NOT half-shipped here)
-//! - **GPU occlusion culling**: Bevy 0.19 has `OcclusionCulling` (two-phase
-//!   HZB) but it REQUIRES a `DepthPrepass` on the view and is, per Bevy's own
-//!   docs, a *measured* optimisation ("Only enable it if you measure it to be a
-//!   speedup on your scene") that also builds an HZB acceleration structure
-//!   every frame. Our v1 smoke world is open highlands with few large
-//!   occluders, so the HZB overhead is unlikely to pay off yet, and enabling it
-//!   risks the headless offscreen smoke capture. Opt-in recipe for 3.10b: add
-//!   `DepthPrepass` +
-//!   `bevy::render::experimental::occlusion_culling::OcclusionCulling` to the
-//!   `Camera3d` (TAA already brings a depth prepass when enabled) and
-//!   benchmark.
-//! - **Far-mesh from the lod-alt heightmap**: the coarse far-terrain mesh needs
-//!   the downscaled `lod_alt`/`lod_horizon` grids, which live on the embedded
-//!   `client::Client` inside `xindeler-sim-bridge` (`world_data().lod_alt`) —
-//!   NOT on the pure-Bevy client. Shipping it is a whole new data path (a
-//!   protocol message carrying the grids + a bridge sender + a coarse CPU/GPU
-//!   mesh, à la voxygen `scene/lod.rs`). Too big for a clean v1 → EM-3.10b.
-//!   Until then the horizon beyond `chunk_render_distance` falls back to sky +
-//!   `DistanceFog` (already applied by the atmosphere rig), which reads
-//!   acceptably.
+//! ## EM-3.10b (landed on top of this module)
+//! - **GPU occlusion culling**: implemented as an opt-in
+//!   [`crate::camera::OcclusionCullingConfig`] (`DepthPrepass` +
+//!   `bevy::render::occlusion_culling::OcclusionCulling` on the `Camera3d`,
+//!   Bevy's own documented recipe). Measured on the listen-server smoke scene
+//!   via the `XINDELER_PERF_LOG` rolling frame-time log — see
+//!   `camera::OcclusionCullingConfig`'s doc comment for the verdict and the
+//!   task report for the raw numbers. Shipped **opt-in, default OFF**
+//!   (`XINDELER_OCCLUSION_CULLING=1` to try it): the sparse-occluder prediction
+//!   below held, so the HZB overhead isn't earning its keep on this scene yet.
+//! - **Far-mesh from the lod-alt heightmap**: landed in `xindeler-client::
+//!   far_terrain` (+ `xindeler-sim-bridge::send_lod_alt_once` /
+//!   `xindeler_protocol::NetLodAlt`) — a coarse, vertex-coloured mesh built
+//!   once from the server's downsampled `lod_alt` grid, filling the horizon
+//!   beyond [`CullingConfig::chunk_render_distance`] with a fixed cutout hole
+//!   around the boot anchor so it never overlaps the near terrain. A
+//!   camera-following (rather than anchor-fixed) hole is deferred to EM-3.10c,
+//!   once the player can roam far from the boot anchor (needs interest
+//!   management, EM-4.2d, first). Until then the previous sky + `DistanceFog`
+//!   fallback still covers the (today unreachable) case where no embedded
+//!   player exists to source the heightmap.
 //!
 //! ## Purity
 //! 100% Bevy + the public `xindeler-render-voxel` chunk-mesh markers + this

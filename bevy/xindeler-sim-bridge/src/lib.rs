@@ -73,8 +73,8 @@ use server::{
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool,
-    NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
+    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetLodAlt, NetOri, NetPos,
+    NetTool, NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -387,6 +387,114 @@ fn stream_terrain_changes(
 }
 
 // ---------------------------------------------------------------------------
+// EM-3.10b — far-terrain heightmap (one-shot lod_alt broadcast)
+// ---------------------------------------------------------------------------
+
+/// Downsample cap: the client far-mesh is a coarse LOD proxy, not full-res
+/// terrain, so the sent grid is bounded to at most this many samples per axis
+/// regardless of world size. A default Veloren world's `lod_alt` already
+/// packs only one sample per CHUNK (not per block) — but a default world is
+/// 1024×1024 chunks, which is still far too many quads for a "coarse"
+/// far-mesh and a needlessly large one-shot payload. [`send_lod_alt_once`]
+/// stride-samples down to this cap.
+const LOD_ALT_MAX_DIM: u32 = 128;
+
+/// One-shot latch for the EM-3.10b far-terrain heightmap broadcast.
+#[derive(Resource, Default)]
+pub struct LodAltState {
+    sent: bool,
+}
+
+/// Registers [`LodAltState`] + [`send_lod_alt_once`]. Same gate as the terrain
+/// stream (`ClientState::Disconnected`, i.e. this App is the terrain/entity
+/// SOURCE). Add AFTER [`PlayerBridgePlugin`] (reads [`EmbeddedPlayer`]).
+pub struct LodAltStreamPlugin;
+
+impl Plugin for LodAltStreamPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LodAltState>().add_systems(
+            Update,
+            send_lod_alt_once.run_if(in_state(ClientState::Disconnected)),
+        );
+    }
+}
+
+/// Pure stride/grid-dimension math for [`send_lod_alt_once`]'s downsample,
+/// split out so it's unit-testable without a real `WorldData`/`Client`
+/// (review should-fix #4 — this arithmetic had zero direct coverage).
+/// `stride` is how many chunks one sampled cell covers (≥1, so a world at or
+/// below [`LOD_ALT_MAX_DIM`] is sampled 1:1); `grid_w`/`grid_h` are the
+/// resulting sample-grid dimensions (each ≥1, even for a degenerate 0-sized
+/// input axis, so callers never divide by zero downstream).
+fn lod_alt_grid_dims(chunk_w: u16, chunk_h: u16) -> (u32, u32, u32) {
+    let stride = u32::from(chunk_w.max(chunk_h))
+        .div_ceil(LOD_ALT_MAX_DIM)
+        .max(1);
+    let grid_w = u32::from(chunk_w).div_ceil(stride).max(1);
+    let grid_h = u32::from(chunk_h).div_ceil(stride).max(1);
+    (stride, grid_w, grid_h)
+}
+
+/// Broadcasts the downsampled `lod_alt` heightmap ONCE, as soon as the
+/// embedded local-player [`EmbeddedPlayer`] exists (its `world_data()` is
+/// populated synchronously inside `Client::new`, well before the player
+/// reaches in-game — see [`EmbeddedPlayer::world_data`]).
+///
+/// v1 has no spectator-only path: without an embedded player (persister
+/// fallback only), there is no `Client`/`WorldData` to read from, so the far
+/// mesh simply never arrives and the client keeps the sky+fog fallback — the
+/// same acceptable degradation `xindeler_client::lod` documents for the
+/// culling-only v1.
+fn send_lod_alt_once(
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
+    mut state: bevy::ecs::system::ResMut<LodAltState>,
+    mut writer: MessageWriter<ToClients<NetLodAlt>>,
+) {
+    if state.sent {
+        return;
+    }
+    let Some(player) = player else { return };
+    let world_data = player.world_data();
+    let size = world_data.chunk_size(); // Vec2<u16>, chunk-grid dimensions
+    if size.x == 0 || size.y == 0 {
+        return; // not populated yet (shouldn't happen once the Client exists)
+    }
+
+    let (stride, grid_w, grid_h) = lod_alt_grid_dims(size.x, size.y);
+
+    let mut heights = Vec::with_capacity((grid_w * grid_h) as usize);
+    for j in 0..grid_h {
+        for i in 0..grid_w {
+            let cx = (i * stride).min(u32::from(size.x) - 1);
+            let cy = (j * stride).min(u32::from(size.y) - 1);
+            #[expect(clippy::cast_possible_wrap, reason = "chunk coords ≪ i32::MAX")]
+            let alt = world_data
+                .alt_at(vek::Vec2::new(cx as i32, cy as i32))
+                .unwrap_or(0.0);
+            heights.push(alt);
+        }
+    }
+
+    // TODO(EM-4.2d): `targets: All` + a global `sent` latch only reaches
+    // clients connected AT the single broadcast — a client joining after it
+    // never receives the far-terrain heightmap (same accepted limitation as
+    // `TerrainAnchor` above). Fine for v1's one-embedded-player world; needs
+    // a per-connection "have I sent this yet" once real multi-client join
+    // timing matters (interest management lands in EM-4.2d anyway).
+    writer.write(ToClients {
+        targets: SendTargets::All,
+        message: NetLodAlt::encode([grid_w, grid_h], stride, &heights),
+    });
+    state.sent = true;
+    tracing::info!(
+        grid_w,
+        grid_h,
+        stride,
+        "far-terrain lod-alt grid broadcast (EM-3.10b)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // EM-3.7 — entity mirror (sim specs entities → replicated Bevy entities)
 // ---------------------------------------------------------------------------
 
@@ -553,11 +661,15 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
     });
 }
 
-/// Builds a visible starter loadout (sword + worker clothes + lantern) as an
+/// Builds a visible starter loadout (sword + worker clothes + lantern + a
+/// bronze-mail head cap + a glider — EM-3.8e) as an
 /// [`Inventory`](comp::Inventory) for a test humanoid NPC (EM-3.8d). Mirrors
-/// the embedded player's default Warrior kit so the gear a test NPC shows
-/// matches the player's. Requires the asset tree (item defs) — only called on
-/// the live sim, which always has it.
+/// the embedded player's default Warrior kit (the head cap matches the
+/// Warrior's real `warrior.ron` bronze-mail set) so the gear a test NPC shows
+/// matches the player's, PLUS a helmet the Warrior's actual starter loadout
+/// doesn't include, so the smoke screenshot has something to show the new
+/// EM-3.8e helmet rendering on. Requires the asset tree (item defs) — only
+/// called on the live sim, which always has it.
 fn humanoid_test_inventory(body: comp::Body) -> comp::Inventory {
     use comp::inventory::loadout_builder::LoadoutBuilder;
 
@@ -570,6 +682,8 @@ fn humanoid_test_inventory(body: comp::Body) -> comp::Inventory {
         .pants(Some(item("common.items.armor.misc.pants.worker_brown")))
         .feet(Some(item("common.items.armor.misc.foot.sandals")))
         .lantern(Some(item("common.items.lantern.black_0")))
+        .head(Some(item("common.items.armor.mail.bronze.head")))
+        .glider(Some(item("common.items.glider.basic_white")))
         .build();
     comp::Inventory::with_loadout(loadout, body)
 }
@@ -706,7 +820,11 @@ fn net_tool(item: &comp::Item) -> Option<NetTool> {
 /// the humanoid figure assembly consumes (EM-3.8d). Reads the same equip slots
 /// voxygen's figure cache does; everything else in the inventory is irrelevant
 /// to the rendered model and stays server-side.
-fn net_loadout_from_inventory(inventory: &comp::Inventory) -> NetLoadout {
+///
+/// `gliding` (EM-3.8e) is NOT read from the inventory — it's the caller's
+/// `CharacterState`-derived signal (see [`is_gliding`]), passed straight
+/// through onto [`NetLoadout::gliding`].
+fn net_loadout_from_inventory(inventory: &comp::Inventory, gliding: bool) -> NetLoadout {
     NetLoadout {
         active_tool: inventory
             .equipped(EquipSlot::ActiveMainhand)
@@ -722,7 +840,24 @@ fn net_loadout_from_inventory(inventory: &comp::Inventory) -> NetLoadout {
         hand: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Hands)),
         foot: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Feet)),
         lantern: armor_key(inventory, EquipSlot::Lantern),
+        head: armor_key(inventory, EquipSlot::Armor(ArmorSlot::Head)),
+        glider: armor_key(inventory, EquipSlot::Glider),
+        gliding,
     }
+}
+
+/// Whether a sim `CharacterState` is glide-shaped — the figure should show
+/// the glider mesh (EM-3.8e). Matches voxygen: both `Glide` (actively
+/// airborne) AND `GlideWield` (the glider-out, pre-jump pose) render the
+/// glider (`next.glider.scale = Vec3::one()` in both animations); the client
+/// approximates both with a single glide animation rather than modelling
+/// `GlideWield`'s distinct pose separately — a deliberate simplification, not
+/// a gating bug.
+fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
+    // Reuse the sim's own `Glide | GlideWield` predicate rather than
+    // hand-rolling the match, so a future upstream change to what counts as
+    // "glide-shaped" can't silently drift between the two copies.
+    character_state.is_some_and(comp::CharacterState::is_glide_wielded)
 }
 
 /// Reads the sim's client-visible entities off the specs storages and UPSERTs
@@ -769,6 +904,9 @@ fn mirror_sim_entities(
     let presences = ecs.read_storage::<comp::Presence>();
     // EM-3.8d: read the loadout so humanoids mirror their real equipped gear.
     let inventories = ecs.read_storage::<comp::Inventory>();
+    // EM-3.8e: read whether each entity is currently gliding, for the
+    // NetLoadout::gliding figure-visibility flag.
+    let character_states = ecs.read_storage::<comp::CharacterState>();
 
     // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
     // fresh every tick over all visible entities, and net_health below issues a
@@ -803,9 +941,12 @@ fn mirror_sim_entities(
         healths.maybe(),
         presences.maybe(),
         inventories.maybe(),
+        character_states.maybe(),
     )
         .lend_join();
-    while let Some((entity, pos, body, ori, vel, health, presence, inventory)) = it.next() {
+    while let Some((entity, pos, body, ori, vel, health, presence, inventory, character_state)) =
+        it.next()
+    {
         // Region-map visibility predicate (see doc comment).
         if !presence.is_none_or(|p| p.kind.sync_me()) {
             continue;
@@ -836,8 +977,16 @@ fn mirror_sim_entities(
         // (`figure_view::classify_bodies`) waits indefinitely for a humanoid's
         // `NetLoadout` to arrive, so a future humanoid-spawn path that skips
         // that invariant must not leave the figure stuck as a capsule forever.
-        let net_loadout = matches!(body, comp::Body::Humanoid(_))
-            .then(|| inventory.map_or_else(NetLoadout::default, net_loadout_from_inventory));
+        let gliding = is_gliding(character_state);
+        let net_loadout = matches!(body, comp::Body::Humanoid(_)).then(|| {
+            inventory.map_or_else(
+                || NetLoadout {
+                    gliding,
+                    ..NetLoadout::default()
+                },
+                |inv| net_loadout_from_inventory(inv, gliding),
+            )
+        });
         updates.push((
             entity,
             net_pos,
@@ -859,6 +1008,7 @@ fn mirror_sim_entities(
         healths,
         presences,
         inventories,
+        character_states,
     ));
 
     for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout) in updates {
@@ -990,6 +1140,56 @@ mod tests {
     use xindeler_protocol::XindelerProtocolPlugin;
 
     use super::*;
+
+    /// A world at/under the cap is sampled 1:1 (stride 1, grid == chunk
+    /// size) — the common case for any dev/test world smaller than 128×128.
+    #[test]
+    fn lod_alt_grid_dims_under_cap_is_1_to_1() {
+        assert_eq!(lod_alt_grid_dims(64, 64), (1, 64, 64));
+        assert_eq!(lod_alt_grid_dims(128, 128), (1, 128, 128));
+    }
+
+    /// Non-square world: stride is driven by the LARGER axis, and each axis
+    /// downsamples independently by that same stride (not two different
+    /// strides), matching `send_lod_alt_once`'s single `stride` field.
+    #[test]
+    fn lod_alt_grid_dims_non_square_world() {
+        // max(1024, 256) = 1024 -> stride = ceil(1024/128) = 8.
+        assert_eq!(lod_alt_grid_dims(1024, 256), (8, 128, 32));
+    }
+
+    /// The default production Veloren world size — the exact case that
+    /// motivated the downsample (1024×1024 chunks, uncapped, would be a
+    /// 1024×1024 = 1Mi-sample payload).
+    #[test]
+    fn lod_alt_grid_dims_default_world_size() {
+        assert_eq!(lod_alt_grid_dims(1024, 1024), (8, 128, 128));
+    }
+
+    /// A non-power-of-two size that doesn't divide the cap evenly still
+    /// yields a grid that covers the WHOLE world (`div_ceil`, not `/`) and
+    /// never exceeds `LOD_ALT_MAX_DIM` on either axis.
+    #[test]
+    fn lod_alt_grid_dims_non_power_of_two() {
+        let (stride, grid_w, grid_h) = lod_alt_grid_dims(1000, 777);
+        assert_eq!(stride, 8); // ceil(1000/128) = 8
+        assert_eq!(grid_w, 125); // ceil(1000/8) = 125
+        assert_eq!(grid_h, 98); // ceil(777/8) = 98 (covers all 777, not 776)
+        assert!(grid_w <= LOD_ALT_MAX_DIM && grid_h <= LOD_ALT_MAX_DIM);
+    }
+
+    /// A degenerate 0-sized axis still yields `grid >= 1` (never 0), so
+    /// `send_lod_alt_once`'s `heights` Vec is never empty by construction —
+    /// callers guard the *real* 0-size case earlier (`size.x == 0 ...
+    /// return`), but the pure function itself must not divide-by-zero or
+    /// underflow if ever called with one.
+    #[test]
+    fn lod_alt_grid_dims_zero_axis_never_yields_zero_grid() {
+        let (stride, grid_w, grid_h) = lod_alt_grid_dims(0, 64);
+        assert_eq!(stride, 1);
+        assert_eq!(grid_w, 1);
+        assert_eq!(grid_h, 64);
+    }
 
     /// EM-1.5 acceptance: boot a real test-world `Server` and tick it 100×
     /// inside a headless Bevy `App`.
@@ -1146,7 +1346,7 @@ mod tests {
         }
         .into();
         let inventory = humanoid_test_inventory(body);
-        let loadout = net_loadout_from_inventory(&inventory);
+        let loadout = net_loadout_from_inventory(&inventory, false);
 
         let tool = loadout
             .active_tool
@@ -1173,10 +1373,44 @@ mod tests {
             loadout.lantern.as_deref(),
             Some("common.items.lantern.black_0")
         );
+        // EM-3.8e: the helmet + glider items resolve too.
+        assert_eq!(
+            loadout.head.as_deref(),
+            Some("common.items.armor.mail.bronze.head")
+        );
+        assert_eq!(
+            loadout.glider.as_deref(),
+            Some("common.items.glider.basic_white")
+        );
         // Slots we didn't equip stay empty (figure uses the manifest default).
         assert_eq!(loadout.belt, None);
         assert_eq!(loadout.shoulder, None);
         assert_eq!(loadout.second_tool, None);
+        // `gliding` passes straight through from the caller's argument.
+        assert!(!loadout.gliding);
+        let gliding_loadout = net_loadout_from_inventory(&inventory, true);
+        assert!(gliding_loadout.gliding);
+    }
+
+    /// EM-3.8e (no assets): `is_gliding` matches voxygen's own glider-mesh
+    /// gating — both `Glide` and `GlideWield` show the glider, everything
+    /// else (including no `CharacterState` at all) doesn't. `Glide` is
+    /// positive-tested with a real value (its `Data::new` constructor is
+    /// public); `GlideWield::Data` has no public constructor outside a full
+    /// `JoinData` (sim-tick context, not constructible in a unit test) — its
+    /// `true` branch is exercised by `is_gliding` delegating to
+    /// `CharacterState::is_glide_wielded`, which is unit-tested in
+    /// `common::comp::character_state` instead.
+    #[test]
+    fn is_gliding_matches_glide_and_glide_wield_only() {
+        assert!(!is_gliding(None));
+        assert!(!is_gliding(Some(&comp::CharacterState::Idle(
+            Default::default()
+        ))));
+        assert!(!is_gliding(Some(&comp::CharacterState::Sit)));
+        assert!(is_gliding(Some(&comp::CharacterState::Glide(
+            common::states::glide::Data::new(1.0, 1.0, comp::Ori::default())
+        ))));
     }
 
     /// The sim→Bevy position rotation matches the voxel converter's
