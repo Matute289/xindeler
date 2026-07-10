@@ -10,6 +10,7 @@ use bevy::{
     ecs::schedule::IntoScheduleConfigs,
 };
 use tokio::sync::Notify;
+use xindeler_oracle_host::{AiGatewayConfig, AiGatewayPlugin};
 
 use crate::{
     metrics,
@@ -35,13 +36,23 @@ impl Plugin for SimServerPlugin {
 
         let shutdown_flag = shutdown::register_signals();
 
+        let metrics_registry = Arc::clone(sim.server.metrics_registry());
         let metrics_shutdown = Arc::new(Notify::new());
         metrics::spawn(
             &sim.runtime,
-            Arc::clone(sim.server.metrics_registry()),
+            Arc::clone(&metrics_registry),
             self.config.metrics_addr,
             Arc::clone(&metrics_shutdown),
         );
+
+        // EM-4.2e: AI-gateway config/metrics seam. Registers 2 zero-value
+        // counters on the SAME registry `/metrics` above serves; makes no
+        // real AI call (see `xindeler_oracle_host::ai_gateway`'s doc
+        // comment).
+        app.add_plugins(AiGatewayPlugin {
+            config: AiGatewayConfig::default(),
+            registry: metrics_registry,
+        });
 
         app.insert_non_send(sim);
         app.insert_resource(ShutdownState {

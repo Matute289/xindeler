@@ -85,6 +85,10 @@ tracing-subscriber = { workspace = true }
 # is in scope).
 prometheus = { workspace = true }
 prometheus-hyper = { workspace = true }
+# EM-4.2e: `AiGatewayPlugin` registers its 2 zero-value AI-gateway counters on
+# this shell's own metrics registry at boot (`plugin.rs`) — config/metrics
+# seam only, makes zero real AI calls.
+xindeler-oracle-host = { path = "../xindeler-oracle-host" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

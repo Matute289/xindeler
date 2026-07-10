@@ -19,3 +19,13 @@ bevy = { version = "=0.19.0", default-features = false, features = [
 ] }
 ron = { workspace = true }
 serde = { workspace = true }
+# EM-4.2e: `ai_gateway` registers its 2 zero-value counters on the SAME
+# `prometheus::Registry` `xindeler-server-app::metrics` already wires.
+prometheus = { workspace = true }
+# EM-4.2e: `AiExecutionMode` lives in the low-level, few-deps `xindeler-protocol`
+# crate (not here) so `xindeler-sim-bridge` — which already depends on
+# `xindeler-protocol`, not on this crate — can read it with zero new
+# dependency edges; this crate takes the one new (and directionally correct,
+# higher-level -> lower-level) edge instead, to embed the type in
+# `AiGatewayConfig`. See `ai_gateway`'s module doc for the full reasoning.
+xindeler-protocol = { path = "../xindeler-protocol" }

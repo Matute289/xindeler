@@ -40,3 +40,8 @@ common = { package = "xindeler-common", path = "../../common", features = [
     "no-assets",
 ] }
 vek = { workspace = true }
+
+[dev-dependencies]
+# BL-82 EM-4.2e: `ai_mode`'s round-trip test parses/serializes `AiExecutionMode`
+# via RON, the same crate every other RON-loadable type in this workspace uses.
+ron = { workspace = true }

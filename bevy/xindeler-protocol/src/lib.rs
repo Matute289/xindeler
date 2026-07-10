@@ -14,6 +14,8 @@
 //! (`AppRuleExt::replicate` / `ClientMessageAppExt::add_client_message` need
 //! replicon's registries in place).
 
+pub mod ai_mode;
+
 use bevy::{
     app::{App, Plugin},
     ecs::{component::Component, message::Message, resource::Resource},
@@ -22,6 +24,8 @@ use bevy::{
 use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt, ServerMessageAppExt};
 use common::terrain::TerrainChunk;
 use serde::{Deserialize, Serialize};
+
+pub use crate::ai_mode::AiExecutionMode;
 
 /// Replicated world position of an entity (server-authoritative).
 ///
