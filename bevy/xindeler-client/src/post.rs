@@ -12,7 +12,16 @@
 
 use bevy::{
     asset::embedded_asset,
-    core_pipeline::fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin},
+    core_pipeline::{
+        Core3dSystems,
+        fullscreen_material::{FullscreenMaterial, FullscreenMaterialPlugin},
+        tonemapping::tonemapping,
+    },
+    ecs::{
+        schedule::{IntoScheduleConfigs, ScheduleConfigs},
+        system::BoxedSystem,
+    },
+    post_process::bloom::bloom,
     prelude::*,
     render::{extract_component::ExtractComponent, render_resource::ShaderType},
     shader::ShaderRef,
@@ -45,8 +54,31 @@ impl FullscreenMaterial for VignettePost {
         // (crate `src/` prefix is trimmed by the embedded source).
         "embedded://xindeler_client/post.wgsl".into()
     }
-    // Default schedule slot: Core3d, Core3dSystems::PostProcess, before
-    // tonemapping.
+
+    /// EM-3.11k (brightness/contrast flicker): the trait's DEFAULT
+    /// `schedule_configs` only orders this pass `.before(tonemapping)` —
+    /// bevy's own `bloom` system (`bevy_post_process::bloom::bloom`) carries
+    /// the SAME constraint (`.before(tonemapping)`) and nothing else, so the
+    /// two `Core3dSystems::PostProcess` systems have NO ordering relative to
+    /// EACH OTHER. Confirmed by an instrumented offscreen-capture harness
+    /// (since reverted) that isolated every camera effect flag one at a
+    /// time: enabling ONLY `bloom` + this vignette pass together (all other
+    /// effects off) reproduced a one-frame brightness/contrast pop,
+    /// alternating almost every other frame during camera rotation (50
+    /// occurrences in a 900-frame capture) — while NEITHER effect alone, nor
+    /// any other combination tried, reproduced it. Both passes read/write
+    /// the camera's ping-ponged `ViewTarget` (`post_process_write`), so an
+    /// unconstrained relative order between them is exactly the kind of
+    /// ambiguity that can leave a stale/incorrectly-ordered read on some
+    /// schedule builds — pin it explicitly: vignette must darken the FINAL
+    /// (already-bloomed) image, so it belongs strictly after bloom, not
+    /// racing it.
+    fn schedule_configs(system: ScheduleConfigs<BoxedSystem>) -> ScheduleConfigs<BoxedSystem> {
+        system
+            .in_set(Core3dSystems::PostProcess)
+            .before(tonemapping)
+            .after(bloom)
+    }
 }
 
 pub struct PostProcessPlugin;
