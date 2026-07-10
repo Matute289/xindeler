@@ -63,3 +63,17 @@ specs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# EM-4.6 (T47.8) `tests/teardown_asset_gc.rs`: proves the VRAM half of the
+# teardown acceptance bar (`Assets<Mesh>::len()` returns to baseline after a
+# `DimensionRoot` cascade-despawn) using the REAL `bevy::mesh::Mesh` asset
+# type. Cargo unifies dev-dependency features into ONLY this crate's own
+# test/bench targets — a normal (non-test) build of `xindeler-dimensions`
+# (and every crate that depends on it) does NOT gain these features; nothing
+# in `src/` uses `Mesh`/`Assets`. Same two feature flags (`bevy_mesh` +
+# `bevy_asset`), same "neither pulls bevy_render/wgpu" verification,
+# `xindeler-render-voxel/Cargo.toml`'s `convert` feature already documents in
+# detail — re-verified here rather than re-derived.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "bevy_mesh",
+    "bevy_asset",
+] }
