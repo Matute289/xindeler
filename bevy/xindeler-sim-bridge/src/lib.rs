@@ -81,12 +81,20 @@
 //!   fallback and the wandering test NPCs cover the acceptance test's "at least
 //!   one replicated entity + one terrain chunk" bar on their own, same as they
 //!   already do for the listen-server's own spectator fallback path.
+//! - EM-4.7 (the generic entity factory's sim-side half): [`entity_factory`]
+//!   reads any `PendingEntityTemplateSpawn` staging entity (created by
+//!   `xindeler_oracle_host::entity_template::spawn_entity_template`) and turns
+//!   it into a real sim NPC through the SAME public event bus
+//!   [`spawn_test_npcs`] uses — see that module's doc comment for the full
+//!   design (why it lives here, not in `xindeler-oracle-host`).
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
 
+mod entity_factory;
 mod player;
+pub use entity_factory::apply_pending_entity_template_spawns;
 pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
 
 use std::{
@@ -817,7 +825,19 @@ impl Plugin for SimEntityMirrorPlugin {
             .init_resource::<AuroraOverlay>()
             .add_systems(
                 FixedUpdate,
-                (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
+                (
+                    spawn_test_npcs,
+                    // EM-4.7: resolves any `PendingEntityTemplateSpawn`
+                    // staging entity (created by
+                    // `xindeler_oracle_host::entity_template::
+                    // spawn_entity_template`) into a real sim NPC through
+                    // the SAME public event bus `spawn_test_npcs` uses,
+                    // BEFORE the mirror runs so the new NPC is visible the
+                    // same tick it spawns.
+                    entity_factory::apply_pending_entity_template_spawns,
+                    mirror_sim_entities,
+                    tick_aurora_overlay,
+                )
                     .chain()
                     .after(tick_sim)
                     .after(ensure_default_dimension)
@@ -2484,6 +2504,246 @@ mod tests {
         assert!(
             occupants >= 1,
             "the mirrored NPC should count as a dimension-0 occupant, got {occupants}"
+        );
+    }
+
+    /// BL-82 EM-4.7 end-to-end acceptance: a `.entity_template.ron`-shaped
+    /// `EntityTemplate` (body/stats/faction/loot/`ai_behavior_override`),
+    /// spawned via `spawn_entity_template`, becomes a REAL sim NPC — through
+    /// the exact chain this task's checklist demands:
+    /// `spawn_entity_template` (Bevy staging entity) →
+    /// `apply_pending_entity_template_spawns` (this crate's adapter, sim's
+    /// public event bus) → `mirror_sim_entities` (the EXISTING, unmodified
+    /// mirror) → a client-visible `NetBody`/`NetUid` entity — proving the
+    /// "verbatim reuse of EM-3.8's figure pipeline" claim structurally: the
+    /// client-visible shape is indistinguishable from
+    /// `spawn_test_npcs`'s own test NPCs, which the figure pipeline already
+    /// renders. `Agent`/`Psyche` presets are asserted directly on the sim
+    /// entity (the concrete, checkable proof that `ai_behavior_override`
+    /// really tunes the real `server-agent` `Agent`, not a stand-in).
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
+    fn entity_template_factory_spawns_a_real_agro_npc_and_mirrors_it() {
+        use xindeler_oracle_host::entity_template::{
+            ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats, spawn_entity_template,
+        };
+
+        const MAX_TICKS: u32 = 4000;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut server_app = App::new();
+        server_app
+            .add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+            ))
+            .finish();
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        server_app.insert_non_send(sim);
+
+        // Keep ground loaded around the world centre (same preamble as
+        // `mirrors_sim_npc_to_replicon_client`) so the spawned NPC doesn't
+        // fall through ungenerated terrain.
+        {
+            let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            server_app.update();
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let (centre, alt) = {
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            (centre, alt)
+        };
+
+        // The full checklist shape: body/stats/faction/loot/
+        // ai_behavior_override, all populated, with a KNOWN-unknown
+        // ai_behavior_override handled by a second spawn below.
+        let aggro_template = EntityTemplate {
+            entity_template_id: "test_dread_wolf".to_owned(),
+            body: "wolf".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some("Test Dread Wolf".to_owned()),
+            },
+            faction: "enemy".to_owned(),
+            loot: Some("common.items.crafting_ing.hide.tough".to_owned()),
+            ai_behavior_override: "aggro".to_owned(),
+        };
+        // Anti-chaos acceptance: an unrecognized `ai_behavior_override`
+        // string must fall back to Passive, never panic the spawn.
+        let malformed_behavior_template = EntityTemplate {
+            entity_template_id: "test_malformed".to_owned(),
+            body: "pig".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some("Test Malformed Pig".to_owned()),
+            },
+            ai_behavior_override: "definitely_not_a_real_behavior".to_owned(),
+            ..EntityTemplate::default()
+        };
+
+        let registry = ComponentSpawnRegistry::with_builtins();
+        {
+            let mut commands = server_app.world_mut().commands();
+            spawn_entity_template(
+                &mut commands,
+                &registry,
+                &aggro_template,
+                [centre.x, centre.y, alt + 3.0],
+                xindeler_protocol::DimensionId::DEFAULT,
+            );
+            spawn_entity_template(
+                &mut commands,
+                &registry,
+                &malformed_behavior_template,
+                [centre.x + 5.0, centre.y, alt + 3.0],
+                xindeler_protocol::DimensionId::DEFAULT,
+            );
+        }
+        server_app.world_mut().flush();
+
+        // Drive a handful of ticks so `apply_pending_entity_template_spawns`
+        // (which runs in the SAME `FixedUpdate` chain as `tick_sim`) resolves
+        // the pending requests into real `CreateNpcEvent`s and the sim
+        // processes them.
+        for _ in 0..10 {
+            server_app.update();
+        }
+
+        // No staging entity should ever survive processing (win or lose).
+        let leftover_pending = server_app
+            .world_mut()
+            .query::<&xindeler_oracle_host::entity_template::PendingEntityTemplateSpawn>()
+            .iter(server_app.world())
+            .count();
+        assert_eq!(
+            leftover_pending, 0,
+            "pending entity-template spawn requests must never accumulate"
+        );
+
+        // Find our two specific spawns by their unique `stats.name` — a real
+        // generated world already has its OWN ambient wildlife (world-gen
+        // spawns wolves/pigs too, some with `Alignment::Enemy`), so matching
+        // by `(body, alignment)` alone would be ambiguous; the name we gave
+        // each template is the one unambiguous handle back to OUR entities.
+        let (aggro_wolf, malformed_pig) = {
+            use common::comp;
+            use specs::{Join, WorldExt};
+
+            let sim = server_app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let agents = ecs.read_storage::<comp::Agent>();
+            let bodies = ecs.read_storage::<comp::Body>();
+            let stats = ecs.read_storage::<comp::Stats>();
+            let alignments = ecs.read_storage::<comp::Alignment>();
+
+            let mut aggro_wolf = None;
+            let mut malformed_pig = None;
+            for (agent, body, stat, alignment) in (&agents, &bodies, &stats, &alignments).join() {
+                match &stat.name {
+                    comp::Content::Plain(name) if name == "Test Dread Wolf" => {
+                        aggro_wolf = Some((agent.clone(), *body, *alignment));
+                    },
+                    comp::Content::Plain(name) if name == "Test Malformed Pig" => {
+                        malformed_pig = Some((agent.clone(), *body, *alignment));
+                    },
+                    _ => {},
+                }
+            }
+            (aggro_wolf, malformed_pig)
+        };
+
+        let (agent, body, alignment) =
+            aggro_wolf.expect("the aggro wolf template should have spawned a real sim NPC by now");
+        assert!(
+            matches!(body, common::comp::Body::QuadrupedMedium(_)),
+            "the \"wolf\" body keyword should resolve to a QuadrupedMedium body"
+        );
+        assert_eq!(
+            alignment,
+            common::comp::Alignment::Enemy,
+            "faction: \"enemy\""
+        );
+        assert_eq!(
+            agent.psyche.aggro_dist, None,
+            "the Aggro preset must skip the warn-up (aggro_no_warn)"
+        );
+        assert!(
+            (agent.psyche.aggro_range_multiplier - 2.0).abs() < f32::EPSILON,
+            "the Aggro preset must widen the aggro range"
+        );
+        assert_eq!(
+            agent.psyche.flee_health, 0.0,
+            "the Aggro preset must never flee"
+        );
+
+        // Anti-chaos acceptance: the malformed `ai_behavior_override` must
+        // have spawned SOMETHING (didn't panic / silently vanish) and must
+        // carry the Passive preset's signature (`aggro_range_multiplier ==
+        // 0.0`), never a real Stalk/Aggro/Flee tuning.
+        let (malformed_agent, ..) = malformed_pig
+            .expect("the malformed-behavior template should still spawn a real sim NPC");
+        assert_eq!(
+            malformed_agent.psyche.aggro_range_multiplier, 0.0,
+            "an unrecognized ai_behavior_override must fall back to the Passive preset, not panic \
+             or silently drop the spawn"
+        );
+        assert_eq!(
+            malformed_agent.psyche.flee_health, 0.0,
+            "Passive never flees either"
+        );
+
+        // Finally, confirm the mirror picks the aggro NPC up like any other
+        // — a client-visible NetBody/NetUid entity, exactly like
+        // `mirrors_sim_npc_to_replicon_client` already proves for
+        // `spawn_test_npcs`'s own test NPCs. No client connection is needed
+        // for this: the LISTEN-SERVER's own local loopback (`ClientState::
+        // Disconnected`) already runs the mirror.
+        let is_mirrored_wolf_visible = |app: &mut App| {
+            let mut q = app.world_mut().query::<&NetBody>();
+            q.iter(app.world())
+                .any(|body| matches!(body.0, common::comp::Body::QuadrupedMedium(_)))
+        };
+        let mut mirrored = is_mirrored_wolf_visible(&mut server_app);
+        for _ in 0..MAX_TICKS {
+            if mirrored {
+                break;
+            }
+            server_app.update();
+            mirrored = is_mirrored_wolf_visible(&mut server_app);
+        }
+        assert!(
+            mirrored,
+            "the factory-spawned NPC must be mirrored to a NetBody (+NetUid, EM-4.2f) entity, \
+             exactly like any other sim NPC — proving EM-3.8's figure pipeline is reused verbatim"
         );
     }
 }

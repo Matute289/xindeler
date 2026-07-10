@@ -39,6 +39,19 @@ xindeler-protocol = { path = "../xindeler-protocol" }
 # `.dmevent.json` is parsed with this, `.dmevent.ron` with `ron` above (spec
 # §5.1/§0.4).
 serde_json = { workspace = true }
+# EM-4.7 (`entity_template.rs`): `AgentPreset::build_agent` constructs a real
+# `common::comp::Agent` (the existing, battle-tested server-agent AI data
+# type — presets just tune its `Psyche` fields, exactly like `/spawn`/
+# `/make_npc` already do in `server/src/cmd.rs`) plus `comp::Body`/
+# `comp::Alignment`/`LootSpec` for the registry's built-in spawn closures.
+# Legal shell -> logic type-library use (same pattern `xindeler-server-app`'s
+# Cargo.toml documents for its own `common` dep) — this crate never embeds a
+# `specs::World` itself, it only names these plain data types.
+common = { package = "xindeler-common", path = "../../common" }
+# `AgentPreset::build_agent`'s `with_patrol_origin` takes a `vek::Vec3<f32>`
+# (the sim's own vector type, matching `common`'s `Agent`/`Pos` API) — same
+# workspace version the logic crates use, so no double-conversion is needed.
+vek = { workspace = true }
 
 [dev-dependencies]
 # `dm_event.rs`'s hot-reload test drops a real file into a real tempdir and

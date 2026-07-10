@@ -201,7 +201,12 @@ impl Narrative {
 /// Truncates `s` to at most `max_bytes` bytes, walking back to the nearest
 /// char boundary so a hostile string that splits a multi-byte char exactly
 /// at `max_bytes` can never panic.
-fn truncate_to(s: &mut String, max_bytes: usize) {
+///
+/// `pub(crate)` (EM-4.7): `entity_template.rs` reuses this exact helper for
+/// its own free-form string fields (`body`/`loot`/stats name/…) rather than
+/// duplicating it — same anti-chaos primitive, one definition, mirroring
+/// `atmosphere::sane`'s own `pub(crate)` reuse rationale.
+pub(crate) fn truncate_to(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;
     }
