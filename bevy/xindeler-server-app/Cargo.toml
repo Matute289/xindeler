@@ -135,3 +135,12 @@ ron = { workspace = true }
 # format — dev-only, shell→logic type-library use (same legal direction as
 # the `client`/`server` dev-deps above).
 rtsim = { package = "xindeler-rtsim", path = "../../rtsim" }
+# BL-82 EM-4.2d interest-management acceptance test
+# (`tests/interest_management.rs`): estimates a representative per-entity
+# wire payload size via the SAME `bincode::config::legacy()` scheme
+# `xindeler_protocol::CompressedChunk`/`NetLodAlt` already use elsewhere in
+# this codebase, rather than importing raw `bevy_quinnet`/`quinn` stats types
+# (which would violate `xindeler-transport`'s isolation boundary — see that
+# test's own module doc comment). Same workspace version `xindeler-protocol`
+# itself pins.
+bincode = { workspace = true }

@@ -12038,6 +12038,7 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "bincode",
  "num_cpus",
  "portpicker",
  "prometheus",
