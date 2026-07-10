@@ -540,6 +540,17 @@ fn classify_bodies(
                 let Some(specs) = quadruped_medium::quadruped_medium_part_specs(
                     &central.0, &lateral.0, species, body_type,
                 ) else {
+                    // No manifest entry for this (species, body_type): keep the
+                    // capsule permanently. This should never happen for a
+                    // shipped species (a completeness test asserts full
+                    // coverage) — warn so a future gap doesn't silently recur
+                    // as an unexplained stuck capsule (BL-82 EM-3.11l).
+                    warn!(
+                        ?species,
+                        ?body_type,
+                        "qm figure: no manifest entry for this species/body_type; keeping the \
+                         capsule"
+                    );
                     commands.entity(entity).insert(FigureBuilt);
                     continue;
                 };
@@ -570,6 +581,14 @@ fn classify_bodies(
                 let Some(specs) =
                     bird_medium::bird_medium_part_specs(&central.0, &lateral.0, species, body_type)
                 else {
+                    // See the QM branch's comment above (BL-82 EM-3.11l): should
+                    // never happen for a shipped species, warn if it does.
+                    warn!(
+                        ?species,
+                        ?body_type,
+                        "bird figure: no manifest entry for this species/body_type; keeping the \
+                         capsule"
+                    );
                     commands.entity(entity).insert(FigureBuilt);
                     continue;
                 };
@@ -606,6 +625,11 @@ fn classify_bodies(
                 let Some(refs) = humanoid::humanoid_vox_refs(&manifests, &hum_body, &loadout)
                 else {
                     // No head-manifest entry for this species: keep the capsule.
+                    // Should never happen for a shipped species (BL-82 EM-3.11l).
+                    warn!(
+                        species = ?hum_body.species,
+                        "humanoid figure: no manifest entry for this species; keeping the capsule"
+                    );
                     commands.entity(entity).insert(FigureBuilt);
                     continue;
                 };
@@ -647,6 +671,13 @@ fn classify_bodies(
             figure::quadruped_small_part_specs(&central.0, &lateral.0, species, body_type)
         else {
             // No manifest entry for this species: keep the capsule permanently.
+            // Should never happen for a shipped species (BL-82 EM-3.11l).
+            warn!(
+                ?species,
+                ?body_type,
+                "figure: no manifest entry for this quadruped-small species/body_type; keeping \
+                 the capsule"
+            );
             commands.entity(entity).insert(FigureBuilt);
             continue;
         };
