@@ -147,7 +147,7 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-4.3 | `DmEventLoader` — `.dmevent.ron/json` AssetLoader + `oracle://` watch dir (ORACLE writes files) | 🔵 PR #45 open (base `development`), reviewed clean, awaiting Matías (bundled with EM-4.4) |
 | EM-4.4 | Anti-chaos validation layer (clamp tables for injected events) | 🔵 PR #45 (see EM-4.3, one implementation PR) |
 | EM-4.5 | `DimensionRegistry` + `DimensionId` + instanced-dimension generation — full Spinup→Active→Draining→Teardown lifecycle (worksheet Q4=maximalist) | 🔵 PR #46 (folded in), reviewed clean, real lifecycle acceptance test passing |
-| EM-4.6 | Dimension teardown & GC (RAM+VRAM leak-free) + heuristic predictive GC (worksheet Q4=maximalist) | ⚪ |
+| EM-4.6 | Dimension teardown & GC (RAM+VRAM leak-free) + heuristic predictive GC (worksheet Q4=maximalist) | 🔵 branch `feat/bl82-em46-dimension-teardown-gc`, reviewed clean (2 blocker/major findings fixed: same-frame sim-delete ordering race, unguarded `DimensionId::DEFAULT` drain-lockout), real RAM-delta + `Assets<Mesh>` VRAM-baseline acceptance tests passing; awaiting fold into the combined Wave-3 PR |
 | EM-4.7 | Generic entity factory v1 (behavior strings → `Agent` presets) | ⚪ |
 | EM-4.8 | Narrative hooks (world_rumor → chronicle; on_enter_message → HUD toast) | ⚪ |
 | EM-4.9 | E2E event drill (full Ravenloft example, both clients coexisting) | ⚪ |

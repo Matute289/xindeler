@@ -835,9 +835,32 @@ impl Plugin for SimEntityMirrorPlugin {
             // build time, after every system in the schedule is registered,
             // the same cross-crate pattern `ensure_default_dimension`/
             // `mirror_sim_entities` already established for `.after(tick_sim)`.
+            //
+            // EM-4.6 bevy-migration-reviewer follow-up (BLOCKER fix): the
+            // `.before(teardown_completed_dimensions)` edge alone left this
+            // system's ordering relative to `handle_drain_requests`/
+            // `predictive_gc_system` UNCONSTRAINED — both can synchronously
+            // flip a dimension straight to `Teardown` within the SAME frame
+            // (`DimensionRegistry::begin_draining`'s "zero occupants ->
+            // immediate Teardown" rule). Only reading `Res<DimensionRegistry>`
+            // (vs. their `ResMut`) meant Bevy's scheduler was free to run this
+            // system BEFORE that same-frame transition happened, in which
+            // case it would see the dimension as still `Active`, skip it —
+            // and then `teardown_completed_dimensions` (downstream via the
+            // dimensions-crate `.chain()`) would despawn the `DimensionRoot`
+            // cascade that same frame, destroying the `SimEntity`/
+            // `DimensionId` tags this system needs before it ever got a
+            // second chance to see `Teardown`. Result: the specs entity would
+            // NEVER be deleted through `delete_entity_recorded` — a permanent
+            // leak. Explicit `.after(..)` edges on BOTH transition sources
+            // close the race, mirroring the exact "make the edge structural"
+            // fix already applied above for `ensure_default_dimension`/
+            // `mirror_sim_entities`.
             .add_systems(
                 Update,
                 delete_specs_entities_for_torn_down_dimensions
+                    .after(xindeler_dimensions::spinup::handle_drain_requests)
+                    .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
                     .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
             );
     }
@@ -2599,6 +2622,8 @@ mod tests {
         app.add_systems(
             Update,
             delete_specs_entities_for_torn_down_dimensions
+                .after(xindeler_dimensions::spinup::handle_drain_requests)
+                .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
                 .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
         );
         app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
@@ -2693,6 +2718,142 @@ mod tests {
             !sim.server.state().ecs().entities().is_alive(specs_entity),
             "the torn-down dimension's mirrored specs entity should have been deleted through the \
              sim's normal delete path (StateExt::delete_entity_recorded)"
+        );
+    }
+
+    /// Regression test for the bevy-migration-reviewer's BLOCKER finding on
+    /// the first version of this system: it must not lose a mirrored specs
+    /// entity when a dimension flips `Active -> Teardown` in the SAME frame
+    /// [`delete_specs_entities_for_torn_down_dimensions`] runs in.
+    ///
+    /// Unlike [`tearing_down_a_dimension_deletes_its_mirrored_specs_entity`]
+    /// above (which drives the transition directly via
+    /// `DimensionRegistry::begin_draining`, entirely OUTSIDE any
+    /// `app.update()`, so it never actually exercises same-frame scheduling
+    /// order), this test sends a REAL [`xindeler_dimensions::DrainDimension`]
+    /// message and lets [`xindeler_dimensions::spinup::handle_drain_requests`]
+    /// perform the `Active -> Teardown` flip (immediate, since the dimension
+    /// has zero REGISTRY-tracked occupants) inside the very same
+    /// `app.update()` this deletion system also runs in — the exact race
+    /// window the reviewer identified: without an explicit `.after(..)` edge
+    /// on both `handle_drain_requests` and `predictive_gc_system`, Bevy was
+    /// free to schedule this system BEFORE the flip happened, see the
+    /// dimension as still `Active`, skip it, and then lose the mirror tags
+    /// forever to `teardown_completed_dimensions`'s same-frame cascade
+    /// despawn — permanently leaking the specs entity.
+    #[test]
+    #[ignore = "boots a real world: needs assets; run locally with VELOREN_ASSETS=\"$(pwd)/assets\""]
+    fn tearing_down_via_a_real_drain_message_in_the_same_frame_still_deletes_the_specs_entity() {
+        use specs::Builder as _;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build());
+        // `SimBridgePlugin` brings in `DimensionsPlugin` (guarded add), which
+        // is what actually registers `handle_drain_requests`/
+        // `predictive_gc_system`/`teardown_completed_dimensions` in `Update`
+        // — the real production wiring, not a hand-picked subset.
+        app.add_plugins(SimBridgePlugin);
+        app.add_systems(
+            Update,
+            delete_specs_entities_for_torn_down_dimensions
+                .after(xindeler_dimensions::spinup::handle_drain_requests)
+                .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
+                .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
+        );
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+
+        let specs_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let body: comp::Body = comp::quadruped_small::Body {
+                species: comp::quadruped_small::Species::Pig,
+                body_type: comp::quadruped_small::BodyType::Female,
+            }
+            .into();
+            sim.server
+                .state_mut()
+                .create_npc(
+                    comp::Pos(vek::Vec3::new(0.0, 0.0, 0.0)),
+                    comp::Ori::default(),
+                    comp::Stats::new(
+                        comp::Content::Plain("Same-Frame Teardown Test Pig".to_string()),
+                        body,
+                    ),
+                    comp::SkillSet::default(),
+                    Some(comp::Health::new(body)),
+                    comp::Poise::new(body),
+                    comp::Inventory::with_empty(),
+                    body,
+                    body.scale(),
+                )
+                .build()
+        };
+        app.update();
+
+        // Manually tag a Bevy mirror entity as belonging to a SECOND
+        // dimension (see the sibling test above for why this is the
+        // forward-looking stand-in for a future EM-4.7 spawn-into-dimension
+        // flow).
+        let bevy_mirror = app
+            .world_mut()
+            .spawn((SimEntity(specs_entity), DimensionId(2)))
+            .id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(specs_entity, bevy_mirror);
+
+        // Spin dimension 2 up to `Active` (zero registry-tracked occupants)
+        // via the registry's direct API — no real procgen needed.
+        {
+            let mut registry = app.world_mut().resource_mut::<DimensionRegistry>();
+            let root = Entity::from_raw_u32(9002).expect("small test entity id");
+            registry
+                .insert_spinning_up(DimensionId(2), root, 0)
+                .unwrap();
+            let (world, index) = server::World::empty();
+            registry
+                .complete_spinup(DimensionId(2), std::sync::Arc::new(world), index)
+                .unwrap();
+            assert_eq!(
+                registry.lifecycle(DimensionId(2)),
+                Some(DimensionLifecycle::Active),
+                "dimension 2 must still be Active before the real drain message is sent"
+            );
+        }
+
+        // The real admin-command message, not a direct registry call — this
+        // is what makes the flip happen INSIDE `handle_drain_requests`, in
+        // the same `Update` schedule run as `delete_specs_entities_for_torn_
+        // down_dimensions`, exercising the actual race window.
+        app.world_mut()
+            .write_message(xindeler_dimensions::DrainDimension(DimensionId(2)));
+
+        // A few ticks: the first `app.update()` after the message is written
+        // is the one where `handle_drain_requests` flips Active -> Teardown
+        // AND (with the ordering fix) this system observes that same-frame
+        // Teardown state before `teardown_completed_dimensions` cascades the
+        // despawn. Without the `.after(..)` fix, this loop could still pass
+        // by luck (Bevy's default executor isn't adversarial) — the point of
+        // this regression test is that the ordering is now DECLARED, not
+        // merely observed to work once.
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let sim = app.world().non_send::<SimServer>();
+        assert!(
+            !sim.server.state().ecs().entities().is_alive(specs_entity),
+            "the specs entity mirrored into a dimension that flipped Active -> Teardown via a \
+             REAL DrainDimension message (not a direct registry call) should still have been \
+             deleted through the sim's normal delete path — no same-frame scheduling race should \
+             be able to lose it"
         );
     }
 }

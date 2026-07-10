@@ -200,11 +200,35 @@ pub fn poll_spinup_tasks(mut registry: ResMut<DimensionRegistry>, mut tasks: Res
 /// Reads [`DrainDimension`] admin-command messages and applies them via
 /// [`DimensionRegistry::begin_draining`], logging (not panicking) on a
 /// rejected request (e.g. the dimension isn't `Active`).
+///
+/// ## `DimensionId::DEFAULT` is rejected HERE, at the single entry point
+/// (EM-4.6 follow-up, bevy-migration-reviewer finding)
+/// EM-4.5 left `begin_draining` itself willing to flip the always-on default
+/// dimension straight to `Teardown` when it has zero tracked occupants — an
+/// entirely realistic boot-time state (see `crate::teardown`'s module doc for
+/// the exact scenario: a `DrainDimension(DimensionId::DEFAULT)` admin command
+/// issued before any player has connected). `crate::teardown`/
+/// `crate::predictive_gc`/`xindeler_sim_bridge`'s teardown system all
+/// correctly refuse to run their DESTRUCTIVE payload against `DEFAULT`, but
+/// none of them undo the lifecycle flip itself — so without a guard HERE, the
+/// registry entry is left stuck at `Teardown` forever (`accepts_new_entrants`
+/// is `false` for `Teardown`), permanently locking out every future player
+/// with no self-heal path. Rejecting the request at its one entry point,
+/// before `begin_draining` ever runs, closes the hole at its source instead
+/// of only mitigating the destructive symptom two systems downstream.
 pub fn handle_drain_requests(
     mut registry: ResMut<DimensionRegistry>,
     mut requests: MessageReader<DrainDimension>,
 ) {
     for &DrainDimension(id) in requests.read() {
+        if id == DimensionId::DEFAULT {
+            tracing::error!(
+                ?id,
+                "refusing to drain the default dimension (would eventually lock out all future \
+                 players) — ignoring this DrainDimension request"
+            );
+            continue;
+        }
         match registry.begin_draining(id) {
             Ok(true) => tracing::info!(
                 ?id,
@@ -223,6 +247,47 @@ mod tests {
 
     use super::*;
     use crate::plugin::DimensionsPlugin;
+
+    /// bevy-migration-reviewer MAJOR finding: `handle_drain_requests` must
+    /// reject `DrainDimension(DimensionId::DEFAULT)` at its own entry point,
+    /// not rely on downstream systems (`teardown`/`predictive_gc`) to only
+    /// mitigate the DESTRUCTIVE symptom two systems later — without this
+    /// guard, `begin_draining` would happily flip the always-on default
+    /// dimension's lifecycle straight to `Teardown` (immediate, since it has
+    /// zero REGISTRY-tracked occupants in this test), and nothing anywhere
+    /// undoes that flip, permanently locking out every future player
+    /// (`accepts_new_entrants` is `false` for `Teardown`).
+    #[test]
+    fn handle_drain_requests_rejects_the_default_dimension() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build());
+        app.add_plugins(DimensionsPlugin);
+
+        {
+            let mut registry = app.world_mut().resource_mut::<DimensionRegistry>();
+            let root = Entity::from_raw_u32(1).expect("small test entity id");
+            registry
+                .insert_spinning_up(DimensionId::DEFAULT, root, 0)
+                .unwrap();
+            let (world, index) = server::World::empty();
+            registry
+                .complete_spinup(DimensionId::DEFAULT, Arc::new(world), index)
+                .unwrap();
+        }
+
+        app.world_mut()
+            .write_message(DrainDimension(DimensionId::DEFAULT));
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<DimensionRegistry>()
+                .lifecycle(DimensionId::DEFAULT),
+            Some(crate::lifecycle::DimensionLifecycle::Active),
+            "a DrainDimension(DEFAULT) request must be rejected outright — the default dimension \
+             must stay Active, never flip toward Teardown at all"
+        );
+    }
 
     /// Drives a REAL `SpinupDimension` message through a headless `App`
     /// (`DimensionsPlugin` + a real `WorldGenThreadPool`) to `Active`,
