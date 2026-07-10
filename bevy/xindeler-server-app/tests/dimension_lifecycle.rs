@@ -138,11 +138,24 @@ fn default_dimension_is_active_with_no_debug_commands_set() {
 /// `Active`, `XINDELER_DEBUG_DRAIN_DIMENSION` drains it — and because this
 /// debug-triggered dimension never has a tracked occupant, `Draining`
 /// immediately advances to `Teardown` (a real, tested transition — see
-/// `DimensionRegistry::begin_draining`'s doc comment), leaving a final,
-/// STABLE `spinup=0 active=1 draining=0 teardown=1` — dimension 0 alone
-/// Active again, dimension 1 torn down. Nothing in THIS task's scope
-/// (EM-4.6 owns the GC payload) changes that end state further, so polling
-/// for it is not racy.
+/// `DimensionRegistry::begin_draining`'s doc comment).
+///
+/// ## Why this polls `teardowns_total`, not the `teardown` gauge (EM-4.6
+/// follow-up, found verifying the phase-4 wave-3 integration merge)
+/// `xindeler_dimensions::teardown::teardown_completed_dimensions` removes a
+/// torn-down dimension's registry entry in the SAME `Update` pass it
+/// discovers it in `Teardown` (that module's own documented "immediate GC"
+/// posture) — so the transient `dimension_lifecycle_teardown` GAUGE can
+/// legitimately read 0 on every single scrape here: nothing keeps dimension
+/// 1 "currently in Teardown" for longer than that one internal system pass,
+/// and this test's own 200ms poll interval can trivially straddle it. The
+/// durable, scrape-any-time-after signal is the monotonic
+/// `dimension_lifecycle_teardowns_total` COUNTER (see `dimensions.rs`'s
+/// `DimensionMetrics` doc comment) — this test waits on THAT, then confirms
+/// the gauges have settled back to EXACTLY the same baseline
+/// `default_dimension_is_active_with_no_debug_commands_set` asserts
+/// (dimension 1 has fully vanished from the registry, not merely "currently
+/// Teardown").
 #[test]
 #[ignore = "spawns a real xindeler-server-app process: needs assets + LFS; run locally with \
             VELOREN_ASSETS"]
@@ -165,18 +178,38 @@ fn debug_triggered_dimension_spins_up_then_drains_to_teardown() {
     // async task pool — give it real wall-clock time, well beyond what the
     // xindeler-dimensions crate's own equivalent test needed.
     let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(total) = sample_gauge(metrics_addr, "dimension_lifecycle_teardowns_total")
+            && total >= 1.0
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "dim-spinup-drain: dimension_lifecycle_teardowns_total never reached >= 1 within the \
+             boot deadline (the debug-triggered dimension never finished tearing down)"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The teardown-completion pass that bumped the counter above ALSO
+    // removed dimension 1's registry entry in that same pass, so the gauges
+    // should already read the settled baseline by the time we sample them —
+    // still poll (bounded, short) rather than assert on a single sample, to
+    // stay robust to any future scheduling change.
     let (spinup, active, draining, teardown) = wait_for_dimension_counts(
         metrics_addr,
-        deadline,
+        Instant::now() + Duration::from_secs(5),
         "dim-spinup-drain",
-        |_, active, _, teardown| active == 1 && teardown == 1,
+        |spinup, active, draining, teardown| (spinup, active, draining, teardown) == (0, 1, 0, 0),
     );
     assert_eq!(
         (spinup, active, draining, teardown),
-        (0, 1, 0, 1),
-        "expected the debug-triggered dimension to reach a stable post-drain state: dimension 0 \
-         Active alone, dimension 1 torn down (Draining skipped straight to Teardown since it had \
-         zero occupants)"
+        (0, 1, 0, 0),
+        "expected the debug-triggered dimension to have fully vanished from the registry after \
+         teardown — the SAME baseline default_dimension_is_active_with_no_debug_commands_set \
+         asserts (dimension 0 Active alone; Draining skipped straight to Teardown since dimension \
+         1 had zero occupants, and Teardown removes the registry entry in that same pass)"
     );
 
     graceful_shutdown(&mut child, Duration::from_secs(15), "dim-spinup-drain");

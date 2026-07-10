@@ -18,7 +18,7 @@ use crate::{
         DrainDimension, SpinupDimension, SpinupTasks, handle_drain_requests,
         handle_spinup_requests, poll_spinup_tasks,
     },
-    teardown::teardown_completed_dimensions,
+    teardown::{DimensionTornDown, teardown_completed_dimensions},
 };
 
 /// Registers [`DimensionRegistry`] + the spinup/drain message types +
@@ -52,6 +52,7 @@ impl Plugin for DimensionsPlugin {
             .init_resource::<PredictiveGcTrackers>()
             .add_message::<SpinupDimension>()
             .add_message::<DrainDimension>()
+            .add_message::<DimensionTornDown>()
             .add_systems(
                 Update,
                 (

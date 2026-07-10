@@ -86,6 +86,9 @@
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
 
+mod entity_factory;
+pub use entity_factory::{apply_pending_entity_template_spawns, spawn_from_spawning_rules};
+
 mod player;
 pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
 
@@ -323,7 +326,19 @@ impl Plugin for SimBridgePlugin {
         app.init_resource::<DefaultDimensionState>();
         // EM-3.11b: FixedUpdate, not Update — see `tick_sim`'s doc for why a
         // display-rate `Update` tick was the wrong home for this.
-        app.add_systems(FixedUpdate, (tick_sim, ensure_default_dimension).chain());
+        // EM-4.7: `apply_pending_entity_template_spawns` resolves any
+        // factory-staged spawn requests through the sim's public event bus —
+        // see `entity_factory`'s module doc for why a future producer system
+        // (EM-4.9) needs an explicit ordering edge against this one.
+        app.add_systems(
+            FixedUpdate,
+            (
+                tick_sim,
+                ensure_default_dimension,
+                apply_pending_entity_template_spawns,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -3049,6 +3064,10 @@ mod tests {
 
         const EXPECTED_MINIONS: usize = 15;
         const MINION_NAME: &str = "Ravenloft Sentinel";
+        // Must match `event.spawning_rules.spawn_radius` below — kept as its
+        // own named constant so the terrain-readiness preamble can size its
+        // wait against the SAME radius the scatter itself uses.
+        const SPAWN_TEST_RADIUS: f32 = 30.0;
 
         let data_dir = tempfile::tempdir().expect("tempdir");
         let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
@@ -3070,23 +3089,44 @@ mod tests {
         )));
         server_app.insert_non_send(sim);
 
-        // Same terrain-ready preamble as the sibling entity-factory test.
+        // Same terrain-ready preamble as the sibling entity-factory test, but
+        // strengthened: unlike that test's two FIXED spawn points (well
+        // inside the centre chunk), this test's `spawn_from_spawning_rules`
+        // scatters each minion up to `spawning_rules.spawn_radius` (30.0,
+        // ~1 chunk) from centre, so a bare "the exact centre chunk is loaded"
+        // check isn't enough — a minion landing in a not-yet-generated
+        // NEIGHBOUR chunk hits the exact same same-tick-deletion class the
+        // EM-3.11o fix (`chunk_anchor_at`'s doc comment) already documents
+        // for wandering test NPCs: `Server::tick`'s entity-cleanup phase
+        // deletes it before this test (or `mirror_sim_entities`) ever
+        // observes it, undercounting `minions.len()` under CPU contention
+        // (e.g. running back-to-back with this crate's other boot-a-real-
+        // world tests) where the async worldgen workers lag behind the
+        // centre chunk's own completion. So wait for EVERY chunk the scatter
+        // radius could possibly touch, not just the one at dead centre.
         {
             let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
             sim.server.create_centered_persister(server::MIN_VD);
         }
+        const CHUNK_SIZE: f32 = 32.0;
+        let scatter_chunk_radius =
+            (SPAWN_TEST_RADIUS / CHUNK_SIZE).ceil() as i32 + 1 /* margin */;
         for _ in 0..800 {
             server_app.update();
             let sim = server_app.world().non_send::<SimServer>();
             let size = sim.server.world().sim().get_size();
             let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
-            if sim
-                .server
-                .state()
-                .terrain()
-                .get_key_arc(centre_chunk)
-                .is_some()
-            {
+            let terrain = sim.server.state().terrain();
+            let all_touched_chunks_loaded =
+                (-scatter_chunk_radius..=scatter_chunk_radius).all(|dx| {
+                    (-scatter_chunk_radius..=scatter_chunk_radius).all(|dy| {
+                        terrain
+                            .get_key_arc(centre_chunk + vek::Vec2::new(dx, dy))
+                            .is_some()
+                    })
+                });
+            drop(terrain);
+            if all_touched_chunks_loaded {
                 break;
             }
         }
@@ -3111,7 +3151,7 @@ mod tests {
             spawning_rules: SpawningRules {
                 entity_templates: vec!["sentinel_owl".to_owned()],
                 spawn_count: 2000.0,
-                spawn_radius: 30.0,
+                spawn_radius: SPAWN_TEST_RADIUS,
                 ai_behavior_override: "stalk".to_owned(),
             },
             ..DmEvent::default()

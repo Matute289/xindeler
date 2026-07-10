@@ -61,6 +61,34 @@ use crate::{
     registry::{DimensionError, DimensionRegistry, DimensionState},
 };
 
+/// Fired exactly once, synchronously, at the moment
+/// [`teardown_completed_dimensions`] actually removes a dimension's registry
+/// entry (right after the BL-16 chronicle hook runs, right before the root
+/// despawn is queued) — the durable "a dimension was genuinely torn down"
+/// signal.
+///
+/// ## Why this exists (found verifying the BL-82 phase-4 wave-3 integration)
+/// A `/metrics` consumer (`xindeler-server-app`'s `update_dimension_metrics`)
+/// cannot reliably observe "currently in `Teardown`" as a snapshot gauge:
+/// this very function removes that entry in the SAME `Update` pass it
+/// discovers it (see this module's own doc comment on the "immediate GC"
+/// posture), so an external scrape landing between two ticks can never
+/// durably catch it — and, a subtler gap an `ecs-design-reviewer` pass caught
+/// in an earlier fix here that instead diffed `DimensionRegistry::ids()`
+/// between ticks, a dimension whose ENTIRE `Spinup -> Active -> Draining ->
+/// Teardown` lifecycle happens to complete within a single `Update` pass
+/// would never appear in a "previously known" snapshot at all, so a
+/// diff-based detector could silently miss it. A message fired
+/// unconditionally at the removal site has no such window: it exists exactly
+/// once per real teardown, independent of how many frames the lifecycle
+/// actually took. Any interested system (a metrics counter today; BL-16's
+/// chronicle system, tomorrow) drains it with a plain `MessageReader`.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct DimensionTornDown {
+    pub id: DimensionId,
+    pub occupant_count: usize,
+}
+
 /// BL-16 chronicle-system hook point (documented no-op — this task's scope
 /// boundary explicitly excludes real chronicle LOGIC, only the seam). Called
 /// exactly once per dimension, synchronously, AFTER it's confirmed
@@ -98,6 +126,7 @@ pub fn extract_persistent_side_effects_before_teardown(id: DimensionId, state: &
 pub fn teardown_completed_dimensions(
     mut commands: Commands,
     mut registry: ResMut<DimensionRegistry>,
+    mut torn_down_writer: MessageWriter<DimensionTornDown>,
 ) {
     // Collect ids first: `remove_torn_down` takes `&mut self`, so we can't
     // hold a borrow from `registry.ids()` while calling it in the same loop.
@@ -132,6 +161,7 @@ pub fn teardown_completed_dimensions(
                 // `Drop`, no manual cleanup.
                 drop(state);
                 commands.entity(root).despawn();
+                torn_down_writer.write(DimensionTornDown { id, occupant_count });
                 info!(?id, occupant_count, "dimension torn down (GC complete)");
             },
             Err(err @ DimensionError::NotFound(_) | err @ DimensionError::WrongLifecycle(..)) => {

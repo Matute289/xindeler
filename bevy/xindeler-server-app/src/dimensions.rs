@@ -19,10 +19,10 @@ use bevy::{
         system::{Res, ResMut},
     },
 };
-use prometheus::{IntGauge, Opts, Registry};
+use prometheus::{IntCounter, IntGauge, Opts, Registry};
 use xindeler_dimensions::{
-    DimensionId, DimensionLifecycle, DimensionRegistry, DimensionSpinupConfig, DrainDimension,
-    SpinupDimension, WorldGenThreadPool,
+    DimensionId, DimensionLifecycle, DimensionRegistry, DimensionSpinupConfig, DimensionTornDown,
+    DrainDimension, SpinupDimension, WorldGenThreadPool,
 };
 
 use crate::sim::SimServer;
@@ -137,12 +137,37 @@ pub fn apply_debug_dimension_commands(
 /// The registry's lifecycle-count gauges (BL-82 EM-4.5), mirroring
 /// EM-4.2e's `AiGatewayMetrics` pattern: registered once on the SAME
 /// `prometheus::Registry` `/metrics` already serves.
+///
+/// ## `teardown` is a snapshot gauge; `teardowns_total` is the durable signal
+/// (EM-4.6 follow-up, found while verifying the phase-4 wave-3 integration)
+/// `xindeler_dimensions::teardown::teardown_completed_dimensions` removes a
+/// dimension's registry entry in the SAME `Update` pass it observes it in
+/// `Teardown` (its own documented "immediate GC" posture — see that
+/// module's doc comment) — so `teardown` (an `IntGauge` reflecting only the
+/// CURRENT registry snapshot) can be, and in the common occupant-less-drain
+/// case reliably IS, zero on every single `/metrics` scrape: an external
+/// poller can never durably catch a dimension "currently in Teardown"
+/// because nothing keeps it there past the tick that discovers it. A
+/// dimension actually being torn down is still a real, meaningful event
+/// operators/tests want to observe — so `teardowns_total` is a genuinely
+/// monotonic `IntCounter`, bumped once per
+/// [`xindeler_dimensions::DimensionTornDown`] message
+/// [`update_dimension_metrics`] drains — fired unconditionally, exactly
+/// once, at the removal site itself (`teardown_completed_dimensions`), so
+/// unlike a between-tick registry-id diff (this module's first cut, caught
+/// by an `ecs-design-reviewer` pass) it can never silently miss a dimension
+/// whose entire `Spinup -> Active -> Draining -> Teardown` lifecycle happens
+/// to complete within a single `Update` pass. Unlike the gauge, this
+/// survives being scraped any time after the event, same as
+/// `xindeler_oracle_host::ai_gateway`'s own `requests_total`/
+/// `fallback_total` counters.
 #[derive(Resource, Clone)]
 pub struct DimensionMetrics {
     pub spinup: IntGauge,
     pub active: IntGauge,
     pub draining: IntGauge,
     pub teardown: IntGauge,
+    pub teardowns_total: IntCounter,
 }
 
 fn make_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
@@ -154,9 +179,18 @@ fn make_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
     gauge
 }
 
-/// Registers the 4 lifecycle-count gauges on `registry`. Manual
-/// `Opts`/`with_opts`/`registry.register` pattern, matching every other
-/// metrics module in this workspace (same convention
+fn make_counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
+    let counter = IntCounter::with_opts(Opts::new(name, help))
+        .expect("static metric options are always valid");
+    registry
+        .register(Box::new(counter.clone()))
+        .unwrap_or_else(|_| panic!("{name} must not already be registered"));
+    counter
+}
+
+/// Registers the 4 lifecycle-count gauges + the `teardowns_total` counter on
+/// `registry`. Manual `Opts`/`with_opts`/`registry.register` pattern,
+/// matching every other metrics module in this workspace (same convention
 /// `xindeler_oracle_host::ai_gateway::register_metrics` documents).
 pub fn register_metrics(registry: &Registry) -> DimensionMetrics {
     DimensionMetrics {
@@ -180,14 +214,27 @@ pub fn register_metrics(registry: &Registry) -> DimensionMetrics {
             "dimension_lifecycle_teardown",
             "number of dimensions currently in Teardown",
         ),
+        teardowns_total: make_counter(
+            registry,
+            "dimension_lifecycle_teardowns_total",
+            "cumulative count of dimensions torn down (GC-completed) since boot",
+        ),
     }
 }
 
 /// Refreshes the 4 gauges from the live [`DimensionRegistry`] every tick —
 /// cheap (O(live dimensions), a handful at most) and the only way an
 /// external process (a test scraping `/metrics`, or an operator) observes
-/// this shell's dimension state without a live admin RPC channel.
-pub fn update_dimension_metrics(registry: Res<DimensionRegistry>, metrics: Res<DimensionMetrics>) {
+/// this shell's dimension state without a live admin RPC channel. Also bumps
+/// `teardowns_total` once per [`DimensionTornDown`] message drained this tick
+/// — see [`DimensionMetrics`]'s doc comment for why a real message, fired at
+/// the removal site, is the durable signal instead of anything derived from
+/// this system's own registry snapshot.
+pub fn update_dimension_metrics(
+    registry: Res<DimensionRegistry>,
+    metrics: Res<DimensionMetrics>,
+    mut torn_down_reader: bevy::ecs::message::MessageReader<DimensionTornDown>,
+) {
     let (mut spinup, mut active, mut draining, mut teardown) = (0i64, 0i64, 0i64, 0i64);
     for id in registry.ids() {
         match registry.lifecycle(id) {
@@ -198,6 +245,12 @@ pub fn update_dimension_metrics(registry: Res<DimensionRegistry>, metrics: Res<D
             None => {},
         }
     }
+
+    let torn_down_this_tick = torn_down_reader.read().count() as u64;
+    if torn_down_this_tick > 0 {
+        metrics.teardowns_total.inc_by(torn_down_this_tick);
+    }
+
     metrics.spinup.set(spinup);
     metrics.active.set(active);
     metrics.draining.set(draining);

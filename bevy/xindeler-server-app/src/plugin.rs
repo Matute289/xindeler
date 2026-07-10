@@ -16,7 +16,7 @@ use bevy::{
 };
 use bevy_replicon::prelude::RepliconPlugins;
 use tokio::sync::Notify;
-use xindeler_dimensions::DimensionsPlugin;
+use xindeler_dimensions::{DimensionsPlugin, teardown_completed_dimensions};
 use xindeler_oracle_host::AiGatewayPlugin;
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
@@ -85,13 +85,28 @@ impl Plugin for SimServerPlugin {
         app.insert_resource(self.config.debug_dimension_commands.clone());
         let dimension_metrics = dimensions::register_metrics(&metrics_registry);
         app.insert_resource(dimension_metrics);
+        // Explicit edge (bevy-migration-reviewer + ecs-design-reviewer follow-up,
+        // found verifying the phase-4 wave-3 integration): this chain and
+        // `DimensionsPlugin`'s own `Update` chain (above) both touch
+        // `DimensionRegistry` with a genuine read/write conflict
+        // (`update_dimension_metrics` reads it right after
+        // `teardown_completed_dimensions` mutates it) with no ordering
+        // constraint between the two otherwise — today it happens to work only
+        // because `add_plugins(DimensionsPlugin)` is called first in this same
+        // `build`, an accident of insertion order a future refactor could
+        // silently break. Declaring the edge explicitly (rather than relying on
+        // that accident) makes `update_dimension_metrics` see this tick's fully
+        // up-to-date registry state, matching the same rigor this crate's own
+        // `DimensionsPlugin::build` doc comment already applies to its debug
+        // isolation sweep.
         app.add_systems(
             Update,
             (
                 dimensions::apply_debug_dimension_commands,
                 dimensions::update_dimension_metrics,
             )
-                .chain(),
+                .chain()
+                .after(teardown_completed_dimensions),
         );
 
         app.insert_non_send(sim);
