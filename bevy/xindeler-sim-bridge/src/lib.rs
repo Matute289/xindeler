@@ -44,6 +44,24 @@
 //!   `NetUid`-carrying entity that is NOT [`NetLocalPlayer`]) otherwise. See
 //!   [`recompute_aurora_overlay`]'s doc comment for the invariant this must
 //!   never violate.
+//! - EM-4.2d (interest management): [`mirror_sim_entities`] additionally writes
+//!   a [`xindeler_protocol::RegionKey`] (via
+//!   `xindeler_protocol::region_key_for_pos`, from the sim's raw `Pos` — the
+//!   SAME region grid `server/src/sys/subscription.rs` keys entities by) for
+//!   every mirrored entity, deduped through [`SimRegionCache`] so it only
+//!   re-inserts on an actual region crossing. This is what
+//!   `xindeler-server-app`'s per-client `RegionKey`-visibility filter scopes
+//!   entities by — replacing the "broadcast to all clients" v1 posture this
+//!   module's own doc comment used to describe. Because every mirrored entity
+//!   now carries a `RegionKey`, a connected client with no `ClientViewpoint`
+//!   would otherwise see NOTHING (a real regression a reviewer caught against
+//!   this crate's own `mirrors_sim_npc_to_replicon_client` test and
+//!   `xindeler-server-app`'s `replicon_quinnet_dual_stack.rs`) — so
+//!   [`SimTerrainStreamPlugin`] also gained
+//!   [`apply_default_viewpoint_for_new_clients`], a documented stopgap granting
+//!   a spectator-style default viewpoint (world-centre,
+//!   [`ANCHOR_VIEW_DISTANCE`]) to any client that doesn't already have one,
+//!   standing in for EM-4.2c's real login-derived viewpoint.
 //! - EM-4.2b (a second host, no behavior change to the above): the
 //!   [`SimBridgePlugin`]/[`SimTerrainStreamPlugin`]/[`SimEntityMirrorPlugin`]
 //!   trio is now ALSO added by `xindeler-server-app`'s `SimServerPlugin` — the
@@ -116,8 +134,8 @@ use xindeler_dimensions::{
 };
 use xindeler_protocol::{
     AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
-    NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RemoveChunk,
-    TerrainAnchor,
+    NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RegionKey,
+    RemoveChunk, TerrainAnchor, region_key_for_pos,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -178,6 +196,16 @@ pub struct SimMirror(pub HashMap<specs::Entity, Entity>);
 /// sent; entries are pruned alongside [`SimMirror`] when an entity disappears.
 #[derive(Resource, Default, Debug)]
 pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
+
+/// Last-mirrored [`RegionKey`] per sim entity (EM-4.2d), dedup cache mirroring
+/// [`SimLoadoutCache`]'s own shape: `RegionKey` is `Copy`/cheap like the
+/// position/body comps, but re-inserting it every tick (even unchanged) would
+/// re-trigger a full replicon `VisibilityFilter` re-evaluation of this entity
+/// against every connected client on every tick, not just on an actual region
+/// crossing. Entries are pruned alongside [`SimMirror`]/[`SimLoadoutCache`]
+/// when an entity disappears.
+#[derive(Resource, Default, Debug)]
+pub struct SimRegionCache(pub HashMap<specs::Entity, RegionKey>);
 
 /// Advances the embedded sim by one tick using the schedule's `dt`, then
 /// drains the sim's frontend events and errors into `tracing`.
@@ -366,9 +394,12 @@ fn ensure_default_dimension(
 /// Terrain view distance (in chunks) the server-side anchor keeps loaded.
 ///
 /// Small on purpose for the listen-server proof: a real world is huge and the
-/// naive broadcast has no interest management yet (EM-4.2d), so a wide anchor
-/// would stream thousands of chunks to a single local client. `MIN_VD` is the
-/// sim's own minimum, matching what a freshly-spawned player loads.
+/// TERRAIN broadcast still has no interest management (EM-4.2d only wired
+/// per-client ENTITY visibility scoping, via `RegionKey` — see
+/// [`stream_terrain_changes`]'s own doc comment for why chunk broadcast is a
+/// separate, still-open follow-up), so a wide anchor would stream thousands
+/// of chunks to a single local client. `MIN_VD` is the sim's own minimum,
+/// matching what a freshly-spawned player loads.
 pub const ANCHOR_VIEW_DISTANCE: u32 = server::MIN_VD;
 
 /// One-shot latch for the server-side presence anchor + broadcast state.
@@ -389,6 +420,15 @@ pub struct TerrainAnchorState {
     anchor_sent: bool,
 }
 
+impl TerrainAnchorState {
+    /// The world-centre anchor position (sim axes), once known. `None` before
+    /// [`ensure_terrain_anchor`] has computed it. EM-4.2d's
+    /// [`apply_default_viewpoint_for_new_clients`] reads this to give a newly
+    /// connected client a sane default [`xindeler_protocol::ClientViewpoint`].
+    #[must_use]
+    pub fn anchor_wpos(&self) -> Option<[f32; 3]> { self.anchor_wpos }
+}
+
 /// Registers [`TerrainAnchorState`] + the EM-3.6 terrain-stream systems. The
 /// systems run only while the App is acting as the terrain source — i.e. NOT a
 /// connected client (`ClientState::Disconnected`, which is true for the
@@ -406,11 +446,70 @@ impl Plugin for SimTerrainStreamPlugin {
         // `.after(tick_sim)` requires both to live in the same schedule.
         app.init_resource::<TerrainAnchorState>().add_systems(
             FixedUpdate,
-            (ensure_terrain_anchor, stream_terrain_changes)
+            (
+                ensure_terrain_anchor,
+                apply_default_viewpoint_for_new_clients,
+                stream_terrain_changes,
+            )
                 .chain()
                 .after(tick_sim)
                 .run_if(in_state(ClientState::Disconnected)),
         );
+    }
+}
+
+/// BL-82 EM-4.2d stopgap: grants every newly-connected replicon client
+/// (`ConnectedClient`, no `ClientViewpoint` yet) a DEFAULT viewpoint centered
+/// on the terrain anchor with a generous ([`ANCHOR_VIEW_DISTANCE`]) view
+/// distance, the moment a real anchor position is known.
+///
+/// ## Why this exists
+/// Since EM-4.2d wired `RegionKey`-based visibility scoping, EVERY mirrored
+/// entity now carries a `RegionKey`, and a connected client with NO
+/// `ClientVisibleRegions` sees NOTHING (see
+/// `xindeler_protocol::visibility::ClientVisibleRegions`'s own doc comment).
+/// `ClientViewpoint`'s doc comment already says nothing populates it
+/// automatically — EM-4.2c's login system is the natural REAL producer,
+/// keying a viewpoint off the connecting client's own player entity. But
+/// EM-4.2c has not landed yet, and without SOME stopgap, EVERY currently
+/// existing acceptance path that connects a plain client with no login at
+/// all (this crate's own `mirrors_sim_npc_to_replicon_client` test,
+/// `xindeler-server-app`'s `tests/replicon_quinnet_dual_stack.rs`, the
+/// `--listen-server`/net-client smoke paths) would silently regress to
+/// "the client sees zero entities forever" — a real, reviewer-caught
+/// regression risk (BL-82 EM-4.2d review), not a hypothetical one.
+///
+/// This system is the minimal, honest interim producer: a spectator-style
+/// default (world-centre position, `ANCHOR_VIEW_DISTANCE` — the SAME
+/// distance the terrain-anchor persister/embedded player already use),
+/// exactly mirroring the terrain anchor's own "no real player yet → fall
+/// back to a sane spectator default" posture ([`ensure_terrain_anchor`]).
+/// **It never touches a client that already has a `ClientViewpoint`** — once
+/// EM-4.2c inserts a real, player-position-derived one (or a test sets one
+/// directly, as `xindeler-server-app`'s own `tests/interest_management.rs`
+/// does), this system leaves it alone permanently for that client.
+fn apply_default_viewpoint_for_new_clients(
+    anchor: bevy::ecs::system::Res<TerrainAnchorState>,
+    clients: bevy::ecs::system::Query<
+        Entity,
+        (
+            bevy::ecs::query::With<bevy_replicon::prelude::ConnectedClient>,
+            bevy::ecs::query::Without<xindeler_protocol::ClientViewpoint>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    let Some(wpos) = anchor.anchor_wpos() else {
+        return;
+    };
+    for client in &clients {
+        commands
+            .entity(client)
+            .insert(xindeler_protocol::ClientViewpoint::new(
+                DimensionId::default(),
+                vek::Vec2::new(wpos[0], wpos[1]),
+                ANCHOR_VIEW_DISTANCE,
+            ));
     }
 }
 
@@ -497,8 +596,16 @@ fn ensure_terrain_anchor(
 /// - `removed_chunks` → [`RemoveChunk`].
 ///
 /// v1 broadcasts to ALL clients (`SendTargets::All`, which also re-emits
-/// locally for the listen server). TODO(EM-4.2d): per-client interest
-/// management — only send a chunk to clients whose presence covers it.
+/// locally for the listen server). TODO (still open past EM-4.2d): per-client
+/// terrain interest management — only send a chunk to clients whose presence
+/// covers it. EM-4.2d (BL-82 T47.6) scoped ENTITY visibility via a
+/// `bevy_replicon` `VisibilityFilter` (`RegionKey`/`ClientVisibleRegions`,
+/// `xindeler_protocol::visibility`); `CompressedChunk`/`RemoveChunk` are
+/// one-shot MESSAGES, not replicated components, so that same
+/// entity-visibility mechanism does not apply to them — scoping the terrain
+/// broadcast needs its own (structurally different) per-client filter and
+/// remains a known, tracked gap, not silently fixed by this comment's mere
+/// existence.
 ///
 /// The changes themselves were snapshotted (keys only) inside [`tick_sim`],
 /// BEFORE the sim's `cleanup()` cleared its `TerrainChanges` resource; here we
@@ -628,12 +735,15 @@ fn send_lod_alt_once(
         }
     }
 
-    // TODO(EM-4.2d): `targets: All` + a global `sent` latch only reaches
-    // clients connected AT the single broadcast — a client joining after it
-    // never receives the far-terrain heightmap (same accepted limitation as
-    // `TerrainAnchor` above). Fine for v1's one-embedded-player world; needs
+    // TODO (still open past EM-4.2d): `targets: All` + a global `sent` latch
+    // only reaches clients connected AT the single broadcast — a client
+    // joining after it never receives the far-terrain heightmap (same
+    // accepted limitation as `TerrainAnchor` above). This is a late-JOIN
+    // replay gap, not region-scoping — EM-4.2d (T47.6) only wired per-client
+    // ENTITY visibility (see `stream_terrain_changes`'s doc comment); it does
+    // not touch this one-shot broadcast's join-timing behavior at all. Needs
     // a per-connection "have I sent this yet" once real multi-client join
-    // timing matters (interest management lands in EM-4.2d anyway).
+    // timing matters.
     writer.write(ToClients {
         targets: SendTargets::All,
         message: NetLodAlt::encode([grid_w, grid_h], stride, &heights),
@@ -701,6 +811,7 @@ impl Plugin for SimEntityMirrorPlugin {
         // if harmless, conflicting-resource-access ambiguity.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
+            .init_resource::<SimRegionCache>()
             .init_resource::<TestNpcState>()
             .init_resource::<AiExecutionMode>()
             .init_resource::<AuroraOverlay>()
@@ -1064,7 +1175,10 @@ fn mirror_admits_new_entity(dimension: Option<&DimensionState>) -> bool {
 /// client-visible iff it has a `Pos` AND (has no `Presence` OR its
 /// `Presence::kind.sync_me()`). We additionally require a `Body` (nothing to
 /// display without one). `Ori`/`Vel`/`Health` are optional (`.maybe()`).
-/// Per-client interest management (region/distance) is EM-4.2d; v1 broadcasts.
+/// This predicate decides whether an entity is mirrored AT ALL; per-client
+/// interest management on TOP of that (which of the mirrored entities a given
+/// client can see) is EM-4.2d's `RegionKey`, written below and consumed by
+/// `xindeler-server-app`'s `RegionKey`-keyed `VisibilityFilter`.
 ///
 /// ## Read-only into the sim
 /// Only `read_storage` + `entities` — never writes into specs (isolation law
@@ -1105,6 +1219,11 @@ fn mirror_sim_entities(
     // `SimServer` — `registry.get(DimensionId::DEFAULT)` returning `None`
     // below is unreachable in practice, just handled defensively.
     mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
+    // EM-4.2d: per-entity region-key cache, mirroring `SimLoadoutCache`'s
+    // dedup shape — only re-inserts `RegionKey` when an entity's region
+    // actually changed, since replicon's `VisibilityFilter` re-evaluates
+    // every connected client on every insert/replace.
+    mut region_cache: bevy::ecs::system::ResMut<SimRegionCache>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
@@ -1143,6 +1262,14 @@ fn mirror_sim_entities(
     // it, harmless). Both are fine at test-NPC scale; when interest management
     // reshapes this loop, hoist the buffers into a reused resource and guard the
     // removal. Reviewer minors 1+2, deliberately deferred (non-blocking).
+    //
+    // EM-4.2d update: interest management landed WITHOUT reshaping this loop
+    // (the TODO above still stands at test-NPC scale) — `RegionKey` is simply
+    // one more per-entity field computed alongside the others below, deduped
+    // through `region_cache` exactly like `NetLoadout`'s own dedup, so it does
+    // NOT re-insert (and thus does not force a replicon visibility
+    // re-evaluation) on every tick, only when an entity actually crosses into
+    // a new region.
     // Snapshot of which sim entities are visible THIS tick + their net comps.
     let mut seen: Vec<specs::Entity> = Vec::new();
     // Collect (sim_entity, components) first so we can borrow-check-cleanly
@@ -1157,6 +1284,7 @@ fn mirror_sim_entities(
         Option<NetHealth>,
         Option<NetLoadout>,
         Option<NetUid>,
+        RegionKey,
     )> = Vec::new();
 
     // `maybe()` makes these MaybeJoin members, so this is a `LendJoin` (lending
@@ -1232,6 +1360,15 @@ fn mirror_sim_entities(
         // `NonZeroU64`; `NetUid` carries the same value as a plain `u64` so
         // the wire type stays serde-simple).
         let net_uid = uid.map(|u| NetUid(u.0.get()));
+        // EM-4.2d: which region (single dimension, `DimensionId::default()` —
+        // see `xindeler_protocol::visibility`'s module doc comment for the
+        // EM-4.5 extension point) this entity currently occupies, computed
+        // from the RAW sim position (`pos.0`, sim axes) — NOT `net_pos`
+        // (already Bevy-axis-converted above) — matching exactly what
+        // `common::region::RegionMap`/`server/src/sys/subscription.rs` key
+        // entities by.
+        let region_key =
+            region_key_for_pos(DimensionId::default(), vek::Vec2::new(pos.0.x, pos.0.y));
         updates.push((
             entity,
             net_pos,
@@ -1241,6 +1378,7 @@ fn mirror_sim_entities(
             net_health,
             net_loadout,
             net_uid,
+            region_key,
         ));
     }
     drop(it);
@@ -1267,8 +1405,17 @@ fn mirror_sim_entities(
     let dimension0_accepts_new = mirror_admits_new_entity(registry.get(DimensionId::DEFAULT));
     let dimension0_root = registry.get(DimensionId::DEFAULT).map(DimensionState::root);
 
-    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout, net_uid) in
-        updates
+    for (
+        sim_entity,
+        net_pos,
+        net_ori,
+        net_vel,
+        net_body,
+        net_health,
+        net_loadout,
+        net_uid,
+        region_key,
+    ) in updates
     {
         let is_local_player = player_sim_entity == Some(sim_entity);
         // EM-3.8d: (re-)insert the loadout ONLY when it changed since we last
@@ -1277,6 +1424,13 @@ fn mirror_sim_entities(
         let loadout_changed = net_loadout
             .as_ref()
             .is_some_and(|l| loadout_cache.0.get(&sim_entity) != Some(l));
+        // EM-4.2d: same dedup shape as the loadout above — re-inserting
+        // `RegionKey` every tick would re-trigger replicon's
+        // `VisibilityFilter` re-evaluation for every connected client on
+        // every tick, for every mirrored entity, regardless of whether it
+        // actually crossed a region boundary. `changed` is also true on
+        // first sight (an absent cache entry never equals `Some(region_key)`).
+        let region_changed = region_cache.0.get(&sim_entity) != Some(&region_key);
         match mirror.0.get(&sim_entity).copied() {
             Some(bevy_entity) => {
                 // UPSERT: overwrite the net comps every tick (server-authoritative
@@ -1308,6 +1462,11 @@ fn mirror_sim_entities(
                 if let Some(u) = net_uid {
                     ec.insert(u);
                 }
+                // EM-4.2d: only re-insert (and thus re-trigger visibility
+                // re-evaluation) when the region actually changed.
+                if region_changed {
+                    ec.insert(region_key);
+                }
             },
             None => {
                 // EM-4.5: don't create a NEW mirror for a dimension that
@@ -1338,6 +1497,7 @@ fn mirror_sim_entities(
                     net_ori,
                     net_vel,
                     net_body,
+                    region_key,
                 ));
                 if let Some(h) = net_health {
                     ec.insert(h);
@@ -1370,10 +1530,11 @@ fn mirror_sim_entities(
                 }
             },
         }
-        // Refresh the dedup cache for this entity's loadout.
+        // Refresh the dedup cache for this entity's loadout / region.
         if let Some(l) = net_loadout {
             loadout_cache.0.insert(sim_entity, l);
         }
+        region_cache.0.insert(sim_entity, region_key);
     }
 
     // Despawn mirrors whose sim entity is gone / no longer visible this tick.
@@ -1399,6 +1560,8 @@ fn mirror_sim_entities(
         // Drop the cached loadout too, so a re-used specs index doesn't inherit
         // a stale entry (EM-3.8d).
         loadout_cache.0.remove(&sim_entity);
+        // EM-4.2d: same reasoning for the region-key dedup cache.
+        region_cache.0.remove(&sim_entity);
     }
 }
 
@@ -2102,6 +2265,25 @@ mod tests {
         );
     }
 
+    /// EM-4.2d drift guard: `xindeler_protocol::interest`'s hand-duplicated
+    /// `CHUNK_FUZZ` (kept out of that crate's public API, exposed only via
+    /// `chunk_fuzz()`, per its own doc comment's rationale for NOT depending
+    /// on `server`) must stay equal to the real
+    /// `server::presence::CHUNK_FUZZ` the legacy
+    /// `server/src/sys/subscription.rs` trigger actually uses. This crate is
+    /// the natural home for the guard: it already depends on both `server`
+    /// and `xindeler-protocol` (unlike either of those, which deliberately do
+    /// not depend on each other for this one constant). No assets needed.
+    #[test]
+    fn chunk_fuzz_matches_the_legacy_subscription_constant() {
+        assert_eq!(
+            xindeler_protocol::chunk_fuzz(),
+            server::presence::CHUNK_FUZZ,
+            "xindeler_protocol::interest's duplicated CHUNK_FUZZ has drifted from \
+             server::presence::CHUNK_FUZZ — update the duplicate to match"
+        );
+    }
+
     /// EM-3.7 acceptance (server → client): boot the REAL sim, add the entity
     /// mirror + replicon SERVER role, connect a pure replicon CLIENT App, spawn
     /// an NPC server-side, and tick until:
@@ -2185,7 +2367,7 @@ mod tests {
                 break;
             }
         }
-        {
+        let centre = {
             let sim = server_app.world().non_send::<SimServer>();
             let size = sim.server.world().sim().get_size();
             let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
@@ -2197,9 +2379,43 @@ mod tests {
                 .unwrap_or(0.0);
             sim.spawn_wandering_npc(vek::Vec3::new(centre.x, centre.y, alt + 3.0), 0);
             eprintln!("spawned NPC at sim centre {centre:?} alt {alt}");
-        }
+            centre
+        };
 
         server_app.connect_client(&mut client_app);
+
+        // EM-4.2d: `mirror_sim_entities` now writes a `RegionKey` onto every
+        // mirrored entity (including this test's wandering NPC), and
+        // replicon's `RegionKey`/`ClientVisibleRegions` visibility filter
+        // defaults an entity to HIDDEN for any client with no matching
+        // `ClientVisibleRegions` — see `xindeler_protocol::visibility`'s doc
+        // comment. This test predates login/interest management and only
+        // wants to prove the mirror itself replicates a live NPC, so it
+        // manually grants the test client a generous region window around
+        // the NPC's spawn point (mirrors what EM-4.2c's future login system
+        // would eventually compute from a real player's own position).
+        {
+            use bevy_replicon::prelude::ConnectedClient;
+            let client_entity = server_app
+                .world_mut()
+                .query_filtered::<Entity, bevy::ecs::query::With<ConnectedClient>>()
+                .single(server_app.world())
+                .expect("exactly one connected client after connect_client");
+            let centre_region =
+                region_key_for_pos(DimensionId::default(), vek::Vec2::new(centre.x, centre.y));
+            let margin = 3; // generous: the wandering NPC never roams this far.
+            let regions = (-margin..=margin).flat_map(|dx| {
+                (-margin..=margin).map(move |dy| {
+                    vek::Vec2::new(centre_region.region.x + dx, centre_region.region.y + dy)
+                })
+            });
+            server_app.world_mut().entity_mut(client_entity).insert(
+                xindeler_protocol::ClientVisibleRegions::from_regions(
+                    DimensionId::default(),
+                    regions,
+                ),
+            );
+        }
 
         // First-seen client position per replicated entity (client Entity ids
         // are stable across ticks). We assert SOME entity changed position,

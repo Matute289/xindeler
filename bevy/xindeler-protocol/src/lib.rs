@@ -16,21 +16,29 @@
 
 pub mod ai_mode;
 pub mod aurora_overlay;
+pub mod dimension_id;
+pub mod interest;
 pub mod login;
+pub mod visibility;
 
 use bevy::{
     app::{App, Plugin},
     ecs::{component::Component, message::Message, resource::Resource},
     math::{Quat, Vec2, Vec3},
 };
-use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt, ServerMessageAppExt};
+use bevy_replicon::prelude::{
+    AppRuleExt, AppVisibilityExt, Channel, ClientMessageAppExt, ServerMessageAppExt,
+};
 use common::terrain::TerrainChunk;
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
     ai_mode::AiExecutionMode,
     aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
+    dimension_id::DimensionId,
+    interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
+    visibility::{ClientVisibleRegions, RegionKey, region_key_for_pos},
 };
 
 /// Replicated world position of an entity (server-authoritative).
@@ -428,12 +436,23 @@ impl XindelerChannel {
 /// server (identical registration order ⇒ identical replicon protocol hash).
 ///
 /// Add **after** `RepliconPlugins`.
-/// ⚠️ OBLIGATION (spec §6.2, reviewer M1): replicon's default visibility sends
-/// every `Replicated` entity to every client. Before the EM-3.6 mirror starts
-/// spawning `Replicated` entities, per-client visibility scoping (interest
-/// management — `bevy_replicon` visibility filters, region/distance +
-/// `DimensionId`) MUST be wired (EM-4.2d). Do not ship default-all visibility
-/// past the listen-server milestone.
+///
+/// ✅ RESOLVED (BL-82 EM-4.2d, spec §1.3): this used to carry a standing
+/// obligation from the EM-3.6/3.7 reviewer — "replicon's default visibility
+/// sends every `Replicated` entity to every client... MUST be wired
+/// (EM-4.2d) before shipping default-all visibility past the listen-server
+/// milestone." [`visibility::RegionKey`]'s `add_visibility_filter`
+/// registration below is that wiring: `bevy_replicon`'s filters only scope
+/// entities that actually CARRY the filter component, so an entity mirrored
+/// WITH a [`visibility::RegionKey`] is only visible to a client whose
+/// [`visibility::ClientVisibleRegions`] contains it (default: hidden, until
+/// `xindeler-server-app`'s `recompute_client_visible_regions` scopes that
+/// client) — `xindeler-sim-bridge`'s mirror attaches a `RegionKey` to every
+/// entity it mirrors, so every entity this codebase actually replicates
+/// today is scoped, not just newly-written ones. Entities that never carry a
+/// `RegionKey` at all (e.g. this crate's own synthetic test fixtures) are
+/// simply not affected by this filter — they keep replicon's ordinary
+/// default-visible behavior, unrelated to the obligation above.
 pub struct XindelerProtocolPlugin;
 
 impl Plugin for XindelerProtocolPlugin {
@@ -499,6 +518,15 @@ impl Plugin for XindelerProtocolPlugin {
         // not be queued behind entity replication either.
         app.add_server_message::<LoginResult>(XindelerChannel::Events.delivery())
             .make_message_independent::<LoginResult>();
+        // BL-82 EM-4.2d: per-client interest management. Registering this
+        // filter does NOT itself add `RegionKey`/`ClientVisibleRegions` to any
+        // entity — it only teaches replicon how to interpret them where they
+        // ARE present (`xindeler-sim-bridge`'s mirror writes `RegionKey`;
+        // `xindeler-server-app::visibility::recompute_client_visible_regions`
+        // writes `ClientVisibleRegions`). See `visibility`'s module doc
+        // comment for the full design and why registering it symmetrically
+        // here (rather than only server-side) is safe.
+        app.add_visibility_filter::<visibility::RegionKey>();
     }
 }
 

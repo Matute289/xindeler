@@ -17,19 +17,13 @@ use bevy::prelude::*;
 /// always-present default dimension — today's single game world, wrapped
 /// (not changed) by [`crate::registry::DimensionRegistry`].
 ///
-/// Deliberately a plain, independently-queryable component (in ADDITION to
-/// the [`DimensionRoot`] relationship): a system that only needs "which
-/// dimension is this in" can filter with `Query<&DimensionId>` without
-/// walking a relationship, while [`DimensionRoot`] is reserved for the
-/// cascade-despawn / hierarchy-shaped questions ("is this entity a member of
-/// THIS dimension's root").
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct DimensionId(pub u64);
-
-impl DimensionId {
-    /// The always-present default dimension — today's single game world.
-    pub const DEFAULT: DimensionId = DimensionId(0);
-}
+/// Canonically defined in `xindeler_protocol::dimension_id` (EM-4.2d
+/// review-follow-up: that crate's own per-client visibility scoping
+/// (`RegionKey`) needs this same identifier, and `xindeler-protocol` is the
+/// low-level crate every consumer can depend on without a cycle — see that
+/// module's doc comment for the full reasoning). Re-exported here so every
+/// existing `xindeler_dimensions::DimensionId` caller is unaffected.
+pub use xindeler_protocol::DimensionId;
 
 /// Relationship-parent tagging an entity as belonging to a dimension's root
 /// entity (Bevy relationships, stable since 0.16). Despawning the root

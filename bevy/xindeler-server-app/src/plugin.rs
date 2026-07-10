@@ -18,7 +18,7 @@ use bevy_replicon::prelude::RepliconPlugins;
 use tokio::sync::Notify;
 use xindeler_dimensions::DimensionsPlugin;
 use xindeler_oracle_host::AiGatewayPlugin;
-use xindeler_protocol::XindelerProtocolPlugin;
+use xindeler_protocol::{ClientInterestPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
     SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
 };
@@ -165,6 +165,20 @@ impl Plugin for SimServerPlugin {
             SimBridgePlugin,
             SimTerrainStreamPlugin,
             SimEntityMirrorPlugin,
+            // BL-82 EM-4.2d: per-client interest management, scoping each
+            // connected client's replicated-entity visibility to the regions
+            // its own `ClientViewpoint` covers (see
+            // `xindeler_protocol::interest`'s module doc comment). Integration
+            // note (EM-4.2c merge): `login.rs`'s handshake does NOT yet set a
+            // real, character-position-derived `ClientViewpoint` — every
+            // client, logged-in or not, still gets
+            // `xindeler-sim-bridge`'s `apply_default_viewpoint_for_new_clients`
+            // stopgap (spectator-style, centred on the world/anchor). Wiring a
+            // real login-derived viewpoint is a follow-up, not attempted here.
+            // Runs in `FixedUpdate`, alongside `SimEntityMirrorPlugin`'s own
+            // `RegionKey` writes, so both settle before `RepliconPlugins`'
+            // `FixedPostUpdate` replication pass.
+            ClientInterestPlugin,
         ));
 
         // EM-4.2b: the transport seam — this crate names ONLY

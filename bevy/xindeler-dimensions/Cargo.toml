@@ -39,6 +39,16 @@ common = { package = "xindeler-common", path = "../../common" }
 # reasoning `xindeler-oracle-host`'s own Cargo.toml documents for its
 # `xindeler-protocol` edge.
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-4.2d review-follow-up: the canonical `DimensionId` type now lives in
+# `xindeler-protocol` (the low-level, few-deps crate — same reasoning as
+# `AiExecutionMode`'s placement, see that type's own doc comment), so its own
+# per-client visibility scoping (`RegionKey`) can use the SAME identifier
+# without a cycle (this crate already depends on `xindeler-oracle-host`,
+# which depends on `xindeler-protocol` — the reverse edge would be circular).
+# `component.rs` re-exports it (`pub use xindeler_protocol::DimensionId`)
+# rather than defining a duplicate, so `xindeler_dimensions::DimensionId`
+# stays the same type for every existing caller.
+xindeler-protocol = { path = "../xindeler-protocol" }
 # Chunk-store keys (`Vec2<i32>`), matching the logic crates' vek version.
 vek = { workspace = true }
 # World generation runs on a rayon thread pool (reused from the sim, see
