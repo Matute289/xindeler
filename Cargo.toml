@@ -8,6 +8,7 @@ members = [
     "bevy/xindeler-render-voxel",
     "bevy/xindeler-server-app",
     "bevy/xindeler-sim-bridge",
+    "bevy/xindeler-transport",
     "bevy/xindeler-ui",
     "client",
     "client/i18n",

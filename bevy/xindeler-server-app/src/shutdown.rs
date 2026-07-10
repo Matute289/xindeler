@@ -82,13 +82,16 @@ pub fn register_signals() -> Arc<AtomicBool> {
     flag
 }
 
-/// Polls [`ShutdownState::flag`] once per `Update` (chained AFTER
-/// [`crate::sim::tick_sim`] — see [`crate::plugin::SimServerPlugin`] — so a
-/// shutdown request always lands after a full tick+cleanup, never mid-tick).
-/// On a set flag: notifies the metrics server to stop, then writes
-/// `AppExit::Success`. `ScheduleRunnerPlugin`'s runner drops the whole `App`
-/// (and with it the non-send `SimServer` → `Server`'s `Drop` impl) as soon as
-/// it observes the exit, before `App::run()` returns to `main`.
+/// Polls [`ShutdownState::flag`] once per `Update` — see
+/// [`crate::plugin::SimServerPlugin`]'s doc comment: Bevy's
+/// `MainScheduleOrder` always runs `Update` strictly AFTER the
+/// `RunFixedMainLoop` schedule (which drives `xindeler_sim_bridge::tick_sim`'s
+/// `FixedUpdate` step, EM-4.2b), so a shutdown request always lands after a
+/// full tick+cleanup, never mid-tick. On a set flag: notifies the metrics
+/// server to stop, then writes `AppExit::Success`. `ScheduleRunnerPlugin`'s
+/// runner drops the whole `App` (and with it the non-send `SimServer` →
+/// `Server`'s `Drop` impl) as soon as it observes the exit, before `App::run()`
+/// returns to `main`.
 pub fn check_shutdown(state: Res<ShutdownState>, mut exit: MessageWriter<AppExit>) {
     if state.flag.load(Ordering::Relaxed) {
         tracing::info!("shutdown signal received; finishing gracefully");

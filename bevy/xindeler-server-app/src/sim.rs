@@ -1,42 +1,70 @@
 //! The embedded specs simulation (EM-4.1): boots the SAME `Server::new` /
-//! `.tick()` / `.cleanup()` recipe server-cli's `server_loop` and
-//! `xindeler-sim-bridge::boot_test_server` use, but reads the REAL production
-//! settings (`server::Settings::load` / `EditableSettings::load` — not the
-//! `singleplayer()` shortcut those two use), so `gameserver_protocols` comes
-//! straight from `<userdata>/server/server_config/settings.ron` exactly like
-//! server-cli. Dual-stack falls out of this for free: whatever protocols
-//! (TCP/QUIC) that file lists come up unmodified — this shell never touches
+//! `.tick()` / `.cleanup()` recipe server-cli's `server_loop` uses, but reads
+//! the REAL production settings (`server::Settings::load` /
+//! `EditableSettings::load` — not the `singleplayer()` shortcut
+//! `xindeler-sim-bridge::boot_test_server` uses for the listen-server path),
+//! so `gameserver_protocols` comes straight from
+//! `<userdata>/server/server_config/settings.ron` exactly like server-cli.
+//! Dual-stack falls out of this for free: whatever protocols (TCP/QUIC) that
+//! file lists come up unmodified — this shell never touches
 //! `gameserver_protocols` beyond the same `no_auth` override server-cli's
 //! `--no-auth` flag applies.
+//!
+//! ## EM-4.2b: boot/tick now flow through `xindeler-sim-bridge`
+//! [`SimServer`] used to be a SEPARATE, near-duplicate copy of
+//! `xindeler-sim-bridge`'s own type (same fields, same tick recipe, just
+//! reading production settings instead of the singleplayer shortcut and
+//! without the bridge's `pending_terrain` snapshot). That duplication is now
+//! gone: [`boot_dedicated_server`] loads the real settings this module has
+//! always read, then hands them to `xindeler_sim_bridge::boot_with_settings`
+//! (extracted from `boot_test_server` for exactly this reuse), producing an
+//! `xindeler_sim_bridge::SimServer` — re-exported here as [`SimServer`] — with
+//! its `pending_terrain` snapshot intact. [`crate::plugin::SimServerPlugin`]
+//! then adds `xindeler_sim_bridge::{SimBridgePlugin, SimTerrainStreamPlugin,
+//! SimEntityMirrorPlugin}` directly (imported there, not re-exported through
+//! this module) instead of registering a second, local `tick_sim` system —
+//! those plugins' `FixedUpdate` `tick_sim` drives the sim, streams terrain,
+//! and mirrors entities into `Replicated` Bevy entities for the new
+//! replicon+quinnet transport (`xindeler-transport`) to actually send. This
+//! is a wrapping refactor, not a behavior change: the settings source, the
+//! `no_auth` override, and the dual-stack legacy listener are all untouched —
+//! including the tokio runtime's own CPU-scaled sizing (below), which an
+//! earlier draft of this extraction accidentally silently downgraded to the
+//! singleplayer path's small fixed size; [`boot_with_settings`] now takes
+//! that sizing as a parameter instead of picking one on every caller's
+//! behalf, so this shell passes its own formula back through exactly as
+//! before.
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use bevy::{
-    ecs::{change_detection::NonSendMut, system::Res},
-    time::Time,
-};
 use server::{
-    EditableSettings, Event, Input, Server, Settings,
+    EditableSettings, Settings,
     persistence::{DatabaseSettings, SqlLogMode},
     settings::Protocol,
 };
-use tokio::runtime::Runtime;
 use xindeler_oracle_host::AiGatewayConfig;
+pub use xindeler_sim_bridge::SimServer;
 
 use crate::metrics::DEFAULT_METRICS_ADDR;
 
-/// Server tick rate (30 TPS — matches server-cli's `TPS` const and the sim's
-/// own expectations). `ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)`
-/// paces the whole headless `App` at this cadence.
+/// Server tick rate (30 TPS — matches server-cli's `TPS` const,
+/// `xindeler_sim_bridge::SIM_TICK_HZ`, and the sim's own expectations).
+/// `ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)` paces the whole
+/// headless `App` at this cadence; [`crate::plugin::SimServerPlugin`] ALSO
+/// installs `Time::<Fixed>::from_hz(SIM_TICK_HZ)` so `tick_sim`'s
+/// `FixedUpdate` schedule (owned by `xindeler_sim_bridge::SimBridgePlugin`)
+/// ticks at the same rate.
 pub const SIM_TICK_INTERVAL: Duration = Duration::from_nanos(33_333_333); // exactly 1/30 s
+
+/// Default bind address for the new replicon+quinnet transport (BL-82
+/// EM-4.2b) — deliberately a DIFFERENT port from both the legacy
+/// `gameserver_protocols` default (14004) and the metrics passthrough default
+/// (`DEFAULT_METRICS_ADDR`, 14005), so the two transports never collide when
+/// both run dual-stack on one process. Overridable via
+/// `XINDELER_SERVER_REPLICON_ADDR` (same env-var pattern as
+/// `XINDELER_SERVER_METRICS_ADDR`/`XINDELER_SERVER_NO_AUTH` in `main.rs`) —
+/// a full settings-file field is Phase 5 polish, out of this task's scope.
+pub const DEFAULT_REPLICON_ADDR: &str = "127.0.0.1:14006";
 
 /// Knobs [`crate::plugin::SimServerPlugin`] needs beyond what's read off
 /// `settings.ron`.
@@ -56,6 +84,9 @@ pub struct SimServerConfig {
     /// RON file path) when set, mirroring `metrics_addr`'s
     /// env-var-overrides-a-sane-default pattern.
     pub ai_gateway: AiGatewayConfig,
+    /// Bind address for the new replicon+quinnet transport (EM-4.2b). See
+    /// [`DEFAULT_REPLICON_ADDR`].
+    pub replicon_addr: SocketAddr,
 }
 
 impl Default for SimServerConfig {
@@ -66,33 +97,19 @@ impl Default for SimServerConfig {
                 .parse()
                 .expect("DEFAULT_METRICS_ADDR is a valid SocketAddr literal"),
             ai_gateway: AiGatewayConfig::default(),
+            replicon_addr: DEFAULT_REPLICON_ADDR
+                .parse()
+                .expect("DEFAULT_REPLICON_ADDR is a valid SocketAddr literal"),
         }
     }
 }
 
-/// The embedded authoritative simulation, owned by
-/// [`crate::plugin::SimServerPlugin`] as a Bevy **non-send** resource (`Server`
-/// is `Send` but not `Sync` — its specs `SendDispatcher` boxes `dyn RunNow +
-/// Send` stages without a `Sync` bound; same reasoning
-/// `xindeler-sim-bridge::SimServer` documents). Non-send storage also pins
-/// [`tick_sim`] to the main thread, matching how server-cli ticks the sim from
-/// its own main loop.
-pub struct SimServer {
-    /// The authoritative veloren/xindeler simulation.
-    pub server: Server,
-    /// Runtime backing the sim's async work (networking, persistence). Kept
-    /// alive here for the sim's lifetime; also used to spawn the metrics
-    /// passthrough server (EM-4.1).
-    pub runtime: Arc<Runtime>,
-    /// Number of successful [`tick_sim`] passes since boot.
-    pub ticks: u64,
-}
-
-/// Boots a real dedicated-server `Server` rooted at `<userdata>/server` (the
-/// SAME data dir server-cli uses — see `server::DEFAULT_DATA_DIR_NAME`'s doc
-/// comment: "Used so that different server frontends can share the same
+/// Boots a real dedicated-server [`SimServer`] rooted at `<userdata>/server`
+/// (the SAME data dir server-cli uses — see `server::DEFAULT_DATA_DIR_NAME`'s
+/// doc comment: "Used so that different server frontends can share the same
 /// server saves, etc."). Panics only where server-cli itself would treat the
-/// failure as fatal (tokio runtime build); a `Server::new` failure is
+/// failure as fatal (tokio runtime build, inside
+/// `xindeler_sim_bridge::boot_with_settings`); a `Server::new` failure is
 /// returned so the caller decides how to report it.
 pub fn boot_dedicated_server(config: &SimServerConfig) -> Result<SimServer, server::Error> {
     let data_dir: PathBuf = {
@@ -113,28 +130,10 @@ pub fn boot_dedicated_server(config: &SimServerConfig) -> Result<SimServer, serv
         sql_log_mode: SqlLogMode::Disabled,
     };
 
-    // Same sizing formula + thread-name-per-worker scheme as server-cli's
-    // runtime (server-cli/src/main.rs): a small pool is enough — the sim's
-    // heavy lifting runs on its own rayon/slow-job pools, this runtime only
-    // backs networking + persistence + (EM-4.1) the metrics server.
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(
-                (num_cpus::get() / 4).max(common::consts::MIN_RECOMMENDED_TOKIO_THREADS),
-            )
-            .thread_name_fn(|| {
-                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                format!("tokio-server-app-{id}")
-            })
-            .build()
-            .expect("failed to build tokio runtime for the xindeler dedicated server"),
-    );
-
-    // Log the listener addresses BEFORE `Server::new` consumes `settings` by
-    // value, so the dual-stack acceptance criterion (old client can still
-    // reach the sim's own listener) is directly visible in the process log.
+    // Log the listener addresses BEFORE handing `settings` off by value, so
+    // the dual-stack acceptance criterion (old client can still reach the
+    // sim's own listener, alongside the new replicon+quinnet transport) is
+    // directly visible in the process log.
     let gameserver_addresses: Vec<(&'static str, std::net::SocketAddr)> = server_settings
         .gameserver_protocols
         .iter()
@@ -144,59 +143,31 @@ pub fn boot_dedicated_server(config: &SimServerConfig) -> Result<SimServer, serv
         })
         .collect();
 
-    let server = Server::new(
+    // Same sizing formula server-cli's own production runtime uses
+    // (server-cli/src/main.rs) — a small pool is enough since the sim's heavy
+    // lifting runs on its own rayon/slow-job pools, this runtime only backs
+    // networking + persistence + the EM-4.1 metrics server, but it still
+    // needs to scale with host core count, unlike the singleplayer/dev-test
+    // path's small fixed size (see `boot_with_settings`'s doc comment for why
+    // this is passed explicitly rather than inherited from that path).
+    let worker_threads = (num_cpus::get() / 4).max(common::consts::MIN_RECOMMENDED_TOKIO_THREADS);
+    let sim = xindeler_sim_bridge::boot_with_settings(
         server_settings,
         editable_settings,
         database_settings,
         &data_dir,
-        &|stage| tracing::debug!(?stage, "sim server init"),
-        Arc::clone(&runtime),
+        worker_threads,
+        "tokio-server-app",
     )?;
 
     tracing::info!(
         ?gameserver_addresses,
+        replicon_addr = %config.replicon_addr,
         "xindeler dedicated server ready to accept connections (dual-stack: the sim's own \
-         listener is unmodified — old/wire-protocol-identical clients connect exactly as they do \
-         against server-cli)"
+         legacy listener is unmodified — old/wire-protocol-identical clients connect exactly as \
+         they do against server-cli — AND the new replicon+quinnet transport listens separately, \
+         EM-4.2b)"
     );
 
-    Ok(SimServer {
-        server,
-        runtime,
-        ticks: 0,
-    })
-}
-
-/// Advances the embedded sim by one tick using Bevy's frame `dt`, then drains
-/// the sim's frontend events into `tracing` — the same shape as server-cli's
-/// `server_loop` body and `xindeler-sim-bridge::tick_sim`.
-///
-/// No-ops until [`crate::plugin::SimServerPlugin`] has inserted a
-/// [`SimServer`] (there is no `resource_exists` equivalent for non-send data,
-/// so the gate is the `Option` param).
-pub fn tick_sim(time: Res<Time>, sim: Option<NonSendMut<SimServer>>) {
-    let Some(mut sim) = sim else { return };
-    let dt = time.delta();
-    let events = match sim.server.tick(Input::default(), dt) {
-        Ok(events) => events,
-        Err(err) => {
-            tracing::error!(?err, "sim server tick failed");
-            return;
-        },
-    };
-    for event in events {
-        match event {
-            Event::ClientConnected { .. } => tracing::info!("client connected"),
-            Event::ClientDisconnected { .. } => tracing::info!("client disconnected"),
-            Event::Chat { msg, .. } => tracing::info!("chat: {msg}"),
-        }
-    }
-
-    // Like server-cli's loop: clean up after every tick (clears TerrainChanges
-    // and other per-tick bookkeeping the sim expects a frontend to drain).
-    sim.server.cleanup();
-    sim.ticks += 1;
-    if sim.ticks.rem_euclid(1000) == 0 {
-        tracing::trace!(ticks = sim.ticks, "keepalive");
-    }
+    Ok(sim)
 }

@@ -44,6 +44,25 @@
 //!   `NetUid`-carrying entity that is NOT [`NetLocalPlayer`]) otherwise. See
 //!   [`recompute_aurora_overlay`]'s doc comment for the invariant this must
 //!   never violate.
+//! - EM-4.2b (a second host, no behavior change to the above): the
+//!   [`SimBridgePlugin`]/[`SimTerrainStreamPlugin`]/[`SimEntityMirrorPlugin`]
+//!   trio is now ALSO added by `xindeler-server-app`'s `SimServerPlugin` — the
+//!   dedicated-server shell that owns the real remote
+//!   `bevy_replicon`/`xindeler-transport` connection. [`boot_with_settings`]
+//!   (factored out of [`boot_test_server`]) lets that shell boot a
+//!   [`SimServer`] from the REAL production `Settings`/`EditableSettings` it
+//!   reads (`server::Settings::load`), instead of the singleplayer shortcut
+//!   this crate's own `boot_test_server` uses for the listen-server path —
+//!   `worker_threads`/`thread_name_prefix` are caller-supplied precisely so
+//!   this extraction does NOT silently downgrade that shell's real CPU-scaled
+//!   tokio runtime sizing to the singleplayer path's small fixed one (see
+//!   [`boot_with_settings`]'s own doc comment for the regression this closes).
+//!   `xindeler-server-app` does NOT add
+//!   [`PlayerBridgePlugin`]/[`LodAltStreamPlugin`] (no embedded local player;
+//!   EM-4.2c/login is out of scope there) — the terrain-anchor persister
+//!   fallback and the wandering test NPCs cover the acceptance test's "at least
+//!   one replicated entity + one terrain chunk" bar on their own, same as they
+//!   already do for the listen-server's own spectator fallback path.
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
@@ -52,7 +71,15 @@
 mod player;
 pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
 
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use bevy::{
     app::{App, FixedUpdate, Plugin, Update},
@@ -1258,7 +1285,9 @@ fn tick_aurora_overlay(
 /// Boots a throwaway singleplayer-style server rooted at `data_dir` for
 /// tests/dev shells: unused local TCP port, auth disabled, default world
 /// (needs `VELOREN_ASSETS`/`XINDELER_ASSETS` + the LFS map blobs), SQLite under
-/// `<data_dir>/saves`.
+/// `<data_dir>/saves`. Same fixed 2-worker runtime this function has always
+/// used (small, dev/test-scale; unaffected by [`boot_with_settings`]'s
+/// EM-4.2b generalization below — see that function's doc comment).
 pub fn boot_test_server(data_dir: &Path) -> Result<SimServer, server::Error> {
     let settings = Settings::singleplayer(data_dir);
     let editable_settings = EditableSettings::singleplayer(data_dir);
@@ -1266,13 +1295,59 @@ pub fn boot_test_server(data_dir: &Path) -> Result<SimServer, server::Error> {
         db_dir: data_dir.join("saves"),
         sql_log_mode: SqlLogMode::Disabled,
     };
-    // Small multi-thread runtime, same shape as server-cli's (Server::new
-    // requires a runtime it can block on and spawn network tasks onto).
+    boot_with_settings(
+        settings,
+        editable_settings,
+        database_settings,
+        data_dir,
+        2,
+        "tokio-sim-bridge",
+    )
+}
+
+/// Boots a [`SimServer`] from ALREADY-LOADED settings (BL-82 EM-4.2b).
+///
+/// Extracted from [`boot_test_server`] so a shell that needs a DIFFERENT
+/// settings source — e.g. `xindeler-server-app`'s dedicated-server shell,
+/// which reads the real production `<userdata>/server/server_config/
+/// settings.ron` via `server::Settings::load` rather than the singleplayer
+/// shortcut — can boot the SAME `SimServer` type (with the `pending_terrain`
+/// snapshot [`SimTerrainStreamPlugin`] depends on) instead of maintaining a
+/// second, divergent copy of this boot recipe. `boot_test_server` is now a
+/// thin wrapper over this for the singleplayer-settings case, passing its own
+/// unchanged fixed 2-worker sizing.
+///
+/// `worker_threads`/`thread_name_prefix` are caller-controlled (an
+/// EM-4.2b-review fix): the FIRST version of this extraction hardcoded the
+/// singleplayer/dev-test path's small fixed `2`-worker sizing for every
+/// caller, silently regressing `xindeler-server-app`'s real dedicated-server
+/// runtime, which used to scale with host core count
+/// (`(num_cpus::get() / 4).max(MIN_RECOMMENDED_TOKIO_THREADS)`, the same
+/// formula `server-cli` sizes its own production runtime with). That shell
+/// now passes its own formula back through (see its `sim.rs`) instead of
+/// silently inheriting the dev-scale default — this function no longer picks
+/// a size on any caller's behalf.
+pub fn boot_with_settings(
+    settings: Settings,
+    editable_settings: EditableSettings,
+    database_settings: DatabaseSettings,
+    data_dir: &Path,
+    worker_threads: usize,
+    thread_name_prefix: &'static str,
+) -> Result<SimServer, server::Error> {
+    // `Server::new` requires a runtime it can block on and spawn
+    // networking/persistence tasks onto; sizing and thread naming are the
+    // CALLER's call (see doc comment above) rather than a one-size-fits-all
+    // default baked in here.
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(2)
-            .thread_name("tokio-sim-bridge")
+            .worker_threads(worker_threads)
+            .thread_name_fn(move || {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                format!("{thread_name_prefix}-{id}")
+            })
             .build()
             .expect("failed to build tokio runtime for the sim"),
     );

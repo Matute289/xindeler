@@ -1,0 +1,97 @@
+//! EM-4.2b — client-role counterpart to the new real replicon+quinnet
+//! transport (compiled only under the `net-client` cargo feature).
+//!
+//! Unlike [`crate::listen_server`] (which HOSTS an embedded sim +
+//! `bevy_replicon` SERVER role in-process, looping back locally through
+//! replicon's `send_locally` path), this module is a genuinely REMOTE THIN
+//! CLIENT: it adds `bevy_replicon`'s CLIENT role + `XindelerProtocolPlugin` +
+//! `xindeler_transport::QuinnetTransport::client_plugins(...)` — never
+//! touching `bevy_replicon_quinnet`/`bevy_quinnet` types directly, see
+//! `xindeler-transport`'s own doc comment — and connects over a REAL
+//! loopback/network UDP socket to a SEPARATE `xindeler-server-app` process.
+//!
+//! It reuses the SAME client-side consumption plugins the listen-server path
+//! uses ([`crate::terrain_stream::TerrainStreamPlugin`],
+//! [`crate::entity_view::EntityViewPlugin`],
+//! [`crate::figure_view::FigureViewPlugin`],
+//! [`crate::sprite_view::SpriteViewPlugin`],
+//! [`crate::lod::LodCullingPlugin`], [`crate::far_terrain::FarTerrainPlugin`])
+//! VERBATIM — the wire shape (`xindeler-protocol`) does not change, only the
+//! transport underneath it and who hosts the sim.
+//!
+//! ## Scope: spectator-only (v1)
+//! There is no embedded local player and no `xindeler-sim-bridge` dependency
+//! at all — login/session handshake (EM-4.2c) is a separate, not-yet-landed
+//! task, so this mode has no way to authenticate a controllable character
+//! yet. It behaves like the listen-server's own "no embedded player" fallback:
+//! a spectator camera parked over the server's terrain anchor
+//! ([`crate::terrain_stream::place_camera_on_anchor`]), watching whatever the
+//! server mirrors (the wandering test NPCs `xindeler_sim_bridge::
+//! spawn_test_npcs` spawns). `xindeler-server-app`'s own acceptance test uses
+//! the `XINDELER_SERVER_NO_AUTH` escape hatch on the SERVER side for this same
+//! reason — no new auth machinery is needed here either.
+//!
+//! ## Purity
+//! This module — and everything it activates — uses NO `specs`, and (unlike
+//! `listen-server`) doesn't even link `xindeler-sim-bridge`: a real remote
+//! client has nothing to host. The engine-isolation guard's grep over this
+//! crate's `src` stays clean, more directly than under `listen-server`'s own
+//! sanctioned exception.
+
+use bevy::prelude::*;
+use bevy_replicon::prelude::RepliconPlugins;
+use xindeler_protocol::XindelerProtocolPlugin;
+use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
+
+use crate::{
+    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
+    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
+};
+
+/// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
+/// client role, the shared protocol, the real transport (dialing
+/// `self.config.server_addr`), and the client-side consumption plugins listed
+/// in the module doc comment.
+pub struct NetClientPlugin {
+    pub config: TransportConfig,
+}
+
+impl Plugin for NetClientPlugin {
+    fn build(&self, app: &mut App) {
+        info!(
+            server_addr = %self.config.server_addr,
+            "net-client: connecting to a remote xindeler-server-app over the replicon+quinnet \
+             transport (EM-4.2b)"
+        );
+
+        // `bevy_replicon`'s CLIENT role (unconfigured `RepliconPlugins`
+        // already includes it — see `xindeler-transport`'s crate doc
+        // comment, "Both client+server bevy_replicon roles compile into
+        // EVERY shell", for why both roles' ECS scaffolding being
+        // technically present here is harmless: only the role with an
+        // actually-open transport connection does anything) + the shared
+        // replication contract. Must precede the transport plugins (see
+        // `QuinnetTransport`'s `Startup`-ordering doc comment for why this
+        // is a correctness requirement, not a style preference).
+        app.add_plugins((RepliconPlugins, XindelerProtocolPlugin));
+
+        // The transport seam: dials `self.config.server_addr` at `Startup`.
+        app.add_plugins(QuinnetTransport.client_plugins(&self.config));
+
+        // Client-side presentation — verbatim reuse of the listen-server
+        // path's own consumer plugins (see module doc comment).
+        app.add_plugins((
+            TerrainStreamPlugin,
+            EntityViewPlugin,
+            FigureViewPlugin,
+            SpriteViewPlugin,
+            LodCullingPlugin,
+            FarTerrainPlugin,
+            // The chunk pipeline needs the palette-derived ChunkLayerMap +
+            // ChunkMaterials to mesh at all (same reason
+            // `listen_server::ListenServerPlugin` adds this).
+            PaletteMaterialPlugin,
+        ));
+    }
+}
