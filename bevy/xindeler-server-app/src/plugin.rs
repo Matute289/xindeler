@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use bevy::{
-    app::{App, Plugin, Update},
+    app::{App, FixedUpdate, Plugin, Update},
     ecs::schedule::IntoScheduleConfigs,
     state::app::StatesPlugin,
     time::{Fixed, Time},
@@ -87,20 +87,39 @@ impl Plugin for SimServerPlugin {
         app.insert_resource(dimension_metrics);
         // Explicit edge (bevy-migration-reviewer + ecs-design-reviewer follow-up,
         // found verifying the phase-4 wave-3 integration): this chain and
-        // `DimensionsPlugin`'s own `Update` chain (above) both touch
-        // `DimensionRegistry` with a genuine read/write conflict
-        // (`update_dimension_metrics` reads it right after
-        // `teardown_completed_dimensions` mutates it) with no ordering
-        // constraint between the two otherwise — today it happens to work only
-        // because `add_plugins(DimensionsPlugin)` is called first in this same
-        // `build`, an accident of insertion order a future refactor could
-        // silently break. Declaring the edge explicitly (rather than relying on
-        // that accident) makes `update_dimension_metrics` see this tick's fully
-        // up-to-date registry state, matching the same rigor this crate's own
-        // `DimensionsPlugin::build` doc comment already applies to its debug
-        // isolation sweep.
+        // `DimensionsPlugin`'s own chain (above) both touch `DimensionRegistry`
+        // with a genuine read/write conflict (`update_dimension_metrics` reads
+        // it right after `teardown_completed_dimensions` mutates it) with no
+        // ordering constraint between the two otherwise — today it happens to
+        // work only because `add_plugins(DimensionsPlugin)` is called first in
+        // this same `build`, an accident of insertion order a future refactor
+        // could silently break. Declaring the edge explicitly (rather than
+        // relying on that accident) makes `update_dimension_metrics` see this
+        // tick's fully up-to-date registry state, matching the same rigor this
+        // crate's own `DimensionsPlugin::build` doc comment already applies to
+        // its debug isolation sweep.
+        //
+        // EM-4.10 Finding B follow-up (bevy-migration-reviewer MAJOR finding):
+        // `teardown_completed_dimensions` moved `Update` -> `FixedUpdate` (see
+        // `xindeler_dimensions::plugin::DimensionsPlugin`'s doc comment) but
+        // this chain was left registered in `Update` with a now-VACUOUS
+        // `.after(teardown_completed_dimensions)` edge — `.after`/`.before`
+        // only order systems within the SAME schedule, so this ordered against
+        // zero members of `Update`'s own system graph (confirmed: Bevy treats
+        // this as a silent no-op, not a build-time error). Runtime correctness
+        // was fortuitously preserved anyway because Bevy's `MainScheduleOrder`
+        // always runs `RunFixedMainLoop` (and thus every `FixedUpdate` step
+        // queued for the frame) strictly before `Update` — but that made the
+        // ordering an accident of Bevy's own schedule structure standing in
+        // for what used to be an explicit, declared edge, exactly the
+        // "insertion-order accident a future refactor could silently break"
+        // class of bug this comment was originally written to eliminate.
+        // Moved this chain to `FixedUpdate` too — sim/debug-command bookkeeping
+        // belongs at sim cadence like the rest of the dimension-lifecycle
+        // chain, not render cadence — so the `.after(..)` edge is a REAL,
+        // same-schedule ordering constraint again.
         app.add_systems(
-            Update,
+            FixedUpdate,
             (
                 dimensions::apply_debug_dimension_commands,
                 dimensions::update_dimension_metrics,
