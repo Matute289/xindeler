@@ -9,9 +9,12 @@
 //! EM-4.2e) and superficially looks like the natural home for this enum too.
 //! But EM-4.2f's mirror (`xindeler-sim-bridge`) also needs to read the
 //! CURRENT mode — to decide whether `AuroraOverlay` gets populated — and
-//! `xindeler-sim-bridge` already depends on `xindeler-protocol` (not on
-//! `xindeler-oracle-host`, which today only `xindeler-client` depends on).
-//! Checking the existing crate-dependency direction: `xindeler-protocol` is
+//! `xindeler-sim-bridge` already depends on `xindeler-protocol`, but NOT on
+//! `xindeler-oracle-host` (which, before this same EM-4.2e change,
+//! `xindeler-client` was the only dependent of; this change adds
+//! `xindeler-server-app` as a second one, purely to wire `AiGatewayPlugin` —
+//! `xindeler-sim-bridge` still isn't among them). Checking the existing
+//! crate-dependency direction: `xindeler-protocol` is
 //! the low-level, few-deps wire/shared crate; `xindeler-oracle-host` is
 //! higher-level (asset loading, ORACLE content). A higher-level crate
 //! depending on a lower-level one is the normal, healthy direction; the

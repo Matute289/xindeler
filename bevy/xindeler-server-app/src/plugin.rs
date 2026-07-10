@@ -10,7 +10,7 @@ use bevy::{
     ecs::schedule::IntoScheduleConfigs,
 };
 use tokio::sync::Notify;
-use xindeler_oracle_host::{AiGatewayConfig, AiGatewayPlugin};
+use xindeler_oracle_host::AiGatewayPlugin;
 
 use crate::{
     metrics,
@@ -45,12 +45,15 @@ impl Plugin for SimServerPlugin {
             Arc::clone(&metrics_shutdown),
         );
 
-        // EM-4.2e: AI-gateway config/metrics seam. Registers 2 zero-value
-        // counters on the SAME registry `/metrics` above serves; makes no
-        // real AI call (see `xindeler_oracle_host::ai_gateway`'s doc
+        // EM-4.2e: AI-gateway config/metrics seam. `self.config.ai_gateway`
+        // defaults to `Offline`/no-op but is overridable via `main.rs`'s
+        // `XINDELER_SERVER_AI_GATEWAY_CONFIG` env var, so this is a genuinely
+        // exercised RON-load path, not just a tested capability. Registers 2
+        // zero-value counters on the SAME registry `/metrics` above serves;
+        // makes no real AI call (see `xindeler_oracle_host::ai_gateway`'s doc
         // comment).
         app.add_plugins(AiGatewayPlugin {
-            config: AiGatewayConfig::default(),
+            config: self.config.ai_gateway.clone(),
             registry: metrics_registry,
         });
 

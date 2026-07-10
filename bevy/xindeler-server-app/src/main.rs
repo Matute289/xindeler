@@ -25,6 +25,8 @@ use bevy::{
     app::{App, AppExit, PluginGroup, ScheduleRunnerPlugin},
 };
 
+use xindeler_oracle_host::AiGatewayConfig;
+
 use crate::{
     plugin::SimServerPlugin,
     sim::{SIM_TICK_INTERVAL, SimServerConfig},
@@ -64,6 +66,37 @@ fn main() -> AppExit {
         },
         Err(_) => SimServerConfig::default().metrics_addr,
     };
+    // EM-4.2e: AI-gateway config seam. No caller dials out from this crate
+    // regardless of the loaded `mode` — see `xindeler_oracle_host::
+    // ai_gateway`'s module doc. Optional so this shell keeps booting with the
+    // safe `Offline` default when unset (the common case today: BL-83/BL-85
+    // don't exist yet).
+    let ai_gateway = match std::env::var("XINDELER_SERVER_AI_GATEWAY_CONFIG") {
+        Ok(path) => match std::fs::read_to_string(&path) {
+            Ok(text) => match AiGatewayConfig::from_ron_str(&text) {
+                Ok(config) => config,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        path,
+                        "XINDELER_SERVER_AI_GATEWAY_CONFIG points at a file that failed to parse \
+                         as AiGatewayConfig RON; falling back to the default (Offline)"
+                    );
+                    AiGatewayConfig::default()
+                },
+            },
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    path,
+                    "XINDELER_SERVER_AI_GATEWAY_CONFIG is set but the file could not be read; \
+                     falling back to the default (Offline)"
+                );
+                AiGatewayConfig::default()
+            },
+        },
+        Err(_) => AiGatewayConfig::default(),
+    };
 
     App::new()
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)))
@@ -71,6 +104,7 @@ fn main() -> AppExit {
             config: SimServerConfig {
                 no_auth,
                 metrics_addr,
+                ai_gateway,
             },
         })
         .run()
