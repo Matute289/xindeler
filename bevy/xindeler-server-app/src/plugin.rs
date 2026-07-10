@@ -18,7 +18,7 @@ use bevy_replicon::prelude::RepliconPlugins;
 use tokio::sync::Notify;
 use xindeler_dimensions::DimensionsPlugin;
 use xindeler_oracle_host::AiGatewayPlugin;
-use xindeler_protocol::{ClientInterestPlugin, XindelerProtocolPlugin};
+use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
     SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
 };
@@ -179,6 +179,14 @@ impl Plugin for SimServerPlugin {
             // `RegionKey` writes, so both settle before `RepliconPlugins`'
             // `FixedPostUpdate` replication pass.
             ClientInterestPlugin,
+            // BL-82 EM-4.8: the `on_enter_message -> HudToast` narrative
+            // hook (`xindeler_protocol::narrative`). A permanent no-op today
+            // (`NarrativeHooks` starts empty and nothing in this shell
+            // registers an entry yet — no `DmEvent`-triggered dimension
+            // spinup exists, EM-4.9's job) but cheap and harmless to wire
+            // for real now, mirroring `AiGatewayPlugin`'s own "seam wired
+            // into the real shell before any real caller exists" posture.
+            HudToastPlugin,
         ));
 
         // EM-4.2b: the transport seam — this crate names ONLY

@@ -42,8 +42,8 @@ use xindeler_sim_bridge::{
 
 use crate::{
     entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -183,6 +183,12 @@ impl Plugin for ListenServerPlugin {
             // installs both from `block_palette.ron`).
             crate::palette_material::PaletteMaterialPlugin,
         ));
+        // BL-82 EM-4.8: minimal timed-fade `bevy_ui` toast, rendered on
+        // `HudToast` arrival (the server-side hook lives in
+        // `xindeler_protocol::narrative`). Pure Bevy. Split into its own
+        // `add_plugins` call — the tuple above is already at the 15-plugin
+        // ceiling `bevy_app`'s `Plugins` trait impls support.
+        app.add_plugins(HudToastViewPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");
