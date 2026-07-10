@@ -40,35 +40,68 @@ use bevy::{
 use xindeler_app::XindelerAppPlugin;
 use xindeler_render_voxel::VoxelRenderPlugin;
 
-/// Window present mode, overridable via `XINDELER_PRESENT_MODE` (EM-3.11b).
+/// Window present mode, overridable via `XINDELER_PRESENT_MODE` (EM-3.11b,
+/// default corrected in EM-3.11m — see below).
 ///
-/// Bevy's `Window` default (unset here previously) is
-/// [`PresentMode::AutoVsync`] (`Fifo`/`FifoRelaxed` — hard-capped, quantised to
-/// whole multiples of the display's refresh interval). That default was the
-/// prime suspect for two reports on this exact listen-server smoke scene: a
-/// flat ~29 fps that did NOT move between a dev build and a `lto=true,
-/// opt-level=3` release build (a CPU speedup should have moved a CPU-bound
-/// number; it moved nothing — see the `OcclusionCullingConfig` doc on
-/// `camera.rs` for the original dev measurement this matches), plus visible
-/// judder ("titileo") panning the mouse and "robotic" movement. Kept as an env
-/// override (not a `GraphicsSettings` field yet — same deferral as
-/// `OcclusionCullingConfig`; `xindeler-app` settings integration is out of
-/// scope here) so re-measuring with vsync off doesn't need a code change:
-/// `XINDELER_PRESENT_MODE=novsync` (or `immediate`) to try it,
-/// unset/`auto`/`vsync` keeps the default.
+/// ## The actual Bevy 0.19 default (verified against source, not memory)
+/// `bevy_window::window::PresentMode` derives `Default` with `#[default]` on
+/// its `Fifo` variant, and `Window::default()` sets
+/// `present_mode: Default::default()` (both in
+/// `bevy_window-0.19.0/src/window.rs`) — so a vanilla, untouched Bevy
+/// `Window` resolves to [`PresentMode::Fifo`], **not** `AutoVsync`. `Fifo`'s
+/// own doc comment is unambiguous: "No tearing will be observed. ... If you
+/// don't know what mode to choose, choose this mode. This is traditionally
+/// called 'Vsync On'." It is also the only mode in the enum with an
+/// *unconditional* no-tearing guarantee and is supported on every platform.
 ///
-/// ## EM-3.11b measurement (see the doc comment referenced above)
-/// See `docs/backlog/engine-migration.md` EM-3.11b for the full before/after
-/// numbers measured on this scene.
+/// The EM-3.11b comment that used to sit here mistakenly asserted the
+/// vanilla default was `AutoVsync` and then used that same (wrong) value as
+/// this override's "unset" fallback — so this client was actually booting
+/// with `AutoVsync` explicitly requested, not Bevy's real default. That
+/// matters for EM-3.11m (mouse-look tearing report) because `AutoVsync`
+/// picks [`PresentMode::FifoRelaxed`] when the backend advertises it, and
+/// `FifoRelaxed`'s own doc says tearing *will* be observed "if frames last
+/// more than one vblank as the front buffer" — precisely what a slightly-late
+/// frame during fast camera rotation looks like. `FifoRelaxed` is documented
+/// as AMD/Vulkan-specific, so on this machine's macOS/Metal backend
+/// `AutoVsync` most likely still resolved to plain `Fifo` in practice — but
+/// "most likely, pending backend capability detection" is not a foundation
+/// to leave under a tearing bug's default path when an unconditional
+/// guarantee (`Fifo`) is one line away.
+///
+/// EM-3.11m: the unset/unrecognised fallback now requests `Fifo` explicitly.
+/// Trade-off considered and accepted: `Fifo` can add up to ~1 frame of input
+/// latency versus `Mailbox`/`Immediate` (`get_current_texture` blocks until
+/// the presentation queue has a free slot) — but that is the standard "Vsync
+/// On" cost every frame-capped game ships with by default, it's Bevy's own
+/// recommended "if you don't know what to choose" mode, and visible tearing
+/// during mouse-look is the worse of the two UX problems being weighed here.
+/// Kept as an env override (not a `GraphicsSettings` field yet — same
+/// deferral as `OcclusionCullingConfig` on `camera.rs`; `xindeler-app`
+/// settings integration is out of scope here) so re-testing other modes
+/// doesn't need a code change: `XINDELER_PRESENT_MODE=novsync`/`immediate`
+/// for no-sync, `mailbox`/`fifo_relaxed`/`fifo`/`vsync` as before, and
+/// `auto`/`autovsync` to explicitly opt back into the old (no-longer-default)
+/// `AutoVsync` behaviour for future A/B testing.
+///
+/// ## EM-3.11b measurement (kept for history — a *different* symptom: fps,
+/// not tearing)
+/// See `docs/backlog/engine-migration.md` EM-3.11b for the before/after
+/// average-frame-time numbers measured on this scene; that investigation
+/// found vsync on/off made "no measurable difference" in average frame time.
+/// It did not measure tearing, which is a temporal/per-frame artifact
+/// independent of the average fps — see EM-3.11m for that half of the story.
 fn present_mode_from_env() -> PresentMode {
     match std::env::var("XINDELER_PRESENT_MODE").as_deref() {
         Ok("novsync" | "immediate") => PresentMode::AutoNoVsync,
         Ok("mailbox") => PresentMode::Mailbox,
         Ok("fifo_relaxed") => PresentMode::FifoRelaxed,
         Ok("fifo" | "vsync") => PresentMode::Fifo,
-        // Unset, "auto", or anything unrecognised: keep Bevy's own default
-        // rather than silently mis-parsing a typo into a different mode.
-        _ => PresentMode::AutoVsync,
+        Ok("auto" | "autovsync") => PresentMode::AutoVsync,
+        // Unset or anything unrecognised: request a real, universally
+        // supported synced mode (Bevy's own true default) rather than the
+        // tearing-prone AutoVsync/FifoRelaxed fallback path (EM-3.11m).
+        _ => PresentMode::Fifo,
     }
 }
 
@@ -175,4 +208,62 @@ fn main() -> AppExit {
     }
 
     app.run()
+}
+
+#[cfg(test)]
+mod present_mode_tests {
+    use super::*;
+
+    /// EM-3.11m regression test: this can't observe real tearing (that needs
+    /// a human eyeball on a real display mid-scanout — see the commit
+    /// message / hand-off report for that caveat), but it CAN pin the pure
+    /// mapping from env var to `PresentMode` so the default never silently
+    /// drifts back to a mode without an unconditional no-tearing guarantee.
+    /// Runs single-threaded within this one test (env vars are process-wide
+    /// state) by doing all assertions sequentially in one `#[test]` fn.
+    #[test]
+    fn present_mode_from_env_defaults_to_fifo_and_respects_overrides() {
+        // SAFETY: this test is the sole reader/writer of
+        // `XINDELER_PRESENT_MODE` in this binary's test suite, and all
+        // set/assert/remove steps run sequentially within this one test
+        // function, so there is no cross-thread data race on the var.
+        unsafe {
+            std::env::remove_var("XINDELER_PRESENT_MODE");
+        }
+        assert_eq!(
+            present_mode_from_env(),
+            PresentMode::Fifo,
+            "unset XINDELER_PRESENT_MODE must resolve to Bevy's real, unconditionally-no-tearing \
+             default (Fifo), not AutoVsync"
+        );
+
+        let cases: &[(&str, PresentMode)] = &[
+            ("vsync", PresentMode::Fifo),
+            ("fifo", PresentMode::Fifo),
+            ("fifo_relaxed", PresentMode::FifoRelaxed),
+            ("mailbox", PresentMode::Mailbox),
+            ("novsync", PresentMode::AutoNoVsync),
+            ("immediate", PresentMode::AutoNoVsync),
+            ("auto", PresentMode::AutoVsync),
+            ("autovsync", PresentMode::AutoVsync),
+            // Typos/unrecognised values fall back to the safe default too.
+            ("bogus-typo", PresentMode::Fifo),
+        ];
+        for (value, expected) in cases {
+            // SAFETY: see justification above.
+            unsafe {
+                std::env::set_var("XINDELER_PRESENT_MODE", value);
+            }
+            assert_eq!(
+                present_mode_from_env(),
+                *expected,
+                "XINDELER_PRESENT_MODE={value:?} should map to {expected:?}"
+            );
+        }
+
+        // SAFETY: see justification above; leave the environment clean.
+        unsafe {
+            std::env::remove_var("XINDELER_PRESENT_MODE");
+        }
+    }
 }
