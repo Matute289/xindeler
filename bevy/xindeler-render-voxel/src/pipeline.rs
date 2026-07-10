@@ -542,6 +542,24 @@ const IN_FLIGHT_FACTOR: u32 = 8;
 /// throughput).
 const SPAWN_BURST_FACTOR: u32 = 4;
 
+// BL-82 EM-3.11p follow-up
+// (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md` round 10):
+// re-tested after Matías reported the diagonal stutter felt unchanged.
+// Confirmed with live `debug!` instrumentation (`spawn_chunk_mesh_tasks`/
+// `apply_chunk_meshes`'s timers below) that the cap DOES engage during real
+// diagonal movement (30-45 times per 45s) — this mitigation is not a no-op —
+// but the main-thread cost it bounds stayed under ~2ms even while engaged, both
+// for the fetch loop and for `apply_chunk_meshes`'s upload/spawn/despawn work.
+// That rules this pipeline out as the dominant cost behind the 50-800ms
+// frame-time spikes Matías experiences: EM-3.11n's fix is real but small,
+// addressing a structurally confirmed (~1.6× more distinct chunks touched per
+// unit diagonal distance) but practically minor effect. The dominant cost
+// remains unidentified as of this round; see the findings log for what else was
+// ruled out (sim-side per-system timing via `XINDELER_SLOW_SYS_MS`, a full
+// `bevy/trace` + `trace_chrome` capture attempt) and the honest scope of what
+// this investigation could and couldn't establish given shared-machine
+// measurement noise.
+
 /// Registers the queue/tasks/budget/stats resources and the pipeline
 /// systems (removals → spawn → apply). Spawn/apply idle until the host
 /// inserts a [`ChunkVolumeProvider`], a [`ChunkLayerMap`] and
@@ -618,6 +636,19 @@ fn spawn_chunk_mesh_tasks(
     if queue.is_empty() {
         return;
     }
+    // BL-82 EM-3.11p: wall-clock this whole system at `debug` level.
+    // `provider.fetch` runs synchronously on the main thread (module docs),
+    // so THIS is where a diagonal-heavier backlog actually costs a frame —
+    // not just in queue depth. EM-3.11n bounded the FETCH COUNT (below) on
+    // the theory that a bigger diagonal backlog meant a bigger main-thread
+    // cost; this timer answers "how big, actually" without re-instrumenting
+    // from scratch next time someone re-opens the diagonal-stutter
+    // investigation (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md`
+    // round 9 vs. the EM-3.11p follow-up: even with the cap engaging on
+    // every diagonal-movement burst, measured cost stayed under ~2ms —
+    // nowhere near the 50+ms frame-time spikes Matías reports, so this path
+    // was never the dominant cost).
+    let fetch_loop_start = std::time::Instant::now();
     let in_flight_cap = (budget.max_uploads_per_frame.max(1) * IN_FLIGHT_FACTOR) as usize;
     let spawn_cap_this_frame = (budget.max_uploads_per_frame.max(1) * SPAWN_BURST_FACTOR) as usize;
     let pool = AsyncComputeTaskPool::get();
@@ -704,6 +735,27 @@ fn spawn_chunk_mesh_tasks(
         // is cancelled (bevy_tasks/async_task semantics) — last write wins.
         tasks.0.insert(key, task);
     }
+    // BL-82 EM-3.11p: confirms `SPAWN_BURST_FACTOR` is actually engaging
+    // (the dirty queue backlogs past the cap in a real run) rather than
+    // sitting at a value so generous it never binds — verified live during a
+    // scripted diagonal-movement `--smoke-perf-run` before this round's
+    // findings were written up (30-45 engagements per 45s).
+    if spawned_this_frame >= spawn_cap_this_frame && !queue.is_empty() {
+        tracing::debug!(
+            spawned_this_frame,
+            spawn_cap_this_frame,
+            queue_remaining = queue.len(),
+            "EM-3.11p: spawn-burst cap engaged this frame"
+        );
+    }
+    let fetch_loop_elapsed_ms = fetch_loop_start.elapsed().as_secs_f64() * 1000.0;
+    if fetch_loop_elapsed_ms > 0.1 {
+        tracing::debug!(
+            elapsed_ms = fetch_loop_elapsed_ms,
+            spawned_this_frame,
+            "EM-3.11p: spawn_chunk_mesh_tasks main-thread cost this frame"
+        );
+    }
 }
 
 /// Applies at most [`ChunkUploadBudget::max_uploads_per_frame`] FINISHED
@@ -725,6 +777,12 @@ fn apply_chunk_meshes(
     if tasks.0.is_empty() && stats.uploads_last_frame == 0 && stats.in_flight == 0 {
         return;
     }
+    // BL-82 EM-3.11p: wall-clock the upload/despawn/spawn side too, same
+    // rationale as `spawn_chunk_mesh_tasks`'s timer above — this budget is
+    // separately capped (`max_uploads_per_frame`, default 2/frame), so it was
+    // already suspected small; measured live during diagonal movement it
+    // never exceeded the threshold below either.
+    let apply_start = std::time::Instant::now();
     stats.uploads_last_frame = 0;
 
     let budget = budget.max_uploads_per_frame.max(1) as usize;
@@ -783,4 +841,12 @@ fn apply_chunk_meshes(
         stats.total_uploads += 1;
     }
     stats.in_flight = tasks.0.len();
+    let apply_elapsed_ms = apply_start.elapsed().as_secs_f64() * 1000.0;
+    if apply_elapsed_ms > 0.5 {
+        tracing::debug!(
+            elapsed_ms = apply_elapsed_ms,
+            uploads = stats.uploads_last_frame,
+            "EM-3.11p: apply_chunk_meshes main-thread cost this frame"
+        );
+    }
 }

@@ -629,6 +629,14 @@ struct SmokePerfRun {
     elapsed_secs: f32,
     /// Raw (unsmoothed) per-frame `FrameTimeDiagnosticsPlugin` samples, ms.
     samples: Vec<f64>,
+    /// Wall-clock (Unix epoch ms) at the moment each `samples` entry was
+    /// recorded (BL-82 EM-3.11p). Frame-index alone can't be correlated
+    /// against `RUST_LOG` timestamps from OTHER systems (e.g. a sim-side
+    /// "slow system execution" warning, or a region-crossing entity-sync
+    /// burst) — this closes that gap so a future investigation can line a
+    /// frame-time spike up against whatever else was logged at that instant
+    /// without guessing from frame count × average fps.
+    sample_times_ms: Vec<u64>,
 }
 
 impl Plugin for SmokePerfRunPlugin {
@@ -641,6 +649,7 @@ impl Plugin for SmokePerfRunPlugin {
             duration_secs: perf_run_duration_secs(),
             elapsed_secs: 0.0,
             samples: Vec::new(),
+            sample_times_ms: Vec::new(),
         })
         // Same gate SmokeScreenshotPlugin uses in listen-server mode: prefer
         // waiting for the player rig to confirm real movement.
@@ -697,13 +706,29 @@ fn summarize(samples: &[f64]) -> PerfSummary {
     }
 }
 
-fn write_perf_csv(path: &Path, samples: &[f64]) -> std::io::Result<()> {
+/// `sample_times_ms` (BL-82 EM-3.11p): wall-clock (Unix epoch ms) per sample,
+/// so a spike row can be lined up against `RUST_LOG` timestamps from other
+/// systems (sim-side "slow system execution", a region-crossing entity-sync
+/// burst, etc.) without guessing from frame count × average fps. Empty (or
+/// shorter than `samples`) is tolerated — callers/tests that only care about
+/// `frame_time_ms` can pass `&[]` and get `0` in that column.
+fn write_perf_csv(path: &Path, samples: &[f64], sample_times_ms: &[u64]) -> std::io::Result<()> {
     let mut file = std::fs::File::create(path)?;
-    writeln!(file, "frame_index,frame_time_ms")?;
+    writeln!(file, "frame_index,frame_time_ms,epoch_ms")?;
     for (i, ms) in samples.iter().enumerate() {
-        writeln!(file, "{i},{ms}")?;
+        let epoch_ms = sample_times_ms.get(i).copied().unwrap_or(0);
+        writeln!(file, "{i},{ms},{epoch_ms}")?;
     }
     Ok(())
+}
+
+/// Current wall-clock time as Unix epoch milliseconds, saturating to `0` in
+/// the practically-impossible case the system clock predates the epoch.
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn drive_smoke_perf_run(
@@ -735,6 +760,7 @@ fn drive_smoke_perf_run(
                 state.phase_frames = 0;
                 state.elapsed_secs = 0.0;
                 state.samples.clear();
+                state.sample_times_ms.clear();
             } else if state.frames >= LISTEN_SERVER_TIMEOUT_FRAMES {
                 error!(
                     "smoke-perf-run: warmup timed out after {} frames",
@@ -750,6 +776,7 @@ fn drive_smoke_perf_run(
                 .and_then(Diagnostic::value)
             {
                 state.samples.push(ms);
+                state.sample_times_ms.push(now_epoch_ms());
             }
             if state.elapsed_secs >= state.duration_secs {
                 let summary = summarize(&state.samples);
@@ -768,7 +795,7 @@ fn drive_smoke_perf_run(
                     stdev_ms = summary.stdev_ms,
                     "smoke-perf-run complete"
                 );
-                match write_perf_csv(&state.out_csv, &state.samples) {
+                match write_perf_csv(&state.out_csv, &state.samples, &state.sample_times_ms) {
                     Ok(()) => {
                         info!(
                             "smoke-perf-run: wrote {} samples to {}",
@@ -840,13 +867,34 @@ mod tests {
             std::env::temp_dir().join(format!("xindeler-perf-csv-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.csv");
-        write_perf_csv(&path, &[16.0, 33.3, 8.0]).expect("write succeeds");
+        write_perf_csv(&path, &[16.0, 33.3, 8.0], &[1_000, 1_016, 1_049]).expect("write succeeds");
         let contents = std::fs::read_to_string(&path).expect("file exists");
         let mut lines = contents.lines();
-        assert_eq!(lines.next(), Some("frame_index,frame_time_ms"));
-        assert_eq!(lines.next(), Some("0,16"));
-        assert_eq!(lines.next(), Some("1,33.3"));
-        assert_eq!(lines.next(), Some("2,8"));
+        assert_eq!(lines.next(), Some("frame_index,frame_time_ms,epoch_ms"));
+        assert_eq!(lines.next(), Some("0,16,1000"));
+        assert_eq!(lines.next(), Some("1,33.3,1016"));
+        assert_eq!(lines.next(), Some("2,8,1049"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// BL-82 EM-3.11p: a shorter/empty `sample_times_ms` (a caller that only
+    /// cares about `frame_time_ms`, e.g. an older harness or a unit test)
+    /// must not panic — missing timestamps fall back to `0`, not an
+    /// out-of-bounds index.
+    #[test]
+    fn perf_csv_tolerates_missing_timestamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "xindeler-perf-csv-notime-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.csv");
+        write_perf_csv(&path, &[16.0, 33.3], &[]).expect("write succeeds even with no timestamps");
+        let contents = std::fs::read_to_string(&path).expect("file exists");
+        let mut lines = contents.lines();
+        assert_eq!(lines.next(), Some("frame_index,frame_time_ms,epoch_ms"));
+        assert_eq!(lines.next(), Some("0,16,0"));
+        assert_eq!(lines.next(), Some("1,33.3,0"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
