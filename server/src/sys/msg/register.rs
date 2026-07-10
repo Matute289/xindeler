@@ -233,12 +233,19 @@ impl<'a> System<'a> for Sys {
 
                         // Destructure new_players_guard last so it gets dropped before the other
                         // three.
+                        // We ignore mpsc connections since those aren't to an external
+                        // process.
+                        let ip = client
+                            .connected_from_addr()
+                            .socket_addr()
+                            .map(|s| s.ip())
+                            .map(NormalizedIpAddr::from);
                         let (
                             (pending_login, player, admin, player_list_update_msg, old_player),
                             mut new_players_guard,
                         ) = match LoginProvider::login(
                             pending,
-                            client,
+                            ip,
                             &editable_settings.admins,
                             &editable_settings.whitelist,
                             &editable_settings.banlist,

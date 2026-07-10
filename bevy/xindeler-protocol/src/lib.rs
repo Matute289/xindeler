@@ -16,6 +16,7 @@
 
 pub mod ai_mode;
 pub mod aurora_overlay;
+pub mod login;
 
 use bevy::{
     app::{App, Plugin},
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::{
     ai_mode::AiExecutionMode,
     aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
+    login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
 };
 
 /// Replicated world position of an entity (server-authoritative).
@@ -459,6 +461,10 @@ impl Plugin for XindelerProtocolPlugin {
         // (no client-side redundancy/resampling yet); it moves to the
         // unreliable State lane once the input stream sends redundant samples.
         app.add_client_message::<PlayerInput>(XindelerChannel::Events.delivery());
+        // BL-82 EM-4.2c: the login/session handshake. Ordered/reliable like
+        // PlayerInput — this is a one-shot discrete request, not a per-tick
+        // state sample.
+        app.add_client_message::<LoginRequest>(XindelerChannel::Events.delivery());
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients
@@ -487,6 +493,12 @@ impl Plugin for XindelerProtocolPlugin {
         // exactly what `Terrain` (Unordered/reliable) exists to avoid.
         app.add_server_message::<NetLodAlt>(XindelerChannel::Terrain.delivery())
             .make_message_independent::<NetLodAlt>();
+
+        // BL-82 EM-4.2c: the login/session handshake reply. Carries no
+        // entity references (like TerrainAnchor/NetLodAlt above), so it must
+        // not be queued behind entity replication either.
+        app.add_server_message::<LoginResult>(XindelerChannel::Events.delivery())
+            .make_message_independent::<LoginResult>();
     }
 }
 
@@ -673,6 +685,73 @@ mod tests {
             .expect("the NPC-shaped entity reaches the client with its NetUid");
         assert_eq!(*got_npc_uid, npc_uid);
         assert_eq!(*got_npc_body, npc_body);
+    }
+
+    /// BL-82 EM-4.2c: `LoginRequest` travels client → server (surfacing as
+    /// `FromClient<_>`) and the server's `LoginResult` reply travels back —
+    /// the wire-shape half of the login handshake; the actual auth/
+    /// persistence logic is exercised by `xindeler-server-app`'s own
+    /// acceptance test, not here.
+    #[test]
+    fn login_request_and_result_round_trip() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let request = LoginRequest {
+            token_or_username: "test_user".to_owned(),
+            locale: "en-US".to_owned(),
+        };
+        client_app.world_mut().write_message(request.clone());
+
+        client_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        server_app.update();
+
+        let received: Vec<_> = server_app
+            .world_mut()
+            .resource_mut::<Messages<FromClient<LoginRequest>>>()
+            .drain()
+            .collect();
+        assert_eq!(received.len(), 1, "server should receive one login request");
+        assert_eq!(received[0].message, request);
+
+        let result = LoginResult {
+            outcome: Ok(LoginSuccess {
+                characters: vec![NetCharacterSummary {
+                    id: common::character::CharacterId(1),
+                    alias: "Hero".to_owned(),
+                    body: common::comp::Body::Humanoid(common::comp::humanoid::Body {
+                        species: common::comp::humanoid::Species::Human,
+                        body_type: common::comp::humanoid::BodyType::Male,
+                        hair_style: 0,
+                        beard: 0,
+                        eyes: 0,
+                        accessory: 0,
+                        hair_color: 0,
+                        skin: 0,
+                        eye_color: 0,
+                    }),
+                }],
+                selected: Some(common::character::CharacterId(1)),
+            }),
+        };
+        server_app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: result.clone(),
+        });
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let received: Vec<_> = client_app
+            .world_mut()
+            .resource_mut::<Messages<LoginResult>>()
+            .drain()
+            .collect();
+        assert_eq!(received, vec![result]);
     }
 
     /// `PlayerInput` travels client → server and surfaces as `FromClient<_>`.

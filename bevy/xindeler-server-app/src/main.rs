@@ -22,6 +22,7 @@
 //! surface, and `xindeler-transport`'s crate doc comment for the transport
 //! abstraction this binary calls through.
 
+mod login;
 mod metrics;
 mod plugin;
 mod shutdown;

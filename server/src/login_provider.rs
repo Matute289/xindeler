@@ -1,13 +1,10 @@
-use crate::{
-    Client,
-    settings::{AdminRecord, Ban, Banlist, WhitelistRecord, banlist::NormalizedIpAddr},
-};
+use crate::settings::{AdminRecord, Ban, Banlist, WhitelistRecord, banlist::NormalizedIpAddr};
 use authc::{AuthClient, AuthClientError, AuthToken, Uuid};
 use chrono::Utc;
-use common::comp::AdminRole;
+use common::comp::{AdminRole, Player};
 use common_net::msg::RegisterError;
 use hashbrown::HashMap;
-use specs::Component;
+use specs::{Component, Join, WorldExt};
 use std::{str::FromStr, sync::Arc};
 use tokio::{runtime::Runtime, sync::oneshot};
 use tracing::{error, info};
@@ -43,6 +40,41 @@ fn derive_uuid(username: &str) -> Uuid {
 
 /// derive Uuid for "singleplayer" is a pub fn
 pub fn derive_singleplayer_uuid() -> Uuid { derive_uuid("singleplayer") }
+
+/// Counts entities currently carrying a `Player` component — the same
+/// player-count-cap denominator `server/src/sys/msg/register.rs` computes
+/// inline via its own `SystemData` join.
+///
+/// Exposed (BL-82 EM-4.2c) so a caller with no specs `System`/`SystemData`
+/// context — e.g. a Bevy system driving the replicon login handshake
+/// (`xindeler-server-app::login`) — can reuse the SAME check instead of
+/// reaching past this crate's public API into raw `WriteStorage`/`Entities`.
+#[must_use]
+pub fn count_players(world: &specs::World) -> usize {
+    let entities = world.entities();
+    let players = world.read_storage::<Player>();
+    (&entities, &players).join().count()
+}
+
+/// Finds an entity whose `Player` component has the given `uuid`, excluding
+/// `exclude` (so a caller checking "is anyone ELSE already logged in as this
+/// account" doesn't match its own not-yet-committed entity). Used for
+/// duplicate-login detection (same account reconnecting) — see
+/// [`count_players`]'s doc comment for why this exists as a public entry
+/// point rather than requiring callers to touch specs storages directly.
+#[must_use]
+pub fn find_other_player_entity_by_uuid(
+    world: &specs::World,
+    uuid: Uuid,
+    exclude: specs::Entity,
+) -> Option<specs::Entity> {
+    let entities = world.entities();
+    let players = world.read_storage::<Player>();
+    (&entities, &players)
+        .join()
+        .find(|(entity, player)| *entity != exclude && player.uuid() == uuid)
+        .map(|(entity, _)| entity)
+}
 
 pub struct PendingLogin {
     pending_r: oneshot::Receiver<Result<(String, Uuid), RegisterError>>,
@@ -112,9 +144,29 @@ impl LoginProvider {
         PendingLogin { pending_r }
     }
 
-    pub(crate) fn login<R>(
+    /// Resolves a [`PendingLogin`] against the ban/whitelist/player-count
+    /// rules, exactly as the legacy TCP/QUIC path does (`server/src/sys/
+    /// msg/register.rs`).
+    ///
+    /// `ip` is the connecting socket's address, pre-resolved by the caller
+    /// (BL-82 EM-4.2c widened this from a `&Client` parameter to a plain
+    /// `Option<NormalizedIpAddr>` — the ONLY thing this function ever did
+    /// with `Client` was read its address via `connected_from_addr()`; every
+    /// other check here — [`ban_applies`], whitelist lookup, player-count
+    /// cap — is transport-agnostic. This lets a caller with no legacy
+    /// `Client` at all, e.g. the new replicon+quinnet login handshake in
+    /// `xindeler-server-app`, reuse this EXACT function instead of
+    /// reimplementing its checks). `None` means either a loopback/mpsc
+    /// connection (legacy behavior, unchanged) or a transport that doesn't
+    /// yet surface a client IP (the replicon+quinnet transport, as of
+    /// EM-4.2c — IP bans don't apply over it yet; UUID-based
+    /// ban/whitelist/player-count-cap checks below are unaffected).
+    ///
+    /// Public (was `pub(crate)`): EM-4.2c is the first caller outside this
+    /// crate.
+    pub fn login<R>(
         pending: &mut PendingLogin,
-        client: &Client,
+        ip: Option<NormalizedIpAddr>,
         admins: &HashMap<Uuid, AdminRecord>,
         whitelist: &HashMap<Uuid, WhitelistRecord>,
         banlist: &Banlist,
@@ -125,13 +177,6 @@ impl LoginProvider {
             Ok(Err(e)) => Some(Err(e)),
             Ok(Ok((username, uuid))) => {
                 let now = Utc::now();
-                // We ignore mpsc connections since those aren't to an external
-                // process.
-                let ip = client
-                    .connected_from_addr()
-                    .socket_addr()
-                    .map(|s| s.ip())
-                    .map(NormalizedIpAddr::from);
                 // Hardcoded admins can always log in.
                 let admin = admins.get(&uuid);
                 if let Some(ban) = banlist

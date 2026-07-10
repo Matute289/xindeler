@@ -104,6 +104,19 @@ impl Default for SimServerConfig {
     }
 }
 
+/// The SAME `<userdata>/server` data dir server-cli uses (see
+/// `server::DEFAULT_DATA_DIR_NAME`'s doc comment: "Used so that different
+/// server frontends can share the same server saves, etc."). Factored out of
+/// [`boot_dedicated_server`] (BL-82 EM-4.2c) so `login.rs` can point its OWN
+/// dedicated `CharacterLoader` instance (see that module's doc comment for
+/// why it needs one) at the exact same `saves/` sqlite path without
+/// duplicating this computation.
+pub fn server_data_dir() -> PathBuf {
+    let mut path = common_base::userdata_dir();
+    path.push(server::DEFAULT_DATA_DIR_NAME);
+    path
+}
+
 /// Boots a real dedicated-server [`SimServer`] rooted at `<userdata>/server`
 /// (the SAME data dir server-cli uses — see `server::DEFAULT_DATA_DIR_NAME`'s
 /// doc comment: "Used so that different server frontends can share the same
@@ -112,11 +125,7 @@ impl Default for SimServerConfig {
 /// `xindeler_sim_bridge::boot_with_settings`); a `Server::new` failure is
 /// returned so the caller decides how to report it.
 pub fn boot_dedicated_server(config: &SimServerConfig) -> Result<SimServer, server::Error> {
-    let data_dir: PathBuf = {
-        let mut path = common_base::userdata_dir();
-        path.push(server::DEFAULT_DATA_DIR_NAME);
-        path
-    };
+    let data_dir: PathBuf = server_data_dir();
     tracing::info!(path = %data_dir.display(), "using userdata folder");
 
     let mut server_settings = Settings::load(&data_dir);

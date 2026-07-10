@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bevy::{
     app::{App, Plugin, Update},
+    ecs::schedule::IntoScheduleConfigs,
     state::app::StatesPlugin,
     time::{Fixed, Time},
 };
@@ -18,11 +19,12 @@ use tokio::sync::Notify;
 use xindeler_oracle_host::AiGatewayPlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
+    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
+    login::{self, ActiveReplicaSessions, PendingLogins},
     metrics,
     shutdown::{self, ShutdownState},
     sim::{self, SimServerConfig},
@@ -151,6 +153,35 @@ impl Plugin for SimServerPlugin {
         // and `XINDELER_SERVER_REPLICON_ADDR` in `main.rs`.
         app.add_plugins(
             QuinnetTransport.server_plugins(&TransportConfig::server(self.config.replicon_addr)),
+        );
+
+        // BL-82 EM-4.2c: the login/session handshake — see `login.rs`'s
+        // module doc comment for the full design (why a SEPARATE
+        // `CharacterLoader` instance, the v1 auto-select policy, the
+        // documented IP-ban gap). `RepliconCharacterLoader` reads/opens the
+        // SAME `saves/` sqlite path `boot_dedicated_server` (via
+        // `sim::server_data_dir()`) already pointed the sim's OWN
+        // `CharacterLoader` at.
+        app.insert_resource(login::boot_replicon_character_loader(
+            &sim::server_data_dir(),
+        ));
+        app.insert_resource(PendingLogins::default());
+        app.insert_resource(ActiveReplicaSessions::default());
+        // `.before(tick_sim)`: this system creates the sim entity + resolves
+        // auth/character-loading BEFORE the sim's own `FixedUpdate` systems
+        // (physics, subscription, persistence batching, …) run for this
+        // frame, so a character that finishes loading this tick is already
+        // fully set up by the time the rest of the sim ticks over it —
+        // matching the natural "ingest input, then simulate" ordering the
+        // rest of this `FixedUpdate` chain already follows (see `xindeler-
+        // sim-bridge`'s own doc comment on `tick_sim`'s
+        // `.after`/`.before` chain). Correctness does not actually depend on
+        // this ordering (see `login.rs`'s module doc comment: the dedicated
+        // `CharacterLoader` instance means there is no shared-channel race
+        // either way), but it is the more intuitive ordering.
+        app.add_systems(
+            bevy::app::FixedUpdate,
+            login::handle_replicon_logins.before(tick_sim),
         );
     }
 }
