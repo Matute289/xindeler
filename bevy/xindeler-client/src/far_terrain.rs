@@ -213,6 +213,7 @@ fn retile_far_mesh(
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut perf_log: Local<Option<bool>>,
 ) {
     let Some(data) = data else { return };
     let Some(eye) = camera.iter().next().map(GlobalTransform::translation) else {
@@ -226,6 +227,19 @@ fn retile_far_mesh(
     {
         return; // still safely inside the current hole — nothing to do
     }
+
+    // BL-82 EM-3.11p round 11 (Wave-3 post-merge regression hunt): this
+    // rebuild is synchronous main-thread work (full `far_mesh_from_heights`
+    // over up to `LOD_ALT_MAX_DIM`² grid cells, plus a mesh/material asset
+    // add) gated only on ~`HOLE_MARGIN_CHUNKS`-chunk camera drift, not a
+    // frame budget — unlike the near-terrain mesh pipeline (async + budgeted
+    // uploads). It was always unbudgeted, but this round is checking whether
+    // it's now landing often/expensively enough to be a visible cost,
+    // possibly compounding with new per-tick work this merge added
+    // elsewhere. Gated by `XINDELER_FAR_MESH_PERF_LOG=1`.
+    let perf_log = *perf_log
+        .get_or_insert_with(|| std::env::var("XINDELER_FAR_MESH_PERF_LOG").is_ok_and(|v| v != "0"));
+    let retile_start = std::time::Instant::now();
 
     let hole_radius = culling.chunk_render_distance + rebuild_slack;
     let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius);
@@ -279,6 +293,15 @@ fn retile_far_mesh(
                 entity: new_entity,
             });
         },
+    }
+
+    if perf_log {
+        let elapsed_ms = retile_start.elapsed().as_secs_f64() * 1000.0;
+        debug!(
+            elapsed_ms,
+            grid_cells = data.0.heights.len(),
+            "EM-3.11p round 11: far-mesh retile main-thread cost"
+        );
     }
 }
 

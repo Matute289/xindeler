@@ -76,6 +76,8 @@
 //! subtle, already-correct, and independently tested — not worth the risk for
 //! a cost that is one lz4 decompress of a chunk-sized buffer, not a hot loop.
 
+use std::collections::VecDeque;
+
 use bevy::{
     asset::{Asset, AssetLoader, LoadContext, LoadState, io::Reader},
     platform::collections::HashMap,
@@ -180,11 +182,14 @@ pub const MAX_SPRITES_PER_CHUNK: usize = 1500;
 /// of main-thread time in one frame (measured: ~30ms for a 30-chunk decode
 /// burst during boot — see the round-11 findings-log entry). This caps how
 /// many chunks each loop processes per frame; excess work is left for LATER
-/// frames (loop 1: unread `CompressedChunk` messages simply stay in the
-/// `Messages<T>` double-buffer for the next `Update`'s `MessageReader::read`;
-/// loop 2: an unbuilt `PendingChunkSprites` marker is untouched and retried
-/// next frame) rather than ever being dropped. Chosen the same order of
-/// magnitude as `pipeline.rs`'s `SPAWN_BURST_FACTOR`-derived cap.
+/// frames (loop 1: every arriving `CompressedChunk` message is still drained
+/// out of Bevy's `Messages<T>` double-buffer EVERY frame — its 2-update TTL
+/// means anything left unread past that is silently dropped, so the cap
+/// cannot be applied by leaving messages unread — into an owned, TTL-free
+/// `decode_queue`, and it's popping from THAT queue that's capped; loop 2:
+/// an unbuilt `PendingChunkSprites` marker is untouched and retried next
+/// frame) rather than ever being dropped. Chosen the same order of magnitude
+/// as `pipeline.rs`'s `SPAWN_BURST_FACTOR`-derived cap.
 const CHUNK_BUILD_BURST_CAP: usize = 4;
 
 /// Client-side sprite plugin (listen-server only). Installs the manifest
@@ -491,6 +496,7 @@ fn build_chunk_sprites(
     mut index: ResMut<SpriteChunkIndex>,
     pending: Query<(Entity, &PendingChunkSprites)>,
     mut perf_log: Local<Option<bool>>,
+    mut decode_queue: Local<VecDeque<CompressedChunk>>,
 ) {
     // Read `XINDELER_SPRITE_PERF_LOG` once per run (cached in the `Local`),
     // not every frame.
@@ -500,17 +506,26 @@ fn build_chunk_sprites(
     let mut chunks_decoded_this_frame = 0usize;
 
     // 1. Newly-arrived chunks → collect + thin instances → a pending marker.
-    // Capped at `CHUNK_BUILD_BURST_CAP` decodes per frame: the cap is checked
-    // BEFORE `msg.decode()` (the expensive lz4 + voxel-scan step) so an
-    // over-cap message costs nothing this frame. `chunks.read()`'s iterator
-    // only advances the `MessageReader`'s cursor as far as we actually pull
-    // from it, so `break`ing here safely leaves any remaining messages in
-    // `Messages<CompressedChunk>`'s double-buffer for a LATER frame's
-    // `read()` to pick up — nothing is dropped, only deferred.
-    for msg in chunks.read() {
-        if chunks_decoded_this_frame >= CHUNK_BUILD_BURST_CAP {
+    //
+    // Bevy's `Messages<T>` double-buffer only guarantees a message survives
+    // for 2 `Update`s (bevy_ecs's own doc comment on `Messages`); a
+    // `MessageReader` that hasn't caught up by then silently loses whatever
+    // it didn't read. So the cap CANNOT be applied by early-`break`ing out of
+    // `chunks.read()`'s iterator across MULTIPLE frames (an earlier version
+    // of this fix did exactly that and a reviewer caught it: at
+    // `CHUNK_BUILD_BURST_CAP` per frame, a real 30-chunk boot burst needs ~8
+    // frames to drain, well past the 2-frame TTL — most of the burst would
+    // be silently dropped, not deferred). Mirrors `pipeline.rs`'s own
+    // pattern instead: `chunks.read()` is drained COMPLETELY, every frame,
+    // into an OWNED `decode_queue` (cheap — no decode yet, just a clone of
+    // the still-compressed bytes), and the expensive lz4-decode +
+    // `collect_sprite_instances` voxel scan is what's actually capped,
+    // popping from that TTL-free owned queue instead.
+    decode_queue.extend(chunks.read().cloned());
+    while chunks_decoded_this_frame < CHUNK_BUILD_BURST_CAP {
+        let Some(msg) = decode_queue.pop_front() else {
             break;
-        }
+        };
         let Some(chunk) = msg.decode() else { continue };
         chunks_decoded_this_frame += 1;
         // Despawn FIRST (built parent AND any in-flight marker), unconditionally
