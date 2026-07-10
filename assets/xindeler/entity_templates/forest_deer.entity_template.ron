@@ -1,0 +1,17 @@
+// Forest Deer — a skittish wild deer NPC template (BL-82 EM-4.7 sample).
+//
+// Schema: `EntityTemplate` in bevy/xindeler-oracle-host/src/entity_template.rs.
+// Uses only already-registered component kinds ("body"/"stats"/"faction"/
+// "loot"/"ai_behavior_override") — the same closed set `dread_wolf.
+// entity_template.ron` uses — demonstrating that adding this sibling
+// template required no Rust changes at all.
+(
+    entity_template_id: "forest_deer",
+    body: "deer",
+    stats: (
+        name: Some("Forest Deer"),
+    ),
+    faction: "wild",
+    loot: Some("common.items.food.meat.beast_small_raw"),
+    ai_behavior_override: "flee",
+)

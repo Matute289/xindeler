@@ -2776,6 +2776,465 @@ mod tests {
         );
     }
 
+    /// BL-82 EM-4.7 end-to-end acceptance: a `.entity_template.ron`-shaped
+    /// `EntityTemplate` (body/stats/faction/loot/`ai_behavior_override`),
+    /// spawned via `spawn_entity_template`, becomes a REAL sim NPC — through
+    /// the exact chain this task's checklist demands:
+    /// `spawn_entity_template` (Bevy staging entity) →
+    /// `apply_pending_entity_template_spawns` (this crate's adapter, sim's
+    /// public event bus) → `mirror_sim_entities` (the EXISTING, unmodified
+    /// mirror) → a client-visible `NetBody`/`NetUid` entity — proving the
+    /// "verbatim reuse of EM-3.8's figure pipeline" claim structurally: the
+    /// client-visible shape is indistinguishable from
+    /// `spawn_test_npcs`'s own test NPCs, which the figure pipeline already
+    /// renders. `Agent`/`Psyche` presets are asserted directly on the sim
+    /// entity (the concrete, checkable proof that `ai_behavior_override`
+    /// really tunes the real `server-agent` `Agent`, not a stand-in).
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
+    fn entity_template_factory_spawns_a_real_agro_npc_and_mirrors_it() {
+        use xindeler_oracle_host::entity_template::{
+            ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats, spawn_entity_template,
+        };
+
+        const MAX_TICKS: u32 = 4000;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut server_app = App::new();
+        server_app
+            .add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+            ))
+            .finish();
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        server_app.insert_non_send(sim);
+
+        // Keep ground loaded around the world centre (same preamble as
+        // `mirrors_sim_npc_to_replicon_client`) so the spawned NPC doesn't
+        // fall through ungenerated terrain.
+        {
+            let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            server_app.update();
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let (centre, alt) = {
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            (centre, alt)
+        };
+
+        // The full checklist shape: body/stats/faction/loot/
+        // ai_behavior_override, all populated, with a KNOWN-unknown
+        // ai_behavior_override handled by a second spawn below.
+        let aggro_template = EntityTemplate {
+            entity_template_id: "test_dread_wolf".to_owned(),
+            body: "wolf".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some("Test Dread Wolf".to_owned()),
+            },
+            faction: "enemy".to_owned(),
+            loot: Some("common.items.crafting_ing.hide.tough".to_owned()),
+            ai_behavior_override: "aggro".to_owned(),
+        };
+        // Anti-chaos acceptance: an unrecognized `ai_behavior_override`
+        // string must fall back to Passive, never panic the spawn.
+        let malformed_behavior_template = EntityTemplate {
+            entity_template_id: "test_malformed".to_owned(),
+            body: "pig".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some("Test Malformed Pig".to_owned()),
+            },
+            ai_behavior_override: "definitely_not_a_real_behavior".to_owned(),
+            ..EntityTemplate::default()
+        };
+
+        let registry = ComponentSpawnRegistry::with_builtins();
+        {
+            let mut commands = server_app.world_mut().commands();
+            spawn_entity_template(
+                &mut commands,
+                &registry,
+                &aggro_template,
+                [centre.x, centre.y, alt + 3.0],
+                xindeler_protocol::DimensionId::DEFAULT,
+            );
+            spawn_entity_template(
+                &mut commands,
+                &registry,
+                &malformed_behavior_template,
+                [centre.x + 5.0, centre.y, alt + 3.0],
+                xindeler_protocol::DimensionId::DEFAULT,
+            );
+        }
+        server_app.world_mut().flush();
+
+        // Drive a handful of ticks so `apply_pending_entity_template_spawns`
+        // (which runs in the SAME `FixedUpdate` chain as `tick_sim`) resolves
+        // the pending requests into real `CreateNpcEvent`s and the sim
+        // processes them.
+        for _ in 0..10 {
+            server_app.update();
+        }
+
+        // No staging entity should ever survive processing (win or lose).
+        let leftover_pending = server_app
+            .world_mut()
+            .query::<&xindeler_oracle_host::entity_template::PendingEntityTemplateSpawn>()
+            .iter(server_app.world())
+            .count();
+        assert_eq!(
+            leftover_pending, 0,
+            "pending entity-template spawn requests must never accumulate"
+        );
+
+        // Find our two specific spawns by their unique `stats.name` — a real
+        // generated world already has its OWN ambient wildlife (world-gen
+        // spawns wolves/pigs too, some with `Alignment::Enemy`), so matching
+        // by `(body, alignment)` alone would be ambiguous; the name we gave
+        // each template is the one unambiguous handle back to OUR entities.
+        let (aggro_wolf, malformed_pig) = {
+            use common::comp;
+            use specs::{Join, WorldExt};
+
+            let sim = server_app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let agents = ecs.read_storage::<comp::Agent>();
+            let bodies = ecs.read_storage::<comp::Body>();
+            let stats = ecs.read_storage::<comp::Stats>();
+            let alignments = ecs.read_storage::<comp::Alignment>();
+
+            let mut aggro_wolf = None;
+            let mut malformed_pig = None;
+            for (agent, body, stat, alignment) in (&agents, &bodies, &stats, &alignments).join() {
+                match &stat.name {
+                    comp::Content::Plain(name) if name == "Test Dread Wolf" => {
+                        aggro_wolf = Some((agent.clone(), *body, *alignment));
+                    },
+                    comp::Content::Plain(name) if name == "Test Malformed Pig" => {
+                        malformed_pig = Some((agent.clone(), *body, *alignment));
+                    },
+                    _ => {},
+                }
+            }
+            (aggro_wolf, malformed_pig)
+        };
+
+        let (agent, body, alignment) =
+            aggro_wolf.expect("the aggro wolf template should have spawned a real sim NPC by now");
+        assert!(
+            matches!(body, common::comp::Body::QuadrupedMedium(_)),
+            "the \"wolf\" body keyword should resolve to a QuadrupedMedium body"
+        );
+        assert_eq!(
+            alignment,
+            common::comp::Alignment::Enemy,
+            "faction: \"enemy\""
+        );
+        assert_eq!(
+            agent.psyche.aggro_dist, None,
+            "the Aggro preset must skip the warn-up (aggro_no_warn)"
+        );
+        assert!(
+            (agent.psyche.aggro_range_multiplier - 2.0).abs() < f32::EPSILON,
+            "the Aggro preset must widen the aggro range"
+        );
+        assert_eq!(
+            agent.psyche.flee_health, 0.0,
+            "the Aggro preset must never flee"
+        );
+
+        // Anti-chaos acceptance: the malformed `ai_behavior_override` must
+        // have spawned SOMETHING (didn't panic / silently vanish) and must
+        // carry the Passive preset's signature (`aggro_range_multiplier ==
+        // 0.0`), never a real Stalk/Aggro/Flee tuning.
+        let (malformed_agent, ..) = malformed_pig
+            .expect("the malformed-behavior template should still spawn a real sim NPC");
+        assert_eq!(
+            malformed_agent.psyche.aggro_range_multiplier, 0.0,
+            "an unrecognized ai_behavior_override must fall back to the Passive preset, not panic \
+             or silently drop the spawn"
+        );
+        assert_eq!(
+            malformed_agent.psyche.flee_health, 0.0,
+            "Passive never flees either"
+        );
+
+        // Finally, confirm the mirror picks the aggro NPC up like any other
+        // — a client-visible NetBody/NetUid entity, exactly like
+        // `mirrors_sim_npc_to_replicon_client` already proves for
+        // `spawn_test_npcs`'s own test NPCs. No client connection is needed
+        // for this: the LISTEN-SERVER's own local loopback (`ClientState::
+        // Disconnected`) already runs the mirror.
+        let is_mirrored_wolf_visible = |app: &mut App| {
+            let mut q = app.world_mut().query::<&NetBody>();
+            q.iter(app.world())
+                .any(|body| matches!(body.0, common::comp::Body::QuadrupedMedium(_)))
+        };
+        let mut mirrored = is_mirrored_wolf_visible(&mut server_app);
+        for _ in 0..MAX_TICKS {
+            if mirrored {
+                break;
+            }
+            server_app.update();
+            mirrored = is_mirrored_wolf_visible(&mut server_app);
+        }
+        assert!(
+            mirrored,
+            "the factory-spawned NPC must be mirrored to a NetBody (+NetUid, EM-4.2f) entity, \
+             exactly like any other sim NPC — proving EM-3.8's figure pipeline is reused verbatim"
+        );
+    }
+
+    /// BL-82 EM-4.7 acceptance (task board's literal bar, `tasks/
+    /// 45-engine-migration-tasks.md`: "Ravenloft example spawns 15 clamped
+    /// minions with stalker AI in a test dimension"): a `DmEvent` shaped
+    /// like a Ravenloft-style ORACLE event (`spawning_rules` drawing from
+    /// the shipped `sentinel_owl` template — an already-authored "stalk"
+    /// sample, see `assets/xindeler/entity_templates/
+    /// sentinel_owl.entity_template.ron`) spawns exactly 15 real sim NPCs,
+    /// every one carrying the Stalk preset's signature, into
+    /// `DimensionId::DEFAULT` — v1's "test dimension" (this module's doc
+    /// comment on `entity_factory`'s default-dimension-only scope; full
+    /// per-DmEvent instanced dimensions are EM-4.9's end-to-end drill, not
+    /// this task's job).
+    ///
+    /// The "clamped" half of the acceptance bar is exercised for real: the
+    /// `DmEvent` is FIRST authored with a hostile `spawn_count` (2000, far
+    /// past EM-4.4's `bounds::SPAWN_COUNT` ceiling of 200) and run through
+    /// the exact same `DmEvent::sanitize` anti-chaos path every ingested
+    /// event goes through, proving the clamp actually fires — only THEN
+    /// does the test dial `spawn_count` down to the literal 15 the
+    /// acceptance bar asks for (15 itself is not a clamp boundary — the
+    /// ceiling is 200 — so this test does not pretend it is one).
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
+    fn ravenloft_spawning_rules_spawn_fifteen_clamped_stalker_minions_in_a_test_dimension() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use xindeler_oracle_host::{
+            DmEvent, SpawningRules,
+            entity_template::{ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats},
+        };
+
+        const EXPECTED_MINIONS: usize = 15;
+        const MINION_NAME: &str = "Ravenloft Sentinel";
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut server_app = App::new();
+        server_app
+            .add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+            ))
+            .finish();
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        server_app.insert_non_send(sim);
+
+        // Same terrain-ready preamble as the sibling entity-factory test.
+        {
+            let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            server_app.update();
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let (centre, alt) = {
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            (centre, alt)
+        };
+
+        // The "Ravenloft example": a DmEvent whose spawning_rules directive
+        // names the shipped `sentinel_owl` template, a uniform "stalk"
+        // override (every minion stalks regardless of the template's own
+        // default), and a deliberately hostile spawn_count.
+        let mut event = DmEvent {
+            spawning_rules: SpawningRules {
+                entity_templates: vec!["sentinel_owl".to_owned()],
+                spawn_count: 2000.0,
+                spawn_radius: 30.0,
+                ai_behavior_override: "stalk".to_owned(),
+            },
+            ..DmEvent::default()
+        };
+        event.sanitize();
+        assert!(
+            event.spawning_rules.spawn_count <= 200.0,
+            "a hostile spawn_count must be clamped by the same EM-4.4 anti-chaos bound every \
+             DmEvent gets, BEFORE this test ever calls spawn_from_spawning_rules: got {}",
+            event.spawning_rules.spawn_count
+        );
+        // Now dial in the literal count the acceptance bar names.
+        event.spawning_rules.spawn_count = EXPECTED_MINIONS as f32;
+
+        // Mirrors the SHIPPED `sentinel_owl.entity_template.ron` asset field
+        // for field (`assets/xindeler/entity_templates/
+        // sentinel_owl.entity_template.ron`: body/faction identical) except
+        // `ai_behavior_override`, deliberately set to "flee" here (not the
+        // shipped asset's "stalk") to prove the batch spawn's
+        // `spawning_rules.ai_behavior_override` OVERRIDES the template's own
+        // value rather than merely reading it.
+        let mut templates = HashMap::new();
+        templates.insert("sentinel_owl".to_owned(), EntityTemplate {
+            entity_template_id: "sentinel_owl".to_owned(),
+            body: "snowy_owl".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some(MINION_NAME.to_owned()),
+            },
+            faction: "wild".to_owned(),
+            loot: None,
+            ai_behavior_override: "flee".to_owned(),
+        });
+
+        let registry = ComponentSpawnRegistry::with_builtins();
+        let mut rng = ChaCha8Rng::seed_from_u64(0xBADD_C0DE);
+        {
+            let mut commands = server_app.world_mut().commands();
+            spawn_from_spawning_rules(
+                &mut commands,
+                &registry,
+                &templates,
+                &event.spawning_rules,
+                [centre.x, centre.y, alt + 3.0],
+                xindeler_protocol::DimensionId::DEFAULT,
+                &mut rng,
+            );
+        }
+        server_app.world_mut().flush();
+
+        for _ in 0..10 {
+            server_app.update();
+        }
+
+        // No staging entity should ever survive processing.
+        let leftover_pending = server_app
+            .world_mut()
+            .query::<&xindeler_oracle_host::entity_template::PendingEntityTemplateSpawn>()
+            .iter(server_app.world())
+            .count();
+        assert_eq!(
+            leftover_pending, 0,
+            "pending entity-template spawn requests must never accumulate"
+        );
+
+        let minions = {
+            use common::comp;
+            use specs::{Join, WorldExt};
+
+            let sim = server_app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let agents = ecs.read_storage::<comp::Agent>();
+            let bodies = ecs.read_storage::<comp::Body>();
+            let stats = ecs.read_storage::<comp::Stats>();
+            let alignments = ecs.read_storage::<comp::Alignment>();
+
+            (&agents, &bodies, &stats, &alignments)
+                .join()
+                .filter_map(|(agent, body, stat, alignment)| match &stat.name {
+                    comp::Content::Plain(name) if name == MINION_NAME => {
+                        Some((agent.clone(), *body, *alignment))
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            minions.len(),
+            EXPECTED_MINIONS,
+            "the Ravenloft example's spawning_rules must spawn exactly {EXPECTED_MINIONS} real \
+             sim NPCs, no more, no fewer"
+        );
+
+        for (agent, body, alignment) in &minions {
+            assert_eq!(
+                *alignment,
+                common::comp::Alignment::Wild,
+                "every minion's faction must be \"wild\", per the template (matching the shipped \
+                 sentinel_owl.entity_template.ron asset)"
+            );
+            // Stalk is body-derived defaults, untouched (see `AgentPreset::
+            // build_agent`'s doc comment) — assert it matches THIS body's
+            // own baseline, not a hardcoded number, so the check holds
+            // regardless of species-specific Agent::from_body defaults.
+            let baseline = common::comp::Agent::from_body(body);
+            assert_eq!(
+                agent.psyche.aggro_range_multiplier, baseline.psyche.aggro_range_multiplier,
+                "every minion must carry the Stalk preset (spawning_rules.ai_behavior_override \
+                 overriding the template's own \"flee\"), not Passive/Aggro/Flee"
+            );
+            assert_eq!(
+                agent.psyche.flee_health, baseline.psyche.flee_health,
+                "Stalk must not carry Flee's flee_health override (the template itself said \
+                 \"flee\" — spawning_rules must have overridden it)"
+            );
+            assert_ne!(
+                agent.psyche.flee_health, 1.0,
+                "if this were still the template's own \"flee\" preset, flee_health would be 1.0 \
+                 — spawning_rules.ai_behavior_override must have overridden it to \"stalk\""
+            );
+        }
+    }
+
     /// Identifies the wandering test NPCs SPECIFICALLY, on the sim side, by
     /// their own `Stats.name` convention (`"Test <Body> <index>"` — see
     /// `emit_wandering_npc`/`_humanoid`/`_quadruped_medium`/`_bird_medium`),

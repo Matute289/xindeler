@@ -11959,6 +11959,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "vek",
+ "xindeler-common",
  "xindeler-protocol",
 ]
 
@@ -12172,6 +12174,9 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "rand 0.10.1",
+ "rand_chacha 0.10.0",
+ "ron",
  "specs",
  "tempfile",
  "tokio",
@@ -12180,6 +12185,7 @@ dependencies = [
  "xindeler-client-core",
  "xindeler-common",
  "xindeler-dimensions",
+ "xindeler-oracle-host",
  "xindeler-protocol",
  "xindeler-server-core",
 ]

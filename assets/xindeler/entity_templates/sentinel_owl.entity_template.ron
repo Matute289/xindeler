@@ -1,0 +1,15 @@
+// Sentinel Owl — a wide-ranging watcher NPC template (BL-82 EM-4.7 sample).
+//
+// Same schema, same closed set of component kinds as `dread_wolf.
+// entity_template.ron`/`forest_deer.entity_template.ron` — a third sibling
+// template, again with zero Rust changes.
+(
+    entity_template_id: "sentinel_owl",
+    body: "snowy_owl",
+    stats: (
+        name: Some("Sentinel Owl"),
+    ),
+    faction: "wild",
+    loot: Some("common.items.food.meat.bird_raw"),
+    ai_behavior_override: "stalk",
+)
