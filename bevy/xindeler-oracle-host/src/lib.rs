@@ -1,19 +1,25 @@
 //! ORACLE host: DmEvent AssetLoader, instanced dimensions,
-//! AtmosphereController, entity factory.
+//! AtmosphereController, entity factory, AI-gateway config seam.
 //!
-//! BL-82 Bevy migration — skeleton crate (EM-0.7); [`atmosphere`] (EM-2.4)
-//! and [`dm_event`] (EM-4.3/4.4) are the first real systems. Remaining
-//! systems land per `docs/design/tasks/45-engine-migration-tasks.md` /
+//! BL-82 Bevy migration — skeleton crate (EM-0.7); [`atmosphere`] (EM-2.4),
+//! [`ai_gateway`] (EM-4.2e, a config/metrics-only seam for BL-83/BL-85 that
+//! makes zero real AI calls itself), and [`dm_event`] (EM-4.3/4.4) are the
+//! first real systems. Remaining systems land per
+//! `docs/design/tasks/45-engine-migration-tasks.md` /
 //! `docs/design/tasks/47-bl82-phase4-remaining-tasks.md`. Isolation law:
 //! logic crates never depend on this crate or on Bevy. This crate stays
 //! render-free (headless-safe) — apply-to-render systems live in the client.
 
+pub mod ai_gateway;
 pub mod atmosphere;
 pub mod dm_event;
 
 use bevy::app::{App, Plugin};
 
 pub use crate::{
+    ai_gateway::{
+        AiExecutionMode, AiGatewayConfig, AiGatewayMetrics, AiGatewayPlugin, FallbackPolicy,
+    },
     atmosphere::{
         AmbientSky, AtmosphereController, AtmosphereProfile, WeatherEffect,
         XindelerAtmospherePlugin,

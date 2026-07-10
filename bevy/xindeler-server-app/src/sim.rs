@@ -29,6 +29,7 @@ use server::{
     settings::Protocol,
 };
 use tokio::runtime::Runtime;
+use xindeler_oracle_host::AiGatewayConfig;
 
 use crate::metrics::DEFAULT_METRICS_ADDR;
 
@@ -49,6 +50,12 @@ pub struct SimServerConfig {
     /// Bind address for the metrics passthrough (EM-4.1). Defaults to the
     /// same port server-cli's own `web_address` setting serves `/metrics` on.
     pub metrics_addr: SocketAddr,
+    /// AI-gateway config seam (EM-4.2e). Defaults to
+    /// `AiGatewayConfig::default()` (`mode: Offline`, zero AI activity);
+    /// `main.rs` overrides this from `XINDELER_SERVER_AI_GATEWAY_CONFIG` (a
+    /// RON file path) when set, mirroring `metrics_addr`'s
+    /// env-var-overrides-a-sane-default pattern.
+    pub ai_gateway: AiGatewayConfig,
 }
 
 impl Default for SimServerConfig {
@@ -58,6 +65,7 @@ impl Default for SimServerConfig {
             metrics_addr: DEFAULT_METRICS_ADDR
                 .parse()
                 .expect("DEFAULT_METRICS_ADDR is a valid SocketAddr literal"),
+            ai_gateway: AiGatewayConfig::default(),
         }
     }
 }

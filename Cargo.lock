@@ -11870,10 +11870,12 @@ name = "xindeler-oracle-host"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "prometheus",
  "ron",
  "serde",
  "serde_json",
  "tempfile",
+ "xindeler-protocol",
 ]
 
 [[package]]
@@ -11885,6 +11887,7 @@ dependencies = [
  "bevy_replicon",
  "bincode",
  "lz-fear",
+ "ron",
  "serde",
  "vek",
  "xindeler-common",
@@ -11980,6 +11983,7 @@ dependencies = [
  "xindeler-client-core",
  "xindeler-common",
  "xindeler-common-base",
+ "xindeler-oracle-host",
  "xindeler-rtsim",
  "xindeler-server-agent",
  "xindeler-server-core",
