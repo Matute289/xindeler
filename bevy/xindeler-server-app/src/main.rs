@@ -23,6 +23,7 @@
 //! abstraction this binary calls through.
 
 mod dimensions;
+mod login;
 mod metrics;
 mod plugin;
 mod shutdown;

@@ -116,6 +116,19 @@ xindeler-oracle-host = { path = "../xindeler-oracle-host" }
 # 4 lifecycle-count gauges on the SAME metrics registry `AiGatewayPlugin`
 # above already registers onto.
 xindeler-dimensions = { path = "../xindeler-dimensions" }
+# BL-82 EM-4.2c: the login/session handshake system (`login.rs`) creates a
+# specs entity for each replicon-authenticated player via
+# `WorldSyncExt::create_entity_synced` (the SAME helper the legacy TCP/QUIC
+# connect path uses to allocate a `Uid`), so it needs this trait directly —
+# `xindeler-sim-bridge` doesn't re-export it. Legal shell→logic type-library
+# use (same direction as this crate's other `common*`/`server` deps).
+common-net = { package = "xindeler-common-net", path = "../../common/net" }
+# `login.rs` reads/writes specs storages (`Player`/`Admin`/`Uid`) and calls
+# `WorldSyncExt::create_entity_synced` directly on the sim's `specs::World`
+# (via `Server::state_mut().ecs_mut()`) — same legal shell→logic direction
+# `xindeler-sim-bridge`'s own Cargo.toml documents for its identical `specs`
+# dependency.
+specs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
