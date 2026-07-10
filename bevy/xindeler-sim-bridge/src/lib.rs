@@ -34,6 +34,17 @@
 //!   follow it. The terrain persister anchor becomes a FALLBACK, spawned only
 //!   if the embedded player never reaches in-game.
 //!
+//! - EM-4.2f (the identity + AURORA-readiness half): [`mirror_sim_entities`]
+//!   additionally writes [`NetUid`] (the sim's `Uid` inner value) for every
+//!   mirrored entity — additive, no change to any existing mirrored field.
+//!   [`tick_aurora_overlay`] then keeps `xindeler_protocol::AuroraOverlay` in
+//!   sync with [`AiExecutionMode`]: empty while `Offline` (today's default
+//!   `server-agent` AI, unchanged), one neutral-default
+//!   `xindeler_protocol::AuroraNpcState` entry per mirrored NPC (every
+//!   `NetUid`-carrying entity that is NOT [`NetLocalPlayer`]) otherwise. See
+//!   [`recompute_aurora_overlay`]'s doc comment for the invariant this must
+//!   never violate.
+//!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
@@ -66,6 +77,7 @@ use common::{
         slot::{ArmorSlot, EquipSlot},
     },
     event::{CreateNpcEvent, NpcBuilder},
+    uid::Uid,
 };
 use server::{
     EditableSettings, Event, Input, Server, Settings,
@@ -73,8 +85,9 @@ use server::{
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetLodAlt, NetOri, NetPos,
-    NetTool, NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
+    AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
+    NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RemoveChunk,
+    TerrainAnchor,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -560,12 +573,21 @@ impl Plugin for SimEntityMirrorPlugin {
     fn build(&self, app: &mut App) {
         // EM-3.11b: FixedUpdate alongside `tick_sim` — see its doc. Chaining
         // `.after(tick_sim)` requires both to live in the same schedule.
+        //
+        // EM-4.2f: `init_resource` only INSERTS if missing (never overwrites),
+        // so if `xindeler-oracle-host`'s `AiGatewayPlugin` already inserted a
+        // real `AiExecutionMode` (in either add-order), this is a no-op; if
+        // this crate runs standalone (e.g. in tests, or before that plugin
+        // exists in an App), it defaults to `Offline` — the safe, zero-AI
+        // posture.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
             .init_resource::<TestNpcState>()
+            .init_resource::<AiExecutionMode>()
+            .init_resource::<AuroraOverlay>()
             .add_systems(
                 FixedUpdate,
-                (spawn_test_npcs, mirror_sim_entities)
+                (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
                     .chain()
                     .after(tick_sim)
                     .run_if(in_state(ClientState::Disconnected)),
@@ -948,6 +970,13 @@ fn mirror_sim_entities(
     // EM-3.8e: read whether each entity is currently gliding, for the
     // NetLoadout::gliding figure-visibility flag.
     let character_states = ecs.read_storage::<comp::CharacterState>();
+    // EM-4.2f: read the sim's stable identity so the mirror can carry it onto
+    // the wire as `NetUid`. `.maybe()` (not required): every sim entity is
+    // expected to have one ("for now we expect all entities have a Uid
+    // component" — `server/src/state_ext.rs`), but this stays defensive so a
+    // future entity that somehow lacks one still mirrors its other fields
+    // rather than being silently dropped (additive-only requirement).
+    let uids = ecs.read_storage::<Uid>();
 
     // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
     // fresh every tick over all visible entities, and net_health below issues a
@@ -968,6 +997,7 @@ fn mirror_sim_entities(
         NetBody,
         Option<NetHealth>,
         Option<NetLoadout>,
+        Option<NetUid>,
     )> = Vec::new();
 
     // `maybe()` makes these MaybeJoin members, so this is a `LendJoin` (lending
@@ -983,10 +1013,21 @@ fn mirror_sim_entities(
         presences.maybe(),
         inventories.maybe(),
         character_states.maybe(),
+        uids.maybe(),
     )
         .lend_join();
-    while let Some((entity, pos, body, ori, vel, health, presence, inventory, character_state)) =
-        it.next()
+    while let Some((
+        entity,
+        pos,
+        body,
+        ori,
+        vel,
+        health,
+        presence,
+        inventory,
+        character_state,
+        uid,
+    )) = it.next()
     {
         // Region-map visibility predicate (see doc comment).
         if !presence.is_none_or(|p| p.kind.sync_me()) {
@@ -1028,6 +1069,10 @@ fn mirror_sim_entities(
                 |inv| net_loadout_from_inventory(inv, gliding),
             )
         });
+        // EM-4.2f: the entity's stable sim identity, verbatim (`Uid` wraps a
+        // `NonZeroU64`; `NetUid` carries the same value as a plain `u64` so
+        // the wire type stays serde-simple).
+        let net_uid = uid.map(|u| NetUid(u.0.get()));
         updates.push((
             entity,
             net_pos,
@@ -1036,6 +1081,7 @@ fn mirror_sim_entities(
             net_body,
             net_health,
             net_loadout,
+            net_uid,
         ));
     }
     drop(it);
@@ -1050,9 +1096,12 @@ fn mirror_sim_entities(
         presences,
         inventories,
         character_states,
+        uids,
     ));
 
-    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout) in updates {
+    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout, net_uid) in
+        updates
+    {
         let is_local_player = player_sim_entity == Some(sim_entity);
         // EM-3.8d: (re-)insert the loadout ONLY when it changed since we last
         // mirrored it (it is a few Strings — re-inserting every tick would
@@ -1084,6 +1133,13 @@ fn mirror_sim_entities(
                 } else {
                     ec.remove::<NetLocalPlayer>();
                 }
+                // EM-4.2f: `NetUid` is `Copy`/cheap like the other UPSERTed
+                // comps — re-insert every tick when present; leave it alone
+                // (never remove) if this entity somehow has no `Uid` this
+                // tick, since a stable identity should not flicker away.
+                if let Some(u) = net_uid {
+                    ec.insert(u);
+                }
             },
             None => {
                 // First sighting: spawn the replicated mirror entity.
@@ -1103,6 +1159,9 @@ fn mirror_sim_entities(
                 }
                 if is_local_player {
                     ec.insert(NetLocalPlayer);
+                }
+                if let Some(u) = net_uid {
+                    ec.insert(u);
                 }
                 mirror.0.insert(sim_entity, ec.id());
             },
@@ -1129,6 +1188,71 @@ fn mirror_sim_entities(
         // a stale entry (EM-3.8d).
         loadout_cache.0.remove(&sim_entity);
     }
+}
+
+// --- EM-4.2f: AURORA-readiness overlay -------------------------------------
+
+/// Recomputes `overlay` for the current tick's set of mirrored NPC
+/// [`NetUid`]s, given the current [`AiExecutionMode`]. Pure logic (no ECS
+/// types) so it is unit-testable without booting Bevy or the sim.
+///
+/// ## The invariant this function exists to enforce (spec §1.5)
+/// **`Offline` means the map is empty, and an empty map means the NPC
+/// behaves exactly as today's default `server-agent` AI — this is not a
+/// degraded mode, it is the current game.** Outside `Offline`, entries exist
+/// but carry only `AuroraNpcState::default` neutral placeholders until
+/// BL-83 writes real data:
+/// - `AiExecutionMode::Offline` ⇒ `overlay` is cleared unconditionally,
+///   regardless of what was in it before (e.g. a mode flip back to `Offline`
+///   mid-session must drop any placeholder entries).
+/// - `AiExecutionMode::LocalOnly | AiExecutionMode::Full` ⇒ every uid in
+///   `live_npc_uids` gets an entry if it doesn't already have one — an EXISTING
+///   entry is left untouched (`HashMap::entry(..).or_default()`), so once BL-83
+///   starts writing real content into an entry, this function never stomps it
+///   back to neutral on a later tick. Entries whose uid is no longer live (NPC
+///   despawned/left view) are pruned, so the map never grows unbounded and
+///   never describes an NPC that no longer exists.
+///
+/// This function computes NOTHING about what an NPC is doing — it only
+/// decides WHETHER an entry exists and, for a brand-new entry, that it
+/// starts at the documented neutral default. No position/stats/behavior
+/// history is read here or anywhere in this task.
+fn recompute_aurora_overlay(
+    mode: AiExecutionMode,
+    overlay: &mut AuroraOverlay,
+    live_npc_uids: impl Iterator<Item = u64>,
+) {
+    if mode == AiExecutionMode::Offline {
+        overlay.0.clear();
+        return;
+    }
+
+    let live: std::collections::HashSet<u64> = live_npc_uids.collect();
+    overlay.0.retain(|uid, _| live.contains(uid));
+    for uid in live {
+        overlay.0.entry(uid).or_default();
+    }
+}
+
+/// Bevy-system wrapper over [`recompute_aurora_overlay`]: the "NPCs" are every
+/// mirrored entity carrying [`NetUid`] that is NOT [`NetLocalPlayer`].
+///
+/// v1 caveat: today the ONLY mirrored non-NPC is the one embedded local
+/// player (`mirror_sim_entities` tags exactly that one sim entity with
+/// `NetLocalPlayer`), so this predicate happens to be correct for the
+/// current single-embedded-player listen-server architecture — but it is
+/// NOT automatically correct for a future remote/second player: any other
+/// player-controlled mirrored entity would carry `NetUid` and no
+/// `NetLocalPlayer` tag, and would be silently classified as an NPC here.
+/// A future multi-player mirror should add a positive "this is a
+/// player" marker (rather than relying on the ABSENCE of
+/// `NetLocalPlayer`) before that scenario becomes real.
+fn tick_aurora_overlay(
+    mode: Res<AiExecutionMode>,
+    mut overlay: bevy::ecs::system::ResMut<AuroraOverlay>,
+    npcs: bevy::ecs::system::Query<&NetUid, bevy::ecs::query::Without<NetLocalPlayer>>,
+) {
+    recompute_aurora_overlay(*mode, &mut overlay, npcs.iter().map(|uid| uid.0));
 }
 
 /// Boots a throwaway singleplayer-style server rooted at `data_dir` for
@@ -1182,7 +1306,7 @@ mod tests {
         time::{Fixed, TimeUpdateStrategy},
     };
     use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
-    use xindeler_protocol::XindelerProtocolPlugin;
+    use xindeler_protocol::{AuroraNpcState, XindelerProtocolPlugin};
 
     use super::*;
 
@@ -1483,6 +1607,156 @@ mod tests {
         assert!(is_gliding(Some(&comp::CharacterState::Glide(
             common::states::glide::Data::new(1.0, 1.0, comp::Ori::default())
         ))));
+    }
+
+    // --- EM-4.2f: AURORA-readiness overlay (no assets, no sim) -------------
+
+    /// The core Offline-fallback invariant (spec §1.5): with
+    /// `AiExecutionMode::Offline`, `recompute_aurora_overlay` clears the map
+    /// unconditionally, even if live NPCs are present — Offline never gets
+    /// entries.
+    #[test]
+    fn aurora_overlay_stays_empty_while_offline() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(
+            AiExecutionMode::Offline,
+            &mut overlay,
+            [1, 2, 3].into_iter(),
+        );
+        assert!(
+            overlay.0.is_empty(),
+            "Offline must never populate AuroraOverlay"
+        );
+    }
+
+    /// Outside Offline, every live NPC uid gets exactly one entry, and that
+    /// entry equals the documented neutral placeholder byte-for-byte (spec
+    /// §1.5): empty memory, Idle-only intention at weight 1.0, neutral mood
+    /// at zero intensity.
+    #[test]
+    fn aurora_overlay_populates_neutral_defaults_outside_offline() {
+        for mode in [AiExecutionMode::LocalOnly, AiExecutionMode::Full] {
+            let mut overlay = AuroraOverlay::default();
+            recompute_aurora_overlay(mode, &mut overlay, [10, 20].into_iter());
+
+            assert_eq!(
+                overlay.0.len(),
+                2,
+                "one entry per mirrored NPC under {mode:?}"
+            );
+            for uid in [10, 20] {
+                let state = overlay
+                    .0
+                    .get(&uid)
+                    .unwrap_or_else(|| panic!("expected an entry for NPC {uid} under {mode:?}"));
+                assert_eq!(state, &AuroraNpcState::default());
+                assert!(state.short_term_memory.is_empty());
+                assert_eq!(state.intention, vec![(
+                    xindeler_protocol::IntentKind::Idle,
+                    1.0
+                )]);
+                assert_eq!(
+                    state.emotional_state.mood,
+                    xindeler_protocol::MoodKind::Neutral
+                );
+                assert_eq!(state.emotional_state.intensity, 0.0);
+            }
+        }
+    }
+
+    /// An entry that already carries non-default content (standing in for a
+    /// future BL-83 write) must survive a later recompute tick untouched —
+    /// this function only decides existence, never overwrites (spec §1.5:
+    /// "not a computation", never stomps real data back to neutral).
+    #[test]
+    fn aurora_overlay_never_overwrites_an_existing_entry() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+
+        // Simulate a future BL-83 write.
+        let mut seeded = AuroraNpcState::default();
+        seeded
+            .short_term_memory
+            .push("something happened".to_owned());
+        overlay.0.insert(7, seeded.clone());
+
+        // Recompute again with the SAME live set — must not reset entry 7.
+        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+        assert_eq!(overlay.0.get(&7), Some(&seeded));
+    }
+
+    /// An NPC that stops being live (despawned/left view) has its overlay
+    /// entry pruned — the map must never describe an NPC that no longer
+    /// exists.
+    #[test]
+    fn aurora_overlay_prunes_npcs_no_longer_live() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        assert_eq!(overlay.0.len(), 2);
+
+        // NPC 2 is gone this tick.
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1].into_iter());
+        assert_eq!(overlay.0.len(), 1);
+        assert!(overlay.0.contains_key(&1));
+        assert!(!overlay.0.contains_key(&2));
+    }
+
+    /// Toggling the mode back to Offline mid-session clears any placeholder
+    /// (or seeded) entries — Offline always means zero entries, regardless of
+    /// prior state.
+    #[test]
+    fn aurora_overlay_clears_on_toggle_back_to_offline() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        assert_eq!(overlay.0.len(), 2);
+
+        recompute_aurora_overlay(AiExecutionMode::Offline, &mut overlay, [1, 2].into_iter());
+        assert!(overlay.0.is_empty());
+    }
+
+    /// System-level wiring check (no real sim needed): [`tick_aurora_overlay`]
+    /// reads `NetUid`-carrying Bevy entities directly, excludes the one
+    /// tagged `NetLocalPlayer`, and reacts live to `AiExecutionMode` changing
+    /// resource value between ticks — proving the acceptance bar ("toggling
+    /// AiExecutionMode asserts AuroraOverlay's population state") end-to-end
+    /// through the real system, not just the pure function.
+    #[test]
+    fn tick_aurora_overlay_system_respects_mode_and_local_player_exclusion() {
+        let mut app = App::new();
+        app.insert_resource(AiExecutionMode::Offline)
+            .init_resource::<AuroraOverlay>()
+            .add_systems(Update, tick_aurora_overlay);
+
+        app.world_mut().spawn(NetUid(100));
+        app.world_mut().spawn((NetUid(200), NetLocalPlayer));
+
+        app.update();
+        assert!(
+            app.world().resource::<AuroraOverlay>().0.is_empty(),
+            "Offline must not populate the overlay even with mirrored entities present"
+        );
+
+        *app.world_mut().resource_mut::<AiExecutionMode>() = AiExecutionMode::LocalOnly;
+        app.update();
+        let overlay = app.world().resource::<AuroraOverlay>();
+        assert_eq!(
+            overlay.0.len(),
+            1,
+            "only the non-NetLocalPlayer NetUid entity should get an entry"
+        );
+        assert!(overlay.0.contains_key(&100));
+        assert!(
+            !overlay.0.contains_key(&200),
+            "the local player must never get an AuroraNpcState entry"
+        );
+        assert_eq!(overlay.0.get(&100), Some(&AuroraNpcState::default()));
+
+        *app.world_mut().resource_mut::<AiExecutionMode>() = AiExecutionMode::Offline;
+        app.update();
+        assert!(
+            app.world().resource::<AuroraOverlay>().0.is_empty(),
+            "toggling back to Offline must clear the overlay"
+        );
     }
 
     /// The sim→Bevy position rotation matches the voxel converter's

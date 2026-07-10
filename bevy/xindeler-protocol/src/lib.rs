@@ -15,6 +15,7 @@
 //! replicon's registries in place).
 
 pub mod ai_mode;
+pub mod aurora_overlay;
 
 use bevy::{
     app::{App, Plugin},
@@ -25,7 +26,10 @@ use bevy_replicon::prelude::{AppRuleExt, Channel, ClientMessageAppExt, ServerMes
 use common::terrain::TerrainChunk;
 use serde::{Deserialize, Serialize};
 
-pub use crate::ai_mode::AiExecutionMode;
+pub use crate::{
+    ai_mode::AiExecutionMode,
+    aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
+};
 
 /// Replicated world position of an entity (server-authoritative).
 ///
@@ -170,6 +174,26 @@ pub enum NetToolKey {
         hands: common::comp::tool::Hands,
     },
 }
+
+/// Replicated stable sim identity of an entity (BL-82 EM-4.2f, spec §1.5).
+///
+/// Wraps the sim's `common::uid::Uid` inner value (a `NonZeroU64`, here a
+/// plain `u64` since replicated components need no `common` dependency
+/// beyond what already exists — this crate stays a type library over
+/// `common`, never a `uid`-allocating one). Every sim entity already carries
+/// a `Uid` (player and NPC alike; "for now we expect all entities have a Uid
+/// component" — `server/src/state_ext.rs`), so `xindeler-sim-bridge`'s mirror
+/// writes this alongside the existing `NetPos`/`NetBody`/etc. for every
+/// mirrored entity.
+///
+/// Before this task, replicated mirror entities had no wire-visible identity
+/// that survives a respawn/reconnect or correlates back to the sim's
+/// `Uid`/`rtsim::NpcId` — `NetUid` is that correlation point. AURORA (BL-15/
+/// BL-83, much later) keys [`AuroraOverlay`] entries by this same `u64` value
+/// so it can say "this rendered figure IS `NpcId` X, with persistent
+/// memories/relationships."
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NetUid(pub u64);
 
 /// Marks the mirrored entity that is THIS client's own player (EM-3.7b).
 ///
@@ -425,7 +449,11 @@ impl Plugin for XindelerProtocolPlugin {
             .replicate::<NetLoadout>()
             // EM-3.7b: the local-player marker on the mirror entity so the
             // client's third-person camera knows which capsule to follow.
-            .replicate::<NetLocalPlayer>();
+            .replicate::<NetLocalPlayer>()
+            // EM-4.2f: the entity's stable sim identity (player or NPC), so a
+            // future AURORA consumer can correlate a rendered figure back to
+            // the sim's Uid/NpcId across respawns/reconnects.
+            .replicate::<NetUid>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
@@ -583,6 +611,68 @@ mod tests {
             .single(client_app.world())
             .expect("the humanoid loadout reaches the client");
         assert_eq!(*got, loadout, "the loadout round-trips byte-for-byte");
+    }
+
+    /// BL-82 EM-4.2f acceptance: `NetUid` (the mirrored entity's stable sim
+    /// identity) round-trips server → client for BOTH a player-shaped
+    /// (`NetLocalPlayer`-tagged humanoid) and an NPC-shaped
+    /// (`Body::QuadrupedSmall`) mirrored entity — mirrors
+    /// `net_loadout_replicates`'s shape, just for the new identity
+    /// component.
+    #[test]
+    fn net_uid_replicates_for_player_and_npc() {
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let player_uid = NetUid(1);
+        let player_body = NetBody(common::comp::Body::Humanoid(common::comp::humanoid::Body {
+            species: common::comp::humanoid::Species::Human,
+            body_type: common::comp::humanoid::BodyType::Male,
+            hair_style: 0,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 0,
+            skin: 0,
+            eye_color: 0,
+        }));
+        let npc_uid = NetUid(2);
+        let npc_body = NetBody(common::comp::Body::QuadrupedSmall(
+            common::comp::quadruped_small::Body {
+                species: common::comp::quadruped_small::Species::Pig,
+                body_type: common::comp::quadruped_small::BodyType::Female,
+            },
+        ));
+
+        server_app
+            .world_mut()
+            .spawn((Replicated, player_body, player_uid, NetLocalPlayer));
+        server_app
+            .world_mut()
+            .spawn((Replicated, npc_body, npc_uid));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let mut player_q = client_app
+            .world_mut()
+            .query::<(&NetUid, &NetBody, &NetLocalPlayer)>();
+        let (got_player_uid, got_player_body, _) = player_q
+            .single(client_app.world())
+            .expect("the player-shaped entity reaches the client with its NetUid");
+        assert_eq!(*got_player_uid, player_uid);
+        assert_eq!(*got_player_body, player_body);
+
+        let mut npc_q = client_app
+            .world_mut()
+            .query_filtered::<(&NetUid, &NetBody), Without<NetLocalPlayer>>();
+        let (got_npc_uid, got_npc_body) = npc_q
+            .single(client_app.world())
+            .expect("the NPC-shaped entity reaches the client with its NetUid");
+        assert_eq!(*got_npc_uid, npc_uid);
+        assert_eq!(*got_npc_body, npc_body);
     }
 
     /// `PlayerInput` travels client → server and surfaces as `FromClient<_>`.
