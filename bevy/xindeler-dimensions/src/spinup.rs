@@ -277,7 +277,13 @@ mod tests {
 
         app.world_mut()
             .write_message(DrainDimension(DimensionId::DEFAULT));
-        app.update();
+        // EM-4.10 Finding B: `handle_drain_requests` now lives in
+        // `FixedUpdate`, not `Update` — run that schedule directly (rather
+        // than `app.update()`, which would depend on `Time::<Fixed>`'s
+        // real-time accumulator) so this genuinely exercises the guard
+        // instead of trivially passing because the handler never ran at
+        // all.
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
 
         assert_eq!(
             app.world()
