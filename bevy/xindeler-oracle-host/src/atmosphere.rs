@@ -199,7 +199,11 @@ pub mod bounds {
 
 /// `value` clamped into `(min, max)`; non-finite (NaN/±inf) falls back to
 /// `default`.
-fn sane(value: f32, (min, max): (f32, f32), default: f32) -> f32 {
+///
+/// `pub(crate)` (EM-4.3): `dm_event.rs` reuses this exact helper for
+/// `DmEvent`'s own `bounds::`/`sanitize()` pass rather than duplicating it —
+/// same anti-chaos primitive, one definition.
+pub(crate) fn sane(value: f32, (min, max): (f32, f32), default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
     } else {
