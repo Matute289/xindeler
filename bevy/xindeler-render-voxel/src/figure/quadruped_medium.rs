@@ -416,6 +416,63 @@ mod tests {
         );
     }
 
+    /// BL-82 EM-3.11l regression: every `Species` × `BodyType` this project
+    /// ships must resolve to `Some` specs with every sub-part's `vox_name`
+    /// non-empty, so no shipped quadruped-medium species can silently fall
+    /// through `classify_bodies` and get stuck on the placeholder capsule
+    /// forever. Two distinct completeness bugs this catches:
+    /// - a species/body_type key missing from either manifest entirely
+    ///   (`quadruped_medium_part_specs` returns `None`);
+    /// - `#[serde(default)]` on `QmSubSpec`/`QmCentralEntry`/`QmLateralEntry`
+    ///   means a species key PRESENT in the manifest but missing an individual
+    ///   bone sub-field silently defaults to an EMPTY `vox_name` instead of
+    ///   erroring at parse time.
+    ///
+    /// Same "does every kind resolve to real data, no silent fallback" shape
+    /// as `sprite::tests::sprite_kinds_have_non_black_colour_data`.
+    #[test]
+    #[ignore = "reads the real quadruped_medium manifests: needs the asset tree"]
+    fn qm_species_have_complete_manifest_specs() {
+        let root = std::env::var("XINDELER_ASSETS")
+            .or_else(|_| std::env::var("VELOREN_ASSETS"))
+            .expect("set XINDELER_ASSETS or VELOREN_ASSETS to the assets dir");
+        let read_ron = |dotted: &str| -> String {
+            let path = format!("{root}/{}.ron", dotted.replace('.', "/"));
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+        };
+        let central: QmCentralManifest =
+            ron::de::from_str(&read_ron(QM_CENTRAL_MANIFEST)).expect("QM central manifest");
+        let lateral: QmLateralManifest =
+            ron::de::from_str(&read_ron(QM_LATERAL_MANIFEST)).expect("QM lateral manifest");
+
+        let mut problems = Vec::new();
+        for &species in Species::ALL.iter() {
+            for &body_type in BodyType::ALL.iter() {
+                match quadruped_medium_part_specs(&central, &lateral, species, body_type) {
+                    None => problems.push(format!("{species:?}/{body_type:?}: NO manifest entry")),
+                    Some(specs) => {
+                        for s in &specs {
+                            if s.vox_name.is_empty() {
+                                problems.push(format!(
+                                    "{species:?}/{body_type:?}: bone {:?} has EMPTY vox_name \
+                                     (defaulted sub-spec)",
+                                    s.bone
+                                ));
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        if !problems.is_empty() {
+            panic!(
+                "{} incomplete quadruped-medium specs:\n{}",
+                problems.len(),
+                problems.join("\n")
+            );
+        }
+    }
+
     /// Idle vs run differ, and run advances with the acc phase.
     #[test]
     fn qm_run_differs_from_idle_and_advances_by_acc() {
