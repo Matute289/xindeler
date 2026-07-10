@@ -893,7 +893,7 @@ impl Plugin for SimEntityMirrorPlugin {
             // fix already applied above for `ensure_default_dimension`/
             // `mirror_sim_entities`.
             .add_systems(
-                Update,
+                FixedUpdate,
                 delete_specs_entities_for_torn_down_dimensions
                     .after(xindeler_dimensions::spinup::handle_drain_requests)
                     .after(xindeler_dimensions::predictive_gc::predictive_gc_system)

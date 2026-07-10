@@ -54,7 +54,7 @@ impl Plugin for DimensionsPlugin {
             .add_message::<DrainDimension>()
             .add_message::<DimensionTornDown>()
             .add_systems(
-                Update,
+                bevy::app::FixedUpdate,
                 (
                     handle_spinup_requests,
                     poll_spinup_tasks,
@@ -72,7 +72,7 @@ impl Plugin for DimensionsPlugin {
         // comment for why EM-4.6 moved it to the front of the chain.
         #[cfg(debug_assertions)]
         app.add_systems(
-            Update,
+            bevy::app::FixedUpdate,
             debug_assert_dimension_isolation.before(handle_spinup_requests),
         );
     }
