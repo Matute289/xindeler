@@ -553,13 +553,33 @@ fn sim_ori_to_bevy(q: vek::Quaternion<f32>) -> Quat {
 /// gate — same as the terrain stream), and only after [`tick_sim`] so it reads
 /// post-tick sim state.
 ///
-/// Add AFTER [`SimBridgePlugin`].
+/// ## EM-3.11o: also reads [`EmbeddedPlayer`], so also runs after `tick_player`
+/// [`spawn_test_npcs`] now centres the wandering-NPC ring on the embedded
+/// player's real position (see its doc), so this plugin depends on
+/// [`crate::tick_player`] (which writes [`EmbeddedPlayer`]) having already run
+/// this step — the same "reads `EmbeddedPlayer`" dependency
+/// [`LodAltStreamPlugin`]'s doc already calls out for `send_lod_alt_once`.
+/// Unlike that plugin, this one enforces it with an EXPLICIT
+/// `.after(tick_player)` schedule constraint, not just a "register after"
+/// convention in the doc comment — plugin *registration* order does not by
+/// itself guarantee Bevy *execution* order (only `.chain()`/`.before()`/
+/// `.after()` do), so relying on the comment alone was the gap a reviewer
+/// caught here. The constraint is a no-op if `PlayerBridgePlugin` (and thus
+/// `tick_player`) was never registered — see the same-schedule caveat on
+/// [`tick_sim`]'s `.after()` usage.
+///
+/// Add AFTER [`SimBridgePlugin`] AND AFTER [`crate::PlayerBridgePlugin`] (for
+/// registration-order hygiene matching the explicit constraint below; the
+/// constraint itself is what actually enforces the dependency).
 pub struct SimEntityMirrorPlugin;
 
 impl Plugin for SimEntityMirrorPlugin {
     fn build(&self, app: &mut App) {
         // EM-3.11b: FixedUpdate alongside `tick_sim` — see its doc. Chaining
         // `.after(tick_sim)` requires both to live in the same schedule.
+        // EM-3.11o: also `.after(tick_player)` — see this plugin's doc for
+        // why an explicit constraint (not just registration order) is
+        // required now that `spawn_test_npcs` reads `EmbeddedPlayer`.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
             .init_resource::<TestNpcState>()
@@ -568,6 +588,7 @@ impl Plugin for SimEntityMirrorPlugin {
                 (spawn_test_npcs, mirror_sim_entities)
                     .chain()
                     .after(tick_sim)
+                    .after(tick_player)
                     .run_if(in_state(ClientState::Disconnected)),
             );
     }
@@ -578,9 +599,27 @@ impl Plugin for SimEntityMirrorPlugin {
 struct TestNpcState {
     /// Whether the spawn request has been emitted yet.
     spawned: bool,
+    /// Sim tick at which the player-readiness gate (see [`spawn_test_npcs`])
+    /// first held. `None` until then; [`Self::warmup_ticks`] counts down from
+    /// this tick, NOT from sim boot.
+    ///
+    /// BL-82 EM-3.11o follow-up: `warmup_ticks` used to be the ENTIRE gate,
+    /// counted from sim boot — which reproduces the exact never-loaded-chunk
+    /// bug this module fixes if the latch fires while the embedded player is
+    /// still mid-connect (`LoadingCharacterList`/`CreatingCharacter`/
+    /// `Spawning`, all of which report `player.uid() == None`): `centre`
+    /// then falls back to the geometric world-centre, which is only actually
+    /// kept loaded by the persister fallback — and that fallback is itself
+    /// WITHHELD while a player is still connecting (see
+    /// `ensure_terrain_anchor`'s doc). So a bare tick count can't tell "the
+    /// player reached in-game before tick 150" apart from "the player is
+    /// still connecting past tick 150" — only the same readiness condition
+    /// `ensure_terrain_anchor` uses can. `warmup_ticks` is now only a
+    /// settle-time FLOOR applied on top of that condition.
+    ready_since: Option<u64>,
     /// Wait for the anchor to have generated ground before spawning, so the
-    /// NPCs don't fall through ungenerated terrain. We reuse the terrain
-    /// anchor's readiness by waiting a few ticks after boot.
+    /// NPCs don't fall through ungenerated terrain. Counted from
+    /// [`Self::ready_since`] (see its doc), not from sim boot.
     warmup_ticks: u64,
     /// Number of wandering NPCs to spawn.
     count: u32,
@@ -590,8 +629,11 @@ impl Default for TestNpcState {
     fn default() -> Self {
         Self {
             spawned: false,
+            ready_since: None,
             // ~150 ticks (~5 s at 30 TPS) gives the async chunk gen around the
-            // anchor time to produce ground under the spawn ring.
+            // anchor/player time to produce ground under the spawn ring,
+            // counted from player-readiness (see `ready_since`'s doc), not
+            // sim boot.
             warmup_ticks: 150,
             // 8 = two of each of the four figure paths (pig / human / wolf /
             // owl) so every EM-3.8c body type is on the ring.
@@ -608,32 +650,127 @@ impl Default for TestNpcState {
     }
 }
 
-/// Emits [`CreateNpcEvent`]s for a ring of wandering NPCs around the world
-/// centre, ONCE, after a short warmup. Uses only the sim's PUBLIC event bus
-/// (`State::emit_event_now` + `event::{CreateNpcEvent, NpcBuilder}`) — the same
-/// path `/spawn` uses — so the bridge stays a thin shell over public API.
+/// Ring radius (blocks) the wandering test NPCs are spawned around `centre`
+/// (see [`spawn_test_npcs`]) — a shared const so the
+/// [`tests::test_npcs_survive_around_the_players_real_spawn_point`] regression
+/// test can assert against it without duplicating the literal.
+const TEST_NPC_RING_RADIUS: f32 = 10.0;
+
+/// Emits [`CreateNpcEvent`]s for a ring of wandering NPCs around the embedded
+/// player's real position (or the world centre in pure-spectator mode), ONCE,
+/// gated on the SAME player-readiness condition [`ensure_terrain_anchor`]
+/// uses (see `player_ready` below) plus a settle-time warmup floor (see
+/// [`TestNpcState::ready_since`]) — BL-82 EM-3.11o. Uses only the sim's
+/// PUBLIC event bus (`State::emit_event_now` +
+/// `event::{CreateNpcEvent, NpcBuilder}`) — the same path `/spawn` uses — so
+/// the bridge stays a thin shell over public API.
 ///
 /// The NPCs get an [`Agent`](comp::Agent) so the sim's AI walks them around
 /// (idle wander), which is exactly the moving target EM-3.7's interpolation
 /// needs to be verified against.
 fn spawn_test_npcs(
     sim: Option<NonSendMut<SimServer>>,
+    // BL-82 EM-3.11o: need the embedded player's real position — see the
+    // `centre` doc comment below for why the old geometric-centre-only
+    // formula silently spawned every test NPC into a never-loaded chunk.
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut state: bevy::ecs::system::ResMut<TestNpcState>,
 ) {
     let Some(sim) = sim else { return };
-    if state.spawned || sim.ticks < state.warmup_ticks {
+    if state.spawned {
         return;
     }
 
-    // World-centre XY in sim blocks (same derivation as the terrain anchor).
-    let size_chunks = sim.server.world().sim().get_size();
-    let chunk_sz = vek::Vec2::new(32.0_f32, 32.0);
-    let centre = vek::Vec2::new(size_chunks.x as f32, size_chunks.y as f32) * chunk_sz * 0.5;
+    // BL-82 EM-3.11o: gate on the SAME player-readiness condition
+    // `ensure_terrain_anchor` uses for the opposite decision (whether to
+    // withhold the persister fallback). A player that is still connecting
+    // (`LoadingCharacterList`/`CreatingCharacter`/`Spawning` — all report
+    // `uid() == None`) must NOT be treated the same as "no player at all":
+    // if we fired here while such a player was still connecting, `centre`
+    // below would fall back to the geometric world-centre, but the persister
+    // fallback that keeps THAT area loaded is itself withheld while the
+    // player is still connecting (see `ensure_terrain_anchor`'s doc) —
+    // reproducing the exact never-loaded-chunk bug this module fixes, just
+    // via a different trigger (a slow first boot / slow-tick episode landing
+    // the warmup latch inside the connect window instead of after it).
+    //
+    // Ready iff: no embedded player at all (pure spectator — the persister
+    // fallback covers the geometric centre), OR the player reached a
+    // terminal state: `is_in_game` (its real position is now readable) or
+    // `is_failed` (terminal failure — the persister fallback covers it too).
+    // Anything else (still connecting) means WAIT — do not fire yet.
+    let player_ready = match &player {
+        None => true,
+        Some(p) => p.is_in_game() || p.is_failed(),
+    };
+    if !player_ready {
+        return;
+    }
+    // `warmup_ticks` is a settle-time FLOOR counted from the tick readiness
+    // FIRST held (see `TestNpcState::ready_since`'s doc), not from sim boot.
+    let ready_since = *state.ready_since.get_or_insert(sim.ticks);
+    if sim.ticks < ready_since + state.warmup_ticks {
+        return;
+    }
+
+    // The ring centre MUST be wherever terrain is actually loaded, not the
+    // geometric map centre (`world_size / 2`) the pre-EM-3.7b code assumed.
+    //
+    // Root cause (BL-82 EM-3.11o): `ensure_terrain_anchor`'s centered
+    // persister — which used to be the thing keeping the geometric centre's
+    // chunks loaded — became a FALLBACK once EM-3.7b added the embedded
+    // player: it is only spawned when there's no working player. In the
+    // normal case (the player DOES reach in-game), nothing keeps the
+    // geometric centre's chunks loaded at all — the world's own spawn-point
+    // selection routinely lands the player hundreds of blocks away from it.
+    // Spawning the wandering-NPC ring at the geometric centre therefore put
+    // every test NPC in a chunk `state.terrain().get_key_real(..)` reports as
+    // NOT loaded; `Server::tick`'s "remove NPCs outside the view distance of
+    // all players" entity-cleanup phase (`server/src/lib.rs`) deletes any
+    // Presence-less, unloaded-chunk entity the same tick it's created — SO
+    // EVERY test NPC was destroyed before `mirror_sim_entities` (or anything
+    // else client-side) ever saw it. 100% reproducible regardless of NPC
+    // count, invisible to any external observer (creation + deletion both
+    // happen inside one `Server::tick()` call), and unrelated to the
+    // similar-looking-but-distinct EM-3.11l capsule/manifest findings.
+    //
+    // Fix: centre the ring on the embedded player's own position (its
+    // Presence is what actually keeps chunks loaded post-EM-3.7b) whenever
+    // it's known; fall back to the geometric centre only when there is no
+    // embedded player, or it terminally failed to connect — the only two
+    // cases `player_ready` above lets through where the persister fallback
+    // (see `ensure_terrain_anchor`) is actually spawned and genuinely keeps
+    // that area loaded.
+    //
+    // Reads the position off the sim's specs ECS (`player_sim_entity` +
+    // `comp::Pos`) rather than `EmbeddedPlayer::position()` (a client-side
+    // accessor): this matches `mirror_sim_entities`'s own established
+    // pattern of reading positions straight from the authoritative sim
+    // storages, and keeps this system's dependency on `EmbeddedPlayer`
+    // limited to the readiness signals (`uid()`/`is_in_game()`/`is_failed()`)
+    // used above, not position data too.
+    let centre = player
+        .as_ref()
+        .and_then(|p| p.uid())
+        .and_then(|uid| player::player_sim_entity(&sim, uid))
+        .and_then(|e| {
+            sim.server
+                .state()
+                .ecs()
+                .read_storage::<comp::Pos>()
+                .get(e)
+                .map(|p| p.0.xy())
+        })
+        .unwrap_or_else(|| {
+            let size_chunks = sim.server.world().sim().get_size();
+            let chunk_sz = vek::Vec2::new(32.0_f32, 32.0);
+            vek::Vec2::new(size_chunks.x as f32, size_chunks.y as f32) * chunk_sz * 0.5
+        });
 
     for i in 0..state.count {
         let angle = core::f32::consts::TAU * (i as f32) / (state.count as f32);
-        // A ~10-block ring so they're near the anchor camera but not stacked.
-        let offset = vek::Vec2::new(angle.cos(), angle.sin()) * 10.0;
+        // A ring so they're near the anchor camera but not stacked.
+        let offset = vek::Vec2::new(angle.cos(), angle.sin()) * TEST_NPC_RING_RADIUS;
         let xy = centre + offset;
         // Spawn well above the surface; the sim drops them onto the ground
         // (physics) so we don't need the exact altitude.
@@ -657,6 +794,42 @@ fn spawn_test_npcs(
 
     tracing::info!(count = state.count, "spawned test NPCs around the anchor");
     state.spawned = true;
+}
+
+/// The chunk-anchor every test-NPC spawn must carry (BL-82 EM-3.11o root
+/// cause): `Server::tick`'s "remove NPCs outside the view distance of all
+/// players" cleanup (`server/src/lib.rs`, entity-cleanup phase) deletes any
+/// entity that lacks BOTH a `Presence` (real network clients only) AND an
+/// `Anchor` the instant its current chunk isn't `get_key_real` — same tick it
+/// was created, before any Bevy-side system ever observes it. Every OTHER NPC
+/// spawn path (rtsim wildlife via `server/src/sys/terrain.rs`'s
+/// `npc_builder.with_anchor(comp::Anchor::Chunk(key))`) already does this;
+/// this bridge's test-NPC builders never did, so a wandering test NPC was
+/// deleted the moment it was born whenever its very-first chunk wasn't (yet)
+/// `get_key_real`-loaded — 100% reproducible regardless of scale, and
+/// invisible to any external observer since creation-then-deletion happens
+/// inside one `Server::tick()` call, before `mirror_sim_entities` ever runs.
+///
+/// ## What this anchor does NOT buy, at spawn time
+/// The cleanup predicate is (`server/src/lib.rs`, ~line 1004-1015):
+/// `Some(Anchor::Chunk(hc)) => get_key_real(chunk_key).is_none() &&
+/// get_key_real(*hc).is_none()`. Since the anchor set here is the entity's OWN
+/// spawn chunk (`hc == chunk_key`), the `&&` collapses to one test — this
+/// anchor gives ZERO incremental protection over having no anchor at all at
+/// the moment of spawn. It only starts mattering LATER, after the entity has
+/// wandered away to a chunk different from the one recorded here: its
+/// original spawn chunk stays "anchored" (won't itself unload) even if the
+/// entity's CURRENT chunk isn't loaded, buying it one step of grace during a
+/// wander. The actual fix for the spawn-time deletion this doc describes is
+/// centring the ring on a position that IS already loaded (`centre` in
+/// [`spawn_test_npcs`]), not this anchor — this anchor is a good practice to
+/// match every other NPC spawn path, not the load-bearing fix.
+fn chunk_anchor_at(server: &Server, wpos: vek::Vec3<f32>) -> comp::Anchor {
+    let key = server
+        .state()
+        .terrain()
+        .pos_key(wpos.map(|e| e.floor() as i32));
+    comp::Anchor::Chunk(key)
 }
 
 /// Requests one wandering HUMANOID NPC (a random human) at `wpos` through the
@@ -693,7 +866,8 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
     )
     .with_health(comp::Health::new(body))
     .with_inventory(inventory)
-    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos))
+    .with_anchor(chunk_anchor_at(server, wpos));
 
     server.state().emit_event_now(CreateNpcEvent {
         pos: comp::Pos(wpos),
@@ -744,7 +918,8 @@ fn emit_wandering_quadruped_medium(server: &Server, wpos: vek::Vec3<f32>, index:
         comp::Alignment::Wild,
     )
     .with_health(comp::Health::new(body))
-    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos))
+    .with_anchor(chunk_anchor_at(server, wpos));
 
     server.state().emit_event_now(CreateNpcEvent {
         pos: comp::Pos(wpos),
@@ -768,7 +943,8 @@ fn emit_wandering_bird_medium(server: &Server, wpos: vek::Vec3<f32>, index: u32)
         comp::Alignment::Wild,
     )
     .with_health(comp::Health::new(body))
-    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos))
+    .with_anchor(chunk_anchor_at(server, wpos));
 
     server.state().emit_event_now(CreateNpcEvent {
         pos: comp::Pos(wpos),
@@ -795,7 +971,8 @@ fn emit_wandering_npc(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
         comp::Alignment::Wild,
     )
     .with_health(comp::Health::new(body))
-    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos));
+    .with_agent(comp::Agent::from_body(&body).with_patrol_origin(wpos))
+    .with_anchor(chunk_anchor_at(server, wpos));
 
     server.state().emit_event_now(CreateNpcEvent {
         pos: comp::Pos(wpos),
@@ -1177,7 +1354,10 @@ mod tests {
     use bevy::{
         MinimalPlugins,
         app::PluginGroup,
-        ecs::message::Messages,
+        ecs::{
+            message::Messages,
+            query::{With, Without},
+        },
         state::app::StatesPlugin,
         time::{Fixed, TimeUpdateStrategy},
     };
@@ -1667,6 +1847,217 @@ mod tests {
         assert!(
             moved,
             "a mirrored entity's NetPos must update as the sim moves it (interpolation source)"
+        );
+    }
+
+    /// Identifies the wandering test NPCs SPECIFICALLY, on the sim side, by
+    /// their own `Stats.name` convention (`"Test <Body> <index>"` — see
+    /// `emit_wandering_npc`/`_humanoid`/`_quadruped_medium`/`_bird_medium`),
+    /// returning each one's current `comp::Pos`. Shared by
+    /// [`test_npcs_survive_around_the_players_real_spawn_point`]'s count and
+    /// ring-radius assertions.
+    fn test_npc_positions(sim: &SimServer) -> Vec<vek::Vec3<f32>> {
+        let ecs = sim.server.state().ecs();
+        let stats = ecs.read_storage::<comp::Stats>();
+        let positions = ecs.read_storage::<comp::Pos>();
+        specs::Join::join((&stats, &positions))
+            .filter(|(s, _)| {
+                matches!(&s.name, common::comp::Content::Plain(n) if n.starts_with("Test "))
+            })
+            .map(|(_, p)| p.0)
+            .collect()
+    }
+
+    /// BL-82 EM-3.11o regression: `spawn_test_npcs` used to centre its
+    /// wandering-NPC ring on the world's GEOMETRIC centre (`world_size / 2`),
+    /// on the assumption that was always where terrain stayed loaded. Once
+    /// EM-3.7b made the terrain-anchor persister a FALLBACK (superseded by the
+    /// embedded player's own `Presence`), that assumption broke: the world's
+    /// own spawn-point selection routinely lands the player hundreds of
+    /// blocks from the geometric centre, so nothing kept THAT area's chunks
+    /// loaded. Every wandering test NPC was born in a chunk
+    /// `state.terrain().get_key_real(..)` reports as unloaded; `Server::tick`'s
+    /// "remove NPCs outside the view distance of all players" entity-cleanup
+    /// phase deleted each one the SAME tick it was created — before
+    /// `mirror_sim_entities` (or anything else client-side) ever ran. No
+    /// `NetBody` mirror entity ever appeared, no matter how long a test
+    /// (or a real playthrough) waited — 100% reproducible, invisible to any
+    /// external observer (creation + deletion happen inside one
+    /// `Server::tick()` call).
+    ///
+    /// Fixed by (a) centring the ring on the embedded player's REAL position
+    /// (read off its sim entity) instead of the geometric centre, and
+    /// (b) giving every wandering test NPC a `comp::Anchor::Chunk` at its own
+    /// spawn chunk, matching what every other NPC spawn path (rtsim wildlife,
+    /// `server/src/sys/terrain.rs`) already does; and, follow-up, (c) gating
+    /// the whole one-shot latch on the SAME player-readiness condition
+    /// `ensure_terrain_anchor` uses, instead of a bare tick count, so the
+    /// latch can no longer fire while the player is still mid-connect (which
+    /// reproduces the identical bug via a different trigger — see
+    /// `TestNpcState::ready_since`'s doc).
+    ///
+    /// This test boots the REAL sim + a REAL embedded player (so the ring
+    /// centres on wherever the world's own spawn-point selection actually put
+    /// it — not a location the test controls), lets the boot-time
+    /// `spawn_test_npcs` ring fire, and asserts the default 8 wandering NPCs
+    /// (a) actually reach the Bevy World as `NetBody` entities distinct from
+    /// the player's own mirror, (b) are STILL alive `SURVIVAL_TICKS` later —
+    /// before the fix, (a) alone already failed (the count was always 0) —
+    /// and (c) actually spawned WITHIN `TEST_NPC_RING_RADIUS` of the player's
+    /// own real position at fire time, not merely "survived" (a bare survival
+    /// count can't distinguish "correctly centred on the player" from "this
+    /// run's player happened to reach in-game before the warmup latch fired"
+    /// — the pre-fix bug only bit when the player was STILL connecting at
+    /// fire time, which a fast/lucky run could dodge even with the old code).
+    #[test]
+    #[ignore = "boots a real world + embedded player: needs assets + LFS; run with XINDELER_ASSETS"]
+    fn test_npcs_survive_around_the_players_real_spawn_point() {
+        const MAX_TICKS: u32 = 6000;
+        const SURVIVAL_TICKS: u32 = 300;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let player = boot_embedded_player(&mut sim).expect("failed to boot embedded player");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+                PlayerBridgePlugin,
+            ))
+            .finish();
+        // EM-3.11b: see `boots_and_ticks_100_times` — pin FixedUpdate to run
+        // exactly once per `app.update()`.
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+        app.insert_non_send(player);
+
+        // Tick until `spawn_test_npcs` has fired (its one-shot latch), then
+        // keep ticking `SURVIVAL_TICKS` further so a same-tick-of-creation
+        // deletion (the exact bug) has ample time to show up as an empty
+        // count, and a later, slower deletion (e.g. wandering into a still-
+        // unloaded neighbour chunk) would too.
+        //
+        // BL-82 EM-3.11o strengthening: a bare "still alive after
+        // SURVIVAL_TICKS" count can't tell "correctly centred on the player"
+        // apart from "this run's player happened to reach in-game before the
+        // warmup latch fired" (a pre-fix run and a post-fix run could both
+        // pass that assertion on a fast machine — the OLD bug only bit when
+        // the player was STILL connecting at fire time). So also capture (a)
+        // the player's own real sim position at the exact tick the ring
+        // fired, and (b) each wandering NPC's position `RING_CHECK_DELAY`
+        // ticks later — early enough that idle-wander AI hasn't carried them
+        // far — and assert every one of them actually landed within
+        // `TEST_NPC_RING_RADIUS` (+ a small tolerance) of that captured
+        // centre.
+        const RING_CHECK_DELAY: u32 = 5;
+        /// Slack (blocks) on top of `TEST_NPC_RING_RADIUS`, covering the
+        /// handful of physics/AI ticks between spawn and the position sample
+        /// (fall-to-ground settling, a few steps of idle wander).
+        const RING_CHECK_TOLERANCE: f32 = 6.0;
+
+        let mut fired_at: Option<u32> = None;
+        let mut spawn_centre: Option<vek::Vec2<f32>> = None;
+        let mut ring_positions: Option<Vec<vek::Vec3<f32>>> = None;
+        for tick in 0..MAX_TICKS {
+            app.update();
+            if fired_at.is_none() && app.world().resource::<TestNpcState>().spawned {
+                fired_at = Some(tick);
+                // Read the player's real position straight off the sim ECS —
+                // the same source `spawn_test_npcs`'s `centre` itself reads —
+                // at the exact tick the ring was centred on it.
+                let sim = app.world().non_send::<SimServer>();
+                let player = app.world().non_send::<EmbeddedPlayer>();
+                spawn_centre = player.uid().and_then(|uid| {
+                    player::player_sim_entity(sim, uid).and_then(|e| {
+                        sim.server
+                            .state()
+                            .ecs()
+                            .read_storage::<comp::Pos>()
+                            .get(e)
+                            .map(|p| p.0.xy())
+                    })
+                });
+                eprintln!("spawn_test_npcs fired at tick {tick}, ring centre {spawn_centre:?}");
+            }
+            if let Some(f) = fired_at
+                && ring_positions.is_none()
+                && tick >= f + RING_CHECK_DELAY
+            {
+                ring_positions = Some(test_npc_positions(app.world().non_send::<SimServer>()));
+            }
+            if let Some(f) = fired_at
+                && tick >= f + SURVIVAL_TICKS
+            {
+                break;
+            }
+        }
+        let fired_at = fired_at.expect("spawn_test_npcs never fired within MAX_TICKS");
+        assert!(
+            fired_at + SURVIVAL_TICKS < MAX_TICKS,
+            "ran out of MAX_TICKS before completing the {SURVIVAL_TICKS}-tick survival window"
+        );
+        let spawn_centre = spawn_centre.expect(
+            "the player's real sim position must be readable at the exact tick spawn_test_npcs \
+             fired — i.e. the player must already be in-game by then. If this fails, the \
+             player-readiness gate let the latch fire too early (see `spawn_test_npcs`'s \
+             `player_ready`).",
+        );
+        let ring_positions = ring_positions
+            .expect("ring position sample must have been taken within the survival window");
+        let max_allowed = TEST_NPC_RING_RADIUS + RING_CHECK_TOLERANCE;
+        for pos in &ring_positions {
+            let dist = (pos.xy() - spawn_centre).magnitude();
+            assert!(
+                dist <= max_allowed,
+                "a wandering test NPC was {dist:.1} blocks from the player's real spawn-time \
+                 position {spawn_centre:?} (expected <= {max_allowed:.1}) — this is exactly what \
+                 the EM-3.11o bug would produce: a geometric-world-centre fallback firing while \
+                 the player was still connecting puts the ring far from the player instead of \
+                 around it"
+            );
+        }
+
+        // Identify the wandering test NPCs SPECIFICALLY, on the sim side (see
+        // `test_npc_positions`'s doc for why a plain `NetBody` count on the
+        // Bevy mirror is NOT enough: the player's real (non-geometric-centre)
+        // spawn point almost always has ambient rtsim wildlife nearby, which
+        // ALSO mirrors as `NetBody` and would make a bare "count >= 8"
+        // assertion pass even if every test NPC had been deleted — this
+        // exact false-positive was caught while writing this test, with the
+        // fix reverted only in-memory to confirm it — never committed
+        // unfixed).
+        let test_named = test_npc_positions(app.world().non_send::<SimServer>()).len();
+        let expected = TestNpcState::default().count as usize;
+        assert_eq!(
+            test_named, expected,
+            "expected all {expected} wandering test NPCs to still exist in the sim \
+             {SURVIVAL_TICKS} ticks after spawn (got {test_named}) — before the EM-3.11o fix \
+             every one of them was deleted the SAME tick it was created (its spawn chunk was \
+             never actually loaded around the player's real, non-geometric-centre spawn point),so \
+             this count was always 0 regardless of how long the test waited"
+        );
+
+        // Also confirm at least that many non-player `NetBody` entities made
+        // it across the sim↔Bevy mirror too (client-visible, not just alive
+        // server-side) — the mirror/figure-build half of the pipeline this
+        // bug hunt is about.
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, (With<NetBody>, Without<NetLocalPlayer>)>();
+        let mirrored = q.iter(app.world()).count();
+        assert!(
+            mirrored >= expected,
+            "expected at least the {expected} wandering test NPCs among the mirrored (non-player) \
+             NetBody entities {SURVIVAL_TICKS} ticks after spawn (got {mirrored} total, which may \
+             also include ambient wildlife)"
         );
     }
 }
