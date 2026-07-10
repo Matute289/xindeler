@@ -19,6 +19,7 @@ pub mod aurora_overlay;
 pub mod dimension_id;
 pub mod interest;
 pub mod login;
+pub mod narrative;
 pub mod visibility;
 
 use bevy::{
@@ -38,6 +39,7 @@ pub use crate::{
     dimension_id::DimensionId,
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
+    narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     visibility::{ClientVisibleRegions, RegionKey, region_key_for_pos},
 };
 
@@ -518,6 +520,12 @@ impl Plugin for XindelerProtocolPlugin {
         // not be queued behind entity replication either.
         app.add_server_message::<LoginResult>(XindelerChannel::Events.delivery())
             .make_message_independent::<LoginResult>();
+        // BL-82 EM-4.8: the narrative on-enter-message toast
+        // (`narrative::fire_on_enter_toasts`). Carries no entity references
+        // (a plain text notice, like `LoginResult`/`TerrainAnchor` above), so
+        // it must not be queued behind entity replication either.
+        app.add_server_message::<HudToast>(XindelerChannel::Events.delivery())
+            .make_message_independent::<HudToast>();
         // BL-82 EM-4.2d: per-client interest management. Registering this
         // filter does NOT itself add `RegionKey`/`ClientVisibleRegions` to any
         // entity — it only teaches replicon how to interpret them where they

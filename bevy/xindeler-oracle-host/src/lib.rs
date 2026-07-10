@@ -12,6 +12,7 @@
 
 pub mod ai_gateway;
 pub mod atmosphere;
+pub mod chronicle;
 pub mod dm_event;
 
 use bevy::app::{App, Plugin};
@@ -24,6 +25,7 @@ pub use crate::{
         AmbientSky, AtmosphereController, AtmosphereProfile, WeatherEffect,
         XindelerAtmospherePlugin,
     },
+    chronicle::{ChronicleLog, ChroniclePlugin},
     dm_event::{
         DimensionConfig, DmEvent, DmEventLoader, DmEventPlugin, Narrative, ORACLE_EVENTS_DIR_ENV,
         ORACLE_SOURCE, SpawningRules, default_events_dir, register_oracle_source,

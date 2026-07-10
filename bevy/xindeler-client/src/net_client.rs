@@ -45,8 +45,8 @@ use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
     entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -92,6 +92,10 @@ impl Plugin for NetClientPlugin {
             // ChunkMaterials to mesh at all (same reason
             // `listen_server::ListenServerPlugin` adds this).
             PaletteMaterialPlugin,
+            // BL-82 EM-4.8: minimal timed-fade `bevy_ui` toast, rendered on
+            // `HudToast` arrival — verbatim reuse, same as every other
+            // consumer plugin in this list (module doc comment).
+            HudToastViewPlugin,
         ));
     }
 }

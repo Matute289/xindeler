@@ -27,6 +27,8 @@ mod entity_view;
 mod far_terrain;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod figure_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod hud_toast;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
