@@ -61,13 +61,17 @@ impl GraphicsTier {
     /// The toggle values this tier stands for (`None` for [`Self::Custom`]),
     /// as `(taa, ssao, bloom, volumetric_fog, contact_shadows,
     /// shadow_cascades)`.
+    ///
+    /// `contact_shadows` is `false` for EVERY preset (BL-82 EM-3.11q — see
+    /// [`GraphicsSettings::contact_shadows`]'s doc for why); a settings.ron
+    /// can still hand-enable it under `tier: Custom`.
     #[must_use]
     pub fn preset(self) -> Option<(bool, bool, bool, bool, bool, u8)> {
         match self {
             Self::Low => Some((false, false, false, false, false, 1)),
             Self::Medium => Some((true, false, true, false, false, 2)),
             Self::High => Some((true, true, true, true, false, 3)),
-            Self::Ultra => Some((true, true, true, true, true, 4)),
+            Self::Ultra => Some((true, true, true, true, false, 4)),
             Self::Custom => None,
         }
     }
@@ -90,7 +94,8 @@ pub struct ExperimentalGraphics {
 
 /// Graphics toggles consumed by the client when building the camera and
 /// light rigs (EM-2.2 / EM-2.3). Defaults = the [`GraphicsTier::Ultra`]
-/// preset (everything on, 4 shadow cascades) + vignette.
+/// preset (4 shadow cascades, everything else on EXCEPT `contact_shadows` —
+/// see its field doc, BL-82 EM-3.11q) + vignette.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphicsSettings {
@@ -112,6 +117,32 @@ pub struct GraphicsSettings {
     /// Volumetric fog / light shafts on the camera.
     pub volumetric_fog: bool,
     /// Screen-space contact shadows (camera + per-light flag).
+    ///
+    /// **Defaults to `false` in EVERY tier, including Ultra** (BL-82
+    /// EM-3.11q — `docs/design/specs/2026-07-09-bl82-em311-findings-log.md`).
+    /// Matías reported distant flower/grass sprite shadows/edges appearing to
+    /// flicker; an A/B offscreen-capture harness with the camera AND sun
+    /// both frozen (so only per-frame rendering noise could differ between
+    /// otherwise-identical captures) measured real, sizeable pixel variance
+    /// concentrated on sprite silhouettes and lit grass, and toggling this
+    /// flag off cut that variance ~5x (p99) — by far the largest single
+    /// contributor found (SSAO's independent contribution was small and
+    /// fully subsumed once this was off). Root cause: Bevy's
+    /// `bevy_pbr::contact_shadows::ContactShadows` is a screen-space,
+    /// per-pixel dithered ray march with a fixed, small `length` (world-space
+    /// metres, default 0.3) meant to add FINE contact-point detail beyond
+    /// what cascaded shadow maps resolve — it has no distance falloff/cutoff,
+    /// so it keeps evaluating (and dithering, relying on TAA to average out
+    /// over time) on tiny/thin sprite silhouettes at any range, where a
+    /// 0.3 m ray is comparatively huge relative to the object's on-screen
+    /// footprint and the dithered result never fully converges. The
+    /// cascaded shadow maps (still enabled, still up to 4 cascades) keep
+    /// providing real, correctly-scaled shadows; this only removes the
+    /// small-scale screen-space ADD-ON, which was providing negligible
+    /// visual benefit at range while causing a confirmed, reproducible
+    /// flicker. Re-enable (`tier: Custom`, `contact_shadows: true`) once
+    /// Bevy exposes a distance falloff/cutoff for it, or once Xindeler adds
+    /// its own (e.g. gating the per-pixel effect by scene depth).
     pub contact_shadows: bool,
     /// Number of directional-light shadow cascades. Effective range 1..=4
     /// (clamped at the light rig).
@@ -132,7 +163,9 @@ impl Default for GraphicsSettings {
             ssao: true,
             bloom: true,
             volumetric_fog: true,
-            contact_shadows: true,
+            // BL-82 EM-3.11q: false in every tier, including Ultra — see the
+            // field doc above.
+            contact_shadows: false,
             shadow_cascades: 4,
             vignette: true,
             experimental: ExperimentalGraphics::default(),
@@ -228,6 +261,29 @@ mod tests {
         settings.sanitize();
         assert_eq!(settings, before);
         assert_eq!(settings.tier, GraphicsTier::Ultra);
+    }
+
+    /// BL-82 EM-3.11q regression: `contact_shadows` must stay `false` in
+    /// EVERY tier preset (including Ultra), so the confirmed distant-sprite
+    /// flicker never silently comes back via a tier change. See
+    /// `GraphicsSettings::contact_shadows`'s doc for the full investigation.
+    #[test]
+    fn no_tier_preset_enables_contact_shadows() {
+        for tier in [
+            GraphicsTier::Low,
+            GraphicsTier::Medium,
+            GraphicsTier::High,
+            GraphicsTier::Ultra,
+        ] {
+            let (_, _, _, _, contact_shadows, _) =
+                tier.preset().expect("non-Custom tiers have a preset");
+            assert!(
+                !contact_shadows,
+                "{tier:?} must not enable contact_shadows (BL-82 EM-3.11q)"
+            );
+        }
+        // The struct default (fresh install, tier: Ultra) must match.
+        assert!(!GraphicsSettings::default().contact_shadows);
     }
 
     #[test]
