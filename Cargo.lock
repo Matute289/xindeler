@@ -1645,6 +1645,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b511e89f7078fd21fdea77061a0ca3e737297c7011bb10c073e0aecb17c9fea6"
 
 [[package]]
+name = "bevy_quinnet"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18ecf602ad5060645f2c446df183442027aeeb14da81f14ec28455d10f35ec61"
+dependencies = [
+ "base64 0.22.1",
+ "bevy",
+ "bytes",
+ "futures",
+ "quinn",
+ "quinn-proto",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-platform-verifier 0.7.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bevy_reflect"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1772,6 +1794,17 @@ dependencies = [
  "typeid",
  "variadics_please 2.0.0",
  "xxhash-rust",
+]
+
+[[package]]
+name = "bevy_replicon_quinnet"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4359d8b0c52c5725e28fbbbb9586a0641d8bd8a71a5bd53e36e85135b54d6d9"
+dependencies = [
+ "bevy",
+ "bevy_quinnet",
+ "bevy_replicon",
 ]
 
 [[package]]
@@ -7311,7 +7344,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier",
+ "rustls-platform-verifier 0.6.2",
  "slab",
  "thiserror 2.0.18",
  "tinyvec",
@@ -8037,6 +8070,27 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "jni 0.21.1",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier-android",
+ "rustls-webpki",
+ "security-framework",
+ "security-framework-sys",
+ "webpki-root-certs",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls-platform-verifier"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "jni 0.22.4",
  "log",
  "once_cell",
  "rustls",
@@ -9173,6 +9227,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
 dependencies = [
  "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
  "pin-project-lite",
  "tokio",
 ]
@@ -11563,6 +11630,7 @@ dependencies = [
  "xindeler-protocol",
  "xindeler-render-voxel",
  "xindeler-sim-bridge",
+ "xindeler-transport",
 ]
 
 [[package]]
@@ -11964,6 +12032,7 @@ name = "xindeler-server-app"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "bevy_replicon",
  "num_cpus",
  "portpicker",
  "prometheus",
@@ -11978,9 +12047,12 @@ dependencies = [
  "xindeler-client-core",
  "xindeler-common",
  "xindeler-common-base",
+ "xindeler-protocol",
  "xindeler-rtsim",
  "xindeler-server-agent",
  "xindeler-server-core",
+ "xindeler-sim-bridge",
+ "xindeler-transport",
 ]
 
 [[package]]
@@ -12097,6 +12169,17 @@ dependencies = [
  "xindeler-client-core",
  "xindeler-common",
  "xindeler-server-core",
+]
+
+[[package]]
+name = "xindeler-transport"
+version = "0.18.0"
+dependencies = [
+ "bevy",
+ "bevy_quinnet",
+ "bevy_replicon",
+ "bevy_replicon_quinnet",
+ "tracing",
 ]
 
 [[package]]

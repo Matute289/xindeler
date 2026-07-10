@@ -14,6 +14,13 @@
 //! non-send resource — see `sim.rs`), the per-tick `Server::tick` system,
 //! SIGINT/SIGTERM graceful-shutdown handling (`shutdown.rs`), and the
 //! Prometheus metrics passthrough (`metrics.rs`).
+//!
+//! **BL-82 EM-4.2b**: this is also now the FIRST place in the codebase a real
+//! `bevy_replicon` connection crosses an actual network socket — a second,
+//! genuinely dual-stack listener alongside the untouched legacy one. See
+//! `plugin.rs`'s doc comment and `sim::DEFAULT_REPLICON_ADDR` for the config
+//! surface, and `xindeler-transport`'s crate doc comment for the transport
+//! abstraction this binary calls through.
 
 mod metrics;
 mod plugin;
@@ -64,6 +71,25 @@ fn main() -> AppExit {
         },
         Err(_) => SimServerConfig::default().metrics_addr,
     };
+    // BL-82 EM-4.2b: same env-var-for-v1 pattern as the two vars above — a
+    // full settings-file field is Phase 5 polish. Must never collide with
+    // `metrics_addr`/the legacy `gameserver_protocols` port(s); see
+    // `sim::DEFAULT_REPLICON_ADDR`'s doc comment.
+    let replicon_addr = match std::env::var("XINDELER_SERVER_REPLICON_ADDR") {
+        Ok(addr) => match addr.parse() {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    addr,
+                    "XINDELER_SERVER_REPLICON_ADDR is set but not a valid socket address; falling \
+                     back to the default"
+                );
+                SimServerConfig::default().replicon_addr
+            },
+        },
+        Err(_) => SimServerConfig::default().replicon_addr,
+    };
 
     App::new()
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)))
@@ -71,6 +97,7 @@ fn main() -> AppExit {
             config: SimServerConfig {
                 no_auth,
                 metrics_addr,
+                replicon_addr,
             },
         })
         .run()

@@ -47,6 +47,25 @@ bevy = { version = "=0.19.0", default-features = false, features = ["std"] }
 # regardless of any dependency edge — verified via `cargo tree -e features
 # -i xindeler-common-state`, this is not something a dev-dependency forces.)
 server = { package = "xindeler-server-core", path = "../../server" }
+# BL-82 EM-4.2b: the SAME server-side bridge the listen-server client uses —
+# `SimBridgePlugin`/`SimTerrainStreamPlugin`/`SimEntityMirrorPlugin` mirror
+# sim entities/terrain into `Replicated` Bevy entities/messages, which the new
+# replicon+quinnet transport below actually sends over a real socket. Also
+# supplies the `SimServer` type + `boot_with_settings`/`tick_sim` this shell's
+# own `sim.rs` now boots/ticks through (see that module's doc comment) instead
+# of maintaining a second, divergent copy of the same boot/tick recipe.
+xindeler-sim-bridge = { path = "../xindeler-sim-bridge" }
+# The replication contract (shared wire shape, symmetric client/server
+# registration — see that crate's own doc comment).
+xindeler-protocol = { path = "../xindeler-protocol" }
+# Server role. Pinned EXACT per BL-82 [Q5]=A, matching xindeler-protocol/
+# xindeler-sim-bridge's own pin.
+bevy_replicon = "=0.41.1"
+# BL-82 EM-4.2b: the transport seam — this crate calls ONLY
+# `xindeler_transport::{ReplicaTransport, TransportConfig, QuinnetTransport}`,
+# never `bevy_replicon_quinnet`/`bevy_quinnet` types directly (see that
+# crate's own doc comment for the grep-bar this maintains).
+xindeler-transport = { path = "../xindeler-transport" }
 # `common::consts::MIN_RECOMMENDED_TOKIO_THREADS` — the tokio worker-thread
 # floor server-cli sizes its runtime with; taken directly for exact parity
 # rather than re-deriving/hardcoding it. Legal shell→logic type-library use

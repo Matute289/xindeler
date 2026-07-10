@@ -217,6 +217,16 @@ fn receive_chunks(
     if touched.is_empty() {
         return;
     }
+    // BL-82 EM-4.2b: a plain, always-on log line the FIRST time any
+    // `CompressedChunk` is decoded — used by the EM-4.2b acceptance test
+    // (`bevy/xindeler-server-app/tests/replicon_quinnet_dual_stack.rs`) to
+    // confirm at least one terrain chunk crossed the NEW replicon+quinnet
+    // transport, by grepping the net-client process's stdout. Cheap (fires
+    // exactly once per process) and harmless under every other mode
+    // (listen-server's loopback also passes through here).
+    if !first.0 {
+        info!(keys = ?touched, "first terrain chunk(s) received over the network");
+    }
     for key in &touched {
         // A new/changed chunk affects its neighbours' shared-border meshing
         // too, so mark the whole 3×3 neighbourhood dirty (`ChunkMeshQueue`

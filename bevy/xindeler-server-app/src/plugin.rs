@@ -1,15 +1,25 @@
-//! Glues `sim` + `shutdown` + `metrics` into the one plugin the EM-4.1 task
-//! board line asks for verbatim: "`SimServerPlugin` owning
-//! `veloren_server::Server` + `.tick()` system, signal handling, metrics
-//! passthrough."
+//! Glues `sim` + `shutdown` + `metrics` + (BL-82 EM-4.2b) the new
+//! replicon+quinnet transport into the one plugin the EM-4.1 task board line
+//! asks for verbatim: "`SimServerPlugin` owning `veloren_server::Server` +
+//! `.tick()` system, signal handling, metrics passthrough" — now extended per
+//! the EM-4.2b spec (§1.1) to also host `xindeler-sim-bridge`'s entity/terrain
+//! mirror + a REAL remote `bevy_replicon` server role, dual-stack alongside
+//! the untouched legacy listener.
 
 use std::sync::Arc;
 
 use bevy::{
     app::{App, Plugin, Update},
-    ecs::schedule::IntoScheduleConfigs,
+    state::app::StatesPlugin,
+    time::{Fixed, Time},
 };
+use bevy_replicon::prelude::RepliconPlugins;
 use tokio::sync::Notify;
+use xindeler_protocol::XindelerProtocolPlugin;
+use xindeler_sim_bridge::{
+    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
+};
+use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
     metrics,
@@ -18,11 +28,13 @@ use crate::{
 };
 
 /// Boots the embedded sim, installs the SIGINT/SIGTERM shutdown flag, starts
-/// the metrics passthrough, and registers the per-tick systems — see the
-/// module doc comment. Building this plugin boots a real (possibly slow,
-/// asset-dependent) world, same as `server-cli`'s `main` calling `Server::new`
-/// directly; unlike `xindeler-sim-bridge` (which defers booting to its
-/// caller), this crate IS the shell, so there is no other place to do it.
+/// the metrics passthrough, wires the entity/terrain mirror + the new
+/// replicon+quinnet transport (EM-4.2b), and registers the per-tick systems —
+/// see the module doc comment. Building this plugin boots a real (possibly
+/// slow, asset-dependent) world, same as `server-cli`'s `main` calling
+/// `Server::new` directly; unlike `xindeler-sim-bridge` (which defers booting
+/// to its caller), this crate IS the shell, so there is no other place to do
+/// it.
 #[derive(Default)]
 pub struct SimServerPlugin {
     pub config: SimServerConfig,
@@ -48,8 +60,83 @@ impl Plugin for SimServerPlugin {
             flag: shutdown_flag,
             metrics_shutdown,
         });
-        // `check_shutdown` runs AFTER `tick_sim` so a shutdown request never
-        // lands mid-tick — see shutdown.rs's doc comment.
-        app.add_systems(Update, (sim::tick_sim, shutdown::check_shutdown).chain());
+        // `check_shutdown` runs in `Update`, which Bevy's `MainScheduleOrder`
+        // always runs strictly AFTER the `RunFixedMainLoop` schedule (which
+        // drives every `FixedUpdate` step queued for that frame) —
+        // structurally, for any tick rate, not merely because
+        // `sim::SIM_TICK_INTERVAL` happens to match `SIM_TICK_HZ` below — so
+        // a shutdown request still never lands mid-tick (see
+        // shutdown.rs's doc comment). `tick_sim` itself is no longer
+        // registered here — `SimBridgePlugin` below owns it (EM-4.2b: shared
+        // with the listen-server path instead of a second local copy).
+        app.add_systems(Update, shutdown::check_shutdown);
+
+        // EM-4.2b: pace the bridge's `FixedUpdate` tick_sim at the sim's real
+        // 30 TPS, same as the listen-server client does (see
+        // `xindeler_sim_bridge::tick_sim`'s doc comment for why FixedUpdate,
+        // not Update, is the right home for this).
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+
+        // Real remote `bevy_replicon` SERVER role + the shared replication
+        // contract + the sim↔Bevy bridge (entity mirror + terrain stream —
+        // the SAME plugins the listen-server path uses, now hosted here
+        // instead, per spec §0.1/§1.1). `RepliconPlugins` is added
+        // UNCONFIGURED (library default `ServerPlugin::default()`, which
+        // replicates on `FixedPostUpdate`) rather than overridden to
+        // `PostUpdate`: `FixedPostUpdate` runs in the SAME `FixedMain`
+        // iteration as `SimBridgePlugin`/`SimEntityMirrorPlugin`'s own
+        // `FixedUpdate` mirror writes, so every fixed-step mirror update gets
+        // replicated — no frame can coalesce/drop an intermediate step (which
+        // a `PostUpdate` override, ticking once per RENDER frame regardless
+        // of how many `FixedUpdate` steps ran that frame, could do). An
+        // earlier draft copied `ServerPlugin::new(PostUpdate)` from
+        // `xindeler-sim-bridge`'s OWN test harness (`src/lib.rs`'s
+        // `new_test_app`), where that override exists only to satisfy a
+        // manually-stepped `TimeUpdateStrategy::ManualDuration` test app that
+        // may never run a real `FixedMain` iteration — an unrelated
+        // constraint that doesn't apply to this real wall-clock,
+        // `ScheduleRunnerPlugin`-paced production shell.
+        //
+        // No client role is ever activated in this process (`ClientState`
+        // stays `Disconnected`), so `SimTerrainStreamPlugin`/
+        // `SimEntityMirrorPlugin`'s
+        // `run_if(in_state(ClientState::Disconnected))` gate holds
+        // continuously — this shell is purely a replication SOURCE, never a
+        // sink.
+        //
+        // `StatesPlugin` is NOT part of `MinimalPlugins` (this shell's own
+        // plugin set, `main.rs`) — only `DefaultPlugins` bundles it. Every
+        // other place `RepliconPlugins` is added in this codebase gets
+        // `StatesPlugin` for free (the listen-server client via
+        // `DefaultPlugins`; `xindeler-protocol`'s own tests add it
+        // explicitly alongside `MinimalPlugins`). `bevy_replicon`'s
+        // `ClientState`/`ServerState` are Bevy `States`, so without this the
+        // very first `RepliconPlugins` system to touch `StateTransition`
+        // panics at Startup ("the `StateTransition` schedule is missing").
+        //
+        // Note: this process also compiles/registers a dormant client-role
+        // `ClientPlugin`/`ClientMessagePlugin` (Cargo feature unification —
+        // see `xindeler-transport`'s crate doc comment, "Both client+server
+        // bevy_replicon roles compile into EVERY shell", for the full
+        // explanation and why it's harmless and not worth fighting here).
+        app.add_plugins((
+            StatesPlugin,
+            RepliconPlugins,
+            XindelerProtocolPlugin,
+            SimBridgePlugin,
+            SimTerrainStreamPlugin,
+            SimEntityMirrorPlugin,
+        ));
+
+        // EM-4.2b: the transport seam — this crate names ONLY
+        // `xindeler_transport::{ReplicaTransport, TransportConfig,
+        // QuinnetTransport}`, never `bevy_replicon_quinnet`/`bevy_quinnet`
+        // types (see `xindeler-transport`'s own doc comment for the grep bar
+        // this maintains). Binds a port distinct from the legacy
+        // `gameserver_protocols` listener(s) — see `sim::DEFAULT_REPLICON_ADDR`
+        // and `XINDELER_SERVER_REPLICON_ADDR` in `main.rs`.
+        app.add_plugins(
+            QuinnetTransport.server_plugins(&TransportConfig::server(self.config.replicon_addr)),
+        );
     }
 }

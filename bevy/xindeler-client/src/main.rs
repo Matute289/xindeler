@@ -9,16 +9,30 @@
 //! EM-3.6: `--listen-server` (needs the `listen-server` cargo feature) boots
 //! an embedded Veloren world in-process and streams its REAL terrain to the
 //! mesh pipeline via replicon loopback, replacing the synthetic 5×5 demo.
+//!
+//! EM-4.2b: `--connect <addr>` (needs the `net-client` cargo feature) is a
+//! genuinely REMOTE client role — no embedded sim, no `xindeler-sim-bridge` —
+//! connecting over a real network socket (via `xindeler-transport`) to a
+//! SEPARATE `xindeler-server-app` process. It reuses the SAME client-side
+//! consumption modules (`terrain_stream`, `entity_view`, `figure_view`,
+//! `sprite_view`, `lod`, `far_terrain`) `--listen-server` uses, verbatim — the
+//! wire shape (`xindeler-protocol`) is unchanged, only the transport
+//! underneath it and who hosts the sim. See `net_client.rs`.
 
 mod atmosphere;
 mod camera;
-#[cfg(feature = "listen-server")] mod entity_view;
-#[cfg(feature = "listen-server")] mod far_terrain;
-#[cfg(feature = "listen-server")] mod figure_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod entity_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod far_terrain;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod figure_view;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
-#[cfg(feature = "listen-server")] mod lod;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod lod;
+#[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
 mod perf_log;
 #[cfg(feature = "listen-server")]
@@ -26,8 +40,9 @@ mod player_input;
 mod post;
 mod scene;
 mod smoke;
-#[cfg(feature = "listen-server")] mod sprite_view;
-#[cfg(feature = "listen-server")]
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod sprite_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod terrain_stream;
 mod voxel_demo;
 
@@ -105,6 +120,18 @@ fn present_mode_from_env() -> PresentMode {
     }
 }
 
+/// `--connect <addr>` value, if present (EM-4.2b). A trailing flag with no
+/// following argument is treated as absent (falls through to the synthetic
+/// demo) rather than panicking — the same tolerant posture `--listen-server`
+/// (a plain boolean flag) already has.
+fn connect_addr_from_args() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == "--connect")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 fn main() -> AppExit {
     let smoke_mode = smoke::parse_smoke_args();
     // EM-3.6: `--listen-server` boots the embedded world and streams REAL
@@ -116,6 +143,23 @@ fn main() -> AppExit {
             "--listen-server requires the `listen-server` cargo feature (rebuild with --features \
              listen-server)"
         );
+        return AppExit::error();
+    }
+
+    // EM-4.2b: `--connect <addr>` is a genuinely remote client role — see
+    // `net_client.rs`. Mutually exclusive with `--listen-server` (checked
+    // below, alongside the synthetic-demo fallback).
+    let connect_addr = connect_addr_from_args();
+    #[cfg(not(feature = "net-client"))]
+    if connect_addr.is_some() {
+        eprintln!(
+            "--connect requires the `net-client` cargo feature (rebuild with --features \
+             net-client)"
+        );
+        return AppExit::error();
+    }
+    if listen_server && connect_addr.is_some() {
+        eprintln!("--listen-server and --connect are mutually exclusive");
         return AppExit::error();
     }
 
@@ -162,12 +206,35 @@ fn main() -> AppExit {
         perf_log::PerfLogPlugin,
     ));
 
-    // The synthetic 5×5 demo and the real listen-server terrain are mutually
-    // exclusive: both drive the SAME pipeline (one ChunkVolumeProvider), so
-    // only one may install a provider.
+    // The synthetic 5×5 demo, the listen-server's embedded terrain, and the
+    // EM-4.2b remote net-client are mutually exclusive: all three drive the
+    // SAME pipeline (one ChunkVolumeProvider), so only one may install a
+    // provider.
     if listen_server {
         #[cfg(feature = "listen-server")]
         app.add_plugins(listen_server::ListenServerPlugin);
+    } else if let Some(addr) = connect_addr.as_deref() {
+        #[cfg(feature = "net-client")]
+        {
+            match addr.parse::<std::net::SocketAddr>() {
+                Ok(server_addr) => {
+                    app.add_plugins(net_client::NetClientPlugin {
+                        config: xindeler_transport::TransportConfig::client(server_addr),
+                    });
+                },
+                Err(err) => {
+                    eprintln!("--connect: invalid address {addr:?}: {err}");
+                    return AppExit::error();
+                },
+            }
+        }
+        #[cfg(not(feature = "net-client"))]
+        {
+            // Unreachable: the early `#[cfg(not(feature = "net-client"))]`
+            // check above already returned. Kept exhaustive so this `if let`
+            // arm type-checks identically regardless of feature set.
+            let _ = addr;
+        }
     } else {
         app.add_plugins(voxel_demo::VoxelDemoPlugin);
     }

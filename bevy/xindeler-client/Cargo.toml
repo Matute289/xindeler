@@ -21,6 +21,20 @@ listen-server = [
     "dep:xindeler-protocol",
     "dep:bevy_replicon",
 ]
+# BL-82 EM-4.2b: a genuinely REMOTE client role — real `bevy_replicon` client
+# role + the new replicon+quinnet transport (`xindeler-transport`), connecting
+# over a real network socket to a SEPARATE `xindeler-server-app` process. NOT
+# the same thing as `listen-server` (which hosts an embedded sim + replicon
+# SERVER role in-process, looping back locally, and therefore also needs
+# `xindeler-sim-bridge`). This feature deliberately does NOT depend on
+# `xindeler-sim-bridge` — a real remote client has nothing to host, so it
+# never touches `specs` at all (the isolation law's "client stays pure" holds
+# even more directly here than under `listen-server`'s sanctioned exception).
+net-client = [
+    "dep:xindeler-protocol",
+    "dep:bevy_replicon",
+    "dep:xindeler-transport",
+]
 
 [dependencies]
 # Full default feature set (2d + 3d + ui + audio); `default_platform` (inside 3d/ui)
@@ -59,8 +73,17 @@ ron = { workspace = true }
 # server SHELL + terrain bridge (the only crate under bevy/ that touches specs)
 # and the shared replication contract. Pinned EXACT per BL-82 [Q5]=A.
 xindeler-sim-bridge = { path = "../xindeler-sim-bridge", optional = true }
+# Shared by BOTH `listen-server` (loopback) and `net-client` (real socket,
+# EM-4.2b) — the replication contract itself never changes with the
+# transport underneath it.
 xindeler-protocol = { path = "../xindeler-protocol", optional = true }
 bevy_replicon = { version = "=0.41.1", optional = true }
+# BL-82 EM-4.2b (optional; enabled by the `net-client` feature only). The
+# transport seam — this crate calls ONLY
+# `xindeler_transport::{ReplicaTransport, TransportConfig, QuinnetTransport}`,
+# never `bevy_replicon_quinnet`/`bevy_quinnet` types directly (see that
+# crate's own doc comment for the grep bar this maintains).
+xindeler-transport = { path = "../xindeler-transport", optional = true }
 
 # (Tests that validate the smoke harness's baked extreme profile parses use
 # `ron`, now a normal dependency above — EM-3.8.)

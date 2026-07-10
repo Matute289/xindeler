@@ -34,6 +34,22 @@
 //!   follow it. The terrain persister anchor becomes a FALLBACK, spawned only
 //!   if the embedded player never reaches in-game.
 //!
+//! - EM-4.2b (a second host, no behavior change to the above): the
+//!   [`SimBridgePlugin`]/[`SimTerrainStreamPlugin`]/[`SimEntityMirrorPlugin`]
+//!   trio is now ALSO added by `xindeler-server-app`'s `SimServerPlugin` — the
+//!   dedicated-server shell that owns the real remote
+//!   `bevy_replicon`/`xindeler-transport` connection. [`boot_with_settings`]
+//!   (factored out of [`boot_test_server`]) lets that shell boot a
+//!   [`SimServer`] from the REAL production `Settings`/`EditableSettings` it
+//!   reads (`server::Settings::load`), instead of the singleplayer shortcut
+//!   this crate's own `boot_test_server` uses for the listen-server path.
+//!   `xindeler-server-app` does NOT add [`PlayerBridgePlugin`]/
+//!   [`LodAltStreamPlugin`] (no embedded local player; EM-4.2c/login is out of
+//!   scope there) — the terrain-anchor persister fallback and the wandering
+//!   test NPCs cover the acceptance test's "at least one replicated entity +
+//!   one terrain chunk" bar on their own, same as they already do for the
+//!   listen-server's own spectator fallback path.
+//!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
@@ -1142,6 +1158,26 @@ pub fn boot_test_server(data_dir: &Path) -> Result<SimServer, server::Error> {
         db_dir: data_dir.join("saves"),
         sql_log_mode: SqlLogMode::Disabled,
     };
+    boot_with_settings(settings, editable_settings, database_settings, data_dir)
+}
+
+/// Boots a [`SimServer`] from ALREADY-LOADED settings (BL-82 EM-4.2b).
+///
+/// Extracted from [`boot_test_server`] so a shell that needs a DIFFERENT
+/// settings source — e.g. `xindeler-server-app`'s dedicated-server shell,
+/// which reads the real production `<userdata>/server/server_config/
+/// settings.ron` via `server::Settings::load` rather than the singleplayer
+/// shortcut — can boot the SAME `SimServer` type (with the `pending_terrain`
+/// snapshot [`SimTerrainStreamPlugin`] depends on) instead of maintaining a
+/// second, divergent copy of this boot recipe. `boot_test_server` is now a
+/// thin wrapper over this for the singleplayer-settings case; behavior is
+/// unchanged for every existing caller.
+pub fn boot_with_settings(
+    settings: Settings,
+    editable_settings: EditableSettings,
+    database_settings: DatabaseSettings,
+    data_dir: &Path,
+) -> Result<SimServer, server::Error> {
     // Small multi-thread runtime, same shape as server-cli's (Server::new
     // requires a runtime it can block on and spawn network tasks onto).
     let runtime = Arc::new(
