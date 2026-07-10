@@ -31,7 +31,7 @@ use server::{
 use tokio::runtime::Runtime;
 use xindeler_oracle_host::AiGatewayConfig;
 
-use crate::metrics::DEFAULT_METRICS_ADDR;
+use crate::{dimensions::DebugDimensionCommands, metrics::DEFAULT_METRICS_ADDR};
 
 /// Server tick rate (30 TPS — matches server-cli's `TPS` const and the sim's
 /// own expectations). `ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)`
@@ -56,6 +56,12 @@ pub struct SimServerConfig {
     /// RON file path) when set, mirroring `metrics_addr`'s
     /// env-var-overrides-a-sane-default pattern.
     pub ai_gateway: AiGatewayConfig,
+    /// EM-4.5 debug/admin dimension-spinup/drain triggers. Defaults to
+    /// `DebugDimensionCommands::default()` (neither set — no second
+    /// dimension ever spins up unless explicitly requested); `main.rs`
+    /// overrides this from `XINDELER_DEBUG_SPINUP_DIMENSION`/
+    /// `XINDELER_DEBUG_DRAIN_DIMENSION` when set.
+    pub debug_dimension_commands: DebugDimensionCommands,
 }
 
 impl Default for SimServerConfig {
@@ -66,6 +72,7 @@ impl Default for SimServerConfig {
                 .parse()
                 .expect("DEFAULT_METRICS_ADDR is a valid SocketAddr literal"),
             ai_gateway: AiGatewayConfig::default(),
+            debug_dimension_commands: DebugDimensionCommands::default(),
         }
     }
 }

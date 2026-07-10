@@ -15,6 +15,7 @@
 //! SIGINT/SIGTERM graceful-shutdown handling (`shutdown.rs`), and the
 //! Prometheus metrics passthrough (`metrics.rs`).
 
+mod dimensions;
 mod metrics;
 mod plugin;
 mod shutdown;
@@ -28,6 +29,7 @@ use bevy::{
 use xindeler_oracle_host::AiGatewayConfig;
 
 use crate::{
+    dimensions::DebugDimensionCommands,
     plugin::SimServerPlugin,
     sim::{SIM_TICK_INTERVAL, SimServerConfig},
 };
@@ -97,6 +99,10 @@ fn main() -> AppExit {
         },
         Err(_) => AiGatewayConfig::default(),
     };
+    // EM-4.5: debug/admin dimension-spinup/drain triggers — see
+    // `dimensions.rs`'s doc comment for why env vars (not a live RPC/console)
+    // are this task's "debug/admin command" mechanism.
+    let debug_dimension_commands = DebugDimensionCommands::from_env();
 
     App::new()
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)))
@@ -105,6 +111,7 @@ fn main() -> AppExit {
                 no_auth,
                 metrics_addr,
                 ai_gateway,
+                debug_dimension_commands,
             },
         })
         .run()

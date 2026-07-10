@@ -10,10 +10,11 @@ use bevy::{
     ecs::schedule::IntoScheduleConfigs,
 };
 use tokio::sync::Notify;
+use xindeler_dimensions::DimensionsPlugin;
 use xindeler_oracle_host::AiGatewayPlugin;
 
 use crate::{
-    metrics,
+    dimensions, metrics,
     shutdown::{self, ShutdownState},
     sim::{self, SimServerConfig},
 };
@@ -54,8 +55,29 @@ impl Plugin for SimServerPlugin {
         // comment).
         app.add_plugins(AiGatewayPlugin {
             config: self.config.ai_gateway.clone(),
-            registry: metrics_registry,
+            registry: Arc::clone(&metrics_registry),
         });
+
+        // EM-4.5: DimensionRegistry + the full lifecycle state machine.
+        // `DimensionsPlugin` first (so `DimensionRegistry`/`SpinupTasks`/the
+        // message types exist), THEN wrap `DimensionId::DEFAULT` around the
+        // sim's ALREADY-generated `Arc<World>`/`IndexOwned` in place — a
+        // wrapping refactor of already-existing state, not a behavior
+        // change (see `dimensions.rs`'s doc comment).
+        app.add_plugins(DimensionsPlugin);
+        dimensions::install_default_dimension(app, &sim);
+        dimensions::init_debug_state(app);
+        app.insert_resource(self.config.debug_dimension_commands.clone());
+        let dimension_metrics = dimensions::register_metrics(&metrics_registry);
+        app.insert_resource(dimension_metrics);
+        app.add_systems(
+            Update,
+            (
+                dimensions::apply_debug_dimension_commands,
+                dimensions::update_dimension_metrics,
+            )
+                .chain(),
+        );
 
         app.insert_non_send(sim);
         app.insert_resource(ShutdownState {

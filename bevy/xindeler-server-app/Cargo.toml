@@ -89,6 +89,14 @@ prometheus-hyper = { workspace = true }
 # this shell's own metrics registry at boot (`plugin.rs`) — config/metrics
 # seam only, makes zero real AI calls.
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-4.5: `DimensionRegistry` + the full lifecycle state machine
+# (`dimensions.rs`). This shell wraps the sim's already-generated
+# `Arc<World>`/`IndexOwned` as `DimensionId::DEFAULT` at boot (a wrapping
+# refactor of already-existing state, not a behavior change), hosts the
+# debug/admin spinup+drain env-var triggers, and registers the registry's
+# 4 lifecycle-count gauges on the SAME metrics registry `AiGatewayPlugin`
+# above already registers onto.
+xindeler-dimensions = { path = "../xindeler-dimensions" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
