@@ -3154,9 +3154,9 @@ mod tests {
     }
 
     /// BL-82 EM-4.7 acceptance (task board's literal bar, `tasks/
-    /// 45-engine-migration-tasks.md`: "Ravenloft example spawns 15 clamped
+    /// 45-engine-migration-tasks.md`: "Mist-Bound example spawns 15 clamped
     /// minions with stalker AI in a test dimension"): a `DmEvent` shaped
-    /// like a Ravenloft-style ORACLE event (`spawning_rules` drawing from
+    /// like a Mist-Bound-style ORACLE event (`spawning_rules` drawing from
     /// the shipped `sentinel_owl` template — an already-authored "stalk"
     /// sample, see `assets/xindeler/entity_templates/
     /// sentinel_owl.entity_template.ron`) spawns exactly 15 real sim NPCs,
@@ -3176,7 +3176,7 @@ mod tests {
     /// ceiling is 200 — so this test does not pretend it is one).
     #[test]
     #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
-    fn ravenloft_spawning_rules_spawn_fifteen_clamped_stalker_minions_in_a_test_dimension() {
+    fn mist_bound_spawning_rules_spawn_fifteen_clamped_stalker_minions_in_a_test_dimension() {
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
         use xindeler_oracle_host::{
@@ -3185,7 +3185,7 @@ mod tests {
         };
 
         const EXPECTED_MINIONS: usize = 15;
-        const MINION_NAME: &str = "Ravenloft Sentinel";
+        const MINION_NAME: &str = "Mist-Bound Sentinel";
         // Must match `event.spawning_rules.spawn_radius` below — kept as its
         // own named constant so the terrain-readiness preamble can size its
         // wait against the SAME radius the scatter itself uses.
@@ -3265,7 +3265,7 @@ mod tests {
             (centre, alt)
         };
 
-        // The "Ravenloft example": a DmEvent whose spawning_rules directive
+        // The "Mist-Bound example": a DmEvent whose spawning_rules directive
         // names the shipped `sentinel_owl` template, a uniform "stalk"
         // override (every minion stalks regardless of the template's own
         // default), and a deliberately hostile spawn_count.
@@ -3363,7 +3363,7 @@ mod tests {
         assert_eq!(
             minions.len(),
             EXPECTED_MINIONS,
-            "the Ravenloft example's spawning_rules must spawn exactly {EXPECTED_MINIONS} real \
+            "the Mist-Bound example's spawning_rules must spawn exactly {EXPECTED_MINIONS} real \
              sim NPCs, no more, no fewer"
         );
 

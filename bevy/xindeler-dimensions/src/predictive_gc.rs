@@ -173,7 +173,7 @@ pub struct PredictiveGcTrackers(HashMap<DimensionId, PredictiveGcTracker>);
 /// zero, overnight) as part of normal, healthy play; predictively draining
 /// (and thus eventually tearing down — see `crate::teardown`'s module doc)
 /// the persistent game world itself would be catastrophic. This heuristic
-/// only ever applies to actual INSTANCED dimensions (Ravenloft-style
+/// only ever applies to actual INSTANCED dimensions (Mist-Bound-style
 /// event/dungeon instances), which is the entire point of spec §1.9's
 /// mechanism in the first place.
 pub fn predictive_gc_system(

@@ -240,7 +240,7 @@ mod tests {
         let dimension = DimensionId(7);
         app.world_mut()
             .resource_mut::<NarrativeHooks>()
-            .register_on_enter_message(dimension, "The gate to Ravenloft creaks open.");
+            .register_on_enter_message(dimension, "The gate to the Mist-Bound creaks open.");
 
         let client = app
             .world_mut()
@@ -259,7 +259,7 @@ mod tests {
             toasts[0].targets
         );
         assert_eq!(toasts[0].message, HudToast {
-            text: "The gate to Ravenloft creaks open.".to_owned(),
+            text: "The gate to the Mist-Bound creaks open.".to_owned(),
         });
     }
 

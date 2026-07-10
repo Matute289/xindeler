@@ -80,7 +80,7 @@ use xindeler_protocol::DimensionId;
 use crate::SimServer;
 
 /// Turns a (already-sanitized) `SpawningRules` — e.g. a `DmEvent`'s
-/// `spawning_rules` field, the Ravenloft-example schema's monster-population
+/// `spawning_rules` field, the Mist-Bound-example schema's monster-population
 /// directive (migration spec §5.1/§5.5) — into up to `spawn_count`
 /// individual factory-spawn requests, each going through the exact same
 /// [`spawn_entity_template`] staging-entity path a single template spawn
