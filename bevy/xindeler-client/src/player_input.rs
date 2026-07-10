@@ -268,8 +268,50 @@ impl Plugin for SmokeAutoMovePlugin {
             .init_resource::<SmokeAutoMoveState>()
             .add_systems(
                 Update,
-                smoke_auto_move.after(gather_input).in_set(GameplaySet),
+                (
+                    smoke_auto_move.after(gather_input),
+                    // BL-82 EM-3.11p round 11 (Wave-3 post-merge regression
+                    // hunt): EVERY prior `--smoke-perf-run`/`--smoke-screenshot`
+                    // trial (this round's and all earlier EM-3.11 rounds') left
+                    // `FlyCam::yaw`/`pitch` frozen at their boot default the
+                    // whole run — they only change from real
+                    // `AccumulatedMouseMotion`, which a scripted bot never
+                    // produces. A real player's session ALWAYS includes
+                    // continuous mouse-look while walking; EM-3.11k already
+                    // proved camera rotation has its own distinct render-cost
+                    // profile (TAA history-confidence reset). `XINDELER_
+                    // SMOKE_ROTATE=1` opts a run into a slow, continuous,
+                    // scripted yaw sweep on top of the existing walk pattern,
+                    // closing this blind spot for future rounds without
+                    // requiring a human at the mouse.
+                    smoke_rotate_camera.after(gather_input),
+                )
+                    .in_set(GameplaySet),
             );
+    }
+}
+
+/// Radians/second the scripted camera sweeps when `XINDELER_SMOKE_ROTATE=1`
+/// (see [`SmokeAutoMovePlugin`]'s doc comment). Slow enough to resemble a
+/// human idly looking around while walking, not a disorienting spin.
+const SMOKE_ROTATE_RATE_RAD_S: f32 = 0.6;
+
+/// Continuously sweeps the fly-cam's yaw (never its pitch) at
+/// [`SMOKE_ROTATE_RATE_RAD_S`] when `XINDELER_SMOKE_ROTATE` is set to
+/// anything but `0`/unset — a no-op check (cached env read) otherwise, so
+/// every pre-existing smoke run is unaffected by default.
+fn smoke_rotate_camera(
+    time: Res<Time>,
+    mut cameras: Query<&mut FlyCam>,
+    mut enabled: Local<Option<bool>>,
+) {
+    let enabled = *enabled
+        .get_or_insert_with(|| std::env::var("XINDELER_SMOKE_ROTATE").is_ok_and(|v| v != "0"));
+    if !enabled {
+        return;
+    }
+    for mut fly in &mut cameras {
+        fly.yaw += SMOKE_ROTATE_RATE_RAD_S * time.delta_secs();
     }
 }
 
