@@ -453,13 +453,22 @@ impl<'a> System<'a> for Sys {
                 entities_to_remove_buf.push(entity);
                 continue;
             };
+            // BL-82 EM-4.2c: an entity with no legacy `Client` component is no
+            // longer necessarily a bug — a replicon-authenticated player
+            // (`xindeler-server-app::login`) goes through the SAME
+            // `StateExt::update_character_data` call every character does
+            // (which unconditionally inserts `InventoryUpdateBuffer`), but
+            // deliberately never gets a `Client` (that type wraps a real
+            // legacy `network::Participant`, which a replicon/quinnet
+            // connection doesn't have — see that module's doc comment). Drain
+            // the buffer so it can't grow unbounded, but there is simply no
+            // legacy wire-protocol client to notify; inventory replication for
+            // the new transport is a future concern (EM-4.2d+ interest
+            // management), not something to reintroduce here. This USED to be
+            // an always-true invariant (hence the removed `dev_panic!`), but
+            // is not anymore now that two transports coexist.
             let Some(client) = client else {
-                dev_panic!(format!(
-                    "Entity without Client has InventoryUpdateBuffer component. This is a bug. \
-                     entity={:?}",
-                    entity
-                ));
-                entities_to_remove_buf.push(entity);
+                buf.take_events();
                 continue;
             };
 

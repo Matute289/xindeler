@@ -1,0 +1,63 @@
+[package]
+name = "xindeler-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR
+# (EM-6.3). Headless transport seam: only `App`/`Plugin`/`PluginGroup`/`Startup` +
+# the `bevy_state` machinery `bevy_replicon` drives `ClientState`/`ServerState`
+# through (same feature `xindeler-protocol`/`xindeler-sim-bridge` enable for the
+# same reason).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "bevy_state",
+] }
+# Networking per BL-82 [Q3]=B: the replication contract this crate carries a
+# real transport underneath (`RepliconChannels` — read here to configure the
+# backend's own channel set; see `quinnet.rs`).
+bevy_replicon = "=0.41.1"
+# EM-4.2b — the chosen transport backend (spec §0.5, re-verified live against
+# crates.io on 2026-07-10 immediately before writing this: unchanged from the
+# spec's table. `bevy_replicon_renet2` still lags one Bevy minor + one replicon
+# minor behind our exact pins (`bevy^0.18`/`bevy_replicon^0.40` vs. our
+# `=0.19.0`/`=0.41.1`), while `bevy_quinnet`/`bevy_replicon_quinnet` are both
+# current against `bevy^0.19`/`bevy_replicon^0.41` — see this crate's own
+# `quinnet.rs` module doc + the EM-4.2b PR description for the full finding and
+# the separate renet2-fork feasibility note. `bevy_quinnet` is built on the SAME
+# `quinn` crate `xindeler_network`'s own experimental QUIC listener already uses
+# (`network/Cargo.toml`'s `quinn = "0.11"`), keeping this transport's protocol
+# family / TLS-cert story / firewall posture consistent with infrastructure
+# Xindeler already runs.
+# `default-features = false` + an explicit feature list matching EXACTLY what
+# `bevy_replicon_quinnet` itself requests from `bevy_quinnet` (its own
+# Cargo.toml: `client`/`server` features enable `bevy_quinnet/client`/
+# `bevy_quinnet/server`; its own `default` also turns on `shared-client-id`).
+# Deliberately NOT `bevy_quinnet`'s own default features: those additionally
+# enable `recv_channels`, which `bevy_replicon_quinnet` itself never opts
+# into and which changes `ServerEndpointConfigurationDefaultables`/
+# `ClientConnectionConfigurationDefaultables`'s shape (an extra
+# `recv_channels_cfg` field, `#[cfg(feature = "recv_channels")]`). Leaving
+# `recv_channels` on while relying on `..Default::default()` for that field
+# (as this crate's `quinnet.rs` does) silently starved every application
+# message: the QUIC handshake completes and `ConnectedClient` spawns fine,
+# but no `ProtocolHash`/replicated data ever reaches either side — confirmed
+# by a live repro (a real connection with zero further replicon traffic in
+# either direction) before this fix. Matching `bevy_replicon_quinnet`'s own
+# feature set exactly is what its own tested example
+# (`bevy_replicon_quinnet`'s `tic_tac_toe`/`deterministic_boids`) actually
+# builds against — mirroring it here, not guessing.
+bevy_quinnet = { version = "=0.21.0", default-features = false, features = [
+    "client",
+    "server",
+    "shared-client-id",
+] }
+bevy_replicon_quinnet = { version = "=0.20.0", default-features = false, features = [
+    "client",
+    "server",
+    "shared-client-id",
+] }
+tracing = { workspace = true }

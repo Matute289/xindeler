@@ -1,0 +1,79 @@
+[package]
+name = "xindeler-dimensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release
+# PR (EM-6.3). No extra features requested: `App`/`Plugin`/ECS/relationships/
+# `bevy::tasks` (the async task-pool machinery [`spinup`] uses) are all part
+# of the mandatory core set even with `default-features = false` — same
+# posture as `xindeler-render-voxel`'s Cargo.toml, which already uses
+# `AsyncComputeTaskPool`/`Task`/`block_on` off this exact dependency line.
+bevy = { version = "=0.19.0", default-features = false }
+# `world::World::generate`/`generate_chunk` + `WorldOpts`/`GenOpts`/`FileOpts`
+# are re-exported at `server`'s crate root (`server/src/lib.rs`, behind its
+# default-on `worldgen` feature) — taking `server` (rather than a fresh
+# dependency edge on `world` directly) reuses the SAME re-export
+# `xindeler-sim-bridge` already relies on for `sim.server.world()`, and also
+# gives this crate `Server::state().thread_pool()` (the sim's own rayon pool,
+# reused rather than building a second one). This is a shell/bridge crate
+# (like `xindeler-sim-bridge`), not a logic crate, so depending on `server`
+# is the legal shell→logic direction (isolation law rule 4 only forbids the
+# reverse).
+server = { package = "xindeler-server-core", path = "../../server" }
+# `common::terrain::TerrainChunk` — the per-dimension chunk store's value
+# type. Same shell→logic type-library use `xindeler-sim-bridge`'s Cargo.toml
+# documents for `common`.
+common = { package = "xindeler-common", path = "../../common" }
+# EM-4.5 reuses `DmEvent`'s `DimensionConfig` (`seed_modifier` +
+# `biome_profile`, EM-4.3/4.4, `dm_event.rs`) as THIS crate's spinup config
+# input rather than re-declaring a parallel `seed_modifier` field — the exact
+# values a future EM-4.9 `DmEvent`-triggered spinup will hand in. `dm_event.rs`
+# itself flags this as the intended EM-4.5 consumer. Directionally legal
+# (higher-level shell crate -> lower-level asset/config crate), same
+# reasoning `xindeler-oracle-host`'s own Cargo.toml documents for its
+# `xindeler-protocol` edge.
+xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-4.2d review-follow-up: the canonical `DimensionId` type now lives in
+# `xindeler-protocol` (the low-level, few-deps crate — same reasoning as
+# `AiExecutionMode`'s placement, see that type's own doc comment), so its own
+# per-client visibility scoping (`RegionKey`) can use the SAME identifier
+# without a cycle (this crate already depends on `xindeler-oracle-host`,
+# which depends on `xindeler-protocol` — the reverse edge would be circular).
+# `component.rs` re-exports it (`pub use xindeler_protocol::DimensionId`)
+# rather than defining a duplicate, so `xindeler_dimensions::DimensionId`
+# stays the same type for every existing caller.
+xindeler-protocol = { path = "../xindeler-protocol" }
+# Chunk-store keys (`Vec2<i32>`), matching the logic crates' vek version.
+vek = { workspace = true }
+# World generation runs on a rayon thread pool (reused from the sim, see
+# above) — named directly for the type signature.
+rayon = { workspace = true }
+tracing = { workspace = true }
+# `specs::WorldExt::read_resource` — reading the ALREADY-generated
+# `Arc<World>`/`IndexOwned` off a live `server::Server`'s specs ECS resources
+# (`crate::sim_source::read_default_world`), the same trait
+# `xindeler-sim-bridge`'s Cargo.toml documents taking `specs` directly for.
+specs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# EM-4.6 (T47.8) `tests/teardown_asset_gc.rs`: proves the VRAM half of the
+# teardown acceptance bar (`Assets<Mesh>::len()` returns to baseline after a
+# `DimensionRoot` cascade-despawn) using the REAL `bevy::mesh::Mesh` asset
+# type. Cargo unifies dev-dependency features into ONLY this crate's own
+# test/bench targets — a normal (non-test) build of `xindeler-dimensions`
+# (and every crate that depends on it) does NOT gain these features; nothing
+# in `src/` uses `Mesh`/`Assets`. Same two feature flags (`bevy_mesh` +
+# `bevy_asset`), same "neither pulls bevy_render/wgpu" verification,
+# `xindeler-render-voxel/Cargo.toml`'s `convert` feature already documents in
+# detail — re-verified here rather than re-derived.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "bevy_mesh",
+    "bevy_asset",
+] }

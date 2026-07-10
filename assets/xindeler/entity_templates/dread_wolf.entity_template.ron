@@ -1,0 +1,19 @@
+// Dread Wolf — an aggressive wolf NPC template (BL-82 EM-4.7 sample).
+//
+// Schema: `EntityTemplate` in bevy/xindeler-oracle-host/src/entity_template.rs.
+// `body` is an existing Veloren NPC/species keyword (`common::npc::NpcBody`'s
+// `FromStr` — the SAME vocabulary the in-game `/spawn` admin command already
+// parses), never a new naming scheme; `loot` is an existing frozen item
+// asset specifier. Authoring a sibling template (see `forest_deer.
+// entity_template.ron` / `sentinel_owl.entity_template.ron`) requires ZERO
+// Rust changes — that's the acceptance bar this schema exists to satisfy.
+(
+    entity_template_id: "dread_wolf",
+    body: "wolf",
+    stats: (
+        name: Some("Dread Wolf"),
+    ),
+    faction: "enemy",
+    loot: Some("common.items.crafting_ing.hide.tough_hide"),
+    ai_behavior_override: "aggro",
+)

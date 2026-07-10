@@ -45,6 +45,30 @@ tracing = { workspace = true }
 # Read chunk keys / world positions off the sim (Vec2/Vec3), matching the logic
 # crates' vek version.
 vek = { workspace = true }
+# EM-4.5: tags every mirrored entity with `DimensionId(0)`/`DimensionRoot`
+# (the default dimension, wrapped once at boot via `ensure_default_dimension`)
+# and gates NEW mirror-entity creation on `DimensionLifecycle::
+# accepts_new_entrants` — the "interaction with the mirror/visibility
+# systems" spec §1.8 asks the `Draining` transition to have.
+xindeler-dimensions = { path = "../xindeler-dimensions" }
+# EM-4.7 (`entity_factory.rs`): `xindeler_oracle_host::entity_template`'s
+# `Pending*` descriptor components + `AgentPreset` (the `BehaviorRegistry`
+# half). This crate is "the ONLY legal `specs` consumer under `bevy/`" (this
+# file's own module doc) — so the entity-factory adapter that actually turns
+# those descriptors into a REAL sim NPC (via the SAME public
+# `NpcBuilder`/`CreateNpcEvent`/`emit_event_now` path `spawn_test_npcs`
+# already uses) has to live here, not in `xindeler-oracle-host` itself.
+xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-4.7 (`entity_factory.rs`'s `spawn_from_spawning_rules`): scatters a
+# `DmEvent.spawning_rules`-driven batch of spawns within `spawn_radius` of an
+# origin. A seeded RNG (caller-supplied), never wall-clock/thread entropy —
+# keeps the factory itself deterministic per the ORACLE invariant.
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ron = { workspace = true }
+# The EM-4.7 batch-spawn acceptance test seeds a `ChaCha8Rng` so the
+# spawn-scatter is reproducible (same pattern `world/`'s dynamic_rng and
+# `common/benches`'s chonk_benchmark already use for a seeded PRNG).
+rand_chacha = { workspace = true }
