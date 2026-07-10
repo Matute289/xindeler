@@ -127,10 +127,12 @@ use common::{
 use server::{
     EditableSettings, Event, Input, Server, Settings,
     persistence::{DatabaseSettings, SqlLogMode},
+    state_ext::StateExt as _,
 };
 use specs::{LendJoin, WorldExt};
 use xindeler_dimensions::{
-    DimensionId, DimensionRegistry, DimensionRoot, DimensionState, DimensionsPlugin,
+    DimensionId, DimensionLifecycle, DimensionRegistry, DimensionRoot, DimensionState,
+    DimensionsPlugin,
 };
 use xindeler_protocol::{
     AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
@@ -822,6 +824,21 @@ impl Plugin for SimEntityMirrorPlugin {
                     .after(tick_sim)
                     .after(ensure_default_dimension)
                     .run_if(in_state(ClientState::Disconnected)),
+            )
+            // EM-4.6 (T47.8): `Update`, NOT `FixedUpdate` — this system must
+            // run in the SAME schedule as, and strictly BEFORE,
+            // `xindeler_dimensions::teardown::teardown_completed_dimensions`
+            // (added by `DimensionsPlugin` in `Update`; see that plugin's own
+            // doc comment for its full chain). Referencing that function
+            // directly for `.before(..)` is legal regardless of plugin
+            // add-order — Bevy resolves ordering constraints at schedule-
+            // build time, after every system in the schedule is registered,
+            // the same cross-crate pattern `ensure_default_dimension`/
+            // `mirror_sim_entities` already established for `.after(tick_sim)`.
+            .add_systems(
+                Update,
+                delete_specs_entities_for_torn_down_dimensions
+                    .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
             );
     }
 }
@@ -1562,6 +1579,75 @@ fn mirror_sim_entities(
         loadout_cache.0.remove(&sim_entity);
         // EM-4.2d: same reasoning for the region-key dedup cache.
         region_cache.0.remove(&sim_entity);
+    }
+}
+
+// --- EM-4.6 (T47.8): sim-side dimension teardown ---------------------------
+
+/// BL-82 EM-4.6 (T47.8): the SIM-side half of dimension teardown. Before a
+/// torn-down dimension's `DimensionRoot` cascade-despawns its Bevy mirror
+/// entities (`xindeler_dimensions::teardown::teardown_completed_dimensions`,
+/// ordered `.after(this system)` in the SAME `Update` schedule — see
+/// [`SimEntityMirrorPlugin`]'s own wiring), this system removes the
+/// CORRESPONDING specs entities from the sim through its own normal delete
+/// path (`server::state_ext::StateExt::delete_entity_recorded` — the exact
+/// call `server::cmd`'s admin commands and `Server::disconnect_all_clients_
+/// if_requested` already use; NEVER a raw storage poke — isolation law rule
+/// 4: writes into the sim go through its public API only).
+///
+/// Must run BEFORE the cascade-despawn: once the root despawns, the mirror
+/// entities carrying `SimEntity`/`DimensionId` are gone too, and there would
+/// be no way left to know WHICH specs entities belonged to the torn-down
+/// dimension.
+///
+/// ## Today, this is dormant for anything but a bug
+/// [`mirror_sim_entities`] only ever tags a NEW mirror with
+/// `DimensionId::DEFAULT` (see its own doc comment) — no code path in this
+/// codebase yet mirrors a specs entity into any OTHER dimension. This system
+/// is nonetheless written dimension-id-generic (it matches whichever id the
+/// registry reports as `Teardown`, not just a hardcoded one) so it needs NO
+/// changes once EM-4.7/4.9 start spawning real specs-backed NPCs into
+/// non-default dimensions — exactly the forward-looking posture spec §1.9
+/// asks for ("Sim-side: bridge removes mirrored specs entities via the sim's
+/// normal delete path").
+///
+/// ## `DimensionId::DEFAULT` is deliberately EXCLUDED
+/// Same reasoning as `xindeler_dimensions::predictive_gc`'s own exclusion
+/// and `xindeler_dimensions::teardown`'s own despawn-refusal (see that
+/// module's doc comment for the full "why can `DimensionId::DEFAULT` even
+/// reach `Teardown`" explanation) — an INDEPENDENT backstop specific to the
+/// sim side: were the always-on default dimension to ever (incorrectly)
+/// reach `Teardown`, this system must not delete every currently-mirrored
+/// specs entity in the live game (which is what "the torn-down dimension's
+/// specs entities" would mean for dimension 0 today).
+fn delete_specs_entities_for_torn_down_dimensions(
+    sim: Option<NonSendMut<SimServer>>,
+    registry: bevy::ecs::system::Res<DimensionRegistry>,
+    mut mirror: bevy::ecs::system::ResMut<SimMirror>,
+    query: bevy::ecs::system::Query<(&SimEntity, &DimensionId)>,
+) {
+    let Some(mut sim) = sim else { return };
+    for id in registry.ids() {
+        if id == DimensionId::DEFAULT {
+            continue;
+        }
+        if registry.lifecycle(id) != Some(DimensionLifecycle::Teardown) {
+            continue;
+        }
+        for (sim_entity, dim) in query.iter() {
+            if *dim != id {
+                continue;
+            }
+            if let Err(err) = sim.server.state_mut().delete_entity_recorded(sim_entity.0) {
+                tracing::warn!(
+                    ?err,
+                    ?id,
+                    sim_entity = ?sim_entity.0,
+                    "failed to delete a torn-down dimension's mirrored specs entity"
+                );
+            }
+            mirror.0.remove(&sim_entity.0);
+        }
     }
 }
 
@@ -2484,6 +2570,129 @@ mod tests {
         assert!(
             occupants >= 1,
             "the mirrored NPC should count as a dimension-0 occupant, got {occupants}"
+        );
+    }
+
+    // --- EM-4.6 (T47.8): sim-side dimension teardown -----------------------
+
+    /// [`delete_specs_entities_for_torn_down_dimensions`]'s own acceptance:
+    /// once a (non-default) dimension reaches `Teardown`, the specs entity
+    /// tagged as one of its mirrors is ACTUALLY deleted from the sim through
+    /// its normal delete path — never a raw storage poke.
+    ///
+    /// Manually tags a Bevy entity `(SimEntity, DimensionId(1))` rather than
+    /// going through [`mirror_sim_entities`] (which today only ever tags
+    /// `DimensionId::DEFAULT` — see this test's own in-body comment) —
+    /// exactly the forward-looking scenario a future EM-4.7 spawn-into-
+    /// dimension flow will produce.
+    #[test]
+    #[ignore = "boots a real world: needs assets; run locally with VELOREN_ASSETS=\"$(pwd)/assets\""]
+    fn tearing_down_a_dimension_deletes_its_mirrored_specs_entity() {
+        use specs::Builder as _;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build());
+        app.add_plugins(SimBridgePlugin);
+        app.add_systems(
+            Update,
+            delete_specs_entities_for_torn_down_dimensions
+                .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
+        );
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+
+        // A real specs NPC, created synchronously through the sim's own
+        // public `StateExt::create_npc` (the SAME entry point
+        // `server::cmd`'s admin `/spawn` command uses) — not the
+        // event-based `CreateNpcEvent` path this crate's other tests use,
+        // so the concrete `specs::Entity` is known immediately rather than
+        // needing to scan for it after an async event is processed.
+        let specs_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let body: comp::Body = comp::quadruped_small::Body {
+                species: comp::quadruped_small::Species::Pig,
+                body_type: comp::quadruped_small::BodyType::Female,
+            }
+            .into();
+            sim.server
+                .state_mut()
+                .create_npc(
+                    comp::Pos(vek::Vec3::new(0.0, 0.0, 0.0)),
+                    comp::Ori::default(),
+                    comp::Stats::new(comp::Content::Plain("Teardown Test Pig".to_string()), body),
+                    comp::SkillSet::default(),
+                    Some(comp::Health::new(body)),
+                    comp::Poise::new(body),
+                    comp::Inventory::with_empty(),
+                    body,
+                    body.scale(),
+                )
+                .build()
+        };
+        app.update();
+
+        {
+            let sim = app.world().non_send::<SimServer>();
+            assert!(
+                sim.server.state().ecs().entities().is_alive(specs_entity),
+                "the synthetic NPC should be alive before teardown"
+            );
+        }
+
+        // Manually tag a Bevy mirror entity as belonging to a SECOND
+        // dimension — today's `mirror_sim_entities` only ever tags
+        // `DimensionId::DEFAULT` (see its own doc comment); this stands in
+        // for a future EM-4.7 spawn-into-dimension flow.
+        let bevy_mirror = app
+            .world_mut()
+            .spawn((SimEntity(specs_entity), DimensionId(1)))
+            .id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(specs_entity, bevy_mirror);
+
+        // Spin dimension 1 up via the registry's direct API (fast path — no
+        // real procgen needed for a test that's about sim-entity deletion,
+        // not terrain) and drive it straight to `Teardown` (zero
+        // REGISTRY-tracked occupants, a separate bookkeeping concept from
+        // the `SimEntity` tag above — see `DimensionRegistry::
+        // begin_draining`'s own "already-empty dimension tears down
+        // immediately" documented behavior).
+        {
+            let mut registry = app.world_mut().resource_mut::<DimensionRegistry>();
+            let root = Entity::from_raw_u32(9001).expect("small test entity id");
+            registry
+                .insert_spinning_up(DimensionId(1), root, 0)
+                .unwrap();
+            let (world, index) = server::World::empty();
+            registry
+                .complete_spinup(DimensionId(1), std::sync::Arc::new(world), index)
+                .unwrap();
+            registry
+                .begin_draining(DimensionId(1))
+                .expect("Active -> Draining is legal");
+        }
+
+        // A few ticks: `delete_specs_entities_for_torn_down_dimensions` runs
+        // BEFORE `teardown_completed_dimensions` removes the registry entry,
+        // and `tick_sim`'s own `sim.server.cleanup()` (called every
+        // `FixedUpdate` tick) lets specs fully process the deletion.
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let sim = app.world().non_send::<SimServer>();
+        assert!(
+            !sim.server.state().ecs().entities().is_alive(specs_entity),
+            "the torn-down dimension's mirrored specs entity should have been deleted through the \
+             sim's normal delete path (StateExt::delete_entity_recorded)"
         );
     }
 }

@@ -290,6 +290,41 @@ impl DimensionRegistry {
         Ok(false)
     }
 
+    /// EM-4.6: removes a [`DimensionLifecycle::Teardown`] dimension's entry
+    /// from the registry entirely and returns its owned [`DimensionState`] —
+    /// the actual GC "drop the per-dimension chunk store whole" step (spec
+    /// §1.9): the caller (`crate::teardown::teardown_completed_dimensions`)
+    /// gets the state back just long enough to read `root()` (for the
+    /// `DimensionRoot` cascade-despawn) and hand it to the BL-16 chronicle
+    /// hook, then drops it — which frees `chunk_store`/`world`/`index`
+    /// (an `Arc`, dropped here unless something else outside the registry
+    /// still holds a clone, which nothing in this codebase does) all at
+    /// once, ordinary `Drop`, no manual cleanup needed.
+    ///
+    /// Fails (leaving the registry untouched) if `id` doesn't exist or isn't
+    /// currently `Teardown` — this is a one-way, one-shot removal, not a
+    /// generic "delete any dimension" escape hatch, so a caller can't
+    /// accidentally rip a still-`Active`/`Draining` dimension out from under
+    /// its occupants.
+    pub fn remove_torn_down(&mut self, id: DimensionId) -> Result<DimensionState, DimensionError> {
+        let lifecycle = self
+            .dimensions
+            .get(&id)
+            .ok_or(DimensionError::NotFound(id))?
+            .lifecycle;
+        if lifecycle != DimensionLifecycle::Teardown {
+            return Err(DimensionError::WrongLifecycle(
+                id,
+                lifecycle,
+                DimensionLifecycle::Teardown,
+            ));
+        }
+        Ok(self
+            .dimensions
+            .remove(&id)
+            .expect("just confirmed present above"))
+    }
+
     /// Generates (or returns the already-cached) chunk at `pos` for
     /// dimension `id`, via the SAME `World::generate_chunk` call the sim's
     /// own `ChunkGenerator`/`World::find_accessible_pos` use — just scoped to
@@ -664,6 +699,69 @@ mod tests {
             "an already-empty dimension should skip straight to Teardown"
         );
         assert_eq!(registry.lifecycle(id), Some(DimensionLifecycle::Teardown));
+    }
+
+    /// EM-4.6's own removal step: only a `Teardown` dimension can be
+    /// removed, and removing it actually drops it from the map (so a
+    /// subsequent `get`/`contains` sees nothing — the registry-side half of
+    /// spec §1.9's "zero entities/resources carry the dead `DimensionId`"
+    /// acceptance bar).
+    #[test]
+    fn remove_torn_down_removes_a_teardown_dimension_from_the_registry() {
+        let mut registry = DimensionRegistry::default();
+        let root = dummy_entity(0);
+        let id = DimensionId(6);
+        registry.insert_spinning_up(id, root, 0).unwrap();
+        let (world, index) = World::empty();
+        registry
+            .complete_spinup(id, Arc::new(world), index)
+            .unwrap();
+        registry
+            .begin_draining(id)
+            .expect("Active -> Draining is legal");
+        assert_eq!(registry.lifecycle(id), Some(DimensionLifecycle::Teardown));
+
+        let removed = registry.remove_torn_down(id).expect("id is Teardown");
+        assert_eq!(removed.root(), root);
+        assert!(!registry.contains(id));
+        assert!(registry.get(id).is_none());
+    }
+
+    #[test]
+    fn remove_torn_down_rejects_a_dimension_that_is_not_teardown() {
+        let mut registry = DimensionRegistry::default();
+        let root = dummy_entity(0);
+        let id = DimensionId(7);
+        registry.insert_spinning_up(id, root, 0).unwrap();
+        let (world, index) = World::empty();
+        registry
+            .complete_spinup(id, Arc::new(world), index)
+            .unwrap();
+        // Still Active, never drained. `DimensionState` (the `Ok` payload)
+        // has no `PartialEq`/`Debug` (holds an `Arc<World>`), so `unwrap_err`/
+        // `assert_eq!` on the whole `Result` don't work here — match instead.
+        match registry.remove_torn_down(id) {
+            Err(err) => assert_eq!(
+                err,
+                DimensionError::WrongLifecycle(
+                    id,
+                    DimensionLifecycle::Active,
+                    DimensionLifecycle::Teardown
+                )
+            ),
+            Ok(_) => panic!("removing a non-Teardown dimension should be rejected"),
+        }
+        // Untouched — still registered, still Active.
+        assert!(registry.contains(id));
+    }
+
+    #[test]
+    fn remove_torn_down_rejects_an_unknown_dimension() {
+        let mut registry = DimensionRegistry::default();
+        match registry.remove_torn_down(DimensionId(999)) {
+            Err(err) => assert_eq!(err, DimensionError::NotFound(DimensionId(999))),
+            Ok(_) => panic!("removing an unregistered dimension should be rejected"),
+        }
     }
 
     /// The two dimensions' chunk stores are entirely separate `HashMap`s

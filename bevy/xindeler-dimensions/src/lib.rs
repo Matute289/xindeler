@@ -43,20 +43,41 @@
 //! - No predictive/heuristic auto-drain (EM-4.6/T47.8's `PredictiveGc`) —
 //!   `Active -> Draining` is an explicit admin command
 //!   ([`spinup::DrainDimension`]) in this task.
+//!
+//! ## EM-4.6 (T47.8) update, 2026-07-10
+//! Both exclusions immediately above are now DONE: the `Teardown` GC payload
+//! ([`teardown::teardown_completed_dimensions`], the BL-16 chronicle hook
+//! [`teardown::extract_persistent_side_effects_before_teardown`]) and the
+//! predictive/heuristic auto-drain ([`predictive_gc`]) are implemented in
+//! their own modules below — kept as separate files rather than folded into
+//! `registry`/`spinup` so EM-4.5's own reviewed, tested code stays untouched
+//! and the new payload's surface area is easy to review on its own. See
+//! `teardown`'s module doc for the one deliberate safety addition beyond the
+//! literal task text: [`registry::DimensionId::DEFAULT`] is never actually
+//! despawned by the GC payload, even though nothing in EM-4.5's own state
+//! machine forbids it from reaching `Teardown`.
 
 pub mod component;
 pub mod lifecycle;
 pub mod plugin;
+pub mod predictive_gc;
 pub mod registry;
 pub mod sim_source;
 pub mod spinup;
+pub mod teardown;
 
 pub use component::{DimensionMembers, DimensionRoot};
 pub use lifecycle::DimensionLifecycle;
 pub use plugin::DimensionsPlugin;
+pub use predictive_gc::{
+    PredictiveGc, PredictiveGcTracker, PredictiveGcTrackers, predictive_gc_system,
+};
 pub use registry::{
     DimensionError, DimensionId, DimensionRegistry, DimensionState, IsolationViolation,
     sweep_isolation,
 };
 pub use sim_source::{read_default_world, wrap_default_dimension};
 pub use spinup::{DimensionSpinupConfig, DrainDimension, SpinupDimension, WorldGenThreadPool};
+pub use teardown::{
+    extract_persistent_side_effects_before_teardown, teardown_completed_dimensions,
+};
