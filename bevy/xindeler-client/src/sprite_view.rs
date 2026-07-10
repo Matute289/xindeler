@@ -411,9 +411,17 @@ struct SpriteChunkIndex {
 /// centroid and instance count. `pub` so the EM-3.9 smoke camera can frame the
 /// densest sprite patch (the world-centre figure framing sits in a dark
 /// interior — this points the capture at open, lit vegetation instead).
+///
+/// `count` is only READ by `player_input`'s listen-server-only smoke camera
+/// (`SmokeSpriteCamPlugin`) and by this module's own `#[cfg(test)]` helpers —
+/// under the EM-4.2b `net-client` feature alone (no `listen-server`), nothing
+/// reads it, hence the `dead_code` allow below (BL-82 EM-4.2b: this is the
+/// first build combination that compiles this module without also compiling
+/// `player_input`).
 #[derive(Component)]
 pub struct SpriteChunkParent {
     pub centroid: Vec3,
+    #[cfg_attr(not(feature = "listen-server"), allow(dead_code))]
     pub count: usize,
 }
 

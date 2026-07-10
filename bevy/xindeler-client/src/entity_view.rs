@@ -112,6 +112,14 @@ fn add_presentation(
     query: Query<(Entity, &NetBody, Option<&NetPos>, Option<&NetOri>), Added<NetBody>>,
 ) {
     for (entity, body, pos, ori) in &query {
+        // BL-82 EM-4.2b: a plain, always-on log line for every NEWLY mirrored
+        // entity — used by the EM-4.2b acceptance test
+        // (`bevy/xindeler-server-app/tests/replicon_quinnet_dual_stack.rs`)
+        // to confirm at least one replicated entity crossed the NEW
+        // replicon+quinnet transport, by grepping the net-client process's
+        // stdout. Low-frequency (fires once per entity, on spawn) and
+        // harmless under every other mode.
+        info!(?entity, body = ?body.0, "presentation attached to a newly mirrored entity");
         let (radius, half_length) = body_class_capsule(&body.0);
         let mesh = meshes.add(Capsule3d::new(radius, half_length * 2.0));
         let material = materials.add(StandardMaterial {

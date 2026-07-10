@@ -34,6 +34,54 @@
 //!   follow it. The terrain persister anchor becomes a FALLBACK, spawned only
 //!   if the embedded player never reaches in-game.
 //!
+//! - EM-4.2f (the identity + AURORA-readiness half): [`mirror_sim_entities`]
+//!   additionally writes [`NetUid`] (the sim's `Uid` inner value) for every
+//!   mirrored entity — additive, no change to any existing mirrored field.
+//!   [`tick_aurora_overlay`] then keeps `xindeler_protocol::AuroraOverlay` in
+//!   sync with [`AiExecutionMode`]: empty while `Offline` (today's default
+//!   `server-agent` AI, unchanged), one neutral-default
+//!   `xindeler_protocol::AuroraNpcState` entry per mirrored NPC (every
+//!   `NetUid`-carrying entity that is NOT [`NetLocalPlayer`]) otherwise. See
+//!   [`recompute_aurora_overlay`]'s doc comment for the invariant this must
+//!   never violate.
+//! - EM-4.2d (interest management): [`mirror_sim_entities`] additionally writes
+//!   a [`xindeler_protocol::RegionKey`] (via
+//!   `xindeler_protocol::region_key_for_pos`, from the sim's raw `Pos` — the
+//!   SAME region grid `server/src/sys/subscription.rs` keys entities by) for
+//!   every mirrored entity, deduped through [`SimRegionCache`] so it only
+//!   re-inserts on an actual region crossing. This is what
+//!   `xindeler-server-app`'s per-client `RegionKey`-visibility filter scopes
+//!   entities by — replacing the "broadcast to all clients" v1 posture this
+//!   module's own doc comment used to describe. Because every mirrored entity
+//!   now carries a `RegionKey`, a connected client with no `ClientViewpoint`
+//!   would otherwise see NOTHING (a real regression a reviewer caught against
+//!   this crate's own `mirrors_sim_npc_to_replicon_client` test and
+//!   `xindeler-server-app`'s `replicon_quinnet_dual_stack.rs`) — so
+//!   [`SimTerrainStreamPlugin`] also gained
+//!   [`apply_default_viewpoint_for_new_clients`], a documented stopgap granting
+//!   a spectator-style default viewpoint (world-centre,
+//!   [`ANCHOR_VIEW_DISTANCE`]) to any client that doesn't already have one,
+//!   standing in for EM-4.2c's real login-derived viewpoint.
+//! - EM-4.2b (a second host, no behavior change to the above): the
+//!   [`SimBridgePlugin`]/[`SimTerrainStreamPlugin`]/[`SimEntityMirrorPlugin`]
+//!   trio is now ALSO added by `xindeler-server-app`'s `SimServerPlugin` — the
+//!   dedicated-server shell that owns the real remote
+//!   `bevy_replicon`/`xindeler-transport` connection. [`boot_with_settings`]
+//!   (factored out of [`boot_test_server`]) lets that shell boot a
+//!   [`SimServer`] from the REAL production `Settings`/`EditableSettings` it
+//!   reads (`server::Settings::load`), instead of the singleplayer shortcut
+//!   this crate's own `boot_test_server` uses for the listen-server path —
+//!   `worker_threads`/`thread_name_prefix` are caller-supplied precisely so
+//!   this extraction does NOT silently downgrade that shell's real CPU-scaled
+//!   tokio runtime sizing to the singleplayer path's small fixed one (see
+//!   [`boot_with_settings`]'s own doc comment for the regression this closes).
+//!   `xindeler-server-app` does NOT add
+//!   [`PlayerBridgePlugin`]/[`LodAltStreamPlugin`] (no embedded local player;
+//!   EM-4.2c/login is out of scope there) — the terrain-anchor persister
+//!   fallback and the wandering test NPCs cover the acceptance test's "at least
+//!   one replicated entity + one terrain chunk" bar on their own, same as they
+//!   already do for the listen-server's own spectator fallback path.
+//!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
 //! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
 //! consumer under `bevy/` — the client stays pure.
@@ -41,7 +89,15 @@
 mod player;
 pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
 
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use bevy::{
     app::{App, FixedUpdate, Plugin, Update},
@@ -66,15 +122,20 @@ use common::{
         slot::{ArmorSlot, EquipSlot},
     },
     event::{CreateNpcEvent, NpcBuilder},
+    uid::Uid,
 };
 use server::{
     EditableSettings, Event, Input, Server, Settings,
     persistence::{DatabaseSettings, SqlLogMode},
 };
 use specs::{LendJoin, WorldExt};
+use xindeler_dimensions::{
+    DimensionId, DimensionRegistry, DimensionRoot, DimensionState, DimensionsPlugin,
+};
 use xindeler_protocol::{
-    CompressedChunk, NetBody, NetHealth, NetLoadout, NetLocalPlayer, NetLodAlt, NetOri, NetPos,
-    NetTool, NetToolKey, NetVel, RemoveChunk, TerrainAnchor,
+    AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
+    NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RegionKey,
+    RemoveChunk, TerrainAnchor, region_key_for_pos,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -135,6 +196,16 @@ pub struct SimMirror(pub HashMap<specs::Entity, Entity>);
 /// sent; entries are pruned alongside [`SimMirror`] when an entity disappears.
 #[derive(Resource, Default, Debug)]
 pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
+
+/// Last-mirrored [`RegionKey`] per sim entity (EM-4.2d), dedup cache mirroring
+/// [`SimLoadoutCache`]'s own shape: `RegionKey` is `Copy`/cheap like the
+/// position/body comps, but re-inserting it every tick (even unchanged) would
+/// re-trigger a full replicon `VisibilityFilter` re-evaluation of this entity
+/// against every connected client on every tick, not just on an actual region
+/// crossing. Entries are pruned alongside [`SimMirror`]/[`SimLoadoutCache`]
+/// when an entity disappears.
+#[derive(Resource, Default, Debug)]
+pub struct SimRegionCache(pub HashMap<specs::Entity, RegionKey>);
 
 /// Advances the embedded sim by one tick using the schedule's `dt`, then
 /// drains the sim's frontend events and errors into `tracing`.
@@ -231,9 +302,88 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimMirror>();
+        // EM-4.5: DimensionRegistry + the full lifecycle state machine —
+        // every dimension-tagging consumer of this bridge needs it, so it's
+        // wired here rather than as an optional add-on plugin (unlike
+        // `SimTerrainStreamPlugin`/`SimEntityMirrorPlugin`, which really are
+        // optional pieces of the bridge). Guarded: `xindeler-server-app`'s
+        // `SimServerPlugin` already adds `DimensionsPlugin` explicitly and
+        // EARLY (before this plugin), so its own dimension-setup calls
+        // (`install_default_dimension`/`init_debug_state`) can run against
+        // an already-initialized `DimensionRegistry` — re-adding it here
+        // unconditionally would panic ("plugin was already added"). The
+        // listen-server client path (`xindeler-client::ListenServerPlugin`)
+        // does NOT pre-add it, so this guarded add is what actually
+        // registers it for that path.
+        if !app.is_plugin_added::<DimensionsPlugin>() {
+            app.add_plugins(DimensionsPlugin);
+        }
+        app.init_resource::<DefaultDimensionState>();
         // EM-3.11b: FixedUpdate, not Update — see `tick_sim`'s doc for why a
         // display-rate `Update` tick was the wrong home for this.
-        app.add_systems(FixedUpdate, tick_sim);
+        app.add_systems(FixedUpdate, (tick_sim, ensure_default_dimension).chain());
+    }
+}
+
+/// One-shot latch for wrapping [`DimensionId::DEFAULT`] around the sim's
+/// ALREADY-generated `Arc<World>`/`IndexOwned` (EM-4.5, spec §1.8: "a
+/// wrapping refactor of already-existing state, not a behavior change")
+/// once [`SimServer`] exists. Mirrors [`TerrainAnchorState`]'s "
+/// `SimBridgePlugin` doesn't boot the sim, so wait for it" latch pattern —
+/// see [`ensure_default_dimension`].
+#[derive(Resource, Default)]
+struct DefaultDimensionState {
+    wrapped: bool,
+}
+
+/// Wraps [`DimensionId::DEFAULT`] the first tick a [`SimServer`] exists; a
+/// no-op on every call before and after that (before: no sim yet; after:
+/// [`DefaultDimensionState::wrapped`] latch). Runs `.after(tick_sim)` so the
+/// sim has definitely finished constructing its world/index by the time this
+/// reads them (in practice they're ready the instant `Server::new` returns,
+/// well before the first tick, but chaining after `tick_sim` keeps the
+/// ordering guarantee explicit rather than relying on that timing detail).
+fn ensure_default_dimension(
+    sim: Option<NonSendMut<SimServer>>,
+    mut state: bevy::ecs::system::ResMut<DefaultDimensionState>,
+    mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
+    mut commands: Commands,
+) {
+    if state.wrapped {
+        return;
+    }
+    // `xindeler-server-app`'s `SimServerPlugin` calls its own
+    // `install_default_dimension` directly at `Plugin::build` time (before
+    // this system ever runs), wrapping `DimensionId::DEFAULT` into the
+    // registry synchronously — this system's own `state.wrapped` latch (a
+    // separate resource, private to this crate) has no way to observe that.
+    // Without this check, this system would retry+error EVERY tick forever
+    // in that shell (the registry already has DEFAULT, so the wrap below
+    // always fails `AlreadyExists`, and `state.wrapped` never flips because
+    // that only happens in the `Ok` arm). Checking the registry itself —
+    // the actual source of truth — instead of trusting a possibly-stale
+    // flag closes that gap for any caller, not just this one.
+    if registry.get(DimensionId::DEFAULT).is_some() {
+        state.wrapped = true;
+        return;
+    }
+    let Some(sim) = sim else { return };
+
+    // The actual "register + complete spinup" sequence is shared with
+    // `xindeler-server-app`'s own `install_default_dimension` (see
+    // `xindeler_dimensions::wrap_default_dimension`'s doc comment) — only
+    // the root-entity-spawning mechanism differs (`Commands` here, a system
+    // context, vs. `app.world_mut()` there, a `Plugin::build` context).
+    let root = commands.spawn(DimensionId::DEFAULT).id();
+    match xindeler_dimensions::wrap_default_dimension(&mut registry, root, &sim.server) {
+        Ok(()) => {
+            state.wrapped = true;
+            tracing::info!("dimension 0 (default) wrapped: Spinup -> Active");
+        },
+        Err(err) => {
+            tracing::error!(?err, "failed to wrap the default dimension");
+            commands.entity(root).despawn();
+        },
     }
 }
 
@@ -244,9 +394,12 @@ impl Plugin for SimBridgePlugin {
 /// Terrain view distance (in chunks) the server-side anchor keeps loaded.
 ///
 /// Small on purpose for the listen-server proof: a real world is huge and the
-/// naive broadcast has no interest management yet (EM-4.2d), so a wide anchor
-/// would stream thousands of chunks to a single local client. `MIN_VD` is the
-/// sim's own minimum, matching what a freshly-spawned player loads.
+/// TERRAIN broadcast still has no interest management (EM-4.2d only wired
+/// per-client ENTITY visibility scoping, via `RegionKey` — see
+/// [`stream_terrain_changes`]'s own doc comment for why chunk broadcast is a
+/// separate, still-open follow-up), so a wide anchor would stream thousands
+/// of chunks to a single local client. `MIN_VD` is the sim's own minimum,
+/// matching what a freshly-spawned player loads.
 pub const ANCHOR_VIEW_DISTANCE: u32 = server::MIN_VD;
 
 /// One-shot latch for the server-side presence anchor + broadcast state.
@@ -267,6 +420,15 @@ pub struct TerrainAnchorState {
     anchor_sent: bool,
 }
 
+impl TerrainAnchorState {
+    /// The world-centre anchor position (sim axes), once known. `None` before
+    /// [`ensure_terrain_anchor`] has computed it. EM-4.2d's
+    /// [`apply_default_viewpoint_for_new_clients`] reads this to give a newly
+    /// connected client a sane default [`xindeler_protocol::ClientViewpoint`].
+    #[must_use]
+    pub fn anchor_wpos(&self) -> Option<[f32; 3]> { self.anchor_wpos }
+}
+
 /// Registers [`TerrainAnchorState`] + the EM-3.6 terrain-stream systems. The
 /// systems run only while the App is acting as the terrain source — i.e. NOT a
 /// connected client (`ClientState::Disconnected`, which is true for the
@@ -284,11 +446,70 @@ impl Plugin for SimTerrainStreamPlugin {
         // `.after(tick_sim)` requires both to live in the same schedule.
         app.init_resource::<TerrainAnchorState>().add_systems(
             FixedUpdate,
-            (ensure_terrain_anchor, stream_terrain_changes)
+            (
+                ensure_terrain_anchor,
+                apply_default_viewpoint_for_new_clients,
+                stream_terrain_changes,
+            )
                 .chain()
                 .after(tick_sim)
                 .run_if(in_state(ClientState::Disconnected)),
         );
+    }
+}
+
+/// BL-82 EM-4.2d stopgap: grants every newly-connected replicon client
+/// (`ConnectedClient`, no `ClientViewpoint` yet) a DEFAULT viewpoint centered
+/// on the terrain anchor with a generous ([`ANCHOR_VIEW_DISTANCE`]) view
+/// distance, the moment a real anchor position is known.
+///
+/// ## Why this exists
+/// Since EM-4.2d wired `RegionKey`-based visibility scoping, EVERY mirrored
+/// entity now carries a `RegionKey`, and a connected client with NO
+/// `ClientVisibleRegions` sees NOTHING (see
+/// `xindeler_protocol::visibility::ClientVisibleRegions`'s own doc comment).
+/// `ClientViewpoint`'s doc comment already says nothing populates it
+/// automatically — EM-4.2c's login system is the natural REAL producer,
+/// keying a viewpoint off the connecting client's own player entity. But
+/// EM-4.2c has not landed yet, and without SOME stopgap, EVERY currently
+/// existing acceptance path that connects a plain client with no login at
+/// all (this crate's own `mirrors_sim_npc_to_replicon_client` test,
+/// `xindeler-server-app`'s `tests/replicon_quinnet_dual_stack.rs`, the
+/// `--listen-server`/net-client smoke paths) would silently regress to
+/// "the client sees zero entities forever" — a real, reviewer-caught
+/// regression risk (BL-82 EM-4.2d review), not a hypothetical one.
+///
+/// This system is the minimal, honest interim producer: a spectator-style
+/// default (world-centre position, `ANCHOR_VIEW_DISTANCE` — the SAME
+/// distance the terrain-anchor persister/embedded player already use),
+/// exactly mirroring the terrain anchor's own "no real player yet → fall
+/// back to a sane spectator default" posture ([`ensure_terrain_anchor`]).
+/// **It never touches a client that already has a `ClientViewpoint`** — once
+/// EM-4.2c inserts a real, player-position-derived one (or a test sets one
+/// directly, as `xindeler-server-app`'s own `tests/interest_management.rs`
+/// does), this system leaves it alone permanently for that client.
+fn apply_default_viewpoint_for_new_clients(
+    anchor: bevy::ecs::system::Res<TerrainAnchorState>,
+    clients: bevy::ecs::system::Query<
+        Entity,
+        (
+            bevy::ecs::query::With<bevy_replicon::prelude::ConnectedClient>,
+            bevy::ecs::query::Without<xindeler_protocol::ClientViewpoint>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    let Some(wpos) = anchor.anchor_wpos() else {
+        return;
+    };
+    for client in &clients {
+        commands
+            .entity(client)
+            .insert(xindeler_protocol::ClientViewpoint::new(
+                DimensionId::default(),
+                vek::Vec2::new(wpos[0], wpos[1]),
+                ANCHOR_VIEW_DISTANCE,
+            ));
     }
 }
 
@@ -375,8 +596,16 @@ fn ensure_terrain_anchor(
 /// - `removed_chunks` → [`RemoveChunk`].
 ///
 /// v1 broadcasts to ALL clients (`SendTargets::All`, which also re-emits
-/// locally for the listen server). TODO(EM-4.2d): per-client interest
-/// management — only send a chunk to clients whose presence covers it.
+/// locally for the listen server). TODO (still open past EM-4.2d): per-client
+/// terrain interest management — only send a chunk to clients whose presence
+/// covers it. EM-4.2d (BL-82 T47.6) scoped ENTITY visibility via a
+/// `bevy_replicon` `VisibilityFilter` (`RegionKey`/`ClientVisibleRegions`,
+/// `xindeler_protocol::visibility`); `CompressedChunk`/`RemoveChunk` are
+/// one-shot MESSAGES, not replicated components, so that same
+/// entity-visibility mechanism does not apply to them — scoping the terrain
+/// broadcast needs its own (structurally different) per-client filter and
+/// remains a known, tracked gap, not silently fixed by this comment's mere
+/// existence.
 ///
 /// The changes themselves were snapshotted (keys only) inside [`tick_sim`],
 /// BEFORE the sim's `cleanup()` cleared its `TerrainChanges` resource; here we
@@ -506,12 +735,15 @@ fn send_lod_alt_once(
         }
     }
 
-    // TODO(EM-4.2d): `targets: All` + a global `sent` latch only reaches
-    // clients connected AT the single broadcast — a client joining after it
-    // never receives the far-terrain heightmap (same accepted limitation as
-    // `TerrainAnchor` above). Fine for v1's one-embedded-player world; needs
+    // TODO (still open past EM-4.2d): `targets: All` + a global `sent` latch
+    // only reaches clients connected AT the single broadcast — a client
+    // joining after it never receives the far-terrain heightmap (same
+    // accepted limitation as `TerrainAnchor` above). This is a late-JOIN
+    // replay gap, not region-scoping — EM-4.2d (T47.6) only wired per-client
+    // ENTITY visibility (see `stream_terrain_changes`'s doc comment); it does
+    // not touch this one-shot broadcast's join-timing behavior at all. Needs
     // a per-connection "have I sent this yet" once real multi-client join
-    // timing matters (interest management lands in EM-4.2d anyway).
+    // timing matters.
     writer.write(ToClients {
         targets: SendTargets::All,
         message: NetLodAlt::encode([grid_w, grid_h], stride, &heights),
@@ -580,15 +812,36 @@ impl Plugin for SimEntityMirrorPlugin {
         // EM-3.11o: also `.after(tick_player)` — see this plugin's doc for
         // why an explicit constraint (not just registration order) is
         // required now that `spawn_test_npcs` reads `EmbeddedPlayer`.
+        //
+        // EM-4.2f: `init_resource` only INSERTS if missing (never overwrites),
+        // so if `xindeler-oracle-host`'s `AiGatewayPlugin` already inserted a
+        // real `AiExecutionMode` (in either add-order), this is a no-op; if
+        // this crate runs standalone (e.g. in tests, or before that plugin
+        // exists in an App), it defaults to `Offline` — the safe, zero-AI
+        // posture.
+        //
+        // EM-4.5 review follow-up: `.after(ensure_default_dimension)` is now
+        // explicit (not just documented) — `mirror_sim_entities` reads/
+        // mutates the SAME `DimensionRegistry` `ensure_default_dimension`
+        // (registered by `SimBridgePlugin`, added before this plugin) writes
+        // to. Both were already only `.after(tick_sim)`, which doesn't order
+        // them relative to EACH OTHER; making the edge structural (rather
+        // than relying on the benign one-tick self-healing race the mirror's
+        // `registry` param doc comment used to describe) removes a real,
+        // if harmless, conflicting-resource-access ambiguity.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
+            .init_resource::<SimRegionCache>()
             .init_resource::<TestNpcState>()
+            .init_resource::<AiExecutionMode>()
+            .init_resource::<AuroraOverlay>()
             .add_systems(
                 FixedUpdate,
-                (spawn_test_npcs, mirror_sim_entities)
+                (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
                     .chain()
                     .after(tick_sim)
                     .after(tick_player)
+                    .after(ensure_default_dimension)
                     .run_if(in_state(ClientState::Disconnected)),
             );
     }
@@ -1078,6 +1331,17 @@ fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
     character_state.is_some_and(comp::CharacterState::is_glide_wielded)
 }
 
+/// EM-4.5: whether [`mirror_sim_entities`] may create a NEW mirror entity
+/// for `dimension` — pulled out as a pure function (rather than inlined)
+/// specifically so this "interaction with the mirror/visibility systems"
+/// spec §1.8 asks `Draining` to have is unit-testable without booting a real
+/// sim (see the `tests` module below). `None` (dimension not registered
+/// yet — see the caller's doc comment for when that happens) is treated as
+/// "not accepting yet", same as a `Spinup`/`Draining`/`Teardown` dimension.
+fn mirror_admits_new_entity(dimension: Option<&DimensionState>) -> bool {
+    dimension.is_some_and(DimensionState::accepts_new_entrants)
+}
+
 /// Reads the sim's client-visible entities off the specs storages and UPSERTs
 /// one `Replicated` Bevy entity per sim entity carrying the replicated net
 /// components. Despawns mirrors whose sim entity has disappeared.
@@ -1088,12 +1352,22 @@ fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
 /// client-visible iff it has a `Pos` AND (has no `Presence` OR its
 /// `Presence::kind.sync_me()`). We additionally require a `Body` (nothing to
 /// display without one). `Ori`/`Vel`/`Health` are optional (`.maybe()`).
-/// Per-client interest management (region/distance) is EM-4.2d; v1 broadcasts.
+/// This predicate decides whether an entity is mirrored AT ALL; per-client
+/// interest management on TOP of that (which of the mirrored entities a given
+/// client can see) is EM-4.2d's `RegionKey`, written below and consumed by
+/// `xindeler-server-app`'s `RegionKey`-keyed `VisibilityFilter`.
 ///
 /// ## Read-only into the sim
 /// Only `read_storage` + `entities` — never writes into specs (isolation law
 /// rule 4). The write side is entirely on the Bevy world (spawn/insert/despawn
 /// of the mirror entities).
+///
+/// ## EM-4.5: dimension-gated entity creation
+/// [`mirror_admits_new_entity`] gates the `None => spawn` branch below: a
+/// dimension that isn't `Active` (not yet wrapped, `Draining`, or
+/// `Teardown`) never gets a brand-new mirror entity, while entities ALREADY
+/// mirrored keep updating regardless of lifecycle — "existing players may
+/// finish/leave normally" during `Draining` (spec §1.8).
 fn mirror_sim_entities(
     sim: Option<NonSendMut<SimServer>>,
     // EM-3.7b: the embedded local player, if any. Used to tag ITS mirror entity
@@ -1101,6 +1375,32 @@ fn mirror_sim_entities(
     player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut mirror: bevy::ecs::system::ResMut<SimMirror>,
     mut loadout_cache: bevy::ecs::system::ResMut<SimLoadoutCache>,
+    // EM-4.5: the dimension registry — `DimensionsPlugin` (added by
+    // `SimBridgePlugin::build`, which runs before this plugin per its own
+    // "Add AFTER SimBridgePlugin" doc) always inserts it, so this is a plain
+    // resource, not optional. `ResMut` (not `Res`): besides (a) tagging every
+    // NEWLY-mirrored entity with `DimensionId`/`DimensionRoot` — dimension
+    // 0's root entity, wrapped by `ensure_default_dimension` — and (b)
+    // gating NEW mirror creation on `DimensionLifecycle::
+    // accepts_new_entrants`, this system ALSO (c) keeps `DimensionState`'s
+    // occupant bookkeeping in sync with what's actually mirrored
+    // (`try_add_occupant`/`remove_occupant`) — see the should-fix note this
+    // addresses: without it, `begin_draining(DimensionId::DEFAULT)` would
+    // ALWAYS see zero occupants (nothing else in this codebase calls
+    // `try_add_occupant`) and skip straight to `Teardown` even while real
+    // players/NPCs are actively mirrored. `SimEntityMirrorPlugin` registers
+    // this system `.after(ensure_default_dimension)` (both are `.after(
+    // tick_sim)`, which alone wouldn't order them relative to EACH OTHER —
+    // review follow-up: made structural, not just documented), so dimension
+    // 0 is ALWAYS already registered by the time this runs with a live
+    // `SimServer` — `registry.get(DimensionId::DEFAULT)` returning `None`
+    // below is unreachable in practice, just handled defensively.
+    mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
+    // EM-4.2d: per-entity region-key cache, mirroring `SimLoadoutCache`'s
+    // dedup shape — only re-inserts `RegionKey` when an entity's region
+    // actually changed, since replicon's `VisibilityFilter` re-evaluates
+    // every connected client on every insert/replace.
+    mut region_cache: bevy::ecs::system::ResMut<SimRegionCache>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
@@ -1125,6 +1425,13 @@ fn mirror_sim_entities(
     // EM-3.8e: read whether each entity is currently gliding, for the
     // NetLoadout::gliding figure-visibility flag.
     let character_states = ecs.read_storage::<comp::CharacterState>();
+    // EM-4.2f: read the sim's stable identity so the mirror can carry it onto
+    // the wire as `NetUid`. `.maybe()` (not required): every sim entity is
+    // expected to have one ("for now we expect all entities have a Uid
+    // component" — `server/src/state_ext.rs`), but this stays defensive so a
+    // future entity that somehow lacks one still mirrors its other fields
+    // rather than being silently dropped (additive-only requirement).
+    let uids = ecs.read_storage::<Uid>();
 
     // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
     // fresh every tick over all visible entities, and net_health below issues a
@@ -1132,6 +1439,14 @@ fn mirror_sim_entities(
     // it, harmless). Both are fine at test-NPC scale; when interest management
     // reshapes this loop, hoist the buffers into a reused resource and guard the
     // removal. Reviewer minors 1+2, deliberately deferred (non-blocking).
+    //
+    // EM-4.2d update: interest management landed WITHOUT reshaping this loop
+    // (the TODO above still stands at test-NPC scale) — `RegionKey` is simply
+    // one more per-entity field computed alongside the others below, deduped
+    // through `region_cache` exactly like `NetLoadout`'s own dedup, so it does
+    // NOT re-insert (and thus does not force a replicon visibility
+    // re-evaluation) on every tick, only when an entity actually crosses into
+    // a new region.
     // Snapshot of which sim entities are visible THIS tick + their net comps.
     let mut seen: Vec<specs::Entity> = Vec::new();
     // Collect (sim_entity, components) first so we can borrow-check-cleanly
@@ -1145,6 +1460,8 @@ fn mirror_sim_entities(
         NetBody,
         Option<NetHealth>,
         Option<NetLoadout>,
+        Option<NetUid>,
+        RegionKey,
     )> = Vec::new();
 
     // `maybe()` makes these MaybeJoin members, so this is a `LendJoin` (lending
@@ -1160,10 +1477,21 @@ fn mirror_sim_entities(
         presences.maybe(),
         inventories.maybe(),
         character_states.maybe(),
+        uids.maybe(),
     )
         .lend_join();
-    while let Some((entity, pos, body, ori, vel, health, presence, inventory, character_state)) =
-        it.next()
+    while let Some((
+        entity,
+        pos,
+        body,
+        ori,
+        vel,
+        health,
+        presence,
+        inventory,
+        character_state,
+        uid,
+    )) = it.next()
     {
         // Region-map visibility predicate (see doc comment).
         if !presence.is_none_or(|p| p.kind.sync_me()) {
@@ -1205,6 +1533,19 @@ fn mirror_sim_entities(
                 |inv| net_loadout_from_inventory(inv, gliding),
             )
         });
+        // EM-4.2f: the entity's stable sim identity, verbatim (`Uid` wraps a
+        // `NonZeroU64`; `NetUid` carries the same value as a plain `u64` so
+        // the wire type stays serde-simple).
+        let net_uid = uid.map(|u| NetUid(u.0.get()));
+        // EM-4.2d: which region (single dimension, `DimensionId::default()` —
+        // see `xindeler_protocol::visibility`'s module doc comment for the
+        // EM-4.5 extension point) this entity currently occupies, computed
+        // from the RAW sim position (`pos.0`, sim axes) — NOT `net_pos`
+        // (already Bevy-axis-converted above) — matching exactly what
+        // `common::region::RegionMap`/`server/src/sys/subscription.rs` key
+        // entities by.
+        let region_key =
+            region_key_for_pos(DimensionId::default(), vek::Vec2::new(pos.0.x, pos.0.y));
         updates.push((
             entity,
             net_pos,
@@ -1213,6 +1554,8 @@ fn mirror_sim_entities(
             net_body,
             net_health,
             net_loadout,
+            net_uid,
+            region_key,
         ));
     }
     drop(it);
@@ -1227,9 +1570,30 @@ fn mirror_sim_entities(
         presences,
         inventories,
         character_states,
+        uids,
     ));
 
-    for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout) in updates {
+    // EM-4.5: whether dimension 0 currently accepts a NEW mirror entity, and
+    // its root entity — both computed as OWNED values (not a held `&
+    // DimensionState` borrow) so the loop below can still call the
+    // registry's `&mut self` occupant methods (`try_add_occupant`/
+    // `remove_occupant`) without a borrow-checker conflict. See
+    // `mirror_admits_new_entity`'s doc comment for the gating rule.
+    let dimension0_accepts_new = mirror_admits_new_entity(registry.get(DimensionId::DEFAULT));
+    let dimension0_root = registry.get(DimensionId::DEFAULT).map(DimensionState::root);
+
+    for (
+        sim_entity,
+        net_pos,
+        net_ori,
+        net_vel,
+        net_body,
+        net_health,
+        net_loadout,
+        net_uid,
+        region_key,
+    ) in updates
+    {
         let is_local_player = player_sim_entity == Some(sim_entity);
         // EM-3.8d: (re-)insert the loadout ONLY when it changed since we last
         // mirrored it (it is a few Strings — re-inserting every tick would
@@ -1237,6 +1601,13 @@ fn mirror_sim_entities(
         let loadout_changed = net_loadout
             .as_ref()
             .is_some_and(|l| loadout_cache.0.get(&sim_entity) != Some(l));
+        // EM-4.2d: same dedup shape as the loadout above — re-inserting
+        // `RegionKey` every tick would re-trigger replicon's
+        // `VisibilityFilter` re-evaluation for every connected client on
+        // every tick, for every mirrored entity, regardless of whether it
+        // actually crossed a region boundary. `changed` is also true on
+        // first sight (an absent cache entry never equals `Some(region_key)`).
+        let region_changed = region_cache.0.get(&sim_entity) != Some(&region_key);
         match mirror.0.get(&sim_entity).copied() {
             Some(bevy_entity) => {
                 // UPSERT: overwrite the net comps every tick (server-authoritative
@@ -1261,16 +1632,49 @@ fn mirror_sim_entities(
                 } else {
                     ec.remove::<NetLocalPlayer>();
                 }
+                // EM-4.2f: `NetUid` is `Copy`/cheap like the other UPSERTed
+                // comps — re-insert every tick when present; leave it alone
+                // (never remove) if this entity somehow has no `Uid` this
+                // tick, since a stable identity should not flicker away.
+                if let Some(u) = net_uid {
+                    ec.insert(u);
+                }
+                // EM-4.2d: only re-insert (and thus re-trigger visibility
+                // re-evaluation) when the region actually changed.
+                if region_changed {
+                    ec.insert(region_key);
+                }
             },
             None => {
-                // First sighting: spawn the replicated mirror entity.
+                // EM-4.5: don't create a NEW mirror for a dimension that
+                // isn't accepting new entrants (spec §1.8's acceptance bar
+                // extended to the mirror: "no new player can join once
+                // Draining" applies just as much to a wandering NPC as to a
+                // human player). Existing mirrors (the `Some` arm above)
+                // keep updating regardless — "existing players may finish/
+                // leave normally" during `Draining`.
+                if !dimension0_accepts_new {
+                    continue;
+                }
+                // First sighting: spawn the replicated mirror entity, tagged
+                // with the default dimension's identity (EM-4.5: every
+                // entity belonging to an instance carries `DimensionId` +
+                // the `DimensionRoot` relationship — `dimension0_root` is
+                // `Some` here because `dimension0_accepts_new` was just
+                // checked true, which only holds for a registered
+                // dimension).
+                let root = dimension0_root
+                    .expect("dimension0_accepts_new is true only when dimension0_root is Some");
                 let mut ec = commands.spawn((
                     Replicated,
                     SimEntity(sim_entity),
+                    DimensionId::DEFAULT,
+                    DimensionRoot(root),
                     net_pos,
                     net_ori,
                     net_vel,
                     net_body,
+                    region_key,
                 ));
                 if let Some(h) = net_health {
                     ec.insert(h);
@@ -1281,13 +1685,33 @@ fn mirror_sim_entities(
                 if is_local_player {
                     ec.insert(NetLocalPlayer);
                 }
-                mirror.0.insert(sim_entity, ec.id());
+                if let Some(u) = net_uid {
+                    ec.insert(u);
+                }
+                let bevy_entity = ec.id();
+                mirror.0.insert(sim_entity, bevy_entity);
+                // EM-4.5: this mirror now counts as an occupant of dimension
+                // 0 (see the `registry` param's doc comment for why this
+                // matters: without it, `begin_draining` would always see
+                // zero occupants and skip straight to `Teardown`). Can only
+                // fail if the dimension stopped accepting entrants in the
+                // instant between the check above and here — impossible
+                // within one system's single-threaded body, but handled
+                // rather than `.unwrap()`ed for robustness against a future
+                // refactor that makes this async.
+                if let Err(err) = registry.try_add_occupant(DimensionId::DEFAULT, bevy_entity) {
+                    tracing::warn!(
+                        ?err,
+                        "failed to register new mirror as a dimension-0 occupant"
+                    );
+                }
             },
         }
-        // Refresh the dedup cache for this entity's loadout.
+        // Refresh the dedup cache for this entity's loadout / region.
         if let Some(l) = net_loadout {
             loadout_cache.0.insert(sim_entity, l);
         }
+        region_cache.0.insert(sim_entity, region_key);
     }
 
     // Despawn mirrors whose sim entity is gone / no longer visible this tick.
@@ -1301,17 +1725,94 @@ fn mirror_sim_entities(
     for sim_entity in stale {
         if let Some(bevy_entity) = mirror.0.remove(&sim_entity) {
             commands.entity(bevy_entity).despawn();
+            // EM-4.5: this mirror is leaving dimension 0 — the exact
+            // "existing players may finish/leave normally" exit condition
+            // that drives `Draining -> Teardown` (see `remove_occupant`'s
+            // doc comment). A no-op `Ok(false)` if dimension 0 isn't
+            // `Draining` (the common case) or the entity wasn't tracked as
+            // an occupant (e.g. it despawned before ever completing
+            // `try_add_occupant`, an edge case handled gracefully there).
+            let _ = registry.remove_occupant(DimensionId::DEFAULT, bevy_entity);
         }
         // Drop the cached loadout too, so a re-used specs index doesn't inherit
         // a stale entry (EM-3.8d).
         loadout_cache.0.remove(&sim_entity);
+        // EM-4.2d: same reasoning for the region-key dedup cache.
+        region_cache.0.remove(&sim_entity);
     }
+}
+
+// --- EM-4.2f: AURORA-readiness overlay -------------------------------------
+
+/// Recomputes `overlay` for the current tick's set of mirrored NPC
+/// [`NetUid`]s, given the current [`AiExecutionMode`]. Pure logic (no ECS
+/// types) so it is unit-testable without booting Bevy or the sim.
+///
+/// ## The invariant this function exists to enforce (spec §1.5)
+/// **`Offline` means the map is empty, and an empty map means the NPC
+/// behaves exactly as today's default `server-agent` AI — this is not a
+/// degraded mode, it is the current game.** Outside `Offline`, entries exist
+/// but carry only `AuroraNpcState::default` neutral placeholders until
+/// BL-83 writes real data:
+/// - `AiExecutionMode::Offline` ⇒ `overlay` is cleared unconditionally,
+///   regardless of what was in it before (e.g. a mode flip back to `Offline`
+///   mid-session must drop any placeholder entries).
+/// - `AiExecutionMode::LocalOnly | AiExecutionMode::Full` ⇒ every uid in
+///   `live_npc_uids` gets an entry if it doesn't already have one — an EXISTING
+///   entry is left untouched (`HashMap::entry(..).or_default()`), so once BL-83
+///   starts writing real content into an entry, this function never stomps it
+///   back to neutral on a later tick. Entries whose uid is no longer live (NPC
+///   despawned/left view) are pruned, so the map never grows unbounded and
+///   never describes an NPC that no longer exists.
+///
+/// This function computes NOTHING about what an NPC is doing — it only
+/// decides WHETHER an entry exists and, for a brand-new entry, that it
+/// starts at the documented neutral default. No position/stats/behavior
+/// history is read here or anywhere in this task.
+fn recompute_aurora_overlay(
+    mode: AiExecutionMode,
+    overlay: &mut AuroraOverlay,
+    live_npc_uids: impl Iterator<Item = u64>,
+) {
+    if mode == AiExecutionMode::Offline {
+        overlay.0.clear();
+        return;
+    }
+
+    let live: std::collections::HashSet<u64> = live_npc_uids.collect();
+    overlay.0.retain(|uid, _| live.contains(uid));
+    for uid in live {
+        overlay.0.entry(uid).or_default();
+    }
+}
+
+/// Bevy-system wrapper over [`recompute_aurora_overlay`]: the "NPCs" are every
+/// mirrored entity carrying [`NetUid`] that is NOT [`NetLocalPlayer`].
+///
+/// v1 caveat: today the ONLY mirrored non-NPC is the one embedded local
+/// player (`mirror_sim_entities` tags exactly that one sim entity with
+/// `NetLocalPlayer`), so this predicate happens to be correct for the
+/// current single-embedded-player listen-server architecture — but it is
+/// NOT automatically correct for a future remote/second player: any other
+/// player-controlled mirrored entity would carry `NetUid` and no
+/// `NetLocalPlayer` tag, and would be silently classified as an NPC here.
+/// A future multi-player mirror should add a positive "this is a
+/// player" marker (rather than relying on the ABSENCE of
+/// `NetLocalPlayer`) before that scenario becomes real.
+fn tick_aurora_overlay(
+    mode: Res<AiExecutionMode>,
+    mut overlay: bevy::ecs::system::ResMut<AuroraOverlay>,
+    npcs: bevy::ecs::system::Query<&NetUid, bevy::ecs::query::Without<NetLocalPlayer>>,
+) {
+    recompute_aurora_overlay(*mode, &mut overlay, npcs.iter().map(|uid| uid.0));
 }
 
 /// Boots a throwaway singleplayer-style server rooted at `data_dir` for
 /// tests/dev shells: unused local TCP port, auth disabled, default world
 /// (needs `VELOREN_ASSETS`/`XINDELER_ASSETS` + the LFS map blobs), SQLite under
-/// `<data_dir>/saves`.
+/// `<data_dir>/saves`. Same fixed 2-worker runtime this function has always
+/// used (small, dev/test-scale; unaffected by [`boot_with_settings`]'s
+/// EM-4.2b generalization below — see that function's doc comment).
 pub fn boot_test_server(data_dir: &Path) -> Result<SimServer, server::Error> {
     let settings = Settings::singleplayer(data_dir);
     let editable_settings = EditableSettings::singleplayer(data_dir);
@@ -1319,13 +1820,59 @@ pub fn boot_test_server(data_dir: &Path) -> Result<SimServer, server::Error> {
         db_dir: data_dir.join("saves"),
         sql_log_mode: SqlLogMode::Disabled,
     };
-    // Small multi-thread runtime, same shape as server-cli's (Server::new
-    // requires a runtime it can block on and spawn network tasks onto).
+    boot_with_settings(
+        settings,
+        editable_settings,
+        database_settings,
+        data_dir,
+        2,
+        "tokio-sim-bridge",
+    )
+}
+
+/// Boots a [`SimServer`] from ALREADY-LOADED settings (BL-82 EM-4.2b).
+///
+/// Extracted from [`boot_test_server`] so a shell that needs a DIFFERENT
+/// settings source — e.g. `xindeler-server-app`'s dedicated-server shell,
+/// which reads the real production `<userdata>/server/server_config/
+/// settings.ron` via `server::Settings::load` rather than the singleplayer
+/// shortcut — can boot the SAME `SimServer` type (with the `pending_terrain`
+/// snapshot [`SimTerrainStreamPlugin`] depends on) instead of maintaining a
+/// second, divergent copy of this boot recipe. `boot_test_server` is now a
+/// thin wrapper over this for the singleplayer-settings case, passing its own
+/// unchanged fixed 2-worker sizing.
+///
+/// `worker_threads`/`thread_name_prefix` are caller-controlled (an
+/// EM-4.2b-review fix): the FIRST version of this extraction hardcoded the
+/// singleplayer/dev-test path's small fixed `2`-worker sizing for every
+/// caller, silently regressing `xindeler-server-app`'s real dedicated-server
+/// runtime, which used to scale with host core count
+/// (`(num_cpus::get() / 4).max(MIN_RECOMMENDED_TOKIO_THREADS)`, the same
+/// formula `server-cli` sizes its own production runtime with). That shell
+/// now passes its own formula back through (see its `sim.rs`) instead of
+/// silently inheriting the dev-scale default — this function no longer picks
+/// a size on any caller's behalf.
+pub fn boot_with_settings(
+    settings: Settings,
+    editable_settings: EditableSettings,
+    database_settings: DatabaseSettings,
+    data_dir: &Path,
+    worker_threads: usize,
+    thread_name_prefix: &'static str,
+) -> Result<SimServer, server::Error> {
+    // `Server::new` requires a runtime it can block on and spawn
+    // networking/persistence tasks onto; sizing and thread naming are the
+    // CALLER's call (see doc comment above) rather than a one-size-fits-all
+    // default baked in here.
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(2)
-            .thread_name("tokio-sim-bridge")
+            .worker_threads(worker_threads)
+            .thread_name_fn(move || {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                format!("{thread_name_prefix}-{id}")
+            })
             .build()
             .expect("failed to build tokio runtime for the sim"),
     );
@@ -1362,7 +1909,7 @@ mod tests {
         time::{Fixed, TimeUpdateStrategy},
     };
     use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
-    use xindeler_protocol::XindelerProtocolPlugin;
+    use xindeler_protocol::{AuroraNpcState, XindelerProtocolPlugin};
 
     use super::*;
 
@@ -1414,6 +1961,57 @@ mod tests {
         assert_eq!(stride, 1);
         assert_eq!(grid_w, 1);
         assert_eq!(grid_h, 64);
+    }
+
+    /// EM-4.5's "interaction with the mirror/visibility systems" acceptance
+    /// bar, exercised as a pure-function unit test: a dimension not yet
+    /// registered, or `Spinup`/`Draining`/`Teardown`, never admits a NEW
+    /// mirror entity; only `Active` does. Needs real assets
+    /// (`DimensionRegistry::insert_spinning_up`/`complete_spinup` go through
+    /// `World::empty()`, which loads the color/feature manifests) — same
+    /// convention as this crate's other asset-dependent tests, but fast
+    /// enough (no real world generation) to not need `#[ignore]`.
+    #[test]
+    fn mirror_admits_new_entity_only_for_active_dimension() {
+        use xindeler_dimensions::{DimensionLifecycle, DimensionRegistry};
+
+        assert!(
+            !mirror_admits_new_entity(None),
+            "an unregistered dimension (not wrapped yet) must not admit new entrants"
+        );
+
+        let mut registry = DimensionRegistry::default();
+        let root = bevy::ecs::entity::Entity::from_raw_u32(1).unwrap();
+        registry
+            .insert_spinning_up(DimensionId::DEFAULT, root, 0)
+            .unwrap();
+        assert_eq!(
+            registry.lifecycle(DimensionId::DEFAULT),
+            Some(DimensionLifecycle::Spinup)
+        );
+        assert!(
+            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "Spinup must not admit new entrants"
+        );
+
+        let (world, index) = server::World::empty();
+        registry
+            .complete_spinup(DimensionId::DEFAULT, std::sync::Arc::new(world), index)
+            .unwrap();
+        assert!(
+            mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "Active must admit new entrants"
+        );
+
+        registry.begin_draining(DimensionId::DEFAULT).unwrap();
+        // No occupants were ever added in this test, so this dimension went
+        // straight Draining -> Teardown (see `DimensionRegistry::
+        // begin_draining`'s doc comment) — either way, neither state admits
+        // a new entrant, which is exactly what this test is proving.
+        assert!(
+            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "neither Draining nor Teardown may admit a new entrant"
+        );
     }
 
     /// EM-1.5 acceptance: boot a real test-world `Server` and tick it 100×
@@ -1665,6 +2263,156 @@ mod tests {
         ))));
     }
 
+    // --- EM-4.2f: AURORA-readiness overlay (no assets, no sim) -------------
+
+    /// The core Offline-fallback invariant (spec §1.5): with
+    /// `AiExecutionMode::Offline`, `recompute_aurora_overlay` clears the map
+    /// unconditionally, even if live NPCs are present — Offline never gets
+    /// entries.
+    #[test]
+    fn aurora_overlay_stays_empty_while_offline() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(
+            AiExecutionMode::Offline,
+            &mut overlay,
+            [1, 2, 3].into_iter(),
+        );
+        assert!(
+            overlay.0.is_empty(),
+            "Offline must never populate AuroraOverlay"
+        );
+    }
+
+    /// Outside Offline, every live NPC uid gets exactly one entry, and that
+    /// entry equals the documented neutral placeholder byte-for-byte (spec
+    /// §1.5): empty memory, Idle-only intention at weight 1.0, neutral mood
+    /// at zero intensity.
+    #[test]
+    fn aurora_overlay_populates_neutral_defaults_outside_offline() {
+        for mode in [AiExecutionMode::LocalOnly, AiExecutionMode::Full] {
+            let mut overlay = AuroraOverlay::default();
+            recompute_aurora_overlay(mode, &mut overlay, [10, 20].into_iter());
+
+            assert_eq!(
+                overlay.0.len(),
+                2,
+                "one entry per mirrored NPC under {mode:?}"
+            );
+            for uid in [10, 20] {
+                let state = overlay
+                    .0
+                    .get(&uid)
+                    .unwrap_or_else(|| panic!("expected an entry for NPC {uid} under {mode:?}"));
+                assert_eq!(state, &AuroraNpcState::default());
+                assert!(state.short_term_memory.is_empty());
+                assert_eq!(state.intention, vec![(
+                    xindeler_protocol::IntentKind::Idle,
+                    1.0
+                )]);
+                assert_eq!(
+                    state.emotional_state.mood,
+                    xindeler_protocol::MoodKind::Neutral
+                );
+                assert_eq!(state.emotional_state.intensity, 0.0);
+            }
+        }
+    }
+
+    /// An entry that already carries non-default content (standing in for a
+    /// future BL-83 write) must survive a later recompute tick untouched —
+    /// this function only decides existence, never overwrites (spec §1.5:
+    /// "not a computation", never stomps real data back to neutral).
+    #[test]
+    fn aurora_overlay_never_overwrites_an_existing_entry() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+
+        // Simulate a future BL-83 write.
+        let mut seeded = AuroraNpcState::default();
+        seeded
+            .short_term_memory
+            .push("something happened".to_owned());
+        overlay.0.insert(7, seeded.clone());
+
+        // Recompute again with the SAME live set — must not reset entry 7.
+        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+        assert_eq!(overlay.0.get(&7), Some(&seeded));
+    }
+
+    /// An NPC that stops being live (despawned/left view) has its overlay
+    /// entry pruned — the map must never describe an NPC that no longer
+    /// exists.
+    #[test]
+    fn aurora_overlay_prunes_npcs_no_longer_live() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        assert_eq!(overlay.0.len(), 2);
+
+        // NPC 2 is gone this tick.
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1].into_iter());
+        assert_eq!(overlay.0.len(), 1);
+        assert!(overlay.0.contains_key(&1));
+        assert!(!overlay.0.contains_key(&2));
+    }
+
+    /// Toggling the mode back to Offline mid-session clears any placeholder
+    /// (or seeded) entries — Offline always means zero entries, regardless of
+    /// prior state.
+    #[test]
+    fn aurora_overlay_clears_on_toggle_back_to_offline() {
+        let mut overlay = AuroraOverlay::default();
+        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        assert_eq!(overlay.0.len(), 2);
+
+        recompute_aurora_overlay(AiExecutionMode::Offline, &mut overlay, [1, 2].into_iter());
+        assert!(overlay.0.is_empty());
+    }
+
+    /// System-level wiring check (no real sim needed): [`tick_aurora_overlay`]
+    /// reads `NetUid`-carrying Bevy entities directly, excludes the one
+    /// tagged `NetLocalPlayer`, and reacts live to `AiExecutionMode` changing
+    /// resource value between ticks — proving the acceptance bar ("toggling
+    /// AiExecutionMode asserts AuroraOverlay's population state") end-to-end
+    /// through the real system, not just the pure function.
+    #[test]
+    fn tick_aurora_overlay_system_respects_mode_and_local_player_exclusion() {
+        let mut app = App::new();
+        app.insert_resource(AiExecutionMode::Offline)
+            .init_resource::<AuroraOverlay>()
+            .add_systems(Update, tick_aurora_overlay);
+
+        app.world_mut().spawn(NetUid(100));
+        app.world_mut().spawn((NetUid(200), NetLocalPlayer));
+
+        app.update();
+        assert!(
+            app.world().resource::<AuroraOverlay>().0.is_empty(),
+            "Offline must not populate the overlay even with mirrored entities present"
+        );
+
+        *app.world_mut().resource_mut::<AiExecutionMode>() = AiExecutionMode::LocalOnly;
+        app.update();
+        let overlay = app.world().resource::<AuroraOverlay>();
+        assert_eq!(
+            overlay.0.len(),
+            1,
+            "only the non-NetLocalPlayer NetUid entity should get an entry"
+        );
+        assert!(overlay.0.contains_key(&100));
+        assert!(
+            !overlay.0.contains_key(&200),
+            "the local player must never get an AuroraNpcState entry"
+        );
+        assert_eq!(overlay.0.get(&100), Some(&AuroraNpcState::default()));
+
+        *app.world_mut().resource_mut::<AiExecutionMode>() = AiExecutionMode::Offline;
+        app.update();
+        assert!(
+            app.world().resource::<AuroraOverlay>().0.is_empty(),
+            "toggling back to Offline must clear the overlay"
+        );
+    }
+
     /// The sim→Bevy position rotation matches the voxel converter's
     /// `(x, y, z) → (x, z, −y)` (no assets).
     #[test]
@@ -1694,6 +2442,25 @@ mod tests {
         assert!(
             rotated.y.abs() < 1e-5,
             "a sim yaw must map to a Bevy yaw (stays horizontal), got {rotated:?}"
+        );
+    }
+
+    /// EM-4.2d drift guard: `xindeler_protocol::interest`'s hand-duplicated
+    /// `CHUNK_FUZZ` (kept out of that crate's public API, exposed only via
+    /// `chunk_fuzz()`, per its own doc comment's rationale for NOT depending
+    /// on `server`) must stay equal to the real
+    /// `server::presence::CHUNK_FUZZ` the legacy
+    /// `server/src/sys/subscription.rs` trigger actually uses. This crate is
+    /// the natural home for the guard: it already depends on both `server`
+    /// and `xindeler-protocol` (unlike either of those, which deliberately do
+    /// not depend on each other for this one constant). No assets needed.
+    #[test]
+    fn chunk_fuzz_matches_the_legacy_subscription_constant() {
+        assert_eq!(
+            xindeler_protocol::chunk_fuzz(),
+            server::presence::CHUNK_FUZZ,
+            "xindeler_protocol::interest's duplicated CHUNK_FUZZ has drifted from \
+             server::presence::CHUNK_FUZZ — update the duplicate to match"
         );
     }
 
@@ -1780,7 +2547,7 @@ mod tests {
                 break;
             }
         }
-        {
+        let centre = {
             let sim = server_app.world().non_send::<SimServer>();
             let size = sim.server.world().sim().get_size();
             let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
@@ -1792,9 +2559,43 @@ mod tests {
                 .unwrap_or(0.0);
             sim.spawn_wandering_npc(vek::Vec3::new(centre.x, centre.y, alt + 3.0), 0);
             eprintln!("spawned NPC at sim centre {centre:?} alt {alt}");
-        }
+            centre
+        };
 
         server_app.connect_client(&mut client_app);
+
+        // EM-4.2d: `mirror_sim_entities` now writes a `RegionKey` onto every
+        // mirrored entity (including this test's wandering NPC), and
+        // replicon's `RegionKey`/`ClientVisibleRegions` visibility filter
+        // defaults an entity to HIDDEN for any client with no matching
+        // `ClientVisibleRegions` — see `xindeler_protocol::visibility`'s doc
+        // comment. This test predates login/interest management and only
+        // wants to prove the mirror itself replicates a live NPC, so it
+        // manually grants the test client a generous region window around
+        // the NPC's spawn point (mirrors what EM-4.2c's future login system
+        // would eventually compute from a real player's own position).
+        {
+            use bevy_replicon::prelude::ConnectedClient;
+            let client_entity = server_app
+                .world_mut()
+                .query_filtered::<Entity, bevy::ecs::query::With<ConnectedClient>>()
+                .single(server_app.world())
+                .expect("exactly one connected client after connect_client");
+            let centre_region =
+                region_key_for_pos(DimensionId::default(), vek::Vec2::new(centre.x, centre.y));
+            let margin = 3; // generous: the wandering NPC never roams this far.
+            let regions = (-margin..=margin).flat_map(|dx| {
+                (-margin..=margin).map(move |dy| {
+                    vek::Vec2::new(centre_region.region.x + dx, centre_region.region.y + dy)
+                })
+            });
+            server_app.world_mut().entity_mut(client_entity).insert(
+                xindeler_protocol::ClientVisibleRegions::from_regions(
+                    DimensionId::default(),
+                    regions,
+                ),
+            );
+        }
 
         // First-seen client position per replicated entity (client Entity ids
         // are stable across ticks). We assert SOME entity changed position,
@@ -1847,6 +2648,22 @@ mod tests {
         assert!(
             moved,
             "a mirrored entity's NetPos must update as the sim moves it (interpolation source)"
+        );
+
+        // EM-4.5: the mirrored NPC must have registered as a dimension-0
+        // occupant (`mirror_sim_entities`'s `try_add_occupant` call) — this
+        // is what makes `begin_draining(DimensionId::DEFAULT)` a REAL
+        // "existing players may finish/leave normally" transition instead of
+        // always seeing zero occupants and skipping straight to `Teardown`.
+        let occupants = server_app
+            .world()
+            .resource::<DimensionRegistry>()
+            .get(DimensionId::DEFAULT)
+            .expect("ensure_default_dimension should have wrapped dimension 0 by now")
+            .occupant_count();
+        assert!(
+            occupants >= 1,
+            "the mirrored NPC should count as a dimension-0 occupant, got {occupants}"
         );
     }
 

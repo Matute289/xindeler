@@ -45,6 +45,12 @@ tracing = { workspace = true }
 # Read chunk keys / world positions off the sim (Vec2/Vec3), matching the logic
 # crates' vek version.
 vek = { workspace = true }
+# EM-4.5: tags every mirrored entity with `DimensionId(0)`/`DimensionRoot`
+# (the default dimension, wrapped once at boot via `ensure_default_dimension`)
+# and gates NEW mirror-entity creation on `DimensionLifecycle::
+# accepts_new_entrants` — the "interaction with the mirror/visibility
+# systems" spec §1.8 asks the `Draining` transition to have.
+xindeler-dimensions = { path = "../xindeler-dimensions" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
