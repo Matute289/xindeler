@@ -1,0 +1,55 @@
+[package]
+name = "xindeler-dimensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release
+# PR (EM-6.3). No extra features requested: `App`/`Plugin`/ECS/relationships/
+# `bevy::tasks` (the async task-pool machinery [`spinup`] uses) are all part
+# of the mandatory core set even with `default-features = false` — same
+# posture as `xindeler-render-voxel`'s Cargo.toml, which already uses
+# `AsyncComputeTaskPool`/`Task`/`block_on` off this exact dependency line.
+bevy = { version = "=0.19.0", default-features = false }
+# `world::World::generate`/`generate_chunk` + `WorldOpts`/`GenOpts`/`FileOpts`
+# are re-exported at `server`'s crate root (`server/src/lib.rs`, behind its
+# default-on `worldgen` feature) — taking `server` (rather than a fresh
+# dependency edge on `world` directly) reuses the SAME re-export
+# `xindeler-sim-bridge` already relies on for `sim.server.world()`, and also
+# gives this crate `Server::state().thread_pool()` (the sim's own rayon pool,
+# reused rather than building a second one). This is a shell/bridge crate
+# (like `xindeler-sim-bridge`), not a logic crate, so depending on `server`
+# is the legal shell→logic direction (isolation law rule 4 only forbids the
+# reverse).
+server = { package = "xindeler-server-core", path = "../../server" }
+# `common::terrain::TerrainChunk` — the per-dimension chunk store's value
+# type. Same shell→logic type-library use `xindeler-sim-bridge`'s Cargo.toml
+# documents for `common`.
+common = { package = "xindeler-common", path = "../../common" }
+# EM-4.5 reuses `DmEvent`'s `DimensionConfig` (`seed_modifier` +
+# `biome_profile`, EM-4.3/4.4, `dm_event.rs`) as THIS crate's spinup config
+# input rather than re-declaring a parallel `seed_modifier` field — the exact
+# values a future EM-4.9 `DmEvent`-triggered spinup will hand in. `dm_event.rs`
+# itself flags this as the intended EM-4.5 consumer. Directionally legal
+# (higher-level shell crate -> lower-level asset/config crate), same
+# reasoning `xindeler-oracle-host`'s own Cargo.toml documents for its
+# `xindeler-protocol` edge.
+xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# Chunk-store keys (`Vec2<i32>`), matching the logic crates' vek version.
+vek = { workspace = true }
+# World generation runs on a rayon thread pool (reused from the sim, see
+# above) — named directly for the type signature.
+rayon = { workspace = true }
+tracing = { workspace = true }
+# `specs::WorldExt::read_resource` — reading the ALREADY-generated
+# `Arc<World>`/`IndexOwned` off a live `server::Server`'s specs ECS resources
+# (`crate::sim_source::read_default_world`), the same trait
+# `xindeler-sim-bridge`'s Cargo.toml documents taking `specs` directly for.
+specs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

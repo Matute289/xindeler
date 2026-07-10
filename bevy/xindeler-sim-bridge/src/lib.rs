@@ -111,6 +111,9 @@ use server::{
     persistence::{DatabaseSettings, SqlLogMode},
 };
 use specs::{LendJoin, WorldExt};
+use xindeler_dimensions::{
+    DimensionId, DimensionRegistry, DimensionRoot, DimensionState, DimensionsPlugin,
+};
 use xindeler_protocol::{
     AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
     NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RemoveChunk,
@@ -271,9 +274,88 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimMirror>();
+        // EM-4.5: DimensionRegistry + the full lifecycle state machine —
+        // every dimension-tagging consumer of this bridge needs it, so it's
+        // wired here rather than as an optional add-on plugin (unlike
+        // `SimTerrainStreamPlugin`/`SimEntityMirrorPlugin`, which really are
+        // optional pieces of the bridge). Guarded: `xindeler-server-app`'s
+        // `SimServerPlugin` already adds `DimensionsPlugin` explicitly and
+        // EARLY (before this plugin), so its own dimension-setup calls
+        // (`install_default_dimension`/`init_debug_state`) can run against
+        // an already-initialized `DimensionRegistry` — re-adding it here
+        // unconditionally would panic ("plugin was already added"). The
+        // listen-server client path (`xindeler-client::ListenServerPlugin`)
+        // does NOT pre-add it, so this guarded add is what actually
+        // registers it for that path.
+        if !app.is_plugin_added::<DimensionsPlugin>() {
+            app.add_plugins(DimensionsPlugin);
+        }
+        app.init_resource::<DefaultDimensionState>();
         // EM-3.11b: FixedUpdate, not Update — see `tick_sim`'s doc for why a
         // display-rate `Update` tick was the wrong home for this.
-        app.add_systems(FixedUpdate, tick_sim);
+        app.add_systems(FixedUpdate, (tick_sim, ensure_default_dimension).chain());
+    }
+}
+
+/// One-shot latch for wrapping [`DimensionId::DEFAULT`] around the sim's
+/// ALREADY-generated `Arc<World>`/`IndexOwned` (EM-4.5, spec §1.8: "a
+/// wrapping refactor of already-existing state, not a behavior change")
+/// once [`SimServer`] exists. Mirrors [`TerrainAnchorState`]'s "
+/// `SimBridgePlugin` doesn't boot the sim, so wait for it" latch pattern —
+/// see [`ensure_default_dimension`].
+#[derive(Resource, Default)]
+struct DefaultDimensionState {
+    wrapped: bool,
+}
+
+/// Wraps [`DimensionId::DEFAULT`] the first tick a [`SimServer`] exists; a
+/// no-op on every call before and after that (before: no sim yet; after:
+/// [`DefaultDimensionState::wrapped`] latch). Runs `.after(tick_sim)` so the
+/// sim has definitely finished constructing its world/index by the time this
+/// reads them (in practice they're ready the instant `Server::new` returns,
+/// well before the first tick, but chaining after `tick_sim` keeps the
+/// ordering guarantee explicit rather than relying on that timing detail).
+fn ensure_default_dimension(
+    sim: Option<NonSendMut<SimServer>>,
+    mut state: bevy::ecs::system::ResMut<DefaultDimensionState>,
+    mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
+    mut commands: Commands,
+) {
+    if state.wrapped {
+        return;
+    }
+    // `xindeler-server-app`'s `SimServerPlugin` calls its own
+    // `install_default_dimension` directly at `Plugin::build` time (before
+    // this system ever runs), wrapping `DimensionId::DEFAULT` into the
+    // registry synchronously — this system's own `state.wrapped` latch (a
+    // separate resource, private to this crate) has no way to observe that.
+    // Without this check, this system would retry+error EVERY tick forever
+    // in that shell (the registry already has DEFAULT, so the wrap below
+    // always fails `AlreadyExists`, and `state.wrapped` never flips because
+    // that only happens in the `Ok` arm). Checking the registry itself —
+    // the actual source of truth — instead of trusting a possibly-stale
+    // flag closes that gap for any caller, not just this one.
+    if registry.get(DimensionId::DEFAULT).is_some() {
+        state.wrapped = true;
+        return;
+    }
+    let Some(sim) = sim else { return };
+
+    // The actual "register + complete spinup" sequence is shared with
+    // `xindeler-server-app`'s own `install_default_dimension` (see
+    // `xindeler_dimensions::wrap_default_dimension`'s doc comment) — only
+    // the root-entity-spawning mechanism differs (`Commands` here, a system
+    // context, vs. `app.world_mut()` there, a `Plugin::build` context).
+    let root = commands.spawn(DimensionId::DEFAULT).id();
+    match xindeler_dimensions::wrap_default_dimension(&mut registry, root, &sim.server) {
+        Ok(()) => {
+            state.wrapped = true;
+            tracing::info!("dimension 0 (default) wrapped: Spinup -> Active");
+        },
+        Err(err) => {
+            tracing::error!(?err, "failed to wrap the default dimension");
+            commands.entity(root).despawn();
+        },
     }
 }
 
@@ -607,6 +689,16 @@ impl Plugin for SimEntityMirrorPlugin {
         // this crate runs standalone (e.g. in tests, or before that plugin
         // exists in an App), it defaults to `Offline` — the safe, zero-AI
         // posture.
+        //
+        // EM-4.5 review follow-up: `.after(ensure_default_dimension)` is now
+        // explicit (not just documented) — `mirror_sim_entities` reads/
+        // mutates the SAME `DimensionRegistry` `ensure_default_dimension`
+        // (registered by `SimBridgePlugin`, added before this plugin) writes
+        // to. Both were already only `.after(tick_sim)`, which doesn't order
+        // them relative to EACH OTHER; making the edge structural (rather
+        // than relying on the benign one-tick self-healing race the mirror's
+        // `registry` param doc comment used to describe) removes a real,
+        // if harmless, conflicting-resource-access ambiguity.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
             .init_resource::<TestNpcState>()
@@ -617,6 +709,7 @@ impl Plugin for SimEntityMirrorPlugin {
                 (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
                     .chain()
                     .after(tick_sim)
+                    .after(ensure_default_dimension)
                     .run_if(in_state(ClientState::Disconnected)),
             );
     }
@@ -950,6 +1043,17 @@ fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
     character_state.is_some_and(comp::CharacterState::is_glide_wielded)
 }
 
+/// EM-4.5: whether [`mirror_sim_entities`] may create a NEW mirror entity
+/// for `dimension` — pulled out as a pure function (rather than inlined)
+/// specifically so this "interaction with the mirror/visibility systems"
+/// spec §1.8 asks `Draining` to have is unit-testable without booting a real
+/// sim (see the `tests` module below). `None` (dimension not registered
+/// yet — see the caller's doc comment for when that happens) is treated as
+/// "not accepting yet", same as a `Spinup`/`Draining`/`Teardown` dimension.
+fn mirror_admits_new_entity(dimension: Option<&DimensionState>) -> bool {
+    dimension.is_some_and(DimensionState::accepts_new_entrants)
+}
+
 /// Reads the sim's client-visible entities off the specs storages and UPSERTs
 /// one `Replicated` Bevy entity per sim entity carrying the replicated net
 /// components. Despawns mirrors whose sim entity has disappeared.
@@ -966,6 +1070,13 @@ fn is_gliding(character_state: Option<&comp::CharacterState>) -> bool {
 /// Only `read_storage` + `entities` — never writes into specs (isolation law
 /// rule 4). The write side is entirely on the Bevy world (spawn/insert/despawn
 /// of the mirror entities).
+///
+/// ## EM-4.5: dimension-gated entity creation
+/// [`mirror_admits_new_entity`] gates the `None => spawn` branch below: a
+/// dimension that isn't `Active` (not yet wrapped, `Draining`, or
+/// `Teardown`) never gets a brand-new mirror entity, while entities ALREADY
+/// mirrored keep updating regardless of lifecycle — "existing players may
+/// finish/leave normally" during `Draining` (spec §1.8).
 fn mirror_sim_entities(
     sim: Option<NonSendMut<SimServer>>,
     // EM-3.7b: the embedded local player, if any. Used to tag ITS mirror entity
@@ -973,6 +1084,27 @@ fn mirror_sim_entities(
     player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut mirror: bevy::ecs::system::ResMut<SimMirror>,
     mut loadout_cache: bevy::ecs::system::ResMut<SimLoadoutCache>,
+    // EM-4.5: the dimension registry — `DimensionsPlugin` (added by
+    // `SimBridgePlugin::build`, which runs before this plugin per its own
+    // "Add AFTER SimBridgePlugin" doc) always inserts it, so this is a plain
+    // resource, not optional. `ResMut` (not `Res`): besides (a) tagging every
+    // NEWLY-mirrored entity with `DimensionId`/`DimensionRoot` — dimension
+    // 0's root entity, wrapped by `ensure_default_dimension` — and (b)
+    // gating NEW mirror creation on `DimensionLifecycle::
+    // accepts_new_entrants`, this system ALSO (c) keeps `DimensionState`'s
+    // occupant bookkeeping in sync with what's actually mirrored
+    // (`try_add_occupant`/`remove_occupant`) — see the should-fix note this
+    // addresses: without it, `begin_draining(DimensionId::DEFAULT)` would
+    // ALWAYS see zero occupants (nothing else in this codebase calls
+    // `try_add_occupant`) and skip straight to `Teardown` even while real
+    // players/NPCs are actively mirrored. `SimEntityMirrorPlugin` registers
+    // this system `.after(ensure_default_dimension)` (both are `.after(
+    // tick_sim)`, which alone wouldn't order them relative to EACH OTHER —
+    // review follow-up: made structural, not just documented), so dimension
+    // 0 is ALWAYS already registered by the time this runs with a live
+    // `SimServer` — `registry.get(DimensionId::DEFAULT)` returning `None`
+    // below is unreachable in practice, just handled defensively.
+    mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
@@ -1126,6 +1258,15 @@ fn mirror_sim_entities(
         uids,
     ));
 
+    // EM-4.5: whether dimension 0 currently accepts a NEW mirror entity, and
+    // its root entity — both computed as OWNED values (not a held `&
+    // DimensionState` borrow) so the loop below can still call the
+    // registry's `&mut self` occupant methods (`try_add_occupant`/
+    // `remove_occupant`) without a borrow-checker conflict. See
+    // `mirror_admits_new_entity`'s doc comment for the gating rule.
+    let dimension0_accepts_new = mirror_admits_new_entity(registry.get(DimensionId::DEFAULT));
+    let dimension0_root = registry.get(DimensionId::DEFAULT).map(DimensionState::root);
+
     for (sim_entity, net_pos, net_ori, net_vel, net_body, net_health, net_loadout, net_uid) in
         updates
     {
@@ -1169,10 +1310,30 @@ fn mirror_sim_entities(
                 }
             },
             None => {
-                // First sighting: spawn the replicated mirror entity.
+                // EM-4.5: don't create a NEW mirror for a dimension that
+                // isn't accepting new entrants (spec §1.8's acceptance bar
+                // extended to the mirror: "no new player can join once
+                // Draining" applies just as much to a wandering NPC as to a
+                // human player). Existing mirrors (the `Some` arm above)
+                // keep updating regardless — "existing players may finish/
+                // leave normally" during `Draining`.
+                if !dimension0_accepts_new {
+                    continue;
+                }
+                // First sighting: spawn the replicated mirror entity, tagged
+                // with the default dimension's identity (EM-4.5: every
+                // entity belonging to an instance carries `DimensionId` +
+                // the `DimensionRoot` relationship — `dimension0_root` is
+                // `Some` here because `dimension0_accepts_new` was just
+                // checked true, which only holds for a registered
+                // dimension).
+                let root = dimension0_root
+                    .expect("dimension0_accepts_new is true only when dimension0_root is Some");
                 let mut ec = commands.spawn((
                     Replicated,
                     SimEntity(sim_entity),
+                    DimensionId::DEFAULT,
+                    DimensionRoot(root),
                     net_pos,
                     net_ori,
                     net_vel,
@@ -1190,7 +1351,23 @@ fn mirror_sim_entities(
                 if let Some(u) = net_uid {
                     ec.insert(u);
                 }
-                mirror.0.insert(sim_entity, ec.id());
+                let bevy_entity = ec.id();
+                mirror.0.insert(sim_entity, bevy_entity);
+                // EM-4.5: this mirror now counts as an occupant of dimension
+                // 0 (see the `registry` param's doc comment for why this
+                // matters: without it, `begin_draining` would always see
+                // zero occupants and skip straight to `Teardown`). Can only
+                // fail if the dimension stopped accepting entrants in the
+                // instant between the check above and here — impossible
+                // within one system's single-threaded body, but handled
+                // rather than `.unwrap()`ed for robustness against a future
+                // refactor that makes this async.
+                if let Err(err) = registry.try_add_occupant(DimensionId::DEFAULT, bevy_entity) {
+                    tracing::warn!(
+                        ?err,
+                        "failed to register new mirror as a dimension-0 occupant"
+                    );
+                }
             },
         }
         // Refresh the dedup cache for this entity's loadout.
@@ -1210,6 +1387,14 @@ fn mirror_sim_entities(
     for sim_entity in stale {
         if let Some(bevy_entity) = mirror.0.remove(&sim_entity) {
             commands.entity(bevy_entity).despawn();
+            // EM-4.5: this mirror is leaving dimension 0 — the exact
+            // "existing players may finish/leave normally" exit condition
+            // that drives `Draining -> Teardown` (see `remove_occupant`'s
+            // doc comment). A no-op `Ok(false)` if dimension 0 isn't
+            // `Draining` (the common case) or the entity wasn't tracked as
+            // an occupant (e.g. it despawned before ever completing
+            // `try_add_occupant`, an edge case handled gracefully there).
+            let _ = registry.remove_occupant(DimensionId::DEFAULT, bevy_entity);
         }
         // Drop the cached loadout too, so a re-used specs index doesn't inherit
         // a stale entry (EM-3.8d).
@@ -1433,6 +1618,57 @@ mod tests {
         assert_eq!(stride, 1);
         assert_eq!(grid_w, 1);
         assert_eq!(grid_h, 64);
+    }
+
+    /// EM-4.5's "interaction with the mirror/visibility systems" acceptance
+    /// bar, exercised as a pure-function unit test: a dimension not yet
+    /// registered, or `Spinup`/`Draining`/`Teardown`, never admits a NEW
+    /// mirror entity; only `Active` does. Needs real assets
+    /// (`DimensionRegistry::insert_spinning_up`/`complete_spinup` go through
+    /// `World::empty()`, which loads the color/feature manifests) — same
+    /// convention as this crate's other asset-dependent tests, but fast
+    /// enough (no real world generation) to not need `#[ignore]`.
+    #[test]
+    fn mirror_admits_new_entity_only_for_active_dimension() {
+        use xindeler_dimensions::{DimensionLifecycle, DimensionRegistry};
+
+        assert!(
+            !mirror_admits_new_entity(None),
+            "an unregistered dimension (not wrapped yet) must not admit new entrants"
+        );
+
+        let mut registry = DimensionRegistry::default();
+        let root = bevy::ecs::entity::Entity::from_raw_u32(1).unwrap();
+        registry
+            .insert_spinning_up(DimensionId::DEFAULT, root, 0)
+            .unwrap();
+        assert_eq!(
+            registry.lifecycle(DimensionId::DEFAULT),
+            Some(DimensionLifecycle::Spinup)
+        );
+        assert!(
+            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "Spinup must not admit new entrants"
+        );
+
+        let (world, index) = server::World::empty();
+        registry
+            .complete_spinup(DimensionId::DEFAULT, std::sync::Arc::new(world), index)
+            .unwrap();
+        assert!(
+            mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "Active must admit new entrants"
+        );
+
+        registry.begin_draining(DimensionId::DEFAULT).unwrap();
+        // No occupants were ever added in this test, so this dimension went
+        // straight Draining -> Teardown (see `DimensionRegistry::
+        // begin_draining`'s doc comment) — either way, neither state admits
+        // a new entrant, which is exactly what this test is proving.
+        assert!(
+            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            "neither Draining nor Teardown may admit a new entrant"
+        );
     }
 
     /// EM-1.5 acceptance: boot a real test-world `Server` and tick it 100×
@@ -2016,6 +2252,22 @@ mod tests {
         assert!(
             moved,
             "a mirrored entity's NetPos must update as the sim moves it (interpolation source)"
+        );
+
+        // EM-4.5: the mirrored NPC must have registered as a dimension-0
+        // occupant (`mirror_sim_entities`'s `try_add_occupant` call) — this
+        // is what makes `begin_draining(DimensionId::DEFAULT)` a REAL
+        // "existing players may finish/leave normally" transition instead of
+        // always seeing zero occupants and skipping straight to `Teardown`.
+        let occupants = server_app
+            .world()
+            .resource::<DimensionRegistry>()
+            .get(DimensionId::DEFAULT)
+            .expect("ensure_default_dimension should have wrapped dimension 0 by now")
+            .occupant_count();
+        assert!(
+            occupants >= 1,
+            "the mirrored NPC should count as a dimension-0 occupant, got {occupants}"
         );
     }
 }

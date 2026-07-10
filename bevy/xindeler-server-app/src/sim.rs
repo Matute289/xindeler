@@ -45,7 +45,7 @@ use server::{
 use xindeler_oracle_host::AiGatewayConfig;
 pub use xindeler_sim_bridge::SimServer;
 
-use crate::metrics::DEFAULT_METRICS_ADDR;
+use crate::{dimensions::DebugDimensionCommands, metrics::DEFAULT_METRICS_ADDR};
 
 /// Server tick rate (30 TPS — matches server-cli's `TPS` const,
 /// `xindeler_sim_bridge::SIM_TICK_HZ`, and the sim's own expectations).
@@ -87,6 +87,12 @@ pub struct SimServerConfig {
     /// Bind address for the new replicon+quinnet transport (EM-4.2b). See
     /// [`DEFAULT_REPLICON_ADDR`].
     pub replicon_addr: SocketAddr,
+    /// EM-4.5 debug/admin dimension-spinup/drain triggers. Defaults to
+    /// `DebugDimensionCommands::default()` (neither set — no second
+    /// dimension ever spins up unless explicitly requested); `main.rs`
+    /// overrides this from `XINDELER_DEBUG_SPINUP_DIMENSION`/
+    /// `XINDELER_DEBUG_DRAIN_DIMENSION` when set.
+    pub debug_dimension_commands: DebugDimensionCommands,
 }
 
 impl Default for SimServerConfig {
@@ -100,6 +106,7 @@ impl Default for SimServerConfig {
             replicon_addr: DEFAULT_REPLICON_ADDR
                 .parse()
                 .expect("DEFAULT_REPLICON_ADDR is a valid SocketAddr literal"),
+            debug_dimension_commands: DebugDimensionCommands::default(),
         }
     }
 }

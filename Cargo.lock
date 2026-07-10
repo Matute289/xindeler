@@ -11875,6 +11875,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xindeler-dimensions"
+version = "0.18.0"
+dependencies = [
+ "bevy",
+ "rayon",
+ "specs",
+ "tempfile",
+ "tracing",
+ "vek",
+ "xindeler-common",
+ "xindeler-oracle-host",
+ "xindeler-server-core",
+]
+
+[[package]]
 name = "xindeler-i18n-helpers"
 version = "0.18.0"
 dependencies = [
@@ -12052,6 +12067,7 @@ dependencies = [
  "xindeler-client-core",
  "xindeler-common",
  "xindeler-common-base",
+ "xindeler-dimensions",
  "xindeler-oracle-host",
  "xindeler-protocol",
  "xindeler-rtsim",
@@ -12159,6 +12175,7 @@ dependencies = [
  "vek",
  "xindeler-client-core",
  "xindeler-common",
+ "xindeler-dimensions",
  "xindeler-protocol",
  "xindeler-server-core",
 ]
