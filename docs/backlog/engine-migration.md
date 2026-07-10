@@ -129,7 +129,7 @@ so an upgrade waits until the dep tree catches up.
 | EM-3.9c | Sprites polish v3 — wind-sway v2 (normal-consistent or non-geometric approach), furniture/prop/dungeon sprite kinds, shared decoded-chunk store | ⚪ |
 | EM-3.10 | LOD & culling v1 (distance bands + GPU occlusion) | ✅ PR #20 — Bevy auto-frustum-culls all meshes (verified); added `LodCullingPlugin` distance bands (chunk + nearer sprite-parent, Visibility-toggle, data-driven `CullingConfig`) |
 | EM-3.10b | LOD & culling v2 — GPU occlusion culling (DepthPrepass+HZB, measure-gated) + lod-alt far-mesh (needs a bridge→client lod_alt/horizon data path) + `CullingConfig`→RON | ✅ PR #30 — occlusion culling measured (no gain in the smoke scene, shipped opt-in default OFF) + real lod-alt far-mesh fills the horizon (new one-shot `NetLodAlt` bridge→protocol→client data path); `CullingConfig`→RON not attempted (small follow-up) |
-| EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | 🔵 9 rounds of Matías live-playtest fixes so far (PRs #32/#34/#36/#37/#39/#40/#41/#43/this PR): camera, tree/terrain color, far-mesh, perf (FixedUpdate + death-spiral hotfix), fog, ghost-hand/TAA, terrain black-frame, placeholder lighting, brightness/contrast flicker (camera-rotation cap + bloom/vignette ordering), vsync/tearing, quadruped-capsule logging, diagonal-movement stutter (measured + partially mitigated). **Full findings log:** `docs/design/specs/2026-07-09-bl82-em311-findings-log.md`. Open follow-ups flagged there: terrain shadow/AO contrast tuning, a post-boot NPC entity-mirroring gap (candidate EM-3.11o, not started), and the long-running sim-tick stutter epic (EM-3.11c/d/e) is still not fully closed. |
+| EM-3.11 **[M]** | In-game visual smoke (AO/TAA/fog/anims/perf vs old client) | 🔵 10 rounds so far (PRs #32/#34/#36/#37/#39/#40/#41/#43 + round 10 in flight): camera, tree/terrain color, far-mesh, perf, fog, ghost-hand/TAA, terrain black-frame, lighting, flicker, vsync, quadruped logging, diagonal stutter, distant-sprite shadow flicker (fixed, not yet Matías-confirmed). **Full findings log:** `docs/design/specs/2026-07-09-bl82-em311-findings-log.md`. Open: EM-3.11o (post-boot NPC mirroring, fix in 2nd review round), EM-3.11p (diagonal-movement stutter, 5 rounds in, root cause still unidentified — needs a call on whether to keep going). |
 
 ## Phase 4 — Server shell, replicon transport & ORACLE foundations ⚪
 
@@ -142,12 +142,12 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-4.2b | Transport backend spike — `renet2` vs `quinnet` (real network, not loopback) | ⚪ |
 | EM-4.2c | Login / session handshake bridged to the sim's accounts + persistence | ⚪ |
 | EM-4.2d | Interest management — per-client visibility (region/distance + `DimensionId`); bandwidth vs old protocol | ⚪ |
-| EM-4.2e | AI gateway readiness handoff — server shell/config/metrics/fallback seams for BL-83 and BL-85; no AWS account or Bedrock setup yet | ⚪ |
-| EM-4.2f | **AURORA/NPC entity-model readiness** (distinct from EM-4.2e's gateway/config plumbing) — ensure the migrated Bevy-mirrored NPC entity model exposes what BL-15 AURORA's social-sim layer will need (stable identity/uid, external-state injection points, a clean default/fallback behavior when AURORA is OFF so the game stays fully playable). NEW 2026-07-09 (Matías): "acomodar AURORA al nuevo sistema de NPC," scope left to technical judgment — kept narrow (entity-model seams only, no AURORA logic itself, that's BL-15/BL-83) | ⚪ |
-| EM-4.3 | `DmEventLoader` — `.dmevent.ron/json` AssetLoader + `oracle://` watch dir (ORACLE writes files) | ⚪ |
-| EM-4.4 | Anti-chaos validation layer (clamp tables for injected events) | ⚪ |
-| EM-4.5 | `DimensionRegistry` + `DimensionId` + instanced-dimension generation | ⚪ |
-| EM-4.6 | Dimension teardown & GC (RAM+VRAM leak-free) | ⚪ |
+| EM-4.2e | AI gateway readiness handoff — `AiExecutionMode` (Offline/LocalOnly/Full) + config/metrics/fallback seams for BL-83 and BL-85; no AWS account or Bedrock setup yet | 🔵 PR #46 open (base `development`), reviewed clean, awaiting Matías |
+| EM-4.2f | **AURORA/NPC entity-model readiness** — `NetUid` identity + full `AuroraOverlay` schema (memory/intention/mood, neutral-default population outside Offline mode). Scope widened 2026-07-10 (worksheet Q2) | 🔵 in progress, depends on EM-4.2e (PR #46) |
+| EM-4.3 | `DmEventLoader` — `.dmevent.ron/json` AssetLoader + `oracle://` watch dir (ORACLE writes files) | 🔵 PR #45 open (base `development`), reviewed clean, awaiting Matías (bundled with EM-4.4) |
+| EM-4.4 | Anti-chaos validation layer (clamp tables for injected events) | 🔵 PR #45 (see EM-4.3, one implementation PR) |
+| EM-4.5 | `DimensionRegistry` + `DimensionId` + instanced-dimension generation — full Spinup→Active→Draining→Teardown lifecycle (worksheet Q4=maximalist) | ⚪ |
+| EM-4.6 | Dimension teardown & GC (RAM+VRAM leak-free) + heuristic predictive GC (worksheet Q4=maximalist) | ⚪ |
 | EM-4.7 | Generic entity factory v1 (behavior strings → `Agent` presets) | ⚪ |
 | EM-4.8 | Narrative hooks (world_rumor → chronicle; on_enter_message → HUD toast) | ⚪ |
 | EM-4.9 | E2E event drill (full Ravenloft example, both clients coexisting) | ⚪ |
