@@ -218,16 +218,13 @@ fn receive_chunks(
         return;
     }
     for key in &touched {
-        queue.mark_dirty(VVec2::new(key[0], key[1]));
-        // A new chunk changes its neighbours' border meshing, so re-mesh any
-        // neighbour we already hold.
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                queue.mark_dirty(VVec2::new(key[0] + dx, key[1] + dy));
-            }
+        // A new/changed chunk affects its neighbours' shared-border meshing
+        // too, so mark the whole 3×3 neighbourhood dirty (`ChunkMeshQueue`
+        // dedupes an already-queued key, so re-marking `key` itself here is
+        // harmless — see [`neighbourhood_3x3`]'s docs for why this exact
+        // footprint matters for BL-82 EM-3.11n's diagonal-streaming finding).
+        for nk in neighbourhood_3x3(*key) {
+            queue.mark_dirty(VVec2::new(nk[0], nk[1]));
         }
     }
     first.0 = true;
@@ -318,15 +315,55 @@ fn receive_removes(
     }
     for key in &removed {
         queue.remove_chunk(VVec2::new(key[0], key[1]));
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                queue.mark_dirty(VVec2::new(key[0] + dx, key[1] + dy));
+        // The removed chunk itself has nothing left to remesh — only its
+        // surviving neighbours (their shared border just opened up).
+        for nk in neighbourhood_3x3(*key) {
+            if nk == *key {
+                continue;
             }
+            queue.mark_dirty(VVec2::new(nk[0], nk[1]));
         }
     }
+}
+
+/// The 3×3 neighbourhood of `key` — itself plus its 8 neighbours — as a fixed
+/// 9-element array. Shared by [`receive_chunks`] (marks the WHOLE 3×3 dirty:
+/// a new/changed chunk affects its neighbours' shared-border meshing too) and
+/// [`receive_removes`] (marks just the 8 neighbours, skipping the removed
+/// key itself).
+///
+/// ## BL-82 EM-3.11n: why this exact footprint matters for the
+/// ## diagonal-movement "choppier" report
+/// `docs/design/specs/2026-07-09-bl82-em311-findings-log.md` (round 8) traces
+/// Matías's "diagonal movement feels choppier" report partly to this
+/// function's fan-out: consecutive STRAIGHT-line chunk arrivals (e.g.
+/// `(i,0)`, `(i+1,0)`, …) have 3×3 neighbourhoods that overlap by a full
+/// 2×3 = 6 cells, so each new arrival only adds 3 genuinely NEW distinct
+/// chunks to the dirty/remesh set. Consecutive DIAGONAL arrivals (e.g.
+/// `(i,i)`, `(i+1,i+1)`, …) only overlap by 2×2 = 4 cells, so each new
+/// arrival adds 5 new distinct chunks — for the same number of newly-streamed
+/// chunks (i.e. the same real distance travelled, since the server streams
+/// one new chunk per grid-line crossing regardless of direction), a diagonal
+/// streaming frontier churns through ~1.6× as many distinct chunks as a
+/// straight one (see the `diagonal_streaming_touches_more_distinct_chunks_*`
+/// test below for the exact numbers). More distinct chunks marked dirty means
+/// more async re-mesh tasks competing for the same fixed-size
+/// `ChunkUploadBudget` (`pipeline.rs`) and `AsyncComputeTaskPool` capacity —
+/// this doesn't by itself prove a frame-time regression (meshing is off the
+/// main thread and uploads are budget-capped regardless of backlog size), but
+/// it is a real, structural, direction-dependent difference in streaming load
+/// worth ruling in/out empirically alongside the `--smoke-perf-run` live A/B
+/// harness (`crate::smoke`).
+fn neighbourhood_3x3(key: [i32; 2]) -> [[i32; 2]; 9] {
+    let mut out = [[0; 2]; 9];
+    let mut i = 0;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            out[i] = [key[0] + dx, key[1] + dy];
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Stores the camera anchor the first time it arrives (mapped to Bevy space).
@@ -556,5 +593,63 @@ mod tests {
             .expect("anchor message installs TerrainCameraAnchor");
         // Veloren (100, 200, 50) → Bevy (100, 50, −200).
         assert_eq!(anchor.bevy_pos, Vec3::new(100.0, 50.0, -200.0));
+    }
+
+    /// BL-82 EM-3.11n regression test — see [`neighbourhood_3x3`]'s doc
+    /// comment for the full reasoning. Deterministic, no GPU/timing involved:
+    /// for the SAME number `N` of newly-streamed chunk keys (i.e. the same
+    /// real distance travelled, since the server streams one new chunk per
+    /// grid-line crossing regardless of direction), a diagonal streaming
+    /// frontier (`(0,0),(1,1),(2,2),…`) touches (dirty-marks) strictly MORE
+    /// distinct chunk keys than a straight one (`(0,0),(1,0),(2,0),…`)
+    /// because consecutive diagonal arrivals' 3×3 neighbourhoods overlap by
+    /// only 2×2=4 cells vs. the straight case's 2×3=6 cells.
+    #[test]
+    fn diagonal_streaming_touches_more_distinct_chunks_than_straight() {
+        use std::collections::HashSet;
+
+        /// Total distinct chunk keys touched (dirty-marked) across an entire
+        /// streaming run — the union of every arrival's 3×3 neighbourhood.
+        fn total_distinct_touches(keys: &[[i32; 2]]) -> usize {
+            let mut all: HashSet<[i32; 2]> = HashSet::new();
+            for key in keys {
+                all.extend(neighbourhood_3x3(*key));
+            }
+            all.len()
+        }
+
+        const N: i32 = 30;
+        let straight: Vec<[i32; 2]> = (0..N).map(|i| [i, 0]).collect();
+        let diagonal: Vec<[i32; 2]> = (0..N).map(|i| [i, i]).collect();
+
+        let straight_touches = total_distinct_touches(&straight);
+        let diagonal_touches = total_distinct_touches(&diagonal);
+
+        // Exact counts for N=30 (verified independently): straight = 3N+6 =
+        // 96, diagonal = 5N+4 = 154 — asserted exactly so a future change to
+        // the neighbourhood shape (e.g. widening past 3×3) is caught, not
+        // just "still greater than".
+        assert_eq!(
+            straight_touches, 96,
+            "straight frontier distinct-touch count"
+        );
+        assert_eq!(
+            diagonal_touches, 154,
+            "diagonal frontier distinct-touch count"
+        );
+        assert!(
+            diagonal_touches > straight_touches,
+            "diagonal frontier ({diagonal_touches} distinct touched chunks) must exceed the \
+             straight frontier ({straight_touches}) for the same {N}-chunk streaming run"
+        );
+        // The ratio approaches 5/3 ≈ 1.667 as N grows; at N=30 it's already
+        // past 1.5 — a real, structural ~60% more remesh churn for the same
+        // streamed distance.
+        let ratio = f64::from(diagonal_touches as u32) / f64::from(straight_touches as u32);
+        assert!(
+            ratio > 1.5,
+            "expected the diagonal/straight distinct-touch ratio to approach ~1.667 (5/3 marginal \
+             cells per arrival), got {ratio:.3}"
+        );
     }
 }

@@ -217,14 +217,59 @@ fn third_person_camera(
 /// visibly moves under the third-person camera on the real terrain before the
 /// capture. It runs AFTER [`gather_input`] so it wins, and is otherwise inert.
 /// NOT part of the interactive path: no flag = this plugin is never added.
+///
+/// ## BL-82 EM-3.11n: selectable move pattern (straight vs. diagonal)
+/// Also reused by `--smoke-perf-run` (`crate::smoke`) to drive a controlled
+/// A/B frame-time comparison for the "diagonal movement feels choppier" report
+/// (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md`, round 8):
+/// `XINDELER_SMOKE_MOVE_PATTERN` selects the walk direction (sim XY plane),
+/// read ONCE at plugin build time (not per-frame) since it never changes mid
+/// run. `straight` (default, unset, or unrecognised) preserves the original
+/// due-north walk so every existing screenshot smoke run is byte-identical;
+/// `diagonal` walks north-east (`(1,1)` normalized) so the same real ground
+/// speed crosses BOTH chunk-grid axes at once — the grid-crossing-rate
+/// argument the round-8 hypothesis rests on (see the module docs on
+/// `terrain_stream.rs`'s dirty-marking and `pipeline.rs`'s upload budget).
 pub struct SmokeAutoMovePlugin;
+
+/// The two walk patterns [`SmokeAutoMovePlugin`] can drive, selected via
+/// `XINDELER_SMOKE_MOVE_PATTERN` (`straight` default / `diagonal`).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmokeMovePattern {
+    /// Due sim-north (`(0,1)`) — the original EM-3.7b behaviour.
+    Straight,
+    /// Sim north-east (`(1,1)` normalized) — crosses both chunk-grid axes at
+    /// once for the same ground speed (BL-82 EM-3.11n).
+    Diagonal,
+}
+
+impl SmokeMovePattern {
+    /// Reads `XINDELER_SMOKE_MOVE_PATTERN`; unset/unrecognised → `Straight` so
+    /// every pre-existing smoke-screenshot invocation is unaffected.
+    fn from_env() -> Self {
+        match std::env::var("XINDELER_SMOKE_MOVE_PATTERN").as_deref() {
+            Ok("diagonal") => Self::Diagonal,
+            _ => Self::Straight,
+        }
+    }
+
+    /// The sim-XY move vector + matching look vector for this pattern.
+    fn move_dir(self) -> Vec2 {
+        match self {
+            Self::Straight => Vec2::new(0.0, 1.0),
+            Self::Diagonal => Vec2::new(1.0, 1.0).normalize(),
+        }
+    }
+}
 
 impl Plugin for SmokeAutoMovePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SmokeAutoMoveState>().add_systems(
-            Update,
-            smoke_auto_move.after(gather_input).in_set(GameplaySet),
-        );
+        app.insert_resource(SmokeMovePattern::from_env())
+            .init_resource::<SmokeAutoMoveState>()
+            .add_systems(
+                Update,
+                smoke_auto_move.after(gather_input).in_set(GameplaySet),
+            );
     }
 }
 
@@ -238,13 +283,14 @@ struct SmokeAutoMoveState {
     start: Option<Vec3>,
 }
 
-/// Forces a steady forward (sim +y / north) walk + look while the player
-/// exists, and raises [`crate::smoke::SmokePlayerMoved`] once the character has
-/// actually travelled [`SMOKE_MOVE_THRESHOLD`], so the capture lands on a frame
-/// that shows the walking player. Only meaningful once a player entity is
-/// mirrored.
+/// Forces a steady walk (direction from [`SmokeMovePattern`]) + matching look
+/// while the player exists, and raises [`crate::smoke::SmokePlayerMoved`] once
+/// the character has actually travelled [`SMOKE_MOVE_THRESHOLD`], so the
+/// capture/measurement lands on a frame that shows the walking player. Only
+/// meaningful once a player entity is mirrored.
 fn smoke_auto_move(
     player: Query<&Transform, With<NetLocalPlayer>>,
+    pattern: Res<SmokeMovePattern>,
     mut input: ResMut<LocalPlayerInput>,
     mut state: ResMut<SmokeAutoMoveState>,
     mut moved: ResMut<crate::smoke::SmokePlayerMoved>,
@@ -252,10 +298,13 @@ fn smoke_auto_move(
     let Ok(tf) = player.single() else {
         return;
     };
+    let move_dir = pattern.move_dir();
     *input = LocalPlayerInput {
-        move_dir: Vec2::new(0.0, 1.0),
+        move_dir,
         jump: false,
-        look: Vec3::new(0.0, 1.0, 0.0),
+        // Sim (x, y) horizontal look, matching the walk direction (full 3D
+        // look vector with z=0, same convention `gather_input` uses).
+        look: Vec3::new(move_dir.x, move_dir.y, 0.0),
     };
     let pos = tf.translation;
     match state.start {

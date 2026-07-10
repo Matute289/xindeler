@@ -19,7 +19,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use bevy::{
@@ -361,6 +361,77 @@ fn pipeline_meshes_25_chunks_within_budget() {
             assert!(entities.fluid.is_none(), "no water in the test slab");
         }
     }
+}
+
+/// BL-82 EM-3.11n — a large dirty backlog (all 25 chunks marked at once, far
+/// more than fit under the in-flight cap in one go) must not FETCH more than
+/// a small, bounded number of volumes in a SINGLE frame.
+/// `ChunkVolumeProvider::fetch` runs synchronously on
+/// `spawn_chunk_mesh_tasks`'s own (main) thread — only `generate_mesh` itself
+/// is off-thread — so an unbounded per-frame fetch count would be a real
+/// main-thread cost spike proportional to backlog size. This is exactly the
+/// mechanism investigated for the "diagonal movement feels choppier" report
+/// (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md` round 8): a
+/// diagonal streaming frontier backlogs structurally more distinct chunks
+/// per unit distance than a straight one for the same real speed
+/// (`xindeler-client`'s `terrain_stream.rs::neighbourhood_3x3` docs), so its
+/// bursts are bigger — this test guards that ANY burst, regardless of size,
+/// gets its main-thread fetch cost spread over multiple frames instead of
+/// paid all at once.
+#[test]
+fn large_backlog_does_not_fetch_more_than_the_spawn_burst_cap_in_one_frame() {
+    const BUDGET: u32 = 2;
+    // Mirrors `pipeline.rs`'s private `SPAWN_BURST_FACTOR` (4) — pinned here
+    // as a literal since the constant isn't public; update this expectation
+    // too if that factor ever changes.
+    const EXPECTED_SPAWN_CAP: usize = (BUDGET * 4) as usize;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(AssetPlugin::default())
+        .init_asset::<bevy::mesh::Mesh>()
+        .add_plugins(ChunkMeshPipelinePlugin);
+
+    let world_grid = build_world();
+    let fetch_count = Arc::new(AtomicUsize::new(0));
+    let counter = fetch_count.clone();
+    app.insert_resource(ChunkVolumeProvider::new(move |key| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        ((1..=GRID).contains(&key.x) && (1..=GRID).contains(&key.y))
+            .then(|| ChunkVolume::with_z_bounds(world_grid.clone(), key, 0, MAX_Z))
+    }))
+    .insert_resource(ChunkLayerMap::default())
+    .insert_resource(ChunkMaterials {
+        terrain: Handle::default(),
+        fluid: Handle::default(),
+    })
+    .insert_resource(ChunkUploadBudget {
+        max_uploads_per_frame: BUDGET,
+    });
+
+    // 25 chunks, all dirty before the pipeline ever runs a single frame —
+    // the biggest possible burst for this window.
+    {
+        let mut queue = app.world_mut().resource_mut::<ChunkMeshQueue>();
+        for kx in 1..=GRID {
+            for ky in 1..=GRID {
+                queue.mark_dirty(VVec2::new(kx, ky));
+            }
+        }
+    }
+
+    app.update(); // exactly one frame
+
+    let fetched = fetch_count.load(Ordering::Relaxed);
+    assert!(
+        fetched > 0,
+        "sanity: the pipeline must still make progress on the very first frame"
+    );
+    assert!(
+        fetched <= EXPECTED_SPAWN_CAP,
+        "expected at most {EXPECTED_SPAWN_CAP} fetches in one frame from a 25-chunk backlog, got \
+         {fetched} — the per-frame spawn-burst cap regressed"
+    );
 }
 
 /// M1 regression: the palette hot-reload contract is "swap the

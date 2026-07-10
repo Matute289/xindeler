@@ -24,10 +24,14 @@
 //! run) and `Screenshot::image` that. Interactive runs are unaffected (no
 //! flag = no retarget).
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 
 use bevy::{
     camera::RenderTarget,
+    diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
     render::{
         render_resource::TextureFormat,
@@ -86,6 +90,9 @@ const EXTREME_PROFILE_RON: &str = r"// TEMPORARY smoke-harness profile (--smoke-
 pub enum SmokeMode {
     Screenshot(PathBuf),
     Atmosphere(PathBuf),
+    /// BL-82 EM-3.11n: `--smoke-perf-run <out.csv>` — see
+    /// [`SmokePerfRunPlugin`].
+    PerfRun(PathBuf),
 }
 
 /// Listen-server smoke gate (EM-3.7b): set `true` by the player rig once the
@@ -110,6 +117,7 @@ pub fn parse_smoke_args() -> Option<SmokeMode> {
         let mode = match arg.as_str() {
             "--smoke-screenshot" => SmokeMode::Screenshot as fn(PathBuf) -> SmokeMode,
             "--smoke-atmosphere" => SmokeMode::Atmosphere,
+            "--smoke-perf-run" => SmokeMode::PerfRun,
             _ => continue,
         };
         match args.next() {
@@ -558,6 +566,230 @@ fn drive_smoke_atmosphere(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mode 3: --smoke-perf-run (BL-82 EM-3.11n)
+// ---------------------------------------------------------------------------
+
+/// BL-82 EM-3.11n — a scripted, repeatable straight-vs-diagonal frame-time A/B
+/// harness (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md`, round 8:
+/// Matías reported diagonal movement feels distinctly choppier than straight
+/// movement). Pairs with [`crate::player_input::SmokeMovePattern`]
+/// (`XINDELER_SMOKE_MOVE_PATTERN=straight|diagonal`): run the SAME command
+/// twice, once per pattern, from the same fresh-world spawn, and diff the two
+/// CSVs this writes.
+///
+/// Runs `--listen-server` (a real embedded world + terrain stream — this is
+/// meaningless against the synthetic demo), waits out the usual
+/// world-boot/first-mesh warmup (same gate `SmokeScreenshotPlugin` uses:
+/// terrain meshed + player spawned/walked, so both conditions start measuring
+/// from an equivalent state), THEN records every raw (unsmoothed) per-frame
+/// `FrameTimeDiagnosticsPlugin` sample for `XINDELER_PERF_RUN_SECS` seconds
+/// (default [`PERF_RUN_DURATION_SECS_DEFAULT`]) while [`SmokeAutoMovePlugin`]
+/// (`crate::player_input`) drives the walk, and writes them to `out_csv` (one
+/// `frame_index,frame_time_ms` row per sample) plus logs a summary
+/// (mean/min/max/p50/p95/p99/stdev) via `target: "smoke_perf_run"` so a plain
+/// `2>&1 | grep smoke_perf_run` captures it without parsing the CSV. No
+/// pinned pass/fail threshold — frame times are display/vsync/scene-dependent
+/// (`XINDELER_PRESENT_MODE`, EM-3.11b), so this is a MEASUREMENT harness, not
+/// an assertion; compare the two CSVs' distributions by hand or with an
+/// external script.
+pub struct SmokePerfRunPlugin {
+    pub out_csv: PathBuf,
+}
+
+/// Default measurement window (seconds), overridable via
+/// `XINDELER_PERF_RUN_SECS` — long enough to cross several chunk boundaries at
+/// a normal walk speed, short enough for a quick local A/B.
+const PERF_RUN_DURATION_SECS_DEFAULT: f32 = 30.0;
+
+fn perf_run_duration_secs() -> f32 {
+    std::env::var("XINDELER_PERF_RUN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(PERF_RUN_DURATION_SECS_DEFAULT)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerfRunPhase {
+    /// World boot + first-mesh + player-spawn gate (mirrors
+    /// `SmokeScreenshotPlugin`'s listen-server gate).
+    Warmup,
+    /// Recording raw per-frame samples for `duration_secs`.
+    Measuring,
+}
+
+#[derive(Resource)]
+struct SmokePerfRun {
+    out_csv: PathBuf,
+    frames: u32,
+    phase: PerfRunPhase,
+    phase_frames: u32,
+    duration_secs: f32,
+    elapsed_secs: f32,
+    /// Raw (unsmoothed) per-frame `FrameTimeDiagnosticsPlugin` samples, ms.
+    samples: Vec<f64>,
+}
+
+impl Plugin for SmokePerfRunPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(SmokePerfRun {
+            out_csv: self.out_csv.clone(),
+            frames: 0,
+            phase: PerfRunPhase::Warmup,
+            phase_frames: 0,
+            duration_secs: perf_run_duration_secs(),
+            elapsed_secs: 0.0,
+            samples: Vec::new(),
+        })
+        // Same gate SmokeScreenshotPlugin uses in listen-server mode: prefer
+        // waiting for the player rig to confirm real movement.
+        .insert_resource(SmokePlayerMoved(false))
+        .add_systems(Update, drive_smoke_perf_run);
+    }
+}
+
+/// Aggregate stats over one measurement window — logged, not asserted (frame
+/// times are inherently noisy/display-dependent, see the plugin docs).
+#[derive(Debug)]
+struct PerfSummary {
+    count: usize,
+    mean_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    stdev_ms: f64,
+}
+
+fn summarize(samples: &[f64]) -> PerfSummary {
+    if samples.is_empty() {
+        return PerfSummary {
+            count: 0,
+            mean_ms: f64::NAN,
+            min_ms: f64::NAN,
+            max_ms: f64::NAN,
+            p50_ms: f64::NAN,
+            p95_ms: f64::NAN,
+            p99_ms: f64::NAN,
+            stdev_ms: f64::NAN,
+        };
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let count = sorted.len();
+    let mean = sorted.iter().sum::<f64>() / count as f64;
+    let variance = sorted.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
+    let percentile = |p: f64| -> f64 {
+        let idx = ((p * (count - 1) as f64).round() as usize).min(count - 1);
+        sorted[idx]
+    };
+    PerfSummary {
+        count,
+        mean_ms: mean,
+        min_ms: sorted[0],
+        max_ms: sorted[count - 1],
+        p50_ms: percentile(0.50),
+        p95_ms: percentile(0.95),
+        p99_ms: percentile(0.99),
+        stdev_ms: variance.sqrt(),
+    }
+}
+
+fn write_perf_csv(path: &Path, samples: &[f64]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    writeln!(file, "frame_index,frame_time_ms")?;
+    for (i, ms) in samples.iter().enumerate() {
+        writeln!(file, "{i},{ms}")?;
+    }
+    Ok(())
+}
+
+fn drive_smoke_perf_run(
+    mut state: ResMut<SmokePerfRun>,
+    mut commands: Commands,
+    upload_stats: Res<xindeler_render_voxel::pipeline::ChunkUploadStats>,
+    player_moved: Res<SmokePlayerMoved>,
+    diagnostics: Res<DiagnosticsStore>,
+    time: Res<Time>,
+) {
+    state.frames += 1;
+    state.phase_frames += 1;
+
+    match state.phase {
+        PerfRunPhase::Warmup => {
+            let terrain_ready = upload_stats.total_uploads > 0 && upload_stats.in_flight == 0;
+            let player_ready = player_moved.0
+                || state.phase_frames >= LISTEN_SERVER_WARMUP_FRAMES + PLAYER_WAIT_FRAMES;
+            if state.phase_frames >= LISTEN_SERVER_WARMUP_FRAMES && terrain_ready && player_ready {
+                info!(
+                    "smoke-perf-run: warmup done after {} frames ({} chunks meshed, \
+                     player_moved={}) — measuring for {}s",
+                    state.phase_frames,
+                    upload_stats.total_uploads,
+                    player_moved.0,
+                    state.duration_secs
+                );
+                state.phase = PerfRunPhase::Measuring;
+                state.phase_frames = 0;
+                state.elapsed_secs = 0.0;
+                state.samples.clear();
+            } else if state.frames >= LISTEN_SERVER_TIMEOUT_FRAMES {
+                error!(
+                    "smoke-perf-run: warmup timed out after {} frames",
+                    state.frames
+                );
+                commands.write_message(AppExit::error());
+            }
+        },
+        PerfRunPhase::Measuring => {
+            state.elapsed_secs += time.delta_secs();
+            if let Some(ms) = diagnostics
+                .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                .and_then(Diagnostic::value)
+            {
+                state.samples.push(ms);
+            }
+            if state.elapsed_secs >= state.duration_secs {
+                let summary = summarize(&state.samples);
+                // Log each field explicitly (rather than `?summary`) so a
+                // plain `grep smoke_perf_run` line has every stat readable
+                // without needing to know `PerfSummary`'s `Debug` layout.
+                info!(
+                    target: "smoke_perf_run",
+                    count = summary.count,
+                    mean_ms = summary.mean_ms,
+                    min_ms = summary.min_ms,
+                    max_ms = summary.max_ms,
+                    p50_ms = summary.p50_ms,
+                    p95_ms = summary.p95_ms,
+                    p99_ms = summary.p99_ms,
+                    stdev_ms = summary.stdev_ms,
+                    "smoke-perf-run complete"
+                );
+                match write_perf_csv(&state.out_csv, &state.samples) {
+                    Ok(()) => {
+                        info!(
+                            "smoke-perf-run: wrote {} samples to {}",
+                            state.samples.len(),
+                            state.out_csv.display()
+                        );
+                        commands.write_message(AppExit::Success);
+                    },
+                    Err(err) => {
+                        error!(
+                            "smoke-perf-run: failed to write {} ({err})",
+                            state.out_csv.display()
+                        );
+                        commands.write_message(AppExit::error());
+                    },
+                }
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +803,50 @@ mod tests {
         assert!(extreme.fog_density > default.fog_density * 2.0);
         assert!((extreme.transition_secs - 0.5).abs() < f32::EPSILON);
         assert_eq!(extreme.fog_color, [1.0, 0.05, 0.05]);
+    }
+
+    /// [`summarize`] on a known small sample set: mean/min/max/percentiles
+    /// match hand-computed values, and stdev is 0 for a constant series.
+    #[test]
+    fn summarize_known_samples() {
+        let samples = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let s = summarize(&samples);
+        assert_eq!(s.count, 5);
+        assert!((s.mean_ms - 30.0).abs() < 1e-9);
+        assert_eq!(s.min_ms, 10.0);
+        assert_eq!(s.max_ms, 50.0);
+        assert_eq!(s.p50_ms, 30.0);
+
+        let flat = vec![16.6; 100];
+        let flat_summary = summarize(&flat);
+        assert!(
+            flat_summary.stdev_ms < 1e-9,
+            "constant series has zero stdev"
+        );
+    }
+
+    #[test]
+    fn summarize_empty_is_nan_not_panic() {
+        let s = summarize(&[]);
+        assert_eq!(s.count, 0);
+        assert!(s.mean_ms.is_nan());
+    }
+
+    /// [`write_perf_csv`] produces a header + one row per sample, parseable
+    /// back out — this is the file the straight-vs-diagonal comparison reads.
+    #[test]
+    fn perf_csv_round_trips() {
+        let dir =
+            std::env::temp_dir().join(format!("xindeler-perf-csv-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.csv");
+        write_perf_csv(&path, &[16.0, 33.3, 8.0]).expect("write succeeds");
+        let contents = std::fs::read_to_string(&path).expect("file exists");
+        let mut lines = contents.lines();
+        assert_eq!(lines.next(), Some("frame_index,frame_time_ms"));
+        assert_eq!(lines.next(), Some("0,16"));
+        assert_eq!(lines.next(), Some("1,33.3"));
+        assert_eq!(lines.next(), Some("2,8"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

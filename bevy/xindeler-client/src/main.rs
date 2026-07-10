@@ -204,6 +204,18 @@ fn main() -> AppExit {
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {
             app.add_plugins(smoke::SmokeAtmospherePlugin { out_dir });
         },
+        Some(smoke::SmokeMode::PerfRun(out_csv)) => {
+            // BL-82 EM-3.11n: only meaningful against the real streamed
+            // terrain — the synthetic demo has no chunk-streaming/meshing
+            // load to compare straight vs. diagonal movement against.
+            if !listen_server {
+                eprintln!("--smoke-perf-run requires --listen-server");
+                return AppExit::error();
+            }
+            app.add_plugins(smoke::SmokePerfRunPlugin { out_csv });
+            #[cfg(feature = "listen-server")]
+            app.add_plugins(player_input::SmokeAutoMovePlugin);
+        },
         None => {},
     }
 

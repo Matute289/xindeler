@@ -508,6 +508,40 @@ fn placeholder_material() -> StandardMaterial {
 /// the remainder at ~24 bytes/key instead of a full mesh each.
 const IN_FLIGHT_FACTOR: u32 = 8;
 
+/// BL-82 EM-3.11n — per-frame cap on how many NEW mesh tasks
+/// [`spawn_chunk_mesh_tasks`] STARTS in one call (pops off the dirty queue,
+/// synchronously fetches a volume snapshot via [`ChunkVolumeProvider::fetch`],
+/// and hands off to the task pool) — separate from `in_flight_cap` above
+/// (the total OUTSTANDING task ceiling). `fetch` runs on the MAIN thread
+/// (only `generate_mesh` itself runs off-thread, inside `pool.spawn`), so
+/// popping+fetching many keys in a single frame is a real main-thread cost
+/// that scales with how many distinct chunks the dirty queue backlogged
+/// since the last frame — previously uncapped whenever `in_flight_cap` had
+/// headroom (e.g. right after an idle period, when few tasks are
+/// outstanding, a burst could pop+fetch up to `budget × IN_FLIGHT_FACTOR`
+/// keys in ONE frame).
+///
+/// Investigated for the "diagonal movement feels choppier than straight"
+/// report (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md` round
+/// 8; `xindeler-client`'s `terrain_stream.rs::neighbourhood_3x3` docs): a
+/// diagonal streaming frontier backlogs ~1.6× as many distinct chunks per
+/// unit distance as a straight one for the same real ground speed (proven
+/// deterministically by `terrain_stream.rs`'s
+/// `diagonal_streaming_touches_more_distinct_chunks_than_straight` test), so
+/// its bursts are structurally bigger — and a live `--smoke-perf-run` A/B
+/// (straight vs. diagonal, same fresh world, `xindeler-client`) measured
+/// diagonal movement's frame-time distribution consistently skewing toward
+/// larger max/stdev than straight's across repeated trials, even though mean
+/// frame time was statistically unchanged — consistent with OCCASIONAL
+/// bigger spawn bursts causing occasional bigger frame-time spikes, not a
+/// sustained per-frame cost increase. Spreading the fetch cost over more
+/// frames bounds the single-frame spike regardless of burst size, trading a
+/// slightly longer time-to-fully-meshed for a smoother frame time. Smaller
+/// than `IN_FLIGHT_FACTOR` (a fetch is far cheaper than a GPU upload, but
+/// this cap exists specifically to smooth BURSTS, not to throttle steady
+/// throughput).
+const SPAWN_BURST_FACTOR: u32 = 4;
+
 /// Registers the queue/tasks/budget/stats resources and the pipeline
 /// systems (removals → spawn → apply). Spawn/apply idle until the host
 /// inserts a [`ChunkVolumeProvider`], a [`ChunkLayerMap`] and
@@ -566,7 +600,9 @@ fn process_chunk_removals(
 
 /// Drains the dirty queue into `AsyncComputeTaskPool` tasks (one per chunk:
 /// greedy meshing + EM-3.2 conversion, fully off the main thread), holding
-/// back once `budget × IN_FLIGHT_FACTOR` tasks are outstanding.
+/// back once `budget × IN_FLIGHT_FACTOR` tasks are outstanding OR once
+/// `budget × SPAWN_BURST_FACTOR` NEW tasks have started THIS frame (BL-82
+/// EM-3.11n — see [`SPAWN_BURST_FACTOR`]'s docs).
 fn spawn_chunk_mesh_tasks(
     provider: Res<ChunkVolumeProvider>,
     layer_map: Res<ChunkLayerMap>,
@@ -583,11 +619,14 @@ fn spawn_chunk_mesh_tasks(
         return;
     }
     let in_flight_cap = (budget.max_uploads_per_frame.max(1) * IN_FLIGHT_FACTOR) as usize;
+    let spawn_cap_this_frame = (budget.max_uploads_per_frame.max(1) * SPAWN_BURST_FACTOR) as usize;
     let pool = AsyncComputeTaskPool::get();
-    while tasks.0.len() < in_flight_cap {
+    let mut spawned_this_frame = 0usize;
+    while tasks.0.len() < in_flight_cap && spawned_this_frame < spawn_cap_this_frame {
         let Some(key) = queue.pop() else {
             break;
         };
+        spawned_this_frame += 1;
         let Some(volume) = provider.fetch(key) else {
             // The provider no longer has this chunk: cancel any in-flight
             // task too, so a stale mesh can't land later (last write wins).
