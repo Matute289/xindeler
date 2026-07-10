@@ -130,6 +130,13 @@ pub struct FlyCam {
     pub sensitivity: f32,
     pub yaw: f32,
     pub pitch: f32,
+    /// Rotation left over from a frame whose desired yaw/pitch step exceeded
+    /// [`MAX_LOOK_STEP_RAD`] (EM-3.11k) — applied on the following frame(s)
+    /// instead of being dropped, so the full input still lands, just spread
+    /// out instead of landing in one oversized step. See
+    /// [`MAX_LOOK_STEP_RAD`]'s doc for why this exists.
+    yaw_carry: f32,
+    pitch_carry: f32,
 }
 
 // TODO(EM-5.11): speed/sensitivity belong in XindelerSettings (user-facing
@@ -142,7 +149,76 @@ impl Default for FlyCam {
             sensitivity: 0.002,
             yaw: 0.0,
             pitch: 0.0,
+            yaw_carry: 0.0,
+            pitch_carry: 0.0,
         }
+    }
+}
+
+/// Per-frame yaw/pitch rotation ceiling, radians (EM-3.11k — "brightness
+/// flicker" investigation).
+///
+/// Root cause: Bevy's built-in `TemporalAntiAliasing` keeps a per-pixel
+/// history-confidence counter baked into the taa shader (`bevy_anti_alias`,
+/// not exposed as a tunable on the component — only `reset: bool` is public):
+/// it resets to full weight-on-current-frame the instant a pixel's motion
+/// vector exceeds ~0.01px, and otherwise climbs, biasing the frame toward
+/// heavy (up to ~98.5%) history blending while the view stays still. Camera
+/// ROTATION moves nearly every pixel's projected position at once (unlike
+/// translation, where distant/background pixels barely move), so whenever
+/// the player looks around, confidence broadly resets and the frame leans on
+/// the crisper, unblended current sample; the instant rotation is small
+/// again, confidence quickly climbs back up and the picture leans back on
+/// several frames of jittered, softly-averaged history. Confirmed
+/// empirically (`XINDELER_BRIGHTNESS_PROBE` debug harness, since reverted):
+/// consecutive offscreen captures during scripted forward walking (no
+/// rotation) never showed a discrete jump, but the SAME scene with the
+/// camera yaw continuously sweeping showed repeated one-frame luminance
+/// pops (+3 then -3, alternating) exactly matching Matías's "brillo/
+/// contraste sube por un instante" report — a whole-frame, uniform
+/// brightening (confirmed via a diff of consecutive frames), not a
+/// localized geometry edge.
+///
+/// The trigger for the ALTERNATION (not just "rotation causes some popping",
+/// but a sharp one-frame spike sandwiched between normal frames) is this
+/// project's own already-tracked, still-open frame-pacing stutter
+/// (EM-3.11c/d/e: the embedded sim tick can eat an uneven slice of a
+/// render frame's budget). `AccumulatedMouseMotion::delta` naturally
+/// accumulates however much real mouse motion happened since the last
+/// `Update` tick — so when a tick is delayed by a slow sim step, more
+/// motion piles into that ONE tick, immediately followed by a quick
+/// catch-up tick with comparatively little residual motion. That backlog
+/// spike rotates the WHOLE screen further in one frame than its neighbours,
+/// tripping the confidence reset broadly for exactly one frame — the "pop".
+///
+/// We have no public API into the TAA shader's internal thresholds, and
+/// this project's own frame-pacing stutter is a separate, already-tracked
+/// epic this fix does not attempt to solve outright. What IS in scope and
+/// fully in our control: preventing a single Update tick from ever applying
+/// an outsized rotation step, by capping it and carrying any excess into
+/// the next tick(s) (mirrors the `Time::<Virtual>::max_delta` clamp EM-3.11c
+/// already applied to the FixedUpdate catch-up spiral — same shape of fix,
+/// applied to camera rotation instead of the sim tick). Chosen generously —
+/// ~172°/frame — so it only ever engages on a genuine multi-frame backlog
+/// spike; a single ~16-33ms frame cannot get anywhere near this from actual
+/// human mouse movement, so normal play (including fast, deliberate flicks)
+/// is unaffected. Residual uncertainty: this reduces the frame-to-frame
+/// motion-vector inconsistency that triggers the TAA confidence reset, but
+/// since we can't tune the TAA shader itself, an underlying sim-tick stutter
+/// severe enough to still cause single-frame spikes bigger than this ceiling
+/// remains possible in principle — full confirmation needs Matías's own
+/// in-game eyeball check under his actual mouse-look play.
+const MAX_LOOK_STEP_RAD: f32 = 3.0;
+
+/// Splits a desired rotation delta into what to apply THIS frame (bounded by
+/// [`MAX_LOOK_STEP_RAD`]) and what to carry into the next. Pure + unit-tested
+/// in isolation (see the `tests` module).
+fn capped_look_step(desired: f32) -> (f32, f32) {
+    if desired.abs() <= MAX_LOOK_STEP_RAD {
+        (desired, 0.0)
+    } else {
+        let step = MAX_LOOK_STEP_RAD.copysign(desired);
+        (step, desired - step)
     }
 }
 
@@ -240,15 +316,35 @@ fn fly_cam_look(
     let grabbed = cursor_options
         .single()
         .is_ok_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
-    if !grabbed || motion.delta == Vec2::ZERO {
+    if !grabbed {
+        // Not controlling the camera — drop any pending carry (EM-3.11k) so
+        // an old backlog spike doesn't surface as a delayed turn on re-grab.
+        for (_, mut cam) in &mut cameras {
+            cam.yaw_carry = 0.0;
+            cam.pitch_carry = 0.0;
+        }
         return;
     }
+    // Still run with zero fresh motion this frame: a pending carry (EM-3.11k)
+    // must keep draining even on a frame with no new mouse delta, rather than
+    // waiting for the next real mouse event to resolve.
     for (mut transform, mut cam) in &mut cameras {
-        cam.yaw -= motion.delta.x * cam.sensitivity;
-        cam.pitch = (cam.pitch - motion.delta.y * cam.sensitivity).clamp(
+        if motion.delta == Vec2::ZERO && cam.yaw_carry == 0.0 && cam.pitch_carry == 0.0 {
+            continue;
+        }
+        let desired_yaw = cam.yaw_carry - motion.delta.x * cam.sensitivity;
+        let (yaw_step, yaw_carry) = capped_look_step(desired_yaw);
+        cam.yaw += yaw_step;
+        cam.yaw_carry = yaw_carry;
+
+        let desired_pitch = cam.pitch_carry - motion.delta.y * cam.sensitivity;
+        let (pitch_step, pitch_carry) = capped_look_step(desired_pitch);
+        cam.pitch_carry = pitch_carry;
+        cam.pitch = (cam.pitch + pitch_step).clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,
         );
+
         transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
     }
 }
@@ -290,5 +386,75 @@ fn fly_cam_move(
                 1.0
             };
         transform.translation += wish.normalize_or_zero() * speed * time.delta_secs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A normal, in-band rotation step (well under the ceiling — every real
+    /// single-frame mouse delta) applies in FULL with nothing carried over,
+    /// so ordinary play is bit-for-bit unaffected by EM-3.11k's cap.
+    #[test]
+    fn in_band_step_applies_fully_no_carry() {
+        let (step, carry) = capped_look_step(0.05);
+        assert!((step - 0.05).abs() < f32::EPSILON);
+        assert_eq!(carry, 0.0);
+
+        let (step, carry) = capped_look_step(-0.05);
+        assert!((step - (-0.05)).abs() < f32::EPSILON);
+        assert_eq!(carry, 0.0);
+    }
+
+    /// A step at exactly the ceiling still applies in full (boundary case).
+    #[test]
+    fn step_at_ceiling_applies_fully() {
+        let (step, carry) = capped_look_step(MAX_LOOK_STEP_RAD);
+        assert!((step - MAX_LOOK_STEP_RAD).abs() < f32::EPSILON);
+        assert_eq!(carry, 0.0);
+    }
+
+    /// An oversized step (a stutter-induced backlog spike, EM-3.11k) is
+    /// clamped to the ceiling and the remainder is returned to carry into
+    /// the next frame — no input is ever lost, only deferred.
+    #[test]
+    fn oversized_step_is_capped_and_remainder_carried() {
+        let (step, carry) = capped_look_step(5.0);
+        assert!((step - MAX_LOOK_STEP_RAD).abs() < f32::EPSILON);
+        assert!((carry - 2.0).abs() < 1e-5);
+
+        // Sign is preserved for a negative oversized step too.
+        let (step, carry) = capped_look_step(-5.0);
+        assert!((step - (-MAX_LOOK_STEP_RAD)).abs() < f32::EPSILON);
+        assert!((carry - (-2.0)).abs() < 1e-5);
+    }
+
+    /// Feeding a carried remainder back in (as `fly_cam_look` does every
+    /// frame) converges to the full originally-desired rotation over a few
+    /// frames instead of a single oversized one — the fix SPREADS a spike,
+    /// it doesn't discard part of it.
+    #[test]
+    fn carry_converges_to_full_rotation_over_frames() {
+        // Simulate a single 10-radian backlog spike landing in one Update
+        // tick, with zero fresh motion on every following tick.
+        let mut carry = 0.0_f32;
+        let mut total_applied = 0.0_f32;
+        let (step, next_carry) = capped_look_step(10.0 + carry);
+        total_applied += step;
+        carry = next_carry;
+        for _ in 0..20 {
+            if carry == 0.0 {
+                break;
+            }
+            let (step, next_carry) = capped_look_step(carry);
+            total_applied += step;
+            carry = next_carry;
+        }
+        assert_eq!(carry, 0.0, "carry must fully drain within a few frames");
+        assert!(
+            (total_applied - 10.0).abs() < 1e-4,
+            "no rotation is lost, only spread out: {total_applied}"
+        );
     }
 }
