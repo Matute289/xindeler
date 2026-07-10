@@ -11873,6 +11873,8 @@ dependencies = [
  "prometheus",
  "ron",
  "serde",
+ "serde_json",
+ "tempfile",
  "xindeler-protocol",
 ]
 

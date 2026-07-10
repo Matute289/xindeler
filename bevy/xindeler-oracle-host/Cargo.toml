@@ -12,10 +12,16 @@ workspace = true
 # `bevy_asset` only — this crate hosts the data-driven ORACLE assets (DmEvent,
 # AtmosphereProfile, ...) and must stay render-free so the headless server shell
 # can use it (spec §5). Apply-to-render systems live in `xindeler-client`.
+# `file_watcher` (EM-4.3): the `oracle://` custom `AssetSource` (dm_event.rs)
+# needs a REAL hot-reload watcher, and this crate must work headlessly (server
+# shell) — it can't rely on `xindeler-client` re-exporting the feature into
+# the build graph, so it requests it directly (same rationale as
+# `xindeler-client/Cargo.toml`'s own `file_watcher` line).
 bevy = { version = "=0.19.0", default-features = false, features = [
     "std",
     "bevy_log",
     "bevy_asset",
+    "file_watcher",
 ] }
 ron = { workspace = true }
 serde = { workspace = true }
@@ -29,3 +35,12 @@ prometheus = { workspace = true }
 # higher-level -> lower-level) edge instead, to embed the type in
 # `AiGatewayConfig`. See `ai_gateway`'s module doc for the full reasoning.
 xindeler-protocol = { path = "../xindeler-protocol" }
+# `DmEventLoader` (EM-4.3): ORACLE's LLM-side tooling emits JSON comfortably —
+# `.dmevent.json` is parsed with this, `.dmevent.ron` with `ron` above (spec
+# §5.1/§0.4).
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# `dm_event.rs`'s hot-reload test drops a real file into a real tempdir and
+# waits for the `oracle://` source's file watcher to pick it up.
+tempfile = { workspace = true }
