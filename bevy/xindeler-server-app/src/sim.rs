@@ -27,7 +27,13 @@
 //! and mirrors entities into `Replicated` Bevy entities for the new
 //! replicon+quinnet transport (`xindeler-transport`) to actually send. This
 //! is a wrapping refactor, not a behavior change: the settings source, the
-//! `no_auth` override, and the dual-stack legacy listener are all untouched.
+//! `no_auth` override, and the dual-stack legacy listener are all untouched —
+//! including the tokio runtime's own CPU-scaled sizing (below), which an
+//! earlier draft of this extraction accidentally silently downgraded to the
+//! singleplayer path's small fixed size; [`boot_with_settings`] now takes
+//! that sizing as a parameter instead of picking one on every caller's
+//! behalf, so this shell passes its own formula back through exactly as
+//! before.
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -129,11 +135,21 @@ pub fn boot_dedicated_server(config: &SimServerConfig) -> Result<SimServer, serv
         })
         .collect();
 
+    // Same sizing formula server-cli's own production runtime uses
+    // (server-cli/src/main.rs) — a small pool is enough since the sim's heavy
+    // lifting runs on its own rayon/slow-job pools, this runtime only backs
+    // networking + persistence + the EM-4.1 metrics server, but it still
+    // needs to scale with host core count, unlike the singleplayer/dev-test
+    // path's small fixed size (see `boot_with_settings`'s doc comment for why
+    // this is passed explicitly rather than inherited from that path).
+    let worker_threads = (num_cpus::get() / 4).max(common::consts::MIN_RECOMMENDED_TOKIO_THREADS);
     let sim = xindeler_sim_bridge::boot_with_settings(
         server_settings,
         editable_settings,
         database_settings,
         &data_dir,
+        worker_threads,
+        "tokio-server-app",
     )?;
 
     tracing::info!(
