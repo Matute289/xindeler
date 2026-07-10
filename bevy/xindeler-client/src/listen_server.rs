@@ -136,12 +136,23 @@ impl Plugin for ListenServerPlugin {
             // lives entirely inside these plugins).
             SimBridgePlugin,
             SimTerrainStreamPlugin,
+            // Server shell: the embedded local-player Client tick + input apply
+            // (EM-3.7b). Specs/client crate stays inside the bridge.
+            //
+            // EM-3.11o: registered BEFORE `SimEntityMirrorPlugin` — its
+            // `spawn_test_npcs` system now reads `EmbeddedPlayer` (written by
+            // this plugin's `tick_player`), matching the "add AFTER
+            // PlayerBridgePlugin" convention `LodAltStreamPlugin` below
+            // already follows. `SimEntityMirrorPlugin` also carries an
+            // explicit `.after(tick_player)` schedule constraint (see its
+            // doc), so this ordering is redundant-but-consistent rather than
+            // load-bearing — a reviewer flagged the previous
+            // registration-order mismatch as worth fixing regardless, since
+            // registration order alone would NOT have been sufficient.
+            PlayerBridgePlugin,
             // Server shell: entity mirror (sim entities → replicated Bevy
             // entities) + one-shot test-NPC spawn (EM-3.7). Specs stays inside.
             SimEntityMirrorPlugin,
-            // Server shell: the embedded local-player Client tick + input apply
-            // (EM-3.7b). Specs/client crate stays inside the bridge.
-            PlayerBridgePlugin,
             // Server shell: one-shot far-terrain heightmap broadcast (EM-3.10b).
             // Reads the embedded player's `world_data()`, so it's added after
             // `PlayerBridgePlugin`. Specs/client-core stays inside the bridge.
