@@ -59,7 +59,16 @@ xindeler-dimensions = { path = "../xindeler-dimensions" }
 # `NpcBuilder`/`CreateNpcEvent`/`emit_event_now` path `spawn_test_npcs`
 # already uses) has to live here, not in `xindeler-oracle-host` itself.
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# EM-4.7 (`entity_factory.rs`'s `spawn_from_spawning_rules`): scatters a
+# `DmEvent.spawning_rules`-driven batch of spawns within `spawn_radius` of an
+# origin. A seeded RNG (caller-supplied), never wall-clock/thread entropy —
+# keeps the factory itself deterministic per the ORACLE invariant.
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 ron = { workspace = true }
+# The EM-4.7 batch-spawn acceptance test seeds a `ChaCha8Rng` so the
+# spawn-scatter is reproducible (same pattern `world/`'s dynamic_rng and
+# `common/benches`'s chonk_benchmark already use for a seeded PRNG).
+rand_chacha = { workspace = true }
