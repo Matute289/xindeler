@@ -76,7 +76,9 @@ pub(crate) fn chronicle_hook_system(
     for event in events.read() {
         let id = match event {
             AssetEvent::Added { id } | AssetEvent::Modified { id } => *id,
-            AssetEvent::Removed { .. } | AssetEvent::Unused { .. } | AssetEvent::LoadedWithDependencies { .. } => {
+            AssetEvent::Removed { .. }
+            | AssetEvent::Unused { .. }
+            | AssetEvent::LoadedWithDependencies { .. } => {
                 continue;
             },
         };
@@ -148,10 +150,7 @@ mod tests {
         // handle immediately would make this the LAST strong reference,
         // and `Assets<T>` would unload the asset again before
         // `chronicle_hook_system` ever looks it up via `assets.get(id)`.
-        let _handle = app
-            .world_mut()
-            .resource_mut::<Assets<DmEvent>>()
-            .add(event);
+        let _handle = app.world_mut().resource_mut::<Assets<DmEvent>>().add(event);
 
         // Bevy's `AssetEvents` system flushes `Assets<T>`'s internal
         // "just added" queue into `Messages<AssetEvent<T>>` once per frame;
@@ -172,8 +171,8 @@ mod tests {
         }
         assert!(
             found,
-            "the world_rumor must appear in the chronicle log within a few ticks of the \
-             DmEvent's AssetEvent::Added firing"
+            "the world_rumor must appear in the chronicle log within a few ticks of the DmEvent's \
+             AssetEvent::Added firing"
         );
     }
 
@@ -209,5 +208,3 @@ mod tests {
         assert_eq!(log.iter().next(), Some("entry 10"));
     }
 }
-
-

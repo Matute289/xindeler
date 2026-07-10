@@ -88,7 +88,11 @@ impl NarrativeHooks {
     /// (spec §1.11's schema), so a second call for the same dimension is
     /// either a re-registration after a teardown/respawn cycle or a
     /// programming error on the caller's part; neither should panic.
-    pub fn register_on_enter_message(&mut self, dimension: DimensionId, message: impl Into<String>) {
+    pub fn register_on_enter_message(
+        &mut self,
+        dimension: DimensionId,
+        message: impl Into<String>,
+    ) {
         self.0.insert(dimension, message.into());
     }
 
@@ -254,12 +258,9 @@ mod tests {
             "the toast must target exactly the one client via SendTargets::Single, got {:?}",
             toasts[0].targets
         );
-        assert_eq!(
-            toasts[0].message,
-            HudToast {
-                text: "The gate to Ravenloft creaks open.".to_owned(),
-            }
-        );
+        assert_eq!(toasts[0].message, HudToast {
+            text: "The gate to Ravenloft creaks open.".to_owned(),
+        });
     }
 
     /// A client whose viewpoint dimension has no registered hook gets
@@ -271,11 +272,8 @@ mod tests {
             .resource_mut::<NarrativeHooks>()
             .register_on_enter_message(DimensionId(7), "hooked dimension only");
 
-        app.world_mut().spawn(ClientViewpoint::new(
-            DimensionId(1),
-            Vec2::new(0.0, 0.0),
-            1,
-        ));
+        app.world_mut()
+            .spawn(ClientViewpoint::new(DimensionId(1), Vec2::new(0.0, 0.0), 1));
 
         app.world_mut()
             .run_system_once(fire_on_enter_toasts)

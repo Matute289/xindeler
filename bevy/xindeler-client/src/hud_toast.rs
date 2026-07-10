@@ -162,9 +162,7 @@ mod tests {
             .expect("receive_toasts runs");
 
         let mut roots = app.world_mut().query::<(&Visibility, &HudToastRoot)>();
-        let (visibility, _) = roots
-            .single(app.world())
-            .expect("exactly one toast root");
+        let (visibility, _) = roots.single(app.world()).expect("exactly one toast root");
         assert_eq!(*visibility, Visibility::Visible);
 
         let mut texts = app.world_mut().query::<(&Text, &HudToastText)>();
@@ -201,9 +199,7 @@ mod tests {
             .expect("fade_toast runs");
 
         let mut roots = app.world_mut().query::<(&Visibility, &HudToastRoot)>();
-        let (visibility, _) = roots
-            .single(app.world())
-            .expect("exactly one toast root");
+        let (visibility, _) = roots.single(app.world()).expect("exactly one toast root");
         assert_eq!(
             *visibility,
             Visibility::Hidden,
