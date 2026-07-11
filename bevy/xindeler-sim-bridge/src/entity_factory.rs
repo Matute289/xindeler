@@ -28,11 +28,12 @@
 //! deferred-items table). So "routing a spawn into dimension X" means: the
 //! real sim NPC is still created in the one physical world (same terrain
 //! everyone else's entities stand on), but its MIRROR is tagged with
-//! dimension X's `DimensionId` (via [`crate::PendingDimensionAttribution`],
-//! consumed by [`crate::mirror_sim_entities`]) so per-client interest
-//! management (`xindeler_protocol::visibility`) scopes its visibility
-//! separately from the default world's own entities — the concrete,
-//! honest meaning of "the minions live in the instanced dimension" for v1.
+//! dimension X's `DimensionId` (via a [`common::comp::SpawnCorrelation`] tag
+//! resolved through [`crate::PendingDimensionAttribution`], consumed by
+//! [`crate::mirror_sim_entities`]) so per-client interest management
+//! (`xindeler_protocol::visibility`) scopes its visibility separately from
+//! the default world's own entities — the concrete, honest meaning of "the
+//! minions live in the instanced dimension" for v1.
 //!
 //! A request naming a `DimensionId` that isn't currently registered+`Active`
 //! in the [`DimensionRegistry`] is dropped with a `warn!` (defensive: a
@@ -64,7 +65,7 @@
 //! (`.before(apply_pending_entity_template_spawns)`) this doc comment used to
 //! ask a future caller to remember.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use bevy::{
     ecs::{
@@ -95,68 +96,84 @@ use xindeler_protocol::DimensionId;
 
 use crate::SimServer;
 
-/// FIFO queue of dimensions awaiting attribution to the next brand-new,
-/// Agent-bearing sim entity [`crate::mirror_sim_entities`] discovers (BL-82
-/// EM-4.9, Phase C / T51.6).
+/// Side-channel map from a per-request [`common::comp::SpawnCorrelation`] id
+/// to the [`DimensionId`] its factory spawn targets (BL-82 EM-4.9 Phase C /
+/// T51.6; redesigned to fix a real misattribution race — see below).
 ///
-/// ## Why a queue, not a direct `specs::Entity -> DimensionId` map
+/// ## Why a keyed map, not a direct `specs::Entity -> DimensionId` map
 /// `State::emit_event_now` only QUEUES a `CreateNpcEvent` onto the sim's
-/// event bus — the real specs `Entity` doesn't exist until the sim's OWN
-/// next `tick_sim` call processes
-/// it (one `FixedUpdate` tick later than this module's own
-/// [`apply_pending_entity_template_spawns`] run), so there is no `Entity` to
-/// key a map by at the moment this module requests the spawn. Instead, this
-/// module pushes the TARGET dimension once per non-default-dimension spawn
-/// it successfully requests (in request order); [`crate::mirror_sim_entities`]
-/// pops the front entry the next time it discovers a brand-new sim entity
-/// that also carries an `Agent` component (real players never do — see that
-/// function's own doc comment) and assigns that dimension via
-/// [`crate::SimEntityDimension`], defaulting to [`DimensionId::DEFAULT`] when
-/// the queue is empty (unchanged v1 behavior for ordinary NPC/test spawns).
+/// event bus — the real specs `Entity` doesn't exist until the sim's OWN next
+/// `tick_sim` call processes it (one `FixedUpdate` tick later than this
+/// module's own [`apply_pending_entity_template_spawns`] run), so there is no
+/// `Entity` to key a map by at the moment this module requests the spawn.
 ///
-/// ## Known, documented limitation (bevy-migration-reviewer follow-up: the
-/// real risk surface is broader than the original framing)
-/// This is a best-effort correlation, not a guaranteed one: if some OTHER
-/// Agent-bearing entity is discovered by the mirror in the exact same tick a
-/// factory batch materializes, one queue entry could be consumed by the
-/// wrong entity. The original version of this doc comment named only
-/// `spawn_test_npcs`'s wandering ring (a one-shot, dev-only, disabled-by-
-/// default latch) — that undersold the real exposure: `server/src/sys/
-/// terrain.rs`'s wildlife-spawning system is a REAL, ALWAYS-ON per-tick
-/// `specs::System` that continuously creates Agent-bearing wildlife as
-/// chunks stream in during ordinary gameplay (not a rare dev-tool edge case
-/// — the normal spawn path on any populated live server), and rtsim/pet/
-/// summon spawns are further Agent-bearing sources. Any tick where the queue
-/// still has a pending entry (the whole multi-tick window between
-/// `apply_pending_entity_template_spawns` queuing a batch and
-/// `mirror_sim_entities` discovering every corresponding sim NPC) is also a
-/// tick where ordinary wildlife could be discovered first and steal the
-/// wrong slot. Real players are still NEVER at risk (server-side `Agent` is
-/// attached only by `server/src/pet.rs`, `server/src/cmd.rs`, `server/src/
-/// sys/terrain.rs`, and `server/src/rtsim/tick.rs` — none on the login
-/// path), so a misattribution can only ever mistag one NPC/minion for
-/// another, never a player. Acceptable for v1 (one controlled ORACLE
-/// encounter at a time, and this codebase's own dev/test usage keeps
-/// `spawn_test_npcs` off by default); a fully robust fix needs the sim
-/// itself to carry dimension identity on the entity at creation time, which
-/// would touch the `common`/`server` logic crates (upstream-merge-sensitive,
-/// out of this shell-only task's scope) — tracked as a follow-up.
+/// ## Why NOT a FIFO queue (the bug this replaced)
+/// An earlier design pushed the target `DimensionId` onto a shared
+/// `VecDeque`, and [`crate::mirror_sim_entities`] popped the front entry for
+/// "the next Agent-bearing entity discovered this tick" — correlating by
+/// ARRIVAL ORDER, not identity. That was a real, live bug: `server/src/sys/
+/// terrain.rs`'s wildlife-spawning system is ALWAYS-ON (not a rare dev-tool
+/// edge case) and creates Agent-bearing wildlife on the same per-tick cadence
+/// as an ORACLE event's minions, so an ordinary wildlife spawn discovered in
+/// the same tick — before the real factory entity — could steal the queue
+/// slot, mis-tagging the wildlife with the event's `DimensionId` and leaving
+/// the actual minion to fall back to [`DimensionId::DEFAULT`]. Concurrent
+/// `DmEvent`s resolving in the same tick had the identical problem against
+/// EACH OTHER.
 ///
-/// ## A second, related limitation: same-tick multi-event interleaving
-/// (ecs-design-reviewer follow-up) If TWO different `DmEvent`s are both
-/// resolving their `spawn_event_minions` batch in the SAME tick, each
-/// event's entries land in this ONE shared queue in whatever order
-/// `xindeler-sim-bridge::oracle::spawn_event_minions` processes the two
-/// `OracleEventRegistry` entries — `mirror_sim_entities` then consumes them
-/// strictly FIFO as it discovers new Agent-bearing entities, which is only
-/// correct if specs' `Join` iteration order and Bevy's deferred `Commands`
-/// application both preserve enqueue order (true absent intervening
-/// deletions — the same assumption the single-event case above already
-/// relies on). Out of scope to eliminate for v1 (one canonical event at a
-/// time is this task's own scope call), but worth naming explicitly rather
-/// than leaving an implicit multi-event assumption undocumented.
+/// ## The fix: key by an explicit per-request correlation id, not order
+/// [`apply_pending_entity_template_spawns`] mints a fresh
+/// [`common::comp::SpawnCorrelation`] id per spawn request (see
+/// [`NextSpawnCorrelationId`]), stashes `id -> DimensionId` here, and tags
+/// the `NpcBuilder` with that same id (`NpcBuilder::with_spawn_correlation`)
+/// — the sim's own `handle_create_npc` (server-side, isolation-law-legal:
+/// this is the sim's own public event bus, not a bridge write) attaches it as
+/// a real component on the new entity. [`crate::mirror_sim_entities`] then
+/// looks up a newly-discovered entity's OWN `SpawnCorrelation` id directly in
+/// this map — an entity search keyed by an id it structurally cannot share
+/// with any other entity, not by "whichever Agent-bearing entity happened to
+/// be discovered first". Untagged spawns (wildlife, rtsim, pets, players —
+/// none of which ever carry `SpawnCorrelation`) can never collide with a
+/// factory batch's entry regardless of discovery order or same-tick
+/// interleaving between multiple `DmEvent`s, closing both limitations the
+/// FIFO design used to carry.
+///
+/// ## Known, low-probability, non-blocking caveat: an entry that is never
+/// consumed leaks for the process's lifetime
+/// An entry is only ever removed by [`crate::mirror_sim_entities`] reading
+/// the MATCHING `SpawnCorrelation` off a real entity. If the corresponding
+/// `CreateNpcEvent` were ever silently swallowed upstream (nothing in the
+/// current `handle_create_npc` path does this — it unconditionally builds an
+/// entity — so this is theoretical, not an observed bug), that one entry
+/// would sit here forever. Bounded in practice by how many spawn requests
+/// this process ever issues (no unbounded-growth attack surface a hostile
+/// client can trigger — factory spawns are ORACLE/admin-driven, not
+/// player-triggered), and no worse than the FIFO design's own analogous
+/// unbounded-queue-growth risk if a caller stopped resolving its requests.
 #[derive(Resource, Debug, Default)]
-pub struct PendingDimensionAttribution(pub VecDeque<DimensionId>);
+pub struct PendingDimensionAttribution(pub HashMap<u64, DimensionId>);
+
+/// Monotonic counter minting fresh [`common::comp::SpawnCorrelation`] ids for
+/// [`apply_pending_entity_template_spawns`] — see
+/// [`PendingDimensionAttribution`]'s doc comment for why identity (not
+/// arrival order) is what makes the dimension-attribution correlation safe.
+/// A plain in-memory counter (not RNG-derived) is enough: this id is never
+/// persisted, net-synced, or otherwise gameplay-visible, only compared for
+/// equality within one running process, so wraparound after `u64::MAX`
+/// requests (never reached in practice) is the only theoretical collision
+/// and is itself harmless (the oldest in-flight entry, if any, would simply
+/// be overwritten).
+#[derive(Resource, Debug, Default)]
+pub struct NextSpawnCorrelationId(pub u64);
+
+impl NextSpawnCorrelationId {
+    /// Returns a fresh, previously-unused-this-process id.
+    fn next(&mut self) -> u64 {
+        let id = self.0;
+        self.0 = self.0.wrapping_add(1);
+        id
+    }
+}
 
 /// Turns a (already-sanitized) `SpawningRules` — e.g. a `DmEvent`'s
 /// `spawning_rules` field, the Mist-Bound-example schema's monster-population
@@ -281,6 +298,7 @@ pub fn apply_pending_entity_template_spawns(
     mut commands: Commands,
     registry: Res<DimensionRegistry>,
     mut attribution: ResMut<PendingDimensionAttribution>,
+    mut next_correlation_id: ResMut<NextSpawnCorrelationId>,
     pending: Query<(
         Entity,
         &PendingEntityTemplateSpawn,
@@ -349,13 +367,19 @@ pub fn apply_pending_entity_template_spawns(
         .with_agent(agent);
         npc.loot = loot_spec;
 
-        // BL-82 EM-4.9: record the target dimension BEFORE queuing the
-        // event, in request order, so `mirror_sim_entities` can attribute it
-        // to the resulting sim entity once it materializes (see
-        // `PendingDimensionAttribution`'s doc comment). Never pushed for
-        // DEFAULT — that's the mirror's own unattributed fallback.
+        // BL-82 EM-4.9 (fixed misattribution race): mint a fresh correlation
+        // id, record its target dimension BEFORE queuing the event, and tag
+        // the builder with the SAME id — `mirror_sim_entities` looks this
+        // exact id up once the entity materializes, never guessing by
+        // discovery order (see `PendingDimensionAttribution`'s doc comment).
+        // Never assigned for DEFAULT — that's the mirror's own unattributed
+        // fallback, and every other CreateNpcEvent caller (wildlife, rtsim,
+        // pets, players) never sets `spawn_correlation` at all, so they can
+        // never collide with this entry regardless of tick timing.
         if request.dimension != DimensionId::DEFAULT {
-            attribution.0.push_back(request.dimension);
+            let id = next_correlation_id.next();
+            attribution.0.insert(id, request.dimension);
+            npc = npc.with_spawn_correlation(id);
         }
 
         let wpos = vek::Vec3::new(request.pos[0], request.pos[1], request.pos[2]);

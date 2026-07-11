@@ -99,7 +99,8 @@
 
 mod entity_factory;
 pub use entity_factory::{
-    PendingDimensionAttribution, apply_pending_entity_template_spawns, spawn_from_spawning_rules,
+    NextSpawnCorrelationId, PendingDimensionAttribution, apply_pending_entity_template_spawns,
+    spawn_from_spawning_rules,
 };
 
 mod oracle;
@@ -406,6 +407,7 @@ impl Plugin for SimBridgePlugin {
         // idempotent, so `SimEntityMirrorPlugin` initializing them again
         // later is harmless.
         app.init_resource::<entity_factory::PendingDimensionAttribution>();
+        app.init_resource::<entity_factory::NextSpawnCorrelationId>();
         app.init_resource::<SimEntityDimension>();
         // EM-4.5: DimensionRegistry + the full lifecycle state machine —
         // every dimension-tagging consumer of this bridge needs it, so it's
@@ -982,6 +984,33 @@ impl Plugin for SimEntityMirrorPlugin {
         // than relying on the benign one-tick self-healing race the mirror's
         // `registry` param doc comment used to describe) removes a real,
         // if harmless, conflicting-resource-access ambiguity.
+        //
+        // BL-82 (4-reviewer pass follow-up, MAJOR finding): `.after(
+        // handle_spinup_requests).after(handle_drain_requests)` are NEW —
+        // `mirror_sim_entities` reads/mutates `Res<DimensionRegistry>`
+        // (`try_add_occupant`/`remove_occupant`, plus gating new-entrant
+        // admission on `DimensionLifecycle::accepts_new_entrants` — "no new
+        // entrant once Draining" is the stated invariant), but
+        // `DimensionsPlugin`'s OWN chain (`handle_spinup_requests ->
+        // poll_spinup_tasks -> handle_drain_requests -> predictive_gc_system
+        // -> teardown_completed_dimensions`, registered in the SAME
+        // `FixedUpdate` schedule) mutates that SAME resource with no edge
+        // connecting it to this system at all — exactly the race class this
+        // file already closed twice for `delete_specs_entities_for_torn_
+        // down_dimensions` and `release_dimension_occupants_on_drain_
+        // request` below (both carry an explicit "BLOCKER fix" `.after(..)`
+        // edge against this identical chain). Without this edge, Bevy's
+        // scheduler was free to run this system BEFORE `handle_drain_
+        // requests` processed a same-tick `DrainDimension` request, in which
+        // case a dimension that should have JUST stopped accepting new
+        // entrants this tick would still look `Active` here and admit one
+        // anyway. `.after(handle_drain_requests)` alone would already imply
+        // "after `handle_spinup_requests`/`poll_spinup_tasks`" too (they
+        // precede it in `DimensionsPlugin`'s own `.chain()`, and Bevy's
+        // schedule is one consistent topological order), but both edges are
+        // declared explicitly — matching the sibling systems' own style
+        // below — rather than relying on that transitive property staying
+        // true if `DimensionsPlugin`'s internal chain is ever reordered.
         app.init_resource::<SimMirror>()
             .init_resource::<SimLoadoutCache>()
             .init_resource::<SimRegionCache>()
@@ -998,6 +1027,8 @@ impl Plugin for SimEntityMirrorPlugin {
                     .chain()
                     .after(tick_sim)
                     .after(ensure_default_dimension)
+                    .after(xindeler_dimensions::spinup::handle_spinup_requests)
+                    .after(xindeler_dimensions::spinup::handle_drain_requests)
                     .run_if(in_state(ClientState::Disconnected)),
             )
             // EM-4.6 (T47.8) / EM-4.10 Finding B: `FixedUpdate`, matching
@@ -1637,9 +1668,10 @@ fn mirror_sim_entities(
     // actually changed, since replicon's `VisibilityFilter` re-evaluates
     // every connected client on every insert/replace.
     mut region_cache: bevy::ecs::system::ResMut<SimRegionCache>,
-    // BL-82 EM-4.9 (Phase C): the pending non-default-dimension attribution
-    // queue (populated by `apply_pending_entity_template_spawns`) and the
-    // per-entity dimension decision cache — see their own doc comments.
+    // BL-82 EM-4.9 (fixed misattribution race): the pending non-default-
+    // dimension attribution map, keyed by `SpawnCorrelation` id (populated by
+    // `apply_pending_entity_template_spawns`) and the per-entity dimension
+    // decision cache — see their own doc comments.
     mut attribution: bevy::ecs::system::ResMut<PendingDimensionAttribution>,
     mut entity_dims: bevy::ecs::system::ResMut<SimEntityDimension>,
     // EM-4.10 Finding C: reused scratch buffers — see `MirrorScratch`'s doc
@@ -1676,12 +1708,14 @@ fn mirror_sim_entities(
     // future entity that somehow lacks one still mirrors its other fields
     // rather than being silently dropped (additive-only requirement).
     let uids = ecs.read_storage::<Uid>();
-    // BL-82 EM-4.9 (Phase C): read ONLY to gate `PendingDimensionAttribution`
-    // consumption to Agent-bearing (NPC) entities — real players never carry
-    // `Agent` server-side, so a same-tick player login can never consume a
-    // factory batch's queued dimension entry. See `PendingDimensionAttribution`'s
-    // doc comment for the full correlation mechanism and its documented limits.
-    let agents = ecs.read_storage::<comp::Agent>();
+    // BL-82 EM-4.9 (fixed misattribution race): read ONLY to look up a
+    // brand-new entity's OWN dimension-attribution correlation id, if any —
+    // see `PendingDimensionAttribution`'s and `common::comp::SpawnCorrelation`'s
+    // doc comments for the full mechanism this replaced (an Agent-presence
+    // gated FIFO queue) and why identity-based lookup makes ordinary
+    // Agent-bearing spawns (wildlife, rtsim, pets) structurally unable to
+    // collide with a factory batch's entry regardless of discovery order.
+    let spawn_correlations = ecs.read_storage::<comp::SpawnCorrelation>();
 
     // EM-4.2d (superseded by EM-4.10 Finding C below): this mirror loop used
     // to allocate `seen`/`updates`/`seen_set` fresh every tick over all
@@ -1726,7 +1760,7 @@ fn mirror_sim_entities(
         inventories.maybe(),
         character_states.maybe(),
         uids.maybe(),
-        agents.maybe(),
+        spawn_correlations.maybe(),
     )
         .lend_join();
     while let Some((
@@ -1740,7 +1774,7 @@ fn mirror_sim_entities(
         inventory,
         character_state,
         uid,
-        agent,
+        spawn_correlation,
     )) = it.next()
     {
         // Region-map visibility predicate (see doc comment).
@@ -1787,29 +1821,32 @@ fn mirror_sim_entities(
         // `NonZeroU64`; `NetUid` carries the same value as a plain `u64` so
         // the wire type stays serde-simple).
         let net_uid = uid.map(|u| NetUid(u.0.get()));
-        // BL-82 EM-4.9 (Phase C, T51.6): decide THIS entity's dimension once
-        // — reused on every later tick via `entity_dims`, never revisited
-        // (no dimension-transfer path exists yet). A brand-new (not-yet-
-        // decided) entity that ALSO carries an `Agent` (an NPC — real
-        // players never do) consumes the front of the pending attribution
-        // queue if the registry still reports that dimension `Active`;
-        // otherwise (no Agent, empty queue, or a stale/rejected candidate)
-        // it falls back to `DimensionId::DEFAULT`, exactly like every
-        // pre-EM-4.9 mirrored entity. See `PendingDimensionAttribution`'s
-        // doc comment for the full mechanism and its documented limits.
+        // BL-82 EM-4.9 (fixed misattribution race): decide THIS entity's
+        // dimension once — reused on every later tick via `entity_dims`,
+        // never revisited (no dimension-transfer path exists yet). A
+        // brand-new (not-yet-decided) entity that carries a
+        // `SpawnCorrelation` tag (only entities `apply_pending_entity_
+        // template_spawns` itself created ever do — see that component's own
+        // doc comment) looks its EXACT id up in the pending attribution map;
+        // any other entity (wildlife, rtsim, pets, players — none of which
+        // are ever tagged) always falls back to `DimensionId::DEFAULT`,
+        // exactly like every pre-EM-4.9 mirrored entity. Unlike the FIFO
+        // queue this replaced, this lookup is keyed by the entity's OWN
+        // identity, not by which Agent-bearing entity happened to be
+        // discovered first this tick — see `PendingDimensionAttribution`'s
+        // doc comment for the full mechanism and the race it fixes.
         let entity_dimension = *entity_dims.0.entry(entity).or_insert_with(|| {
-            if agent.is_some()
-                && let Some(&candidate) = attribution.0.front()
-            {
-                attribution.0.pop_front();
-                let accepts = registry
-                    .get(candidate)
-                    .is_some_and(|state| state.accepts_new_entrants());
-                if accepts {
-                    candidate
-                } else {
-                    DimensionId::DEFAULT
-                }
+            let Some(&correlation) = spawn_correlation else {
+                return DimensionId::DEFAULT;
+            };
+            let Some(candidate) = attribution.0.remove(&correlation.0) else {
+                return DimensionId::DEFAULT;
+            };
+            let accepts = registry
+                .get(candidate)
+                .is_some_and(|state| state.accepts_new_entrants());
+            if accepts {
+                candidate
             } else {
                 DimensionId::DEFAULT
             }
@@ -1849,7 +1886,7 @@ fn mirror_sim_entities(
         inventories,
         character_states,
         uids,
-        agents,
+        spawn_correlations,
     ));
 
     for (
@@ -3928,6 +3965,262 @@ mod tests {
         );
     }
 
+    /// BL-82 (4-reviewer pass, MAJOR finding — Finding 1): regression test
+    /// for the dimension-attribution misattribution race the old FIFO-queue
+    /// design had. Reproduces the EXACT scenario the finding described: an
+    /// ordinary, untagged Agent-bearing spawn (standing in for `server/src/
+    /// sys/terrain.rs`'s always-on wildlife spawner) and a factory-style,
+    /// `SpawnCorrelation`-tagged Agent-bearing spawn targeting a REAL,
+    /// non-default `Active` dimension both get queued onto the sim's own
+    /// event bus and materialize in the SAME `tick_sim` call — so
+    /// `mirror_sim_entities` discovers both in the SAME pass, with the
+    /// untagged entity created (and thus indexed) FIRST, exactly the
+    /// ordering that would make the OLD design steal the wrong slot (the
+    /// front of a shared FIFO queue, popped by "whichever Agent-bearing
+    /// entity is discovered first").
+    ///
+    /// Bypasses the Bevy staging-entity roundtrip
+    /// (`spawn_from_spawning_rules`/`apply_pending_entity_template_spawns`,
+    /// already covered end-to-end by the test above) and drives the sim's
+    /// public event bus directly — this isolates the exact mechanism under
+    /// test (`mirror_sim_entities`'s per-entity dimension decision) from the
+    /// factory's own staging plumbing, and lets this test construct the
+    /// precise same-tick interleaving deterministically instead of hoping
+    /// two independent systems happen to race a particular way.
+    ///
+    /// Also uses the cheap fake-dimension trick from `xindeler_dimensions::
+    /// plugin`'s own tests (`insert_spinning_up` + `complete_spinup` with a
+    /// placeholder empty `World`) instead of a real async spinup — the
+    /// SECOND dimension's own terrain is irrelevant to this test (see the
+    /// `entity_factory` module doc's "one physical sim" note: both spawned
+    /// entities physically live in dimension 0's REAL terrain regardless of
+    /// which dimension their MIRROR is tagged with), so there is no need to
+    /// pay for a real `WorldGenThreadPool`/async wait here.
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
+    fn mirror_sim_entities_does_not_misattribute_dimension_on_same_tick_wildlife_race() {
+        use xindeler_dimensions::DimensionLifecycle;
+
+        const EVENT_DIMENSION: DimensionId = DimensionId(77);
+        const CORRELATION_ID: u64 = 0xF00D_CAFE;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut server_app = App::new();
+        server_app
+            .add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+            ))
+            .finish();
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        server_app.insert_non_send(sim);
+
+        // Fake a real, Active, non-default dimension WITHOUT a real spinup —
+        // see this test's own doc comment for why that's sound here.
+        let root = server_app.world_mut().spawn(EVENT_DIMENSION).id();
+        {
+            let mut registry = server_app.world_mut().resource_mut::<DimensionRegistry>();
+            registry
+                .insert_spinning_up(EVENT_DIMENSION, root, 0)
+                .unwrap();
+            let (world, index) = server::World::empty();
+            registry
+                .complete_spinup(EVENT_DIMENSION, Arc::new(world), index)
+                .unwrap();
+        }
+        assert_eq!(
+            server_app
+                .world()
+                .resource::<DimensionRegistry>()
+                .lifecycle(EVENT_DIMENSION),
+            Some(DimensionLifecycle::Active),
+            "the fake event dimension must report Active before this test's spawns rely on it"
+        );
+
+        // Terrain-ready preamble (same shape the routing test above uses):
+        // both entities still physically live in the ONE real terrain, so
+        // wait for the centre chunk before ever spawning anything.
+        {
+            let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            server_app.update();
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let (centre, alt) = {
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            (centre, alt)
+        };
+        let wpos = vek::Vec3::new(centre.x, centre.y, alt + 3.0);
+
+        // Stash the correlation entry BEFORE queuing either event (mirrors
+        // `apply_pending_entity_template_spawns`'s own ordering: record the
+        // target dimension, THEN emit) — via `world_mut()`, so this doesn't
+        // overlap with the `world()` borrow taken below for `SimServer`.
+        server_app
+            .world_mut()
+            .resource_mut::<PendingDimensionAttribution>()
+            .0
+            .insert(CORRELATION_ID, EVENT_DIMENSION);
+
+        // Queue BOTH `CreateNpcEvent`s directly onto the sim's own event bus,
+        // untagged FIRST, so — absent this fix — it would be the first
+        // Agent-bearing entity discovered this tick.
+        {
+            let sim = server_app.world().non_send::<SimServer>();
+            let state = sim.server.state();
+
+            // Untagged, Agent-bearing "wildlife" — stands in for `server/src/
+            // sys/terrain.rs`'s always-on spawner. Never carries
+            // `SpawnCorrelation`, exactly like every real wildlife spawn.
+            let common::npc::NpcBody(_, mut make_wolf) =
+                "wolf".parse().expect("\"wolf\" is a valid NpcBody keyword");
+            let wolf_body = make_wolf();
+            state.emit_event_now(common::event::CreateNpcEvent {
+                pos: common::comp::Pos(wpos),
+                ori: common::comp::Ori::default(),
+                npc: common::event::NpcBuilder::new(
+                    common::comp::Stats::new(
+                        common::comp::Content::Plain("Same-Tick Wildlife Interloper".to_owned()),
+                        wolf_body,
+                    ),
+                    wolf_body,
+                    common::comp::Alignment::Wild,
+                )
+                .with_agent(common::comp::Agent::from_body(&wolf_body)),
+            });
+
+            // Correlation-tagged, Agent-bearing "factory minion" targeting
+            // EVENT_DIMENSION — mirrors exactly what `apply_pending_entity_
+            // template_spawns` itself does, minus the Bevy staging-entity
+            // roundtrip.
+            let common::npc::NpcBody(_, mut make_owl) = "snowy_owl"
+                .parse()
+                .expect("\"snowy_owl\" is a valid NpcBody keyword");
+            let owl_body = make_owl();
+            state.emit_event_now(common::event::CreateNpcEvent {
+                pos: common::comp::Pos(wpos),
+                ori: common::comp::Ori::default(),
+                npc: common::event::NpcBuilder::new(
+                    common::comp::Stats::new(
+                        common::comp::Content::Plain("Same-Tick Factory Minion".to_owned()),
+                        owl_body,
+                    ),
+                    owl_body,
+                    common::comp::Alignment::Enemy,
+                )
+                .with_agent(common::comp::Agent::from_body(&owl_body))
+                .with_spawn_correlation(CORRELATION_ID),
+            });
+        }
+
+        // ONE tick: `tick_sim` processes BOTH queued events in the SAME
+        // `Server::tick()` call (creating both new specs entities together,
+        // untagged FIRST), and `mirror_sim_entities` discovers BOTH in the
+        // SAME pass — the exact "concurrent same-tick spawn" scenario.
+        server_app.update();
+        // A few settle ticks so both mirrors are fully upserted.
+        for _ in 0..5 {
+            server_app.update();
+        }
+
+        // Identify the two PLANTED entities by their exact `Stats.name` on
+        // the sim side — the real test world already has its OWN ambient
+        // wildlife nearby (worldgen-driven, unrelated to this test), so
+        // matching by `Body` ENUM VARIANT alone (as an earlier draft of this
+        // test did) is unreliable: an ambient wildlife entity of the same
+        // outer body kind could be discovered first and be mistaken for the
+        // planted one. Matching by name sidesteps that noise entirely.
+        let (wildlife_entity, minion_entity) = {
+            use specs::{Join, WorldExt};
+            let sim = server_app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let entities = ecs.entities();
+            let stats = ecs.read_storage::<common::comp::Stats>();
+            let mut wildlife = None;
+            let mut minion = None;
+            for (entity, stat) in (&entities, &stats).join() {
+                match &stat.name {
+                    common::comp::Content::Plain(n) if n == "Same-Tick Wildlife Interloper" => {
+                        wildlife = Some(entity);
+                    },
+                    common::comp::Content::Plain(n) if n == "Same-Tick Factory Minion" => {
+                        minion = Some(entity);
+                    },
+                    _ => {},
+                }
+            }
+            (wildlife, minion)
+        };
+        let wildlife_entity =
+            wildlife_entity.expect("the planted wildlife-like spawn must exist in the sim");
+        let minion_entity =
+            minion_entity.expect("the planted factory-style spawn must exist in the sim");
+
+        // `mirror_sim_entities`'s own per-entity dimension decision cache —
+        // reading it directly (rather than re-deriving from `NetBody`/
+        // `DimensionId` mirror components, which would suffer the same
+        // ambient-wildlife ambiguity the name-based lookup above avoids)
+        // gives an exact, unambiguous answer for these two specific specs
+        // entities.
+        let entity_dims = server_app.world().resource::<SimEntityDimension>();
+        let wildlife_dim = entity_dims.0.get(&wildlife_entity).copied();
+        let minion_dim = entity_dims.0.get(&minion_entity).copied();
+
+        assert_eq!(
+            wildlife_dim,
+            Some(DimensionId::DEFAULT),
+            "an untagged wildlife-like spawn discovered the SAME tick as a factory batch must \
+             never be mis-tagged with the factory's target dimension — got {wildlife_dim:?} (this \
+             is exactly the misattribution the old FIFO-queue design could produce)"
+        );
+        assert_eq!(
+            minion_dim,
+            Some(EVENT_DIMENSION),
+            "the correlation-tagged factory spawn must land in ITS OWN target dimension \
+             regardless of same-tick discovery order — got {minion_dim:?}"
+        );
+        assert_eq!(
+            server_app
+                .world()
+                .resource::<PendingDimensionAttribution>()
+                .0
+                .len(),
+            0,
+            "the correlation entry must be consumed exactly once by the entity that actually \
+             carries it, never left orphaned in the map"
+        );
+    }
+
     /// Identifies the wandering test NPCs SPECIFICALLY, on the sim side, by
     /// their own `Stats.name` convention (`"Test <Body> <index>"` — see
     /// `emit_wandering_npc`/`_humanoid`/`_quadruped_medium`/`_bird_medium`),
@@ -4410,5 +4703,204 @@ mod tests {
              deleted through the sim's normal delete path — no same-frame scheduling race should \
              be able to lose it"
         );
+    }
+
+    /// BL-82 (4-reviewer pass, MAJOR finding — Finding 2): regression test
+    /// for the missing ordering edge between `mirror_sim_entities` and
+    /// `DimensionsPlugin`'s own `handle_spinup_requests -> poll_spinup_tasks
+    /// -> handle_drain_requests -> predictive_gc_system -> teardown_
+    /// completed_dimensions` chain, which mutates the SAME `DimensionRegistry`
+    /// this system reads/writes (`try_add_occupant`/`remove_occupant`, plus
+    /// gating new-entrant admission on `DimensionLifecycle::
+    /// accepts_new_entrants` — "no new entrant once Draining" is the stated
+    /// invariant). Same style as `tearing_down_via_a_real_drain_message_in_
+    /// the_same_frame_still_deletes_the_specs_entity` above: a REAL
+    /// [`xindeler_dimensions::DrainDimension`] message (not a direct registry
+    /// call) drives the flip inside `handle_drain_requests`, in the SAME
+    /// `FixedUpdate` tick a brand-new correlation-tagged sim entity is
+    /// discovered — the exact race window Finding 2 identified.
+    ///
+    /// The fake dimension is given a NON-zero registry-tracked occupant
+    /// (via `DimensionRegistry::try_add_occupant` directly, a dummy Bevy
+    /// entity — never mirrored to anything, just registry bookkeeping) so
+    /// `begin_draining` flips it to `Draining` ONLY, not straight to
+    /// `Teardown`/removed — isolating the SPECIFIC "no new entrant once
+    /// Draining" gate this test exercises from the (separately-tested)
+    /// zero-occupant instant-teardown path, so passing this test can only be
+    /// explained by `mirror_sim_entities` actually observing the SAME-tick
+    /// `Draining` flip before deciding on the new entrant, not by the
+    /// registry entry disappearing out from under it for an unrelated
+    /// reason.
+    #[test]
+    #[ignore = "boots a real world: needs assets; run locally with VELOREN_ASSETS=\"$(pwd)/assets\""]
+    fn mirror_sim_entities_never_admits_a_new_entrant_into_a_dimension_draining_this_same_tick() {
+        const EVENT_DIMENSION: DimensionId = DimensionId(4);
+        const CORRELATION_ID: u64 = 0xFACE_FEED_u64;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build());
+        app.add_plugins(StatesPlugin);
+        app.add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)));
+        // The real production wiring — `SimEntityMirrorPlugin` registers
+        // `mirror_sim_entities` with its real ordering (the edges under
+        // test), not a hand-picked subset.
+        app.add_plugins((
+            XindelerProtocolPlugin,
+            SimBridgePlugin,
+            SimEntityMirrorPlugin,
+        ));
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+
+        // Fake dimension, Active, with a DUMMY non-zero occupant (see this
+        // test's own doc comment for why) — no real spinup needed.
+        let root = app.world_mut().spawn(EVENT_DIMENSION).id();
+        {
+            let mut registry = app.world_mut().resource_mut::<DimensionRegistry>();
+            registry
+                .insert_spinning_up(EVENT_DIMENSION, root, 0)
+                .unwrap();
+            let (world, index) = server::World::empty();
+            registry
+                .complete_spinup(EVENT_DIMENSION, Arc::new(world), index)
+                .unwrap();
+            let dummy_occupant = Entity::from_raw_u32(9004).expect("small test entity id");
+            registry
+                .try_add_occupant(EVENT_DIMENSION, dummy_occupant)
+                .expect("Active dimension accepts a dummy occupant");
+            assert_eq!(
+                registry.lifecycle(EVENT_DIMENSION),
+                Some(DimensionLifecycle::Active),
+                "the fake dimension must still be Active before the real drain message is sent"
+            );
+        }
+
+        // Terrain-ready preamble — the new entity still physically lives in
+        // the ONE real terrain regardless of which dimension its MIRROR is
+        // tagged with (see the `entity_factory` module doc's "one physical
+        // sim" note).
+        {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            app.update();
+            let sim = app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let wpos = {
+            let sim = app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            vek::Vec3::new(centre.x, centre.y, alt + 3.0)
+        };
+
+        // Stash the correlation entry, then queue a real `CreateNpcEvent`
+        // tagged with it — mirrors `apply_pending_entity_template_spawns`'s
+        // own ordering (record the target dimension, THEN emit).
+        app.world_mut()
+            .resource_mut::<PendingDimensionAttribution>()
+            .0
+            .insert(CORRELATION_ID, EVENT_DIMENSION);
+        {
+            let sim = app.world().non_send::<SimServer>();
+            let common::npc::NpcBody(_, mut make_wolf) =
+                "wolf".parse().expect("\"wolf\" is a valid NpcBody keyword");
+            let body = make_wolf();
+            sim.server
+                .state()
+                .emit_event_now(common::event::CreateNpcEvent {
+                    pos: common::comp::Pos(wpos),
+                    ori: common::comp::Ori::default(),
+                    npc: common::event::NpcBuilder::new(
+                        common::comp::Stats::new(
+                            common::comp::Content::Plain(
+                                "Same-Tick Admission Race Test Wolf".to_owned(),
+                            ),
+                            body,
+                        ),
+                        body,
+                        common::comp::Alignment::Enemy,
+                    )
+                    .with_agent(common::comp::Agent::from_body(&body))
+                    .with_spawn_correlation(CORRELATION_ID),
+                });
+        }
+        // The real admin-command message — the SAME tick that materializes
+        // the queued NPC above must also see this drain request processed,
+        // exercising the actual race window (not a direct registry call,
+        // which would never exercise same-tick scheduling order at all).
+        app.world_mut()
+            .write_message(xindeler_dimensions::DrainDimension(EVENT_DIMENSION));
+
+        for _ in 0..10 {
+            app.update();
+        }
+
+        // Without `mirror_sim_entities`'s `.after(handle_spinup_requests)
+        // .after(handle_drain_requests)` edges, Bevy could freely schedule
+        // this system BEFORE `handle_drain_requests` processed the message
+        // above, observe EVENT_DIMENSION as still Active, and wrongly admit
+        // the new entrant into it (violating "no new entrant once Draining").
+        let entity = {
+            use specs::{Join, WorldExt};
+            let sim = app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let entities = ecs.entities();
+            let stats = ecs.read_storage::<common::comp::Stats>();
+            (&entities, &stats)
+                .join()
+                .find(|(_, stat)| {
+                    matches!(&stat.name, common::comp::Content::Plain(n) if n == "Same-Tick Admission Race Test Wolf")
+                })
+                .map(|(entity, _)| entity)
+                .expect("the planted entity must exist in the sim")
+        };
+        assert_eq!(
+            app.world()
+                .resource::<SimEntityDimension>()
+                .0
+                .get(&entity)
+                .copied(),
+            Some(DimensionId::DEFAULT),
+            "a brand-new correlation-tagged entity discovered the SAME tick a REAL DrainDimension \
+             message flips its target dimension out of Active must never be admitted into it"
+        );
+        assert_eq!(
+            registry_lifecycle(&app, EVENT_DIMENSION),
+            Some(DimensionLifecycle::Draining),
+            "the fake dimension must still be registered as Draining (not Teardown/removed) — \
+             this test's dummy occupant keeps it there, isolating the admission-gate check above \
+             from the separately-tested zero-occupant instant-teardown path"
+        );
+    }
+
+    /// Small helper: `DimensionRegistry::lifecycle` through the `App`, since
+    /// several of the tests above need it after their own local `registry`
+    /// borrow has already gone out of scope.
+    fn registry_lifecycle(app: &App, id: DimensionId) -> Option<DimensionLifecycle> {
+        app.world().resource::<DimensionRegistry>().lifecycle(id)
     }
 }

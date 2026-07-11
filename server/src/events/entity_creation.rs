@@ -136,6 +136,7 @@ pub fn handle_create_npc(server: &mut Server, ev: CreateNpcEvent) -> EcsEntity {
         death_effects,
         rider_effects,
         rider,
+        spawn_correlation,
     } = ev.npc;
     let entity = server
         .state
@@ -144,7 +145,10 @@ pub fn handle_create_npc(server: &mut Server, ev: CreateNpcEvent) -> EcsEntity {
         )
         .maybe_with(heads)
         .maybe_with(death_effects)
-        .maybe_with(rider_effects);
+        .maybe_with(rider_effects)
+        // BL-82: tags the entity with its caller-supplied correlation id (if
+        // any) — see `comp::misc::SpawnCorrelation`'s doc comment.
+        .maybe_with(spawn_correlation);
 
     if let Some(agent) = &mut agent
         && let Alignment::Owned(_) = &alignment

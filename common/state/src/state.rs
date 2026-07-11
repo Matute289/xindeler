@@ -327,6 +327,9 @@ impl State {
         ecs.register::<comp::CharacterState>();
         ecs.register::<comp::CharacterActivity>();
         ecs.register::<comp::Object>();
+        // BL-82: bridge-internal spawn correlation tag — see its own doc
+        // comment (`common/src/comp/misc.rs`) for why this exists.
+        ecs.register::<comp::SpawnCorrelation>();
         ecs.register::<comp::Group>();
         ecs.register::<comp::Shockwave>();
         ecs.register::<comp::ShockwaveHitEntities>();

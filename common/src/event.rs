@@ -73,6 +73,11 @@ pub struct NpcBuilder {
     pub death_effects: Option<DeathEffects>,
     pub rider_effects: Option<RiderEffects>,
     pub rider: Option<Box<Self>>,
+    /// BL-82: an opaque correlation tag a bridge-side caller (e.g.
+    /// `bevy/xindeler-sim-bridge::entity_factory`) can stamp onto the
+    /// resulting entity — see [`comp::misc::SpawnCorrelation`]'s doc comment.
+    /// `None` for every ordinary spawn path (players, pets, rtsim, wildlife).
+    pub spawn_correlation: Option<comp::misc::SpawnCorrelation>,
 }
 
 impl NpcBuilder {
@@ -97,6 +102,7 @@ impl NpcBuilder {
             death_effects: None,
             rider_effects: None,
             rider: None,
+            spawn_correlation: None,
         }
     }
 
@@ -178,6 +184,14 @@ impl NpcBuilder {
 
     pub fn with_rider_effects(mut self, rider_effects: Option<RiderEffects>) -> Self {
         self.rider_effects = rider_effects;
+        self
+    }
+
+    /// BL-82: tags the resulting entity with an opaque correlation id (see
+    /// [`comp::misc::SpawnCorrelation`]'s doc comment) so a bridge-side
+    /// caller can recognize it once mirrored, independent of creation order.
+    pub fn with_spawn_correlation(mut self, id: u64) -> Self {
+        self.spawn_correlation = Some(comp::misc::SpawnCorrelation(id));
         self
     }
 }
