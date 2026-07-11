@@ -87,7 +87,38 @@ pub struct EntityViewPlugin;
 
 impl Plugin for EntityViewPlugin {
     fn build(&self, app: &mut App) {
-        let systems = (add_presentation, interpolate_entities).chain();
+        // BL-82 (4-reviewer pass follow-up, MAJOR finding): `.in_set(MirrorSet)`
+        // is NEW — `xindeler_app::sets` already `configure_sets(Update,
+        // (MirrorSet, GameplaySet).chain())`, declaring that EVERY system in
+        // `MirrorSet` must finish before ANY system in `GameplaySet` starts,
+        // but until now nothing anywhere in `bevy/` actually tagged a system
+        // with `MirrorSet` — the set existed, un-applied, closing no real
+        // ordering gap. `player_input.rs`'s `third_person_camera`
+        // (`.after(FlyCamSet).in_set(GameplaySet)`) queries
+        // `(&Transform, Option<&Interpolated>)` on the SAME local-player
+        // mirror entity `interpolate_entities` writes, with NO ordering edge
+        // between the two plugins — Bevy was free to run the camera before
+        // this frame's interpolation, reading last frame's `Transform`.
+        // Harmless while the local player eased smoothly (a one-frame-stale
+        // ease is imperceptible), but EM-4.11 changed the local player's
+        // render source to a hard SNAP (`PredictedLocalTransform`, no ease at
+        // all) — a one-frame-stale read of a SNAP is a visible position/
+        // collision mismatch, plausibly part of the lingering camera-flicker/
+        // clip symptoms from the EM-3.11/4.11/3.12 investigation arc. Tagging
+        // these two systems (rather than adding one targeted `.after(..)` edge
+        // to `PlayerInputPlugin`) closes the WHOLE class of gap at once: every
+        // current AND future `GameplaySet` system is now guaranteed to read
+        // this frame's mirrored/interpolated state, not just
+        // `third_person_camera`. Verified safe: every existing `.in_set(..)`
+        // call in `bevy/` uses only `GameplaySet`/`PresentationSet` (`grep -rn
+        // "in_set(" bevy/`) — `MirrorSet`/`NetSet`/`SimSet` were all
+        // previously unused — so this is the FIRST system ever placed in
+        // `MirrorSet`, meaning there is no pre-existing ordering this could
+        // conflict with, only the (already-declared, previously vacuous)
+        // `MirrorSet -> GameplaySet` constraint becoming real.
+        let systems = (add_presentation, interpolate_entities)
+            .chain()
+            .in_set(xindeler_app::MirrorSet);
         // BL-82 EM-4.11: `interpolate_entities` reads `PredictedLocalTransform`,
         // written by `xindeler_sim_bridge::mirror_local_player_prediction`
         // (`PlayerBridgePlugin`, also `Update`, a DIFFERENT plugin — no
@@ -571,5 +602,123 @@ mod tests {
             "a remote entity with no prediction must still ease partway, not snap: {:?}",
             remote_transform.translation
         );
+    }
+
+    /// BL-82 (4-reviewer pass, MAJOR finding — Finding 3): regression test
+    /// for the missing ordering edge between [`EntityViewPlugin`]'s systems
+    /// and `player_input.rs`'s `third_person_camera`
+    /// (`.after(FlyCamSet).in_set(GameplaySet)`), which queries
+    /// `(&Transform, Option<&Interpolated>)` on the SAME local-player mirror
+    /// entity [`interpolate_entities`] writes.
+    ///
+    /// Uses the REAL [`EntityViewPlugin`] (so a future regression that
+    /// removes `.in_set(xindeler_app::MirrorSet)` from its registration is
+    /// actually caught here, not just in a hand-rolled stand-in
+    /// registration) plus the REAL `xindeler_app::sets::configure` ordering
+    /// (`configure_sets(Update, (MirrorSet, GameplaySet).chain())`), and a
+    /// fake `GameplaySet`-tagged consumer standing in for
+    /// `third_person_camera`'s read of `Transform`.
+    ///
+    /// Drives the local-player SNAP path (`PredictedLocalTransform`, EM-4.11)
+    /// specifically because it makes the property EXACTLY checkable: every
+    /// frame, `interpolate_entities` sets `Transform` to be bit-for-bit equal
+    /// to that frame's `PredictedLocalTransform` (no easing/lerp to fuzz the
+    /// comparison — see the module doc's "hard SNAP, not a smoothed ease" for
+    /// why EM-4.11 made a stale read of this specific path newly visible). A
+    /// driver system in `PreUpdate` (which Bevy's default schedule order
+    /// always runs before `Update`, needing no extra constraint) writes a
+    /// FRESH, frame-indexed `PredictedLocalTransform` every tick; if the
+    /// consumer ever reads anything OTHER than THIS tick's value, the
+    /// mirror-before-gameplay ordering was violated.
+    #[test]
+    fn entity_view_systems_run_before_gameplay_set_consumers() {
+        use xindeler_app::{GameplaySet, MirrorSet};
+
+        #[derive(Resource, Default)]
+        struct FrameCounter(u32);
+
+        #[derive(Resource, Default)]
+        struct ObservedTransform(Option<Vec3>);
+
+        fn drive_prediction(
+            mut counter: ResMut<FrameCounter>,
+            mut query: Query<&mut PredictedLocalTransform, With<NetLocalPlayer>>,
+        ) {
+            counter.0 += 1;
+            let x = counter.0 as f32;
+            for mut predicted in &mut query {
+                predicted.pos = Vec3::new(x, 0.0, 0.0);
+            }
+        }
+
+        fn observe_as_gameplay_would(
+            query: Query<&Transform, With<NetLocalPlayer>>,
+            mut observed: ResMut<ObservedTransform>,
+        ) {
+            observed.0 = query.iter().next().map(|t| t.translation);
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // `add_presentation` needs `Assets<Mesh>`/`Assets<StandardMaterial>`
+        // as valid resources to run (even though its `Added<NetBody>` query
+        // matches nothing here — this test's entity never gets a `NetBody`,
+        // only the components `add_presentation` would otherwise have
+        // attached, pre-seeded directly, matching this file's OTHER
+        // `interpolate_entities`-only tests above).
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        // The REAL shared set ORDERING — `xindeler_app::sets::configure`
+        // declares this exact constraint too
+        // (`configure_sets(Update, (MirrorSet, GameplaySet).chain())`), but
+        // is `pub(crate)` (only callable from `XindelerAppPlugin`, which also
+        // unconditionally pulls in `bevy_dev_tools`'s FPS overlay per this
+        // crate's own `Cargo.toml` — needs the full render/window/font stack,
+        // not just `MinimalPlugins`). Declaring the same constraint directly
+        // against the REAL `MirrorSet`/`GameplaySet` types keeps this test
+        // scoped to the property under test (does tagging
+        // `EntityViewPlugin`'s systems `.in_set(MirrorSet)` actually order
+        // them before a `GameplaySet` consumer?) without an unrelated
+        // dependency on the FPS overlay.
+        app.configure_sets(Update, (MirrorSet, GameplaySet).chain());
+        // The REAL plugin under test — NOT `net-client`/`listen-server`
+        // gated, so this compiles and registers identically regardless of
+        // which feature this crate's tests happen to run under.
+        app.add_plugins(EntityViewPlugin);
+
+        app.init_resource::<FrameCounter>();
+        app.init_resource::<ObservedTransform>();
+        app.add_systems(PreUpdate, drive_prediction);
+        app.add_systems(Update, observe_as_gameplay_would.in_set(GameplaySet));
+
+        app.world_mut().spawn((
+            NetLocalPlayer,
+            NetPos(Vec3::new(999.0, 999.0, 999.0)),
+            NetOri(Quat::IDENTITY),
+            PredictedLocalTransform {
+                pos: Vec3::ZERO,
+                ori: Quat::IDENTITY,
+                vel: Vec3::ZERO,
+            },
+            Interpolated {
+                pos: Vec3::ZERO,
+                ori: Quat::IDENTITY,
+            },
+            Transform::default(),
+        ));
+
+        for frame in 1..=20u32 {
+            app.update();
+            let expected = Vec3::new(frame as f32, 0.0, 0.0);
+            let observed = app.world().resource::<ObservedTransform>().0;
+            assert_eq!(
+                observed,
+                Some(expected),
+                "frame {frame}: the GameplaySet consumer must observe THIS SAME frame's \
+                 interpolated/snapped Transform, not a stale one — without `interpolate_entities` \
+                 (via `EntityViewPlugin`) being ordered `.in_set(MirrorSet)` (before \
+                 `GameplaySet`), this could read last frame's value instead"
+            );
+        }
     }
 }
