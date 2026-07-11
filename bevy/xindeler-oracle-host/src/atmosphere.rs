@@ -120,6 +120,43 @@ pub struct AtmosphereProfile {
     /// Seconds over which a change TO this profile interpolates. Clamped to
     /// a small minimum so a zero/negative value still applies (as a snap).
     pub transition_secs: f32,
+    /// Metres of downward vertex displacement per metre² of camera-relative
+    /// distance beyond the far-terrain mesh's own `bend_start` radius — the
+    /// `far_terrain_material::FarTerrainExtension::bend_strength` "world-
+    /// curvature" tuning knob (BL-82 EM-3.11 Phase B). Engine extension (not
+    /// in the canonical DmEvent example). `0.0` is a valid, fully-supported
+    /// disable (see `far_terrain_material`'s module doc's "first-class
+    /// disable" section) — e.g. a flat-biome/high-altitude vantage DmEvent
+    /// override where the curvature could look wrong.
+    ///
+    /// Data-driven-content cleanup (comprehensive-review Finding 2): this
+    /// used to be ONLY the compiled-in Rust constant `far_terrain_material::
+    /// FAR_MESH_BEND_STRENGTH`, with just a debug-only env-var override
+    /// (`XINDELER_FAR_MESH_BEND_STRENGTH`) — unlike every sibling
+    /// atmosphere-tuning parameter above, which already lived here. The
+    /// constant still exists as the compiled-in fallback for a context with
+    /// no `AtmosphereController` (e.g. a bare test app) and as this field's
+    /// `Default`; `far_terrain::retile_far_mesh` now reads the LIVE value
+    /// from here first, so retuning it (globally, or per-biome/vantage via a
+    /// DmEvent atmosphere override) is a data change, not a rebuild — the
+    /// env var still wins when set, for a quick A/B without touching RON.
+    pub far_mesh_bend_strength: f32,
+    /// Multiplier applied to the far mesh's geometrically-derived
+    /// `bend_start` radius (`far_terrain::retile_far_mesh`'s own `hole_radius`
+    /// at re-tile time) — lets a profile push the bend's starting radius
+    /// further out (`> 1.0`, a wider flush-with-near-terrain band) without
+    /// touching code. `1.0` (the default) reproduces the pre-cleanup
+    /// behavior exactly (`bend_start == hole_radius`, unscaled).
+    ///
+    /// **Clamped to `>= 1.0`** ([`bounds::FAR_MESH_BEND_START_SCALE`]) — the
+    /// vertex shader's `max(d - bend_start, 0.0)` clamp only guarantees ZERO
+    /// bend at the near/far mesh seam (`d == hole_radius`) when
+    /// `bend_start >= hole_radius`; a scale below 1.0 would push `bend_start`
+    /// INSIDE the hole radius, reintroducing exactly the visible crack this
+    /// module's whole "flush at the seam" design guards against (see
+    /// `far_terrain_material.rs`'s `bend_is_zero_at_and_inside_bend_start`
+    /// test). Engine extension (not in the canonical DmEvent example).
+    pub far_mesh_bend_start_scale: f32,
 }
 
 impl Default for AtmosphereProfile {
@@ -210,6 +247,22 @@ impl Default for AtmosphereProfile {
             weather_effect: WeatherEffect::None,
             time_lock: None,
             transition_secs: 5.0,
+            // BL-82 EM-3.11 Phase B smoke-tuned default (data-driven-content
+            // cleanup, comprehensive-review Finding 2) — see
+            // `far_mesh_bend_strength`'s own doc comment. This crate is
+            // headless (no client/render deps — the isolation law forbids a
+            // `xindeler-client` dependency here), so this can't reference
+            // `xindeler_client::far_terrain_material::FAR_MESH_BEND_STRENGTH`
+            // directly; kept numerically IDENTICAL to it by hand (that
+            // constant's own doc comment carries the full curve-shape
+            // reasoning: ~0 m drop at `bend_start`, ~2 m by 200 m beyond it,
+            // ~12 m by 500 m beyond it — imperceptible as curvature, reads
+            // only as "the ground recedes out there") — a client-side test
+            // (`far_terrain_material::tests::
+            // atmosphere_default_bend_strength_matches_the_compiled_in_fallback`)
+            // pins the two values staying in sync.
+            far_mesh_bend_strength: 0.00005,
+            far_mesh_bend_start_scale: 1.0,
         }
     }
 }
@@ -232,6 +285,22 @@ pub mod bounds {
     pub const AMBIENT_SKY_BRIGHTNESS: (f32, f32) = (0.0, 100_000.0);
     /// Transitions longer than an hour are indistinguishable from broken.
     pub const TRANSITION_SECS: (f32, f32) = (0.0, 3600.0);
+    /// Metres of downward displacement per metre² beyond `bend_start`. The
+    /// shipped default (5e-5) already reads as a clear, gentle "rolling
+    /// away" at hundreds of metres past `bend_start` (see
+    /// `AtmosphereProfile::far_mesh_bend_strength`'s doc comment); 1e-3 is a
+    /// generous ceiling — ~20x the default — past which the curvature would
+    /// read as an obvious fisheye/globe distortion rather than a subtle
+    /// horizon recede.
+    pub const FAR_MESH_BEND_STRENGTH: (f32, f32) = (0.0, 1e-3);
+    /// Multiplier on the far mesh's geometrically-derived `bend_start`
+    /// radius. Floor of `1.0` (never below `hole_radius` — see
+    /// `AtmosphereProfile::far_mesh_bend_start_scale`'s doc comment for why a
+    /// smaller value would reintroduce a visible crack at the near/far mesh
+    /// seam); `5.0` ceiling comfortably covers a much wider
+    /// flush-with-near-terrain band for any plausible per-biome/vantage
+    /// retune.
+    pub const FAR_MESH_BEND_START_SCALE: (f32, f32) = (1.0, 5.0);
 }
 
 /// `value` clamped into `(min, max)`; non-finite (NaN/±inf) falls back to
@@ -298,6 +367,16 @@ impl AtmosphereProfile {
             bounds::TRANSITION_SECS,
             defaults.transition_secs,
         );
+        self.far_mesh_bend_strength = sane(
+            self.far_mesh_bend_strength,
+            bounds::FAR_MESH_BEND_STRENGTH,
+            defaults.far_mesh_bend_strength,
+        );
+        self.far_mesh_bend_start_scale = sane(
+            self.far_mesh_bend_start_scale,
+            bounds::FAR_MESH_BEND_START_SCALE,
+            defaults.far_mesh_bend_start_scale,
+        );
     }
 
     /// Moves `self` a fraction `t` (`0.0..=1.0`) toward `target`.
@@ -327,6 +406,12 @@ impl AtmosphereProfile {
         }
         self.ambient_sky.brightness =
             lerp(self.ambient_sky.brightness, target.ambient_sky.brightness);
+        self.far_mesh_bend_strength =
+            lerp(self.far_mesh_bend_strength, target.far_mesh_bend_strength);
+        self.far_mesh_bend_start_scale = lerp(
+            self.far_mesh_bend_start_scale,
+            target.far_mesh_bend_start_scale,
+        );
         self.time_lock = match (self.time_lock, target.time_lock) {
             (Some(a), Some(b)) => {
                 // Shortest path around the 24 h wheel (23.0 -> 1.0 goes
@@ -611,6 +696,8 @@ mod tests {
             weather_effect: WeatherEffect::Storm,
             time_lock: Some(37.0),
             transition_secs: -1.0,
+            far_mesh_bend_strength: f32::NAN,
+            far_mesh_bend_start_scale: -9.0,
         };
         garbage.sanitize();
 
@@ -634,6 +721,10 @@ mod tests {
         );
         assert_eq!(garbage.time_lock, Some(13.0)); // 37 h -> 13 h on the wheel
         assert!((garbage.transition_secs - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (garbage.far_mesh_bend_strength - defaults.far_mesh_bend_strength).abs() < f32::EPSILON
+        ); // NaN -> default
+        assert!((garbage.far_mesh_bend_start_scale - 1.0).abs() < f32::EPSILON); // clamped to the 1.0 floor, not negative
 
         // A non-finite locked hour drops the lock instead of freezing on NaN.
         let mut nan_lock = AtmosphereProfile {

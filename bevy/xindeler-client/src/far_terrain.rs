@@ -128,8 +128,7 @@ use xindeler_protocol::NetFarTerrain;
 
 use crate::{
     far_terrain_material::{
-        ATTRIBUTE_FAR_HORIZON, FAR_MESH_BEND_STRENGTH, FarTerrainExtension, FarTerrainMaterial,
-        FarTerrainMaterialPlugin,
+        ATTRIBUTE_FAR_HORIZON, FarTerrainExtension, FarTerrainMaterial, FarTerrainMaterialPlugin,
     },
     lod::CullingConfig,
     terrain_stream::{CHUNK_EDGE, TerrainCameraAnchor},
@@ -352,18 +351,30 @@ fn retile_far_mesh(
     // both must come out of one read) — [`FarTerrainExtension::sky_color`]
     // is the Phase-B silhouette-dissolve target, `haze` (fog colour) stays
     // Phase A's vertex-colour atmospheric finish.
-    let (haze, sky_color) = atmosphere.map_or_else(
+    //
+    // Data-driven-content cleanup (comprehensive-review Finding 2): also
+    // reads `far_mesh_bend_strength`/`far_mesh_bend_start_scale` out of the
+    // SAME live `AtmosphereProfile` in this one read — these used to be the
+    // compiled-in `FAR_MESH_BEND_STRENGTH` constant (plus an always-`1.0`
+    // scale) with only a debug-only env-var override; now every sibling
+    // atmosphere-tuning parameter (this pair included) is RON-driven and
+    // hot-reloadable, per-biome/vantage via a DmEvent atmosphere override.
+    let (haze, sky_color, bend_strength_base, bend_start_scale) = atmosphere.map_or_else(
         || {
             let defaults = AtmosphereProfile::default();
             (
                 Vec3::from_array(defaults.fog_color),
                 Vec3::from_array(defaults.sky_color),
+                defaults.far_mesh_bend_strength,
+                defaults.far_mesh_bend_start_scale,
             )
         },
         |a| {
             (
                 Vec3::from_array(a.current.fog_color),
                 Vec3::from_array(a.current.sky_color),
+                a.current.far_mesh_bend_strength,
+                a.current.far_mesh_bend_start_scale,
             )
         },
     );
@@ -371,22 +382,28 @@ fn retile_far_mesh(
     let hole_radius = culling.chunk_render_distance + rebuild_slack;
     let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius, haze);
     // BL-82 EM-3.11 Phase B: `bend_start` is set to THIS re-tile's own
-    // `hole_radius` — the exact invariant the vertex shader's `max(d -
+    // `hole_radius`, scaled by the live `far_mesh_bend_start_scale`
+    // (`>= 1.0`, clamped by `AtmosphereProfile::sanitize` — see that field's
+    // doc comment) — the exact invariant the vertex shader's `max(d -
     // bend_start, 0.0)` clamp relies on to guarantee zero bend across the
     // whole near band (module docs' "Purity"/Phase-B section;
-    // `far_terrain_material.rs`'s doc comments). `sun_direction` starts at
+    // `far_terrain_material.rs`'s doc comments) still holds for ANY
+    // `bend_start_scale >= 1.0`. `sun_direction` starts at
     // `FarTerrainExtension::default()`'s placeholder and, like `fog_color`/
     // `sky_color`, is kept live every frame by
     // `far_terrain_material::sync_far_terrain_material` — no per-tile cost.
+    let bend_start = hole_radius * bend_start_scale;
     //
     // Debug-only, opt-in override (`XINDELER_FAR_MESH_BEND_STRENGTH=<f32>`,
-    // e.g. `0` to disable) so the bend can be A/B'd against
-    // [`FAR_MESH_BEND_STRENGTH`] without a rebuild — same convention as
-    // `XINDELER_SMOKE_FAR_MESH_CAM`/`XINDELER_FAR_MESH_PERF_LOG` above.
+    // e.g. `0` to disable) so the bend can be A/B'd against the LIVE
+    // atmosphere-driven value without touching RON — same convention as
+    // `XINDELER_SMOKE_FAR_MESH_CAM`/`XINDELER_FAR_MESH_PERF_LOG` above. The
+    // atmosphere-driven `bend_strength_base` (RON, hot-reloadable) is now the
+    // PRIMARY/shipped configuration path; the env var only wins when set.
     let bend_strength = std::env::var("XINDELER_FAR_MESH_BEND_STRENGTH")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(FAR_MESH_BEND_STRENGTH);
+        .unwrap_or(bend_strength_base);
     let new_entity = mesh.map(|mesh| {
         commands
             .spawn((
@@ -406,7 +423,7 @@ fn retile_far_mesh(
                     },
                     extension: FarTerrainExtension {
                         bend_strength,
-                        bend_start: hole_radius,
+                        bend_start,
                         fog_color: haze.extend(1.0),
                         sky_color: sky_color.extend(1.0),
                         ..default()
