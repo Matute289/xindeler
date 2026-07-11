@@ -1,13 +1,15 @@
-//! EM-3.10b — coarse far-terrain mesh from the server's downsampled `lod_alt`
-//! heightmap (listen-server only).
+//! EM-3.10b — coarse far-terrain mesh from the server's downsampled
+//! `lod_alt`/`lod_base` grid (listen-server only).
 //!
 //! EM-3.10 (v1) left the horizon beyond [`crate::lod::CullingConfig::
 //! chunk_render_distance`] as sky + `DistanceFog` — an acceptable, honestly
 //! documented fallback, but not a filled-in view. This module builds ONE
-//! low-poly, vertex-coloured mesh from the [`NetLodAlt`] grid
+//! low-poly, vertex-coloured mesh from the [`NetFarTerrain`] grid
 //! (`xindeler-sim-bridge` → `xindeler-protocol`, sent once at boot — the far
 //! terrain never changes during a session) and renders it beyond the near
-//! terrain to fill that gap.
+//! terrain to fill that gap. As of BL-82 EM-3.11 Phase A the mesh's vertex
+//! colour is the REAL `lod_base` colour sampled server-side (see
+//! [`cell_color`]) — not a synthetic gradient.
 //!
 //! ## Why a hole, not a full disc
 //! The far mesh is built in WORLD space and only rebuilt when the camera has
@@ -44,42 +46,56 @@
 //! track the camera — the near-terrain streaming/culling already did.
 //!
 //! ## Precision / look
-//! One sample in [`NetLodAlt`] covers `chunk_stride` chunks — already coarse
-//! by construction (`xindeler-sim-bridge::send_lod_alt_once` caps the grid
-//! dimension, downsampling a potentially 1024×1024-chunk world). Corner
-//! heights are averaged from the up-to-4 touching samples so adjoining quads
-//! share exact vertex positions (no cracks), but each quad still gets its own
-//! (duplicated) vertices and a single flat face normal — deliberately simple
-//! "flat-shaded, vertex-coloured low-poly terrain" (task-approved v1 scope),
-//! not the full PBR block-palette treatment the near terrain gets.
+//! One sample in [`NetFarTerrain`] covers `chunk_stride` chunks — already
+//! coarse by construction (`xindeler-sim-bridge::send_far_terrain_once` caps
+//! the grid dimension, downsampling a potentially 1024×1024-chunk world).
+//! Corner heights are averaged from the up-to-4 touching samples so adjoining
+//! quads share exact vertex positions (no cracks), but each quad still gets
+//! its own (duplicated) vertices, a single flat face normal, and (Phase A) a
+//! single real colour sample — deliberately simple "flat-shaded,
+//! vertex-coloured low-poly terrain" (task-approved v1 scope), not the full
+//! PBR block-palette treatment the near terrain gets.
 //!
-//! ## EM-3.11 round 11: the "beige horizon" — masking wasn't strong enough
+//! ## EM-3.11 round 11 (superseded by Phase A below): the "beige horizon"
 //! Matías's `record8.mov` (a real free-roam session, taken AFTER the EM-4.10
 //! P0 frame-time hotfix) showed this mesh's own flat, undetailed colour as a
-//! visible strip at the horizon, in open areas especially. Root cause: the
-//! ONLY thing masking this mesh's raw colour is `DistanceFog`
-//! (`crate::atmosphere`), and the EM-3.11f density only reached ~97.5%
-//! opacity by this mesh's own nearest visible point (`hole_radius`, ~288m at
-//! the default render distance) — a small but, on real detailed-vs-flat
-//! contrast, clearly visible residual. `docs/design/specs/2026-07-11-
-//! xindeler-old-comparison-research.md` §2 traces the DEEPER gap versus the
-//! old client (which renders a full-world, `lod_base`-coloured LOD terrain
-//! all the way to the horizon, using fog only as a finishing touch on an
-//! already-complete world — not as the sole mask for a hard edge); porting
-//! that (`lod_base`/`lod_horizon` full-disc coverage) is a real follow-up
-//! task, not a hotfix. This round's fix works within the CURRENT
-//! hole-and-fog architecture and closes the reported symptom two ways: (1)
-//! `AtmosphereProfile::default()`'s fog-density retune (same round) reaches
-//! ~99.9% opacity at `hole_radius` instead of ~97.5%; (2) [`HAZE_BLEND`]
-//! mixes this mesh's own vertex colour toward the live fog colour, so even a
-//! transient exposure (a retile lagging a fast camera drift, or a lower-
-//! density weather profile) reads as haze, not "beige ground".
+//! visible strip at the horizon, in open areas especially. Root cause: this
+//! mesh baked a SYNTHETIC 2-stop colour gradient (`height_tint`, since
+//! retired) instead of the real `lod_base` colour the embedded `Client`
+//! already had available, and the ONLY thing masking that flat colour was
+//! `DistanceFog` (`crate::atmosphere`) — the EM-3.11f density only reached
+//! ~97.5% opacity by this mesh's own nearest visible point (`hole_radius`,
+//! ~288m at the default render distance), a small but, on real
+//! detailed-vs-flat contrast, clearly visible residual. `docs/design/specs/
+//! 2026-07-11-xindeler-old-comparison-research.md` §2 traced the DEEPER gap
+//! versus the old client (which renders a full-world, `lod_base`-coloured LOD
+//! terrain all the way to the horizon, using fog only as a finishing touch on
+//! an already-complete world — not as the sole mask for a hard edge). Round
+//! 11's fix (fog-density retune + a heavy 0.35 blend toward fog colour) was a
+//! stopgap that worked within the then-synthetic-colour architecture; it did
+//! not close the structural gap.
+//!
+//! ## BL-82 EM-3.11 Phase A: real colour (this module's current state)
+//! `docs/design/specs/2026-07-11-bl82-full-horizon-lod-terrain-design.md`
+//! designed the structural fix: the server already samples `lod_base`
+//! (`client::WorldData::col_at`) alongside `lod_alt` and ships it as
+//! [`NetFarTerrain::colors`], index-aligned with the height samples. This
+//! module now bakes each quad's vertex colour from that REAL per-cell colour
+//! (see [`cell_color`]) instead of `height_tint`'s synthetic gradient, so the
+//! horizon shows actual varied terrain colour (forests, drylands, water,
+//! peaks) matching the minimap — the reported "flat plateau" symptom is
+//! closed by having real data, not by leaning harder on fog. [`FAR_HAZE_BLEND`]
+//! keeps only a SMALL atmospheric-finish blend (dialled back from round 11's
+//! 0.35 now that colour is real) — a light haze cue for distance, not a mask
+//! for missing detail. Phase B (horizon occlusion + a full sky-blend
+//! silhouette, tracked separately) is what dissolves the far mesh's hard top
+//! *edge* into atmosphere; this phase only fixes the mesh's own colour.
 //!
 //! ## Purity
 //! 100% Bevy + the protocol message + `terrain_stream::{CHUNK_EDGE,
 //! TerrainCameraAnchor}` + `lod::CullingConfig` + (EM-3.11 round 11)
 //! `xindeler-oracle-host`'s headless-safe `AtmosphereController`/
-//! `AtmosphereProfile` types (read-only, for [`HAZE_BLEND`]) — no specs.
+//! `AtmosphereProfile` types (read-only, for [`FAR_HAZE_BLEND`]) — no specs.
 //! Compiled only under the `listen-server` feature.
 
 use bevy::{
@@ -89,7 +105,7 @@ use bevy::{
     prelude::*,
 };
 use xindeler_oracle_host::{AtmosphereController, AtmosphereProfile};
-use xindeler_protocol::NetLodAlt;
+use xindeler_protocol::NetFarTerrain;
 
 use crate::{
     lod::CullingConfig,
@@ -103,14 +119,14 @@ use crate::{
 /// is exactly what keeps the far mesh from ever overlapping the near band).
 const HOLE_MARGIN_CHUNKS: f32 = 2.0;
 
-/// Installs the EM-3.10b far-terrain consumer: receives [`NetLodAlt`] once,
-/// then builds/re-tiles the mesh (see [`retile_far_mesh`]) as soon as, and for
-/// as long as, a camera exists.
+/// Installs the EM-3.10b far-terrain consumer: receives [`NetFarTerrain`]
+/// once, then builds/re-tiles the mesh (see [`retile_far_mesh`]) as soon as,
+/// and for as long as, a camera exists.
 pub struct FarTerrainPlugin;
 
 impl Plugin for FarTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (receive_lod_alt, retile_far_mesh));
+        app.add_systems(Update, (receive_far_terrain, retile_far_mesh));
 
         // Debug-only, opt-in (`XINDELER_SMOKE_FAR_MESH_CAM=1`): parks the
         // camera high above the anchor looking outward so a
@@ -145,18 +161,22 @@ fn smoke_horizon_cam(
     }
 }
 
-/// The decoded far-terrain heightmap. Installed once, the first time the
-/// one-shot [`NetLodAlt`] message arrives, and then kept alive for the whole
-/// session (NOT consumed after the first mesh build) — [`retile_far_mesh`]
-/// re-reads it every time the camera drifts far enough to need a fresh hole.
+/// The decoded far-terrain grid (height + colour). Installed once, the first
+/// time the one-shot [`NetFarTerrain`] message arrives, and then kept alive
+/// for the whole session (NOT consumed after the first mesh build) —
+/// [`retile_far_mesh`] re-reads it every time the camera drifts far enough to
+/// need a fresh hole.
 #[derive(Resource)]
-struct FarTerrainData(DecodedLodAlt);
+struct FarTerrainData(DecodedFarTerrain);
 
-struct DecodedLodAlt {
+struct DecodedFarTerrain {
     grid_w: u32,
     grid_h: u32,
     chunk_stride: u32,
     heights: Vec<f32>,
+    /// Real per-cell RGB colour (BL-82 EM-3.11 Phase A), index-aligned with
+    /// `heights` (`colors[j * grid_w + i]` is the colour of cell `(i, j)`).
+    colors: Vec<[u8; 3]>,
 }
 
 /// Marks the currently-spawned far-terrain mesh entity (so a smoke/debug
@@ -176,12 +196,16 @@ struct FarMeshState {
     entity: Option<Entity>,
 }
 
-/// Decodes the one-shot [`NetLodAlt`] message into [`FarTerrainData`] (once —
-/// the payload is never resent, so a resource already present means we
-/// already have it).
-fn receive_lod_alt(
+/// Decodes the one-shot [`NetFarTerrain`] message into [`FarTerrainData`]
+/// (once — the payload is never resent, so a resource already present means
+/// we already have it). BL-82 EM-3.11 Phase A: both the height AND colour
+/// layers must decode — a message missing (or corrupt in) either is dropped
+/// wholesale (same "undecodable ⇒ drop" behaviour the height-only v1 had),
+/// since a mesh with real heights but no real colour would just fall back to
+/// a single flat colour anyway.
+fn receive_far_terrain(
     mut commands: Commands,
-    mut messages: MessageReader<NetLodAlt>,
+    mut messages: MessageReader<NetFarTerrain>,
     existing: Option<Res<FarTerrainData>>,
 ) {
     if existing.is_some() {
@@ -190,15 +214,20 @@ fn receive_lod_alt(
     let Some(msg) = messages.read().next() else {
         return;
     };
-    let Some(heights) = msg.decode() else {
-        warn!("dropping undecodable far-terrain lod-alt grid");
+    let Some(heights) = msg.decode_heights() else {
+        warn!("dropping undecodable far-terrain grid (heights)");
         return;
     };
-    commands.insert_resource(FarTerrainData(DecodedLodAlt {
+    let Some(colors) = msg.decode_colors() else {
+        warn!("dropping undecodable far-terrain grid (colors)");
+        return;
+    };
+    commands.insert_resource(FarTerrainData(DecodedFarTerrain {
         grid_w: msg.grid_size[0],
         grid_h: msg.grid_size[1],
         chunk_stride: msg.chunk_stride,
         heights,
+        colors,
     }));
 }
 
@@ -267,13 +296,13 @@ fn retile_far_mesh(
         .get_or_insert_with(|| std::env::var("XINDELER_FAR_MESH_PERF_LOG").is_ok_and(|v| v != "0"));
     let retile_start = std::time::Instant::now();
 
-    // BL-82 EM-3.11 round 11 ("beige horizon" — see [`height_tint`]'s doc
-    // comment): the mesh's own vertex colour is mixed toward the CURRENT
-    // atmosphere's live `fog_color` (falls back to the default profile's
-    // colour if no `AtmosphereController` exists, e.g. in a test app that
-    // doesn't wire `AtmospherePlugin`) so an exposed edge reads as haze, not
-    // "beige ground". Only re-baked on a re-tile (rare — see the doc comment
-    // above), not every frame a profile transition animates: acceptable,
+    // BL-82 EM-3.11 Phase A (see [`cell_color`]'s doc comment): each quad's
+    // REAL `lod_base` colour is mixed a small [`FAR_HAZE_BLEND`] toward the
+    // CURRENT atmosphere's live `fog_color` (falls back to the default
+    // profile's colour if no `AtmosphereController` exists, e.g. in a test
+    // app that doesn't wire `AtmospherePlugin`) as an atmospheric finish.
+    // Only re-baked on a re-tile (rare — see the doc comment above), not
+    // every frame a profile transition animates: acceptable,
     // honestly-documented staleness, matching this system's existing
     // "no per-frame cost" design goal (a weather change fully lands in the
     // far mesh's colour the next time the camera drifts far enough to
@@ -349,7 +378,7 @@ fn retile_far_mesh(
 
 /// Height-only-known corner (grid coordinate space, before world placement).
 #[inline]
-fn corner_height(data: &DecodedLodAlt, ci: i32, cj: i32) -> Option<f32> {
+fn corner_height(data: &DecodedFarTerrain, ci: i32, cj: i32) -> Option<f32> {
     if ci < 0 || cj < 0 || ci >= data.grid_w as i32 || cj >= data.grid_h as i32 {
         return None;
     }
@@ -360,7 +389,7 @@ fn corner_height(data: &DecodedLodAlt, ci: i32, cj: i32) -> Option<f32> {
 /// Averages the up-to-4 sample cells touching grid corner `(i, j)` (`i` in
 /// `0..=grid_w`, `j` in `0..=grid_h`) so adjoining quads share an identical
 /// vertex height — the no-cracks contract.
-fn averaged_corner(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
+fn averaged_corner(data: &DecodedFarTerrain, i: u32, j: u32) -> f32 {
     let (i, j) = (i as i32, j as i32);
     let samples = [
         corner_height(data, i - 1, j - 1),
@@ -375,64 +404,46 @@ fn averaged_corner(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
     if n == 0 { 0.0 } else { sum / n as f32 }
 }
 
-/// Fraction of [`height_tint`]'s own low/high palette blended toward the
-/// live atmosphere's `fog_color` before baking vertex colours (BL-82 EM-3.11
-/// round 11 — `docs/design/specs/2026-07-11-xindeler-old-comparison-
-/// research.md` §2). EM-3.11b already leaned on this exact idea for the low
-/// stop alone (softening a saturated forest green so it read as haze rather
-/// than "ground" against the fog it blends into); the fog-density retune in
-/// `AtmosphereProfile::default()`'s doc comment (same round) makes that
-/// blend all but invisible at steady state, but this is defense in depth —
-/// a transient exposure (a re-tile recentre lagging one frame behind a fast
-/// camera drift, or a future low-density weather profile) should still read
-/// as atmospheric haze, not a flat, undetailed "ground" colour, and this
-/// keeps that true regardless of how strong the fog itself currently is.
-/// Kept well under 1.0 so the mesh still shows SOME relief (the "impression
-/// the map continues" Matías asked for, not a single flat colour).
-const HAZE_BLEND: f32 = 0.35;
+/// Small atmospheric-finish blend fraction mixed into the REAL per-cell
+/// colour sampled from the server's `lod_base` layer (BL-82 EM-3.11 Phase A;
+/// `docs/design/specs/2026-07-11-bl82-full-horizon-lod-terrain-design.md`
+/// §3.3). Round 11's [`HAZE_BLEND`] (0.35) leaned hard on this blend to mask
+/// a SYNTHETIC, flat colour — now that [`cell_color`] bakes the real
+/// `lod_base` sample, the mesh's own colour is what sells the horizon, so
+/// this only needs to be a light atmospheric cue (haze at distance), dialled
+/// back accordingly. Phase B's sky-blend silhouette material is the
+/// mechanism that eventually dissolves the mesh's hard top *edge* into
+/// atmosphere; this constant is deliberately NOT trying to do that job too.
+const FAR_HAZE_BLEND: f32 = 0.12;
 
-/// Maps a colour to a coarse "distant terrain" tint by height fraction
-/// (0 = lowest sample in the grid, 1 = highest) — low ground reads greener,
-/// high ground reads paler/rockier — then mixes [`HAZE_BLEND`] of that
-/// toward `haze` (the live atmosphere's fog colour; see [`HAZE_BLEND`]'s doc
-/// comment). Cheap, data-free (no palette dependency), good enough to
-/// visually confirm relief without the near terrain's PBR block-palette
-/// treatment.
-///
-/// BL-82 EM-3.11b: lightened/desaturated from the original, quite saturated
-/// forest green (`(0.20, 0.35, 0.16)`) — the far mesh's own colour is what
-/// `DistanceFog` blends FROM, so a raw colour with high contrast against the
-/// fog stayed visible as a distinct "wall" even at high fog blend factors;
-/// a softer, less saturated low tint minimises that residual contrast at
-/// the mesh's own near edge (still comfortably outside the near-terrain
-/// band per `HOLE_MARGIN_CHUNKS`) without touching per-quad colour variation
-/// (out of scope — this is still one flat 2-stop gradient, now blended a
-/// third stop toward the live fog colour).
-fn height_tint(t: f32, haze: Vec3) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let low = Vec3::new(0.32, 0.42, 0.30);
-    let high = Vec3::new(0.58, 0.57, 0.53);
-    let c = low.lerp(high, t).lerp(haze, HAZE_BLEND);
+/// Bakes a quad's vertex colour from its REAL per-cell `lod_base` sample
+/// (BL-82 EM-3.11 Phase A), mixing [`FAR_HAZE_BLEND`] of it toward `haze`
+/// (the live atmosphere's fog colour) as a light atmospheric finish — see
+/// [`FAR_HAZE_BLEND`]'s doc comment. `rgb` is already sRGB-encoded (matching
+/// the old engine's `t_map` `Rgba8Srgb` convention, decoded byte-for-byte by
+/// `client::WorldData::col_at`), so it's blended in the same sRGB space
+/// `Color::srgb` expects, THEN converted to linear at the call site — the
+/// same order the retired `height_tint` used.
+fn cell_color(rgb: [u8; 3], haze: Vec3) -> Color {
+    let real = Vec3::new(
+        f32::from(rgb[0]) / 255.0,
+        f32::from(rgb[1]) / 255.0,
+        f32::from(rgb[2]) / 255.0,
+    );
+    let c = real.lerp(haze, FAR_HAZE_BLEND);
     Color::srgb(c.x, c.y, c.z)
 }
 
 /// Builds the far-terrain [`BevyMesh`], or `None` if every quad fell inside
 /// the cutout hole (nothing to draw). `haze` is the live atmosphere's
-/// `fog_color` (see [`HAZE_BLEND`]).
+/// `fog_color` (see [`FAR_HAZE_BLEND`]).
 fn far_mesh_from_heights(
-    data: &DecodedLodAlt,
+    data: &DecodedFarTerrain,
     hole_center: Vec2,
     hole_radius: f32,
     haze: Vec3,
 ) -> Option<BevyMesh> {
     let cell = data.chunk_stride as f32 * CHUNK_EDGE;
-    let (min_h, max_h) = data
-        .heights
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &h| {
-            (lo.min(h), hi.max(h))
-        });
-    let span = (max_h - min_h).max(1.0);
 
     // World-space position of grid corner (i, j) — X = i·cell, Z = −(j·cell),
     // matching `xindeler_client::lod::chunk_center_bevy` / `pipeline::
@@ -478,12 +489,21 @@ fn far_mesh_from_heights(
             // triangle; near-flat terrain gives ≈(0, cell², 0), i.e. +Y.
             let normal = (p10 - p00).cross(p11 - p00).normalize_or_zero();
 
+            // BL-82 EM-3.11 Phase A: colours are per *sample/cell*
+            // (`colors[j * grid_w + i]`), while heights are averaged per
+            // *corner* — for v1 the whole quad (all 4 of its duplicated
+            // vertices, matching the existing flat-shaded-quad convention)
+            // takes the colour of its own originating cell `(i, j)`, the
+            // natural, cheap choice given the quads already duplicate
+            // vertices per-face.
+            let cell_rgb = data.colors[(j * data.grid_w + i) as usize];
+            let color = cell_color(cell_rgb, haze).to_linear().to_f32_array();
+
             let base = positions.len() as u32;
             for p in [p00, p10, p11, p01] {
                 positions.push(p.to_array());
                 normals.push(normal.to_array());
-                let t = (p.y - min_h) / span;
-                colors.push(height_tint(t, haze).to_linear().to_f32_array());
+                colors.push(color);
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -510,7 +530,7 @@ mod tests {
 
     use super::*;
 
-    /// Headless App exercising [`retile_far_mesh`] directly (no NetLodAlt
+    /// Headless App exercising [`retile_far_mesh`] directly (no NetFarTerrain
     /// plumbing, no window/render) — regression coverage for the EM-3.11 fix:
     /// a small camera drift must NOT re-tile (the "no per-frame cost"
     /// property), but a drift past [`HOLE_MARGIN_CHUNKS`] MUST re-tile with a
@@ -590,12 +610,13 @@ mod tests {
         );
     }
 
-    fn flat_grid(w: u32, h: u32, height: f32, stride: u32) -> DecodedLodAlt {
-        DecodedLodAlt {
+    fn flat_grid(w: u32, h: u32, height: f32, stride: u32) -> DecodedFarTerrain {
+        DecodedFarTerrain {
             grid_w: w,
             grid_h: h,
             chunk_stride: stride,
             heights: vec![height; (w * h) as usize],
+            colors: vec![[128, 128, 128]; (w * h) as usize],
         }
     }
 
@@ -680,7 +701,7 @@ mod tests {
         assert_eq!(shared_from_quad_00, shared_from_quad_11_neighbor);
     }
 
-    fn corner_pos_for_test(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
+    fn corner_pos_for_test(data: &DecodedFarTerrain, i: u32, j: u32) -> f32 {
         averaged_corner(data, i, j)
     }
 
@@ -704,16 +725,15 @@ mod tests {
         assert!((averaged_corner(&data, 2, 0) - 10.0).abs() < 1e-4);
     }
 
-    /// BL-82 EM-3.11 round 11 ("beige horizon"): [`height_tint`] mixes
-    /// [`HAZE_BLEND`] of its own low/high palette toward `haze`. At `t=0`/
-    /// `t=1` this is a plain lerp toward `haze` by that exact fraction —
-    /// pinning the fraction here means a future accidental change to
-    /// `HAZE_BLEND` (or a typo'd `lerp` direction) is caught directly,
-    /// rather than only showing up as a fuzzy "looks a bit off" screenshot
-    /// diff.
+    /// BL-82 EM-3.11 Phase A: [`cell_color`] mixes [`FAR_HAZE_BLEND`] of the
+    /// REAL per-cell colour toward `haze`. Pinning the fraction here means a
+    /// future accidental change to `FAR_HAZE_BLEND` (or a typo'd `lerp`
+    /// direction) is caught directly, rather than only showing up as a fuzzy
+    /// "looks a bit off" screenshot diff — the exact regression this test
+    /// replaces from the retired `height_tint`.
     #[test]
-    fn height_tint_blends_toward_haze_by_the_configured_fraction() {
-        // `height_tint` returns an sRGB `Color`; go through the SAME
+    fn cell_color_blends_toward_haze_by_the_configured_fraction() {
+        // `cell_color` returns an sRGB `Color`; go through the SAME
         // sRGB->linear conversion the production call site uses
         // (`far_mesh_from_heights`'s `.to_linear()`) when computing the
         // expected value too, so this compares like with like instead of
@@ -721,33 +741,70 @@ mod tests {
         let expected = |c: Vec3| Color::srgb(c.x, c.y, c.z).to_linear().to_vec3();
 
         let haze = Vec3::new(1.0, 1.0, 1.0);
-        let low = Vec3::new(0.32, 0.42, 0.30);
-        let expected_low = expected(low.lerp(haze, HAZE_BLEND));
-        let got_low = height_tint(0.0, haze).to_linear().to_vec3();
+        let rgb: [u8; 3] = [80, 100, 60];
+        let real = Vec3::new(80.0 / 255.0, 100.0 / 255.0, 60.0 / 255.0);
+        let expected_blend = expected(real.lerp(haze, FAR_HAZE_BLEND));
+        let got = cell_color(rgb, haze).to_linear().to_vec3();
         assert!(
-            (got_low - expected_low).length() < 1e-4,
-            "t=0 should be the low stop mixed {HAZE_BLEND} toward haze, got {got_low:?}"
-        );
-
-        let high = Vec3::new(0.58, 0.57, 0.53);
-        let expected_high = expected(high.lerp(haze, HAZE_BLEND));
-        let got_high = height_tint(1.0, haze).to_linear().to_vec3();
-        assert!(
-            (got_high - expected_high).length() < 1e-4,
-            "t=1 should be the high stop mixed {HAZE_BLEND} toward haze, got {got_high:?}"
+            (got - expected_blend).length() < 1e-4,
+            "should be the real cell colour mixed {FAR_HAZE_BLEND} toward haze, got {got:?}"
         );
 
         // Blending a colour toward an IDENTICAL haze is a no-op regardless
         // of the blend fraction — a degenerate case that would silently
         // break if the lerp direction were ever inverted (e.g. `haze.lerp
-        // (base, HAZE_BLEND)` instead of `base.lerp(haze, HAZE_BLEND)`).
-        let midpoint = low.lerp(high, 0.5);
-        let got_noop = height_tint(0.5, midpoint).to_linear().to_vec3();
-        let expected_noop = expected(midpoint);
+        // (real, FAR_HAZE_BLEND)` instead of `real.lerp(haze,
+        // FAR_HAZE_BLEND)`).
+        let got_noop = cell_color(rgb, real).to_linear().to_vec3();
+        let expected_noop = expected(real);
         assert!(
             (got_noop - expected_noop).length() < 1e-4,
             "blending a colour toward an identical haze must be a no-op, got {got_noop:?}"
         );
+    }
+
+    /// BL-82 EM-3.11 Phase A: `far_mesh_from_heights` bakes each quad's
+    /// vertex colour from its OWN originating cell's real colour sample
+    /// (spec §3.3 — "for v1 use the colour of the quad's originating cell
+    /// `(i, j)` for all 4 of its (duplicated) vertices"), not a shared or
+    /// averaged colour, and not the retired synthetic height gradient. Two
+    /// side-by-side cells with distinct colours must produce two distinct
+    /// per-quad vertex colours.
+    #[test]
+    fn far_mesh_assigns_each_quads_own_cell_colour() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let mut data = flat_grid(2, 1, 0.0, 1); // 2 side-by-side quads
+        data.colors = vec![[10, 20, 30], [200, 150, 100]];
+        let haze = Vec3::new(0.5, 0.5, 0.5);
+
+        let mesh = far_mesh_from_heights(&data, Vec2::new(-1_000_000.0, -1_000_000.0), 1.0, haze)
+            .expect("non-empty mesh");
+        let Some(VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(BevyMesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("vertex colours must be stored as Float32x4");
+        };
+        assert_eq!(colors.len(), 2 * 4, "2 quads × 4 verts");
+
+        let expected_cell0 = cell_color(data.colors[0], haze).to_linear().to_f32_array();
+        let expected_cell1 = cell_color(data.colors[1], haze).to_linear().to_f32_array();
+        assert_ne!(
+            expected_cell0, expected_cell1,
+            "the two cells' colours must differ (sanity)"
+        );
+        for c in &colors[0..4] {
+            assert_eq!(
+                *c, expected_cell0,
+                "quad 0's 4 vertices must share ITS OWN cell's colour"
+            );
+        }
+        for c in &colors[4..8] {
+            assert_eq!(
+                *c, expected_cell1,
+                "quad 1's 4 vertices must share ITS OWN cell's colour"
+            );
+        }
     }
 
     /// BL-82 EM-3.11 round 11 ("beige horizon"): the durable regression this

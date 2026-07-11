@@ -149,9 +149,9 @@ use xindeler_dimensions::{
     DimensionsPlugin,
 };
 use xindeler_protocol::{
-    AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetHealth, NetLoadout,
-    NetLocalPlayer, NetLodAlt, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RegionKey,
-    RemoveChunk, TerrainAnchor, region_key_for_pos,
+    AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetFarTerrain, NetHealth, NetLoadout,
+    NetLocalPlayer, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RegionKey, RemoveChunk,
+    TerrainAnchor, region_key_for_pos,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -719,39 +719,41 @@ fn stream_terrain_changes(
 }
 
 // ---------------------------------------------------------------------------
-// EM-3.10b — far-terrain heightmap (one-shot lod_alt broadcast)
+// EM-3.10b — far-terrain grid (one-shot height+colour broadcast)
 // ---------------------------------------------------------------------------
 
 /// Downsample cap: the client far-mesh is a coarse LOD proxy, not full-res
 /// terrain, so the sent grid is bounded to at most this many samples per axis
-/// regardless of world size. A default Veloren world's `lod_alt` already
-/// packs only one sample per CHUNK (not per block) — but a default world is
-/// 1024×1024 chunks, which is still far too many quads for a "coarse"
-/// far-mesh and a needlessly large one-shot payload. [`send_lod_alt_once`]
-/// stride-samples down to this cap.
+/// regardless of world size. A default Veloren world's `lod_alt`/`lod_base`
+/// already pack only one sample per CHUNK (not per block) — but a default
+/// world is 1024×1024 chunks, which is still far too many quads for a
+/// "coarse" far-mesh and a needlessly large one-shot payload.
+/// [`send_far_terrain_once`] stride-samples down to this cap.
 const LOD_ALT_MAX_DIM: u32 = 128;
 
-/// One-shot latch for the EM-3.10b far-terrain heightmap broadcast.
+/// One-shot latch for the EM-3.10b far-terrain grid broadcast (height +,
+/// as of BL-82 EM-3.11 Phase A, colour).
 #[derive(Resource, Default)]
 pub struct LodAltState {
     sent: bool,
 }
 
-/// Registers [`LodAltState`] + [`send_lod_alt_once`]. Same gate as the terrain
-/// stream (`ClientState::Disconnected`, i.e. this App is the terrain/entity
-/// SOURCE). Add AFTER [`PlayerBridgePlugin`] (reads [`EmbeddedPlayer`]).
+/// Registers [`LodAltState`] + [`send_far_terrain_once`]. Same gate as the
+/// terrain stream (`ClientState::Disconnected`, i.e. this App is the
+/// terrain/entity SOURCE). Add AFTER [`PlayerBridgePlugin`] (reads
+/// [`EmbeddedPlayer`]).
 pub struct LodAltStreamPlugin;
 
 impl Plugin for LodAltStreamPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodAltState>().add_systems(
             Update,
-            send_lod_alt_once.run_if(in_state(ClientState::Disconnected)),
+            send_far_terrain_once.run_if(in_state(ClientState::Disconnected)),
         );
     }
 }
 
-/// Pure stride/grid-dimension math for [`send_lod_alt_once`]'s downsample,
+/// Pure stride/grid-dimension math for [`send_far_terrain_once`]'s downsample,
 /// split out so it's unit-testable without a real `WorldData`/`Client`
 /// (review should-fix #4 — this arithmetic had zero direct coverage).
 /// `stride` is how many chunks one sampled cell covers (≥1, so a world at or
@@ -767,20 +769,27 @@ fn lod_alt_grid_dims(chunk_w: u16, chunk_h: u16) -> (u32, u32, u32) {
     (stride, grid_w, grid_h)
 }
 
-/// Broadcasts the downsampled `lod_alt` heightmap ONCE, as soon as the
-/// embedded local-player [`EmbeddedPlayer`] exists (its `world_data()` is
-/// populated synchronously inside `Client::new`, well before the player
-/// reaches in-game — see [`EmbeddedPlayer::world_data`]).
+/// Broadcasts the downsampled `lod_alt` (height) + `lod_base` (colour, BL-82
+/// EM-3.11 Phase A) grid ONCE, as soon as the embedded local-player
+/// [`EmbeddedPlayer`] exists (its `world_data()` is populated synchronously
+/// inside `Client::new`, well before the player reaches in-game — see
+/// [`EmbeddedPlayer::world_data`]).
+///
+/// Both layers are sampled in the SAME downsample loop at the SAME `(cx, cy)`
+/// chunk coordinate, so `colors[k]` is always the real `lod_base` colour of
+/// the exact chunk `heights[k]` is the altitude of (spec §3.1's index-
+/// alignment contract) — the client can zip them by array index with no
+/// re-derivation.
 ///
 /// v1 has no spectator-only path: without an embedded player (persister
 /// fallback only), there is no `Client`/`WorldData` to read from, so the far
 /// mesh simply never arrives and the client keeps the sky+fog fallback — the
 /// same acceptable degradation `xindeler_client::lod` documents for the
 /// culling-only v1.
-fn send_lod_alt_once(
+fn send_far_terrain_once(
     player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
     mut state: bevy::ecs::system::ResMut<LodAltState>,
-    mut writer: MessageWriter<ToClients<NetLodAlt>>,
+    mut writer: MessageWriter<ToClients<NetFarTerrain>>,
 ) {
     if state.sent {
         return;
@@ -794,38 +803,47 @@ fn send_lod_alt_once(
 
     let (stride, grid_w, grid_h) = lod_alt_grid_dims(size.x, size.y);
 
-    let mut heights = Vec::with_capacity((grid_w * grid_h) as usize);
-    for j in 0..grid_h {
-        for i in 0..grid_w {
+    // BL-82 EM-3.11 Phase A review (ecs-design-reviewer): push ONE
+    // `(height, colour)` sample per iteration into a single Vec, then unzip,
+    // rather than two independently-grown parallel Vecs — this makes it
+    // structurally impossible for a future refactor of this loop (e.g. T49.5
+    // adding a third `horizon` layer) to desync `heights[k]`/`colors[k]`
+    // against each other, since both always come from the SAME `push` call
+    // reading the SAME `cpos`. `unzip` still yields two Vecs of the same
+    // length, matching `NetFarTerrain::encode`'s signature.
+    let samples: Vec<(f32, [u8; 3])> = (0..grid_h)
+        .flat_map(|j| (0..grid_w).map(move |i| (i, j)))
+        .map(|(i, j)| {
             let cx = (i * stride).min(u32::from(size.x) - 1);
             let cy = (j * stride).min(u32::from(size.y) - 1);
             #[expect(clippy::cast_possible_wrap, reason = "chunk coords ≪ i32::MAX")]
-            let alt = world_data
-                .alt_at(vek::Vec2::new(cx as i32, cy as i32))
-                .unwrap_or(0.0);
-            heights.push(alt);
-        }
-    }
+            let cpos = vek::Vec2::new(cx as i32, cy as i32);
+            let alt = world_data.alt_at(cpos).unwrap_or(0.0);
+            let col = world_data.col_at(cpos).unwrap_or(vek::Rgb::new(0, 0, 0));
+            (alt, [col.r, col.g, col.b])
+        })
+        .collect();
+    let (heights, colors): (Vec<f32>, Vec<[u8; 3]>) = samples.into_iter().unzip();
 
     // TODO (still open past EM-4.2d): `targets: All` + a global `sent` latch
     // only reaches clients connected AT the single broadcast — a client
-    // joining after it never receives the far-terrain heightmap (same
-    // accepted limitation as `TerrainAnchor` above). This is a late-JOIN
-    // replay gap, not region-scoping — EM-4.2d (T47.6) only wired per-client
-    // ENTITY visibility (see `stream_terrain_changes`'s doc comment); it does
-    // not touch this one-shot broadcast's join-timing behavior at all. Needs
-    // a per-connection "have I sent this yet" once real multi-client join
+    // joining after it never receives the far-terrain grid (same accepted
+    // limitation as `TerrainAnchor` above). This is a late-JOIN replay gap,
+    // not region-scoping — EM-4.2d (T47.6) only wired per-client ENTITY
+    // visibility (see `stream_terrain_changes`'s doc comment); it does not
+    // touch this one-shot broadcast's join-timing behavior at all. Needs a
+    // per-connection "have I sent this yet" once real multi-client join
     // timing matters.
     writer.write(ToClients {
         targets: SendTargets::All,
-        message: NetLodAlt::encode([grid_w, grid_h], stride, &heights),
+        message: NetFarTerrain::encode([grid_w, grid_h], stride, &heights, &colors),
     });
     state.sent = true;
     tracing::info!(
         grid_w,
         grid_h,
         stride,
-        "far-terrain lod-alt grid broadcast (EM-3.10b)"
+        "far-terrain grid broadcast (EM-3.10b height + BL-82 EM-3.11 Phase A colour)"
     );
 }
 
@@ -862,7 +880,7 @@ fn sim_ori_to_bevy(q: vek::Quaternion<f32>) -> Quat {
 /// player's real position (see its doc), so this plugin depends on
 /// [`crate::tick_player`] (which writes [`EmbeddedPlayer`]) having already run
 /// this step — the same "reads `EmbeddedPlayer`" dependency
-/// [`LodAltStreamPlugin`]'s doc already calls out for `send_lod_alt_once`.
+/// [`LodAltStreamPlugin`]'s doc already calls out for `send_far_terrain_once`.
 /// Unlike that plugin, this one enforces it with an EXPLICIT
 /// `.after(tick_player)` schedule constraint, not just a "register after"
 /// convention in the doc comment — plugin *registration* order does not by
@@ -2140,7 +2158,7 @@ mod tests {
 
     /// Non-square world: stride is driven by the LARGER axis, and each axis
     /// downsamples independently by that same stride (not two different
-    /// strides), matching `send_lod_alt_once`'s single `stride` field.
+    /// strides), matching `send_far_terrain_once`'s single `stride` field.
     #[test]
     fn lod_alt_grid_dims_non_square_world() {
         // max(1024, 256) = 1024 -> stride = ceil(1024/128) = 8.
@@ -2168,16 +2186,81 @@ mod tests {
     }
 
     /// A degenerate 0-sized axis still yields `grid >= 1` (never 0), so
-    /// `send_lod_alt_once`'s `heights` Vec is never empty by construction —
-    /// callers guard the *real* 0-size case earlier (`size.x == 0 ...
-    /// return`), but the pure function itself must not divide-by-zero or
-    /// underflow if ever called with one.
+    /// `send_far_terrain_once`'s `heights`/`colors` Vecs are never empty by
+    /// construction — callers guard the *real* 0-size case earlier (`size.x
+    /// == 0 ... return`), but the pure function itself must not
+    /// divide-by-zero or underflow if ever called with one.
     #[test]
     fn lod_alt_grid_dims_zero_axis_never_yields_zero_grid() {
         let (stride, grid_w, grid_h) = lod_alt_grid_dims(0, 64);
         assert_eq!(stride, 1);
         assert_eq!(grid_w, 1);
         assert_eq!(grid_h, 64);
+    }
+
+    /// BL-82 EM-3.11 Phase A acceptance (server side): boot the REAL sim +
+    /// embedded player, add the far-terrain broadcast stack, and tick until
+    /// [`send_far_terrain_once`] fires. Assert the broadcast `NetFarTerrain`
+    /// message's decoded `colors` layer is non-empty and exactly as long as
+    /// `decode_heights()` (both `grid_w * grid_h`) — the index-alignment
+    /// contract spec §3.1 requires, checked against the REAL broadcast rather
+    /// than only the pure `encode`/`decode` round-trip already covered in
+    /// `xindeler-protocol`.
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
+    fn far_terrain_broadcast_colors_are_index_aligned_with_heights() {
+        const MAX_TICKS: u32 = 200;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let player = boot_embedded_player(&mut sim).expect("failed to boot embedded player");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                PlayerBridgePlugin,
+                LodAltStreamPlugin,
+            ))
+            .finish();
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+        app.insert_non_send(player);
+
+        let mut received: Option<NetFarTerrain> = None;
+        for _ in 0..MAX_TICKS {
+            app.update();
+            if let Some(msg) = app
+                .world_mut()
+                .resource_mut::<Messages<NetFarTerrain>>()
+                .drain()
+                .next()
+            {
+                received = Some(msg);
+                break;
+            }
+        }
+
+        let msg = received.expect("far-terrain grid must be broadcast within MAX_TICKS");
+        let heights = msg.decode_heights().expect("heights decode");
+        let colors = msg.decode_colors().expect("colors decode");
+        let expected = msg.grid_size[0] as usize * msg.grid_size[1] as usize;
+        assert_eq!(heights.len(), expected);
+        assert_eq!(
+            colors.len(),
+            expected,
+            "colors must be index-aligned with heights (same grid_w * grid_h length)"
+        );
+        assert!(
+            msg.decode_horizon().is_none(),
+            "Phase A leaves the horizon layer unshipped (empty ⇒ absent)"
+        );
     }
 
     /// EM-4.5's "interaction with the mirror/visibility systems" acceptance
