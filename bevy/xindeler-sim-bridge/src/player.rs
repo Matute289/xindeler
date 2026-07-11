@@ -37,7 +37,11 @@
 //! that may link `specs`/`client`/`server`). The pure Bevy client never sees
 //! it. Purity of `bevy/xindeler-client/src` is unaffected.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bevy::{
     app::{App, Plugin, Update},
@@ -46,7 +50,7 @@ use bevy::{
         entity::Entity,
         query::With,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Query, Res},
+        system::{Commands, Local, Query, Res},
     },
     math::Quat,
 };
@@ -122,6 +126,91 @@ const PLAYER_VIEW_DISTANCE: u32 = server_min_vd();
 
 const fn server_min_vd() -> u32 { server::MIN_VD }
 
+/// Default upper safety ceiling on [`tick_player`]'s dispatch rate, in Hz.
+///
+/// ## Why this exists (BL-82 EM-4.11 follow-up, rust-perf-reviewer MAJOR)
+/// EM-4.11 (PR #59) deliberately moved `tick_player` from `FixedUpdate` (30 Hz)
+/// to `Update` (render-frame rate) — that move is CORRECT and must stay: it is
+/// what closes the tick-quantization/landing-lag bug family (see
+/// `docs/design/specs/2026-07-11-bl82-frame-rate-prediction-design.md`).
+/// Running the embedded predictor at a normal monitor's refresh rate
+/// (60/120/144 Hz) is the intended behaviour, not a bug. The spec's own §3
+/// risk list even names this exact possibility ("if a machine can't afford
+/// it, the client tick can be clamped to a max Hz") but the clamp itself was
+/// never implemented — a genuine gap: with `XINDELER_PRESENT_MODE=novsync`
+/// (uncapped) or on a 240 Hz+ display, `Update` (and therefore this system)
+/// can run far more often than any perceptible prediction benefit justifies,
+/// spending CPU on a full `client.tick()` dispatch (interpolation, tether,
+/// mount, controller, character_behavior, buff, stats, phys(+events),
+/// projectile, shockwave, arcing, beam, pool, aura, telemetry, a terrain
+/// scan/prune, and two network sends — see `common_systems::add_local_systems`
+/// and this module's doc comment) with no upside.
+///
+/// 240 Hz comfortably covers every normal monitor (60/120/144 Hz) with
+/// headroom — the clamp never engages at those refresh rates, so this is
+/// purely a ceiling against the uncapped/very-high-refresh case, not a cap
+/// back toward 30 Hz (which would resurrect the EM-4.11 bug). See
+/// [`max_player_tick_interval`] for the env override.
+const DEFAULT_MAX_PLAYER_TICK_HZ: f64 = 240.0;
+
+/// Resolves the minimum wall-clock interval [`tick_player`] must wait between
+/// successive real `client.tick()` dispatches, from
+/// `XINDELER_MAX_PLAYER_TICK_HZ` (Hz) — falls back to
+/// [`DEFAULT_MAX_PLAYER_TICK_HZ`] if unset or unparseable (same "bogus value
+/// never panics, just uses the safe default" convention as
+/// `xindeler_client::present_mode_from_env`). A value `<= 0` is an EXPLICIT
+/// opt-out (returns `Duration::ZERO`, meaning "no ceiling") so the clamp can be
+/// disabled for testing/profiling without a rebuild — `tick_player` treats a
+/// zero interval as "always eligible".
+///
+/// ## Setting this well below the default is a manual, lossy escape hatch
+/// The 240 Hz default never engages at any normal refresh rate, so this only
+/// matters if you deliberately override it low for testing (as the empirical
+/// verification for this ceiling did, e.g. `=20`). Two things are worth
+/// knowing before doing that (rust-perf-reviewer / bevy-migration-reviewer,
+/// BL-82 EM-4.11 follow-up review):
+/// - `player.clock`'s `MAX_GAME_DT` clamp (`common/src/clock.rs`, 0.2 s) caps
+///   the simulated step on the next real dispatch well below the actual elapsed
+///   gap at very low Hz (e.g. 1-5 Hz) — the embedded predictor effectively runs
+///   in slow motion rather than "catching up", which is expected for a manual
+///   override but easy to mistake for a bug.
+/// - `LocalPlayerInput` (`xindeler-client`'s `gather_input`) is written as
+///   continuous level-state every `Update` frame, with no edge-buffering across
+///   skipped frames — a very brief input (e.g. a fast jump tap) shorter than a
+///   deliberately-low override's gate interval can be missed entirely. This is
+///   a non-issue at the shipped default (which never skips at normal input
+///   timescales) and an acceptable tradeoff for an opt-in low-Hz test knob, but
+///   not for a production ceiling value.
+fn max_player_tick_interval() -> Duration {
+    match std::env::var("XINDELER_MAX_PLAYER_TICK_HZ")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        Some(hz) if hz > 0.0 => Duration::from_secs_f64(1.0 / hz),
+        Some(_) => Duration::ZERO,
+        None => Duration::from_secs_f64(1.0 / DEFAULT_MAX_PLAYER_TICK_HZ),
+    }
+}
+
+/// Pure predicate for [`tick_player`]'s Hz ceiling: given the wall-clock
+/// instant of the last REAL dispatch (`None` if there has never been one),
+/// the current instant, and the minimum interval required between
+/// dispatches, returns whether a dispatch is due now. `max_interval ==
+/// Duration::ZERO` means "no ceiling" (always due — the
+/// `XINDELER_MAX_PLAYER_TICK_HZ<=0` opt-out). Factored out of `tick_player`
+/// so the gating logic is unit-testable with plain `Instant`/`Duration` math,
+/// without booting a real `EmbeddedPlayer` (needs a live sim + loopback
+/// `Client` — heavy, `#[ignore]`d elsewhere in this file's tests).
+fn tick_is_due(last: Option<Instant>, now: Instant, max_interval: Duration) -> bool {
+    if max_interval.is_zero() {
+        return true;
+    }
+    match last {
+        Some(last) => now.duration_since(last) >= max_interval,
+        None => true,
+    }
+}
+
 /// The embedded local-player [`Client`], its runtime, tick clock, and the tiny
 /// life-cycle state machine that walks it from "just connected" to "in game".
 ///
@@ -142,6 +231,11 @@ pub struct EmbeddedPlayer {
     /// Last jump state we sent to the sim, so [`tick_player`] only emits jump
     /// press/release edges (the Client has no "is jump held" query).
     jumping: bool,
+    /// Wall-clock instant of the last REAL `client.tick()` dispatch, used by
+    /// [`tick_player`]'s Hz safety ceiling (BL-82 EM-4.11 follow-up — see
+    /// [`max_player_tick_interval`]). `None` until the first dispatch ever
+    /// runs, so the ceiling never blocks the initial tick.
+    last_tick_wall: Option<Instant>,
 }
 
 /// Non-blocking life-cycle stages, advanced one per frame by [`tick_player`].
@@ -359,7 +453,75 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
         character_id: None,
         uid: None,
         jumping: false,
+        last_tick_wall: None,
     })
+}
+
+/// Opt-in real-dispatch-rate diagnostic for [`tick_player`]'s Hz ceiling
+/// (BL-82 EM-4.11 follow-up), gated on `XINDELER_PLAYER_TICK_PERF_LOG=1` (same
+/// "cached bool, off by default" convention as `XINDELER_CULL_PERF_LOG` /
+/// `XINDELER_SPRITE_PERF_LOG` elsewhere in this codebase). Counts real
+/// dispatches vs. ceiling-skipped `Update` frames over a rolling ~1 s window
+/// and logs the measured Hz — `target: "player_tick_perf"` so a plain `grep
+/// player_tick_perf` on any run's log (e.g. a `--smoke-perf-run` with
+/// `XINDELER_PRESENT_MODE=novsync`) gives the empirical dispatch rate
+/// directly, without a debugger or a code change.
+///
+/// `pub(crate)`: it appears in `tick_player`'s signature as a `Local<Option<
+/// TickPerfLog>>` system parameter, so it must be at least as reachable as
+/// that function within the crate (`private_interfaces` lint) — `tick_player`
+/// itself is `pub(crate)` too (bevy-migration-reviewer audit: no external
+/// crate actually calls it, only doc-comment prose mentions it; tightening
+/// both together avoids growing the crate's real public API surface for a
+/// pure diagnostic type). Its fields stay private; nothing outside this
+/// module constructs or reads one directly.
+pub(crate) struct TickPerfLog {
+    enabled: bool,
+    window_start: Instant,
+    ticked: u32,
+    skipped: u32,
+}
+
+/// Rolling window length for [`TickPerfLog`]'s Hz summary — long enough to
+/// average out single-frame jitter, short enough to react quickly in a
+/// manual smoke run.
+const TICK_PERF_LOG_WINDOW: Duration = Duration::from_secs(1);
+
+/// Updates (and, on the `XINDELER_PLAYER_TICK_PERF_LOG=1` path, logs) the
+/// rolling real-tick-rate window. `state` starts `None` (first call per
+/// `tick_player` instance) and is initialized here; a disabled log still pays
+/// only the one-time env read (cached via the `enabled` flag) plus a no-op
+/// early return, matching every other `*_PERF_LOG` in this codebase.
+fn log_tick_perf(state: &mut Option<TickPerfLog>, ticked: bool, now: Instant) {
+    let state = state.get_or_insert_with(|| TickPerfLog {
+        enabled: std::env::var("XINDELER_PLAYER_TICK_PERF_LOG").is_ok_and(|v| v != "0"),
+        window_start: now,
+        ticked: 0,
+        skipped: 0,
+    });
+    if !state.enabled {
+        return;
+    }
+    if ticked {
+        state.ticked += 1;
+    } else {
+        state.skipped += 1;
+    }
+    let elapsed = now.duration_since(state.window_start);
+    if elapsed >= TICK_PERF_LOG_WINDOW {
+        let secs = elapsed.as_secs_f64();
+        tracing::info!(
+            target: "player_tick_perf",
+            real_ticks = state.ticked,
+            skipped_frames = state.skipped,
+            measured_tick_hz = state.ticked as f64 / secs,
+            window_secs = secs,
+            "tick_player Hz-ceiling window"
+        );
+        state.window_start = now;
+        state.ticked = 0;
+        state.skipped = 0;
+    }
 }
 
 /// Advances the embedded player one step: ticks its network/sync and walks
@@ -389,8 +551,67 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
 /// server + per-frame client reconciled; no explicit `.after(tick_sim)`
 /// ordering is needed (or even meaningful — the two are different schedules
 /// now) for this to work correctly.
-pub fn tick_player(player: Option<NonSendMut<EmbeddedPlayer>>, input: Res<LocalPlayerInput>) {
+///
+/// ## BL-82 EM-4.11 follow-up: Hz safety ceiling
+/// This does NOT cap back toward 30 Hz and does NOT revert the `Update` move
+/// above — both remain correct and intentional. It adds an upper-bound-only
+/// guard (default [`DEFAULT_MAX_PLAYER_TICK_HZ`] = 240 Hz, comfortably above
+/// any normal monitor's refresh rate) so an uncapped render loop
+/// (`XINDELER_PRESENT_MODE=novsync`) or a 240 Hz+ display can't run this
+/// system's full dispatch — and its `client.tick()` system graph — more
+/// often than any perceptible benefit justifies. See
+/// [`max_player_tick_interval`] for the `XINDELER_MAX_PLAYER_TICK_HZ`
+/// override.
+///
+/// ### Verifying the ceiling empirically
+/// Set `XINDELER_PLAYER_TICK_PERF_LOG=1` (see [`TickPerfLog`]) to log the
+/// measured real-dispatch Hz once per second — e.g. pair it with
+/// `--smoke-perf-run` and `XINDELER_PRESENT_MODE=novsync` and `grep
+/// player_tick_perf` the output to confirm the dispatch rate stays bounded
+/// near the ceiling even when the render loop itself runs much faster.
+///
+/// `pub(crate)` (tightened from a pre-existing `pub` + crate-root re-export
+/// during this follow-up, bevy-migration-reviewer audit): no crate outside
+/// `xindeler-sim-bridge` actually calls this — `PlayerBridgePlugin::build`
+/// registers it in this same module, and every other mention across
+/// `xindeler-client` is plain doc-comment prose, not a resolved cross-crate
+/// reference. Keeping it crate-internal avoids growing the public API
+/// surface further (this follow-up's new [`TickPerfLog`] system parameter
+/// would otherwise have needed the same wider `pub` + re-export treatment).
+pub(crate) fn tick_player(
+    player: Option<NonSendMut<EmbeddedPlayer>>,
+    input: Res<LocalPlayerInput>,
+    mut max_tick_interval: Local<Option<Duration>>,
+    mut tick_perf_log: Local<Option<TickPerfLog>>,
+) {
     let Some(mut player) = player else { return };
+
+    // BL-82 EM-4.11 follow-up (rust-perf-reviewer MAJOR): Hz safety ceiling.
+    // `Update` can run far faster than any perceptible prediction benefit
+    // justifies (uncapped `XINDELER_PRESENT_MODE=novsync`, or a 240 Hz+
+    // display) — see [`DEFAULT_MAX_PLAYER_TICK_HZ`]'s doc for the full
+    // rationale. Read (and cache) the env override once via `Local`, same
+    // "resolve once, reuse every frame" shape `far_terrain.rs`/`lod.rs` use
+    // for their own per-frame env-gated flags.
+    let max_interval = *max_tick_interval.get_or_insert_with(max_player_tick_interval);
+    let now = Instant::now();
+    let due = tick_is_due(player.last_tick_wall, now, max_interval);
+    log_tick_perf(&mut tick_perf_log, due, now);
+    if !due {
+        // Under the ceiling: skip this frame's dispatch entirely. Bevy still
+        // renders the frame — we simply don't run the redundant
+        // interpolation/tether/mount/controller/character_behavior/buff/
+        // stats/phys(+events)/projectile/shockwave/arcing/beam/pool/aura/
+        // telemetry system graph, the terrain scan/prune, or the two network
+        // sends `client.tick` performs (see this module's doc comment).
+        // `mirror_local_player_prediction` (chained right after this system)
+        // still runs and simply re-reads the unchanged
+        // `EmbeddedPlayer::position()`/velocity/orientation from the last
+        // real tick — a cheap no-op write, not a correctness gap.
+        return;
+    }
+    player.last_tick_wall = Some(now);
+
     player.clock.tick();
     let dt = player.clock.game_dt();
 
@@ -934,6 +1155,105 @@ mod tests {
             predicted.ori,
             Quat::IDENTITY,
             "no orientation sample falls back to identity, same as position()'s None handling"
+        );
+    }
+
+    /// BL-82 EM-4.11 follow-up (rust-perf-reviewer MAJOR): pins the pure
+    /// `XINDELER_MAX_PLAYER_TICK_HZ` → `Duration` mapping so the default Hz
+    /// ceiling never silently drifts, and the disable/override paths keep
+    /// working. Runs single-threaded within this one test (env vars are
+    /// process-wide state), same convention as
+    /// `xindeler_client::present_mode_tests`.
+    #[test]
+    fn max_player_tick_interval_defaults_and_respects_overrides() {
+        // SAFETY: this test is the sole reader/writer of
+        // `XINDELER_MAX_PLAYER_TICK_HZ` in this crate's test suite, and every
+        // set/assert/remove step below runs sequentially within this one test
+        // function, so there is no cross-thread data race on the var.
+        unsafe {
+            std::env::remove_var("XINDELER_MAX_PLAYER_TICK_HZ");
+        }
+        assert_eq!(
+            max_player_tick_interval(),
+            Duration::from_secs_f64(1.0 / DEFAULT_MAX_PLAYER_TICK_HZ),
+            "unset XINDELER_MAX_PLAYER_TICK_HZ must resolve to the default ceiling"
+        );
+
+        // SAFETY: see justification above.
+        unsafe {
+            std::env::set_var("XINDELER_MAX_PLAYER_TICK_HZ", "not-a-number");
+        }
+        assert_eq!(
+            max_player_tick_interval(),
+            Duration::from_secs_f64(1.0 / DEFAULT_MAX_PLAYER_TICK_HZ),
+            "an unparseable value must fall back to the safe default, not panic"
+        );
+
+        // SAFETY: see justification above.
+        unsafe {
+            std::env::set_var("XINDELER_MAX_PLAYER_TICK_HZ", "120");
+        }
+        assert_eq!(
+            max_player_tick_interval(),
+            Duration::from_secs_f64(1.0 / 120.0),
+            "a valid override must be honoured exactly"
+        );
+
+        for opt_out in ["0", "-1"] {
+            // SAFETY: see justification above.
+            unsafe {
+                std::env::set_var("XINDELER_MAX_PLAYER_TICK_HZ", opt_out);
+            }
+            assert_eq!(
+                max_player_tick_interval(),
+                Duration::ZERO,
+                "{opt_out:?} must be an explicit opt-out (no ceiling), not clamped to 0 Hz"
+            );
+        }
+
+        // SAFETY: see justification above; leave the environment clean.
+        unsafe {
+            std::env::remove_var("XINDELER_MAX_PLAYER_TICK_HZ");
+        }
+    }
+
+    /// BL-82 EM-4.11 follow-up: [`tick_is_due`]'s pure gating logic — the
+    /// piece that actually decides whether `tick_player` runs its full
+    /// dispatch or skips a frame. Verifies all four branches with real
+    /// `Instant`/`Duration` math (no mock clock needed): first-ever call is
+    /// always due; a call too soon after the last real tick is NOT due;
+    /// waiting out the interval makes it due again; `Duration::ZERO` (the
+    /// `XINDELER_MAX_PLAYER_TICK_HZ<=0` opt-out) is always due regardless of
+    /// timing.
+    #[test]
+    fn tick_is_due_gates_on_elapsed_wall_clock_time() {
+        let max_interval = Duration::from_millis(20);
+        let last = Instant::now();
+
+        assert!(
+            tick_is_due(None, Instant::now(), max_interval),
+            "the very first dispatch (no prior tick) must never be blocked by the ceiling"
+        );
+        assert!(
+            !tick_is_due(Some(last), Instant::now(), max_interval),
+            "called again immediately, well under the interval, must NOT be due yet"
+        );
+
+        std::thread::sleep(max_interval + Duration::from_millis(15));
+        assert!(
+            tick_is_due(Some(last), Instant::now(), max_interval),
+            "after the interval has elapsed, a dispatch must be due again"
+        );
+
+        assert!(
+            !tick_is_due(Some(Instant::now()), Instant::now(), Duration::from_secs(1)),
+            "sanity: a huge interval right after a tick must gate (proves the assertion above \
+             isn't vacuously true)"
+        );
+        assert!(
+            tick_is_due(Some(last), Instant::now(), Duration::ZERO),
+            "Duration::ZERO must always be due — the explicit opt-out disables the ceiling \
+             entirely, regardless of elapsed time"
         );
     }
 
