@@ -26,6 +26,8 @@ use std::{
 };
 
 use bevy::prelude::*;
+#[cfg(feature = "listen-server")]
+use common::vol::BaseVol;
 use common::{
     terrain::{Block, BlockKind, MapSizeLg, TerrainChunk, TerrainChunkMeta},
     vol::{ReadVol, RectRasterableVol},
@@ -113,39 +115,93 @@ impl TerrainStore {
     }
 
     /// BL-82 EM-3.12: cast the third-person camera's collision boom ray
-    /// against this store's OWN terrain snapshot. Assembles the SAME
-    /// `VolGrid2d` [`Self::volume_for`] builds for the mesher (the pivot's
-    /// chunk ± 1 xy neighbours — ample for a `CAM_BACK`-length boom since
-    /// chunks are `RECT_SIZE` wide), then delegates the actual ray math to
+    /// against this store's OWN terrain snapshot. Unlike [`Self::volume_for`]
+    /// (the mesher's fetch path — see the follow-up note below for why it
+    /// doesn't apply here), this borrows [`ChunkStoreView`] directly over
+    /// `self.chunks` — no `VolGrid2d`, no `HashMap` construction, no
+    /// `Arc::clone` — then delegates the actual ray math to
     /// [`crate::player_input::collide_boom`] so the clamp/pad/min logic lives
     /// in exactly one place (also unit-tested there against a hand-built
-    /// grid). If the pivot's own chunk isn't streamed yet, the ray passes
-    /// straight through (`desired`, no clip) — never clamps on missing data,
-    /// matching the reference engine's `.ignore_error()` behaviour.
+    /// grid). If the pivot's own chunk isn't streamed yet, `ChunkStoreView`'s
+    /// `get` errors at the very first sample and `collide_boom`'s
+    /// `.ignore_error()` lets the ray run out without ever matching `until`,
+    /// so the full `desired` distance comes back — never clamps on missing
+    /// data, matching the reference engine's `.ignore_error()` behaviour.
     ///
-    /// ## Known v1 cost (reviewed, accepted, follow-up noted — not fixed here)
-    /// Unlike its ONLY other caller (the async mesh pipeline, which calls
-    /// `volume_for` per DIRTY chunk, infrequently, off the render thread),
-    /// this runs on the MAIN THREAD EVERY RENDERED FRAME. Reusing
-    /// `volume_for` means every call allocates a fresh `VolGrid2d`
-    /// (a `HashMap` + up to 9 `Arc::clone`s) just to run one short ray
-    /// through it. Both `bevy-migration-reviewer` and `rust-perf-reviewer`
-    /// confirmed this is cheap in absolute terms (small map, a handful of
-    /// `Arc` clones, no deep copies — nowhere near a 16 ms frame budget) and
-    /// is NOT a merge blocker, but flagged it as worth a follow-up: index
-    /// `self.chunks` directly for the 1-2 chunks a `CAM_BACK`-length ray can
-    /// actually touch instead of materializing an owned `VolGrid2d` snapshot
-    /// just to discard it after one cast.
+    /// ## Follow-up to the v1 `volume_for`-reuse cost (fixed here)
+    /// The original v1 landed reusing [`Self::volume_for`] here, the SAME
+    /// fetch the async mesh pipeline calls per dirty chunk (infrequently, off
+    /// the render thread) — but THIS call site runs on the MAIN THREAD EVERY
+    /// RENDERED FRAME, so every call allocated a fresh `VolGrid2d` (a
+    /// `HashMap` + up to 9 `Arc::clone`s) just to run one short ray through
+    /// it and immediately discard it. Both `bevy-migration-reviewer` and
+    /// `rust-perf-reviewer` flagged it as worth fixing before merge (PR #64
+    /// wasn't merged yet). [`ChunkStoreView`] replaces that with a zero-
+    /// allocation borrow: each DDA step is one `HashMap` lookup into
+    /// `self.chunks`, no construction, no clones.
     #[cfg(feature = "listen-server")]
     fn boom_cast(&self, pivot_sim: VVec3<f32>, dir_sim: VVec3<f32>, desired: f32) -> f32 {
-        let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(
-            pivot_sim.x.floor() as i32,
-            pivot_sim.y.floor() as i32,
-        ));
-        match self.volume_for(key) {
-            Some(vol) => crate::player_input::collide_boom(&*vol.grid, pivot_sim, dir_sim, desired),
-            None => desired,
-        }
+        let view = ChunkStoreView {
+            map_size_lg: self.map_size_lg,
+            default: &self.default,
+            chunks: &self.chunks,
+        };
+        crate::player_input::collide_boom(&view, pivot_sim, dir_sim, desired)
+    }
+}
+
+/// BL-82 EM-3.12 follow-up (perf review on PR #64, fixed before merge): a
+/// zero-allocation [`ReadVol`] view straight over [`TerrainStore::chunks`],
+/// used ONLY by [`TerrainStore::boom_cast`]'s single per-frame ray query.
+/// Mirrors `VolGrid2d<TerrainChunk>::get`'s exact chunk-key / chunk-offset /
+/// out-of-bounds-default-fallback logic (`common/src/volumes/vol_grid_2d.rs`)
+/// but reads directly from the store's own map — no `HashMap` built to hold a
+/// copy, no `Arc::clone`s, just an integer division (via the SAME
+/// `VolGrid2d::chunk_key`/`chunk_offs` helpers, reused as free functions so
+/// the arithmetic can't drift from the mesher's) and a lookup per DDA step.
+/// [`TerrainStore::volume_for`] is unchanged and keeps serving its only other
+/// caller, the async mesh pipeline, which genuinely needs an owned,
+/// `Send`-friendly snapshot to hand across the worker-thread boundary.
+///
+/// `#[cfg(feature = "listen-server")]`: this exists solely for
+/// [`TerrainStore::boom_cast`], itself gated the same way (the third-person
+/// camera it serves doesn't exist under a pure `net-client` build) — gating
+/// it too keeps it from sitting dead-code-unused outside that build.
+#[cfg(feature = "listen-server")]
+struct ChunkStoreView<'a> {
+    map_size_lg: MapSizeLg,
+    default: &'a Arc<TerrainChunk>,
+    chunks: &'a HashMap<[i32; 2], Arc<TerrainChunk>>,
+}
+
+/// Unit error for [`ChunkStoreView`]: `collide_boom`'s ray always finishes
+/// with `.ignore_error()`, so the value itself is never inspected — this
+/// exists only to satisfy `BaseVol::Error: Debug`.
+#[cfg(feature = "listen-server")]
+#[derive(Debug)]
+struct ChunkStoreViewError;
+
+#[cfg(feature = "listen-server")]
+impl BaseVol for ChunkStoreView<'_> {
+    type Error = ChunkStoreViewError;
+    type Vox = Block;
+}
+
+#[cfg(feature = "listen-server")]
+impl ReadVol for ChunkStoreView<'_> {
+    fn get(&self, pos: VVec3<i32>) -> Result<&Block, ChunkStoreViewError> {
+        let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(pos.x, pos.y));
+        let chunk = match self.chunks.get(&[key.x, key.y]) {
+            Some(chunk) => chunk,
+            // Counterintuitively (mirroring `VolGrid2d::get_key`), a key
+            // outside the map's max bounds always resolves to the default
+            // (void) chunk rather than an error — only an IN-BOUNDS but
+            // not-yet-streamed chunk is a genuine miss.
+            None if !self.map_size_lg.contains_chunk(key) => self.default,
+            None => return Err(ChunkStoreViewError),
+        };
+        let offs = VolGrid2d::<TerrainChunk>::chunk_offs(pos);
+        Ok(chunk.get_unchecked(offs))
     }
 }
 
@@ -165,7 +221,8 @@ impl SharedTerrain {
     /// terrain snapshot, returning the collision-limited distance. Takes the
     /// read lock only for the duration of this call (a handful of voxel
     /// `get`s — microseconds); the mesher's own lock usage elsewhere is
-    /// unaffected. See [`TerrainStore::boom_cast`] for the volume assembly.
+    /// unaffected. See [`TerrainStore::boom_cast`] for the (zero-allocation)
+    /// view assembly.
     pub(crate) fn boom_cast(
         &self,
         pivot_sim: VVec3<f32>,
@@ -976,6 +1033,64 @@ mod tests {
             "the selective rule must eliminate this synthetic model's direction-dependent \
              asymmetry entirely (both directions never re-mark a neighbour that hasn't \
              independently streamed in)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-3.12 follow-up — `ChunkStoreView` (the zero-allocation
+    // `boom_cast` path) mirrors `VolGrid2d::get`'s fallback semantics
+    // -----------------------------------------------------------------------
+
+    /// Exercises `ChunkStoreView::get`'s three branches directly (present
+    /// chunk / out-of-map-bounds default / genuine in-bounds miss) — the same
+    /// three cases `VolGrid2d::get_key_arc` distinguishes
+    /// (`common/src/volumes/vol_grid_2d.rs`). The real-terrain integration
+    /// test below (`boom_cast_clamps_against_real_generated_terrain`) only
+    /// ever exercises the "present chunk" branch (the anchor's own already-
+    /// streamed chunk); this test guards the other two directly and cheaply
+    /// (no App/assets/sim needed) — reviewer-suggested coverage for the
+    /// zero-allocation view added in this follow-up (PR #64).
+    #[cfg(feature = "listen-server")]
+    #[test]
+    fn chunk_store_view_mirrors_vol_grid_2d_fallback_semantics() {
+        let map_size_lg = MapSizeLg::new(VVec2::new(6, 6)).expect("valid map size");
+        let default = Arc::new(TerrainChunk::new(
+            0,
+            Block::empty(),
+            Block::empty(),
+            TerrainChunkMeta::void(),
+        ));
+        let mut chunks = HashMap::new();
+        chunks.insert([0, 0], Arc::new(solid_chunk(5)));
+        let view = ChunkStoreView {
+            map_size_lg,
+            default: &default,
+            chunks: &chunks,
+        };
+
+        // Present chunk: reads the real solid block back.
+        assert!(
+            view.get(VVec3::new(1, 1, 2))
+                .is_ok_and(|b: &Block| b.is_solid()),
+            "a stored chunk's own solid block must read back solid"
+        );
+
+        // Out-of-map-bounds key (map is 2^6 = 64 chunks per axis): falls back
+        // to the default (void, non-solid) chunk rather than erroring —
+        // mirrors `VolGrid2d::get_key_arc`'s "areas outside the map are
+        // *always* considered in it" contract.
+        let out_of_bounds = VVec3::new(1000 * CHUNK, 1000 * CHUNK, 2);
+        assert!(
+            view.get(out_of_bounds).is_ok_and(|b: &Block| !b.is_solid()),
+            "an out-of-map-bounds key must resolve to the void default chunk"
+        );
+
+        // In-bounds but genuinely not-yet-streamed neighbour key: a real miss.
+        let unstreamed_neighbour = VVec3::new(CHUNK, 1, 2);
+        assert!(
+            view.get(unstreamed_neighbour).is_err(),
+            "an in-bounds chunk that was never inserted must be a genuine miss, not a default \
+             fallback"
         );
     }
 
