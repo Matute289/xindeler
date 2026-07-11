@@ -845,12 +845,15 @@ fn send_far_terrain_once(
 
     // BL-82 EM-3.11 Phase A review (ecs-design-reviewer): push ONE
     // `(height, colour, horizon)` sample per iteration into a single Vec,
-    // then unzip, rather than three independently-grown parallel Vecs — this
-    // makes it structurally impossible for a future refactor of this loop to
-    // desync `heights[k]`/`colors[k]`/`horizon[k]` against each other, since
-    // all three always come from the SAME iteration reading the SAME
-    // `cpos`. `unzip3` still yields three Vecs of the same length, matching
-    // `NetFarTerrain::encode`'s signature.
+    // then split it into three parallel Vecs via one for-loop (no
+    // `Iterator::unzip` — that's pair-only; `itertools::multiunzip` isn't a
+    // dependency of this crate, so a hand-rolled loop is the simplest
+    // dependency-free option), rather than growing three Vecs independently
+    // in the closure above — this makes it structurally impossible for a
+    // future refactor of this loop to desync `heights[k]`/`colors[k]`/
+    // `horizon[k]` against each other, since all three always come from the
+    // SAME iteration reading the SAME `cpos`. The loop still yields three
+    // Vecs of the same length, matching `NetFarTerrain::encode`'s signature.
     let samples: Vec<(f32, [u8; 3], [u8; 4])> = (0..grid_h)
         .flat_map(|j| (0..grid_w).map(move |i| (i, j)))
         .map(|(i, j)| {
