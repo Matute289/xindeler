@@ -803,20 +803,27 @@ fn send_far_terrain_once(
 
     let (stride, grid_w, grid_h) = lod_alt_grid_dims(size.x, size.y);
 
-    let mut heights = Vec::with_capacity((grid_w * grid_h) as usize);
-    let mut colors: Vec<[u8; 3]> = Vec::with_capacity((grid_w * grid_h) as usize);
-    for j in 0..grid_h {
-        for i in 0..grid_w {
+    // BL-82 EM-3.11 Phase A review (ecs-design-reviewer): push ONE
+    // `(height, colour)` sample per iteration into a single Vec, then unzip,
+    // rather than two independently-grown parallel Vecs — this makes it
+    // structurally impossible for a future refactor of this loop (e.g. T49.5
+    // adding a third `horizon` layer) to desync `heights[k]`/`colors[k]`
+    // against each other, since both always come from the SAME `push` call
+    // reading the SAME `cpos`. `unzip` still yields two Vecs of the same
+    // length, matching `NetFarTerrain::encode`'s signature.
+    let samples: Vec<(f32, [u8; 3])> = (0..grid_h)
+        .flat_map(|j| (0..grid_w).map(move |i| (i, j)))
+        .map(|(i, j)| {
             let cx = (i * stride).min(u32::from(size.x) - 1);
             let cy = (j * stride).min(u32::from(size.y) - 1);
             #[expect(clippy::cast_possible_wrap, reason = "chunk coords ≪ i32::MAX")]
             let cpos = vek::Vec2::new(cx as i32, cy as i32);
             let alt = world_data.alt_at(cpos).unwrap_or(0.0);
-            heights.push(alt);
             let col = world_data.col_at(cpos).unwrap_or(vek::Rgb::new(0, 0, 0));
-            colors.push([col.r, col.g, col.b]);
-        }
-    }
+            (alt, [col.r, col.g, col.b])
+        })
+        .collect();
+    let (heights, colors): (Vec<f32>, Vec<[u8; 3]>) = samples.into_iter().unzip();
 
     // TODO (still open past EM-4.2d): `targets: All` + a global `sent` latch
     // only reaches clients connected AT the single broadcast — a client

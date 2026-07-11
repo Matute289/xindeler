@@ -126,7 +126,7 @@ pub struct FarTerrainPlugin;
 
 impl Plugin for FarTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (receive_lod_alt, retile_far_mesh));
+        app.add_systems(Update, (receive_far_terrain, retile_far_mesh));
 
         // Debug-only, opt-in (`XINDELER_SMOKE_FAR_MESH_CAM=1`): parks the
         // camera high above the anchor looking outward so a
@@ -167,9 +167,9 @@ fn smoke_horizon_cam(
 /// [`retile_far_mesh`] re-reads it every time the camera drifts far enough to
 /// need a fresh hole.
 #[derive(Resource)]
-struct FarTerrainData(DecodedLodAlt);
+struct FarTerrainData(DecodedFarTerrain);
 
-struct DecodedLodAlt {
+struct DecodedFarTerrain {
     grid_w: u32,
     grid_h: u32,
     chunk_stride: u32,
@@ -203,7 +203,7 @@ struct FarMeshState {
 /// wholesale (same "undecodable ⇒ drop" behaviour the height-only v1 had),
 /// since a mesh with real heights but no real colour would just fall back to
 /// a single flat colour anyway.
-fn receive_lod_alt(
+fn receive_far_terrain(
     mut commands: Commands,
     mut messages: MessageReader<NetFarTerrain>,
     existing: Option<Res<FarTerrainData>>,
@@ -222,7 +222,7 @@ fn receive_lod_alt(
         warn!("dropping undecodable far-terrain grid (colors)");
         return;
     };
-    commands.insert_resource(FarTerrainData(DecodedLodAlt {
+    commands.insert_resource(FarTerrainData(DecodedFarTerrain {
         grid_w: msg.grid_size[0],
         grid_h: msg.grid_size[1],
         chunk_stride: msg.chunk_stride,
@@ -378,7 +378,7 @@ fn retile_far_mesh(
 
 /// Height-only-known corner (grid coordinate space, before world placement).
 #[inline]
-fn corner_height(data: &DecodedLodAlt, ci: i32, cj: i32) -> Option<f32> {
+fn corner_height(data: &DecodedFarTerrain, ci: i32, cj: i32) -> Option<f32> {
     if ci < 0 || cj < 0 || ci >= data.grid_w as i32 || cj >= data.grid_h as i32 {
         return None;
     }
@@ -389,7 +389,7 @@ fn corner_height(data: &DecodedLodAlt, ci: i32, cj: i32) -> Option<f32> {
 /// Averages the up-to-4 sample cells touching grid corner `(i, j)` (`i` in
 /// `0..=grid_w`, `j` in `0..=grid_h`) so adjoining quads share an identical
 /// vertex height — the no-cracks contract.
-fn averaged_corner(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
+fn averaged_corner(data: &DecodedFarTerrain, i: u32, j: u32) -> f32 {
     let (i, j) = (i as i32, j as i32);
     let samples = [
         corner_height(data, i - 1, j - 1),
@@ -438,7 +438,7 @@ fn cell_color(rgb: [u8; 3], haze: Vec3) -> Color {
 /// the cutout hole (nothing to draw). `haze` is the live atmosphere's
 /// `fog_color` (see [`FAR_HAZE_BLEND`]).
 fn far_mesh_from_heights(
-    data: &DecodedLodAlt,
+    data: &DecodedFarTerrain,
     hole_center: Vec2,
     hole_radius: f32,
     haze: Vec3,
@@ -610,8 +610,8 @@ mod tests {
         );
     }
 
-    fn flat_grid(w: u32, h: u32, height: f32, stride: u32) -> DecodedLodAlt {
-        DecodedLodAlt {
+    fn flat_grid(w: u32, h: u32, height: f32, stride: u32) -> DecodedFarTerrain {
+        DecodedFarTerrain {
             grid_w: w,
             grid_h: h,
             chunk_stride: stride,
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(shared_from_quad_00, shared_from_quad_11_neighbor);
     }
 
-    fn corner_pos_for_test(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
+    fn corner_pos_for_test(data: &DecodedFarTerrain, i: u32, j: u32) -> f32 {
         averaged_corner(data, i, j)
     }
 

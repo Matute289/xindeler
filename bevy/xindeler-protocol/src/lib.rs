@@ -414,6 +414,15 @@ impl NetFarTerrain {
     /// Serializes (bincode `legacy()`) + compresses (lz4, same scheme as
     /// [`CompressedChunk`]) a downsampled height + colour grid. `horizon` is
     /// left empty (Phase A does not send it yet).
+    ///
+    /// `heights`/`colors` must be the SAME length and index-aligned (spec
+    /// §3.1's contract — `colors[k]` is the real colour of the exact chunk
+    /// `heights[k]` is the altitude of). This is a cheap, self-documenting
+    /// guard against a future caller/refactor accidentally desyncing the two
+    /// parallel slices (ecs-design-reviewer, BL-82 EM-3.11 Phase A review);
+    /// the actual sampling loop (`xindeler-sim-bridge::send_far_terrain_once`)
+    /// additionally structurally prevents this by pushing one `(height,
+    /// colour)` tuple per cell rather than growing two Vecs independently.
     #[must_use]
     pub fn encode(
         grid_size: [u32; 2],
@@ -421,6 +430,11 @@ impl NetFarTerrain {
         heights: &[f32],
         colors: &[[u8; 3]],
     ) -> Self {
+        debug_assert_eq!(
+            heights.len(),
+            colors.len(),
+            "heights/colors must be index-aligned (same length)"
+        );
         Self {
             grid_size,
             chunk_stride,
@@ -977,11 +991,11 @@ mod tests {
     /// layers, since each is its own compressed blob.
     #[test]
     fn net_far_terrain_rejects_length_mismatch() {
+        // `heights`/`colors` are index-aligned with EACH OTHER (both length
+        // 3, `encode`'s own `debug_assert_eq!` contract), but neither matches
+        // the DECLARED 2×2=4 grid — `decode_*` must catch that mismatch.
         let heights: Vec<f32> = vec![1.0, 2.0, 3.0];
-        let colors: Vec<[u8; 3]> = vec![[1, 2, 3]];
-        // `encode` doesn't validate its own input — 3 heights / 1 colour into
-        // a declared 2×2=4 grid — so `decode_*` must catch the mismatch
-        // instead.
+        let colors: Vec<[u8; 3]> = vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]];
         let encoded = NetFarTerrain::encode([2, 2], 4, &heights, &colors);
         assert_eq!(encoded.decode_heights(), None);
         assert_eq!(encoded.decode_colors(), None);
