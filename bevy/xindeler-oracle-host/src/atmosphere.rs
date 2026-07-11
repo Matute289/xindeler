@@ -167,7 +167,25 @@ impl Default for AtmosphereProfile {
             // (a `retile_far_mesh` recentre lagging a fast camera drift, or a
             // future low-density weather profile) reads as haze, not "beige
             // ground" — defense in depth, not a replacement for this retune.
-            fog_density: 0.00913,
+            //
+            // BL-82 EM-3.11 Phase B / T49.7 (2026-07-11, `docs/design/specs/
+            // 2026-07-11-bl82-full-horizon-lod-terrain-design.md`): round
+            // 11's 0.00913 is no longer earning its keep. `far_terrain_
+            // material.wgsl`'s world-curvature vertex bend + horizon-
+            // occlusion + sky-blend dissolve (T49.6) now does the actual
+            // edge-hiding work the far mesh needs — fog only has to be a
+            // FINISHING touch, exactly like the old engine's "fog is a
+            // finish, never the sole mask" design (the structural gap this
+            // whole epic closes). Restored to the EM-3.11f value below,
+            // undoing round 11's over-tune: opacity drops back to ~97.5% at
+            // the far mesh's 288 m hole_radius (from ~99.9%) — the
+            // material's own dissolve now covers that residual 2.5% — while
+            // the near/mid field clears back up (~10% haze at 50 m, was
+            // ~19%; ~36% at 100 m, was ~56%). See `far_terrain.rs`'s
+            // `fog_density_gives_a_reasonable_assist_without_over_hazing_
+            // the_near_field` test for the invariant this value must keep
+            // satisfying.
+            fog_density: 0.00667,
             // Brighter, slightly less saturated than the original flat
             // gray-blue (EM-3.11b): the old (0.55, 0.65, 0.75) read
             // noticeably darker/flatter than the physically-based `Atmosphere`

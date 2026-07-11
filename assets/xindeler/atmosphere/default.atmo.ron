@@ -7,12 +7,14 @@
 // atmosphere animate (hot reload via bevy's file_watcher).
 (
     // Distance-fog extinction density for `FogFalloff::ExponentialSquared`
-    // (BL-82 EM-3.11 round 11 re-tune — the EM-3.11f value only reached
-    // ~97.5% opacity by the far-mesh's ~288m cutout hole, leaving a visible
-    // "beige horizon" strip; now ~99.9% fogged there, still a clear near/mid
-    // field. See AtmosphereProfile::default()'s doc comment for the full
-    // rationale + curve-shape reasoning).
-    fog_density: 0.00913,
+    // (BL-82 EM-3.11 Phase B / T49.7 re-tune — restored to the EM-3.11f
+    // value: round 11's 0.00913 fully masked the far mesh's edge with fog
+    // ALONE, over-hazing the near/mid field to do it. The far-terrain
+    // material now bends + dissolves the edge itself (far_terrain_
+    // material.wgsl), so fog only needs to be a finishing touch again. See
+    // AtmosphereProfile::default()'s doc comment for the full rationale +
+    // curve-shape reasoning).
+    fog_density: 0.00667,
     // sRGB fog color (brightened/desaturated in EM-3.11b to match the
     // physically-based Atmosphere sky's horizon haze more closely).
     fog_color: (0.66, 0.73, 0.81),

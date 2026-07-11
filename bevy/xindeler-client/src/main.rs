@@ -15,7 +15,8 @@
 //! connecting over a real network socket (via `xindeler-transport`) to a
 //! SEPARATE `xindeler-server-app` process. It reuses the SAME client-side
 //! consumption modules (`terrain_stream`, `entity_view`, `figure_view`,
-//! `sprite_view`, `lod`, `far_terrain`) `--listen-server` uses, verbatim — the
+//! `sprite_view`, `lod`, `far_terrain`, `far_terrain_material`)
+//! `--listen-server` uses, verbatim — the
 //! wire shape (`xindeler-protocol`) is unchanged, only the transport
 //! underneath it and who hosts the sim. See `net_client.rs`.
 
@@ -25,6 +26,8 @@ mod camera;
 mod entity_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod far_terrain_material;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod figure_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
