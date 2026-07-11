@@ -210,8 +210,12 @@ backlog. Each row below links its spec/plan/task doc once drafted.
 | EM-7.4 | Rain (weather) — v1 = hybrid: minimal server-side low-res weather grid (state sync only) + full client GPU rendering (`bevy_hanabi`), wind-coupled diagonal rain, canopy interception/secondary drip, wet-surface dynamic PBR (maximalist v1, worksheet 2026-07-09) | ⚪ |
 | EM-7.5 | Visible sun disc — v1 = Bevy 0.19's first-party `SunDisk` component on the existing `Sun` light entity (nearly free once found) | ⚪ |
 | EM-7.6 | Night sky — stars — v1 = real astronomical star map + constellations, with clean (currently-empty) hooks for ORACLE to later mutate the sky during narrative events | ⚪ |
+<!-- TODO(orchestrator): replace the EM-7.6 row above with the sibling EM-7.6 agent's exact revised
+     row text (detailed spec broken out to private tasks/53 — real RA/Dec star map + Xindeler-canon
+     constellation layer + empty SkyOverride hook; consumes EM-7.9's day-of-year/year-fraction clock). -->
 | EM-7.7 | Moon — v1 = real dynamic lunar phases, deterministically clocked (maximalist v1, worksheet 2026-07-09) | ⚪ |
 | ~~EM-7.8~~ | ~~Ambient wildlife — birds~~ **moved to BL-86** (general backlog) — Matías wants real, non-AI entities; that's entity-model/gameplay scope, not atmosphere polish | ➡️ BL-86 |
+| EM-7.9 | Calendar & seasons **simulation** — v1 = fixed 364-day looping year (7-day weeks, 13 months × 28 days, 4 seasons × 91 days), gradual season transitions, and **date-varying day-length + sun arc** from a real solar-declination model (solstices/equinoxes land on the season boundaries). The **authoritative celestial clock EM-7.5/7.6/7.7 consume** (day-of-year, declination, sun-direction). Derived from the already-synced `TimeOfDay` (default path = **no new server state**) + an empty `SeasonOverride` ORACLE hook; season biases EM-7.4's weather grid, doesn't replace it. Private design: spec `2026-07-11-em79-calendar-seasons-system.md`, tasks `54-…`. *(Numbering: the private atmosphere spec uses 7.9 internally for wind shaders; this takes the free public 7.9 row — reconcile.)* | ⚪ |
 
 **Day/night ↔ sim sync:** `SunCycle` (client-local real-time stub) gets a read-only mirror of the sim's
 authoritative `TimeOfDay` as part of this phase — cheap correctness win Matías asked for explicitly (was
