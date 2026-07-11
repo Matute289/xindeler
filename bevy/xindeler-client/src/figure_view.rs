@@ -696,10 +696,73 @@ fn classify_bodies(
     }
 }
 
+/// EM-4.10 round 12: bound the number of figures actually ASSEMBLED (meshed +
+/// spawned) per frame, across each of the four `build_pending_*` systems
+/// below. Unlike the terrain-mesh pipeline (async, budgeted uploads/frame —
+/// `xindeler-render-voxel::pipeline`'s `ChunkUploadBudget`) or the
+/// sprite-chunk decode path (round 11, `sprite_view::CHUNK_BUILD_BURST_CAP`),
+/// figure assembly had NO cap at all: `classify_bodies` requests every
+/// mirrored NPC's `.vox` parts as soon as its body/loadout is known, and once
+/// the FIRST NPC of a given species/gender has its parts cached in
+/// `Assets<VoxAsset>` (typically after the first few frames of any real
+/// session), every OTHER already-classified NPC of the same kind resolves to
+/// `PartsReady::Ready` on the SAME frame — so a batch of N simultaneously
+/// visible NPCs paid N × (voxel-segment union + mesh build +
+/// `Commands::spawn`) synchronously in ONE `Update` call, unbounded.
+///
+/// Measured empirically (this investigation, `XINDELER_TEST_NPC_COUNT=150`,
+/// `--smoke-perf-run`, timestamps taken from this module's own existing
+/// per-build `info!` lines): ~1.1ms per humanoid figure (the most expensive
+/// body class — 8 manifests + a `DynaUnionizer` head union) — 37 humanoids
+/// assembled back-to-back in ONE frame cost ~41ms of main-thread time alone,
+/// enough on its own to floor a frame under ~25fps. This is NOT a one-off
+/// boot cost: it recurs any time several same-species NPCs enter view
+/// together (a wildlife pack, a crowded town, a region crossing), which is
+/// exactly the "frame-time spikes scale with mirrored-entity count" pattern
+/// this round's investigation was asked to explain beyond the
+/// already-fixed `xindeler-dimensions`/`xindeler-sim-bridge` causes (spec
+/// `2026-07-10-bl82-wave3-regression-fixes-design.md`, Findings A/B/C).
+///
+/// Fix: cap ACTUAL builds (the `Ready` branch) at
+/// [`FIGURE_BUILD_BURST_CAP`] per frame, per body-class system. A `Ready`
+/// figure beyond the cap is simply left `Pending` — untouched, no data loss,
+/// no despawn/respawn — and built on a LATER frame, mirroring the "unbuilt
+/// marker retried next frame" reasoning `sprite_view.rs`'s round-11 fix
+/// already established for its own build loop (a plain component marker, not
+/// a `Messages<T>`-backed reader, so there is no TTL to race against — unlike
+/// that fix's OWN loop 1, this one needs no owned/queue rework, just a
+/// counter). Readiness POLLING (the cheap `poll_parts` check) stays
+/// uncapped — only the expensive assemble+spawn path is bounded — so a
+/// figure whose parts are still loading is never made to wait behind the cap
+/// for no reason.
+///
+/// Ordering caveat (round-12 review): unlike `sprite_view.rs`'s
+/// `CHUNK_BUILD_BURST_CAP` (which drains a `Local<VecDeque<_>>`, a real FIFO)
+/// or `pipeline.rs`'s resource-backed `ChunkMeshQueue`, this cap relies on
+/// `Query` iteration order, not an explicit queue — a `Ready` entity's
+/// position in that order can shift frame-to-frame as OTHER entities'
+/// `Pending*` marker is removed (archetype moves). This is deliberately not
+/// a hard FIFO: the pending set here only ever SHRINKS toward zero per
+/// species (no adversarial producer keeps inserting ahead of older entries),
+/// so eventual, bounded-latency draining is what matters, not strict
+/// oldest-first order — confirmed empirically (see the humanoid doc above:
+/// a 37-figure burst drained in ~9 frames of 4, no entity left stranded).
+/// Each of the four systems below also has its OWN independent counter/cap —
+/// a pathological frame where all four hit their cap simultaneously pays at
+/// most ~4×[`FIGURE_BUILD_BURST_CAP`] worth of assembly cost, still an order
+/// of magnitude below the ~41ms/37-figure burst this fix replaces; a shared
+/// cross-system budget would tighten that further but is not warranted
+/// unless a future round measures QM/bird assembly as non-trivial too.
+const FIGURE_BUILD_BURST_CAP: usize = 4;
+
 /// Once every `.vox` handle of a [`PendingFigure`] has loaded, mesh the parts,
 /// REPLACE the placeholder capsule (remove its `Mesh3d`/`MeshMaterial3d`) with
 /// one child entity per part at its rest-pose bone transform, and mark
 /// [`FigureBuilt`]. On a load failure, keep the capsule and stop retrying.
+///
+/// EM-4.10 round 12: actual assembly is capped at
+/// [`FIGURE_BUILD_BURST_CAP`] per frame (see that const's doc) — a `Ready`
+/// figure beyond the cap stays `Pending` and is retried next frame.
 fn build_pending_figures(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -708,6 +771,7 @@ fn build_pending_figures(
     mut materials: ResMut<Assets<StandardMaterial>>,
     pending: Query<(Entity, &PendingFigure)>,
 ) {
+    let mut built_this_frame = 0usize;
     for (entity, figure) in &pending {
         // Per-part fallback (polish minor c): an OPTIONAL part that hard-fails
         // is dropped and the figure still builds; an ESSENTIAL part that fails
@@ -733,6 +797,11 @@ fn build_pending_figures(
             PartsReady::Ready => {},
         }
 
+        // Defensive-only branch (in practice unreachable: `classify_bodies`
+        // only ever inserts `PendingFigure` for an actual `QuadrupedSmall`
+        // body) — cheap (no meshing), so it does NOT consume a
+        // `FIGURE_BUILD_BURST_CAP` slot; only the real assemble+spawn path
+        // below is capped.
         let FigureBody::QuadrupedSmall { species, body_type } = figure.body else {
             commands
                 .entity(entity)
@@ -740,6 +809,11 @@ fn build_pending_figures(
                 .insert(FigureBuilt);
             continue;
         };
+        if built_this_frame >= FIGURE_BUILD_BURST_CAP {
+            continue; // still `Pending`; picked up again next frame.
+        }
+        built_this_frame += 1;
+
         let rest = figure::quadruped_small_bone_rest(species, body_type);
 
         // Skip any optional part whose `.vox` failed (its handle isn't Loaded).
@@ -884,6 +958,9 @@ fn figure_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardM
 /// Once every part of a [`PendingQuadrupedMedium`] resolves (per-part
 /// fallback), assemble + place the QM figure and attach
 /// [`QuadrupedMediumFigure`].
+/// EM-4.10 round 12: actual assembly is capped at [`FIGURE_BUILD_BURST_CAP`]
+/// per frame (see that const's doc) — a `Ready` figure beyond the cap stays
+/// `Pending` and is retried next frame.
 fn build_pending_quadruped_mediums(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -892,6 +969,7 @@ fn build_pending_quadruped_mediums(
     mut materials: ResMut<Assets<StandardMaterial>>,
     pending: Query<(Entity, &PendingQuadrupedMedium)>,
 ) {
+    let mut built_this_frame = 0usize;
     for (entity, figure) in &pending {
         let ready = poll_parts(
             &asset_server,
@@ -912,6 +990,10 @@ fn build_pending_quadruped_mediums(
             },
             PartsReady::Ready => {},
         }
+        if built_this_frame >= FIGURE_BUILD_BURST_CAP {
+            continue; // still `Pending`; picked up again next frame.
+        }
+        built_this_frame += 1;
 
         let rest: QmBoneTransforms =
             quadruped_medium::quadruped_medium_bone_rest(figure.species, figure.body_type);
@@ -965,6 +1047,9 @@ fn build_pending_quadruped_mediums(
 
 /// Once every part of a [`PendingBirdMedium`] resolves, assemble + place the
 /// bird figure and attach [`BirdMediumFigure`].
+/// EM-4.10 round 12: actual assembly is capped at [`FIGURE_BUILD_BURST_CAP`]
+/// per frame (see that const's doc) — a `Ready` figure beyond the cap stays
+/// `Pending` and is retried next frame.
 fn build_pending_bird_mediums(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -973,6 +1058,7 @@ fn build_pending_bird_mediums(
     mut materials: ResMut<Assets<StandardMaterial>>,
     pending: Query<(Entity, &PendingBirdMedium)>,
 ) {
+    let mut built_this_frame = 0usize;
     for (entity, figure) in &pending {
         let ready = poll_parts(
             &asset_server,
@@ -993,6 +1079,10 @@ fn build_pending_bird_mediums(
             },
             PartsReady::Ready => {},
         }
+        if built_this_frame >= FIGURE_BUILD_BURST_CAP {
+            continue; // still `Pending`; picked up again next frame.
+        }
+        built_this_frame += 1;
 
         let rest: BmBoneTransforms =
             bird_medium::bird_medium_bone_rest(figure.species, figure.body_type);
@@ -1313,6 +1403,12 @@ pub struct HumanoidFigure {
 /// the placeholder capsule with one child entity per part at its REST-pose bone
 /// transform, and attach [`HumanoidFigure`] (+ [`FigureBuilt`]). On a load
 /// failure, keep the capsule and stop retrying.
+/// EM-4.10 round 12: actual assembly is capped at [`FIGURE_BUILD_BURST_CAP`]
+/// per frame (see that const's doc) — a `Ready` figure beyond the cap stays
+/// `Pending` and is retried next frame. Humanoids are the MOST expensive body
+/// class (8 manifests + a `DynaUnionizer` head union) — this is the path the
+/// round-12 investigation actually measured (~1.1ms/figure, ~41ms for a
+/// 37-figure same-frame burst before this cap existed).
 fn build_pending_humanoids(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -1328,6 +1424,7 @@ fn build_pending_humanoids(
         return;
     };
 
+    let mut built_this_frame = 0usize;
     for (entity, figure) in &pending {
         // Per-part fallback (polish minor c): a missing accessory/weapon/eye
         // etc. is dropped; a missing core body part keeps the capsule.
@@ -1350,6 +1447,10 @@ fn build_pending_humanoids(
             },
             PartsReady::Ready => {},
         }
+        if built_this_frame >= FIGURE_BUILD_BURST_CAP {
+            continue; // still `Pending`; picked up again next frame.
+        }
+        built_this_frame += 1;
 
         // Pair each loaded `.vox` back with its role, then recolour + assemble.
         // A failed OPTIONAL part isn't in the store, so `filter_map` drops it.
