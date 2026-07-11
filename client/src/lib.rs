@@ -212,6 +212,16 @@ impl WorldData {
         let [r, g, b, _a] = self.lod_base.get(cpos)?.to_le_bytes();
         Some(Rgb::new(r, g, b))
     }
+
+    /// The coarse LOD horizon-occlusion record at chunk `cpos` (packed
+    /// west/east `(angle, occluder-height)` bytes in `lod_horizon`; BL-82
+    /// EM-3.11 Phase B). Mirrors `alt_at`/`col_at`'s pure-decode role — the
+    /// Bevy far-terrain material's fragment shader (`xindeler-client::
+    /// far_terrain_material`) turns these 4 bytes into a soft sun-occlusion
+    /// factor.
+    pub fn horizon_at(&self, cpos: Vec2<i32>) -> Option<[u8; 4]> {
+        Some(self.lod_horizon.get(cpos)?.to_le_bytes())
+    }
 }
 
 pub struct SiteMarker {
@@ -3609,6 +3619,30 @@ impl Drop for Client {
 mod tests {
     use super::*;
     use client_i18n::LocalizationHandle;
+
+    /// `WorldData::horizon_at` decode round-trip (BL-82 EM-3.11 Phase B,
+    /// T49.5) — mirrors `col_at`'s pure-decode role. Private fields
+    /// (`map`) are constructible here because this test module is a
+    /// descendant of the module `WorldData` is defined in.
+    #[test]
+    fn horizon_at_decodes_packed_bytes() {
+        let world = WorldData {
+            lod_base: Grid::from_raw(Vec2::new(2, 1), vec![0u32, 0u32]),
+            lod_alt: Grid::from_raw(Vec2::new(2, 1), vec![0u32, 0u32]),
+            lod_horizon: Grid::from_raw(Vec2::new(2, 1), vec![
+                u32::from_le_bytes([10, 20, 30, 40]),
+                u32::from_le_bytes([1, 2, 3, 4]),
+            ]),
+            map: (Vec::new(), Vec2::new(0, 0), Vec2::new(0.0, 0.0)),
+        };
+        assert_eq!(world.horizon_at(Vec2::new(0, 0)), Some([10, 20, 30, 40]));
+        assert_eq!(world.horizon_at(Vec2::new(1, 0)), Some([1, 2, 3, 4]));
+        assert_eq!(
+            world.horizon_at(Vec2::new(5, 5)),
+            None,
+            "out of bounds -> None"
+        );
+    }
 
     #[test]
     /// THIS TEST VERIFIES THE CONSTANT API.

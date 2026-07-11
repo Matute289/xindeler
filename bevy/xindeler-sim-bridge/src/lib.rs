@@ -759,7 +759,7 @@ fn stream_terrain_changes(
 }
 
 // ---------------------------------------------------------------------------
-// EM-3.10b — far-terrain grid (one-shot height+colour broadcast)
+// EM-3.10b — far-terrain grid (one-shot height+colour+horizon broadcast)
 // ---------------------------------------------------------------------------
 
 /// Downsample cap: the client far-mesh is a coarse LOD proxy, not full-res
@@ -772,7 +772,7 @@ fn stream_terrain_changes(
 const LOD_ALT_MAX_DIM: u32 = 128;
 
 /// One-shot latch for the EM-3.10b far-terrain grid broadcast (height +,
-/// as of BL-82 EM-3.11 Phase A, colour).
+/// as of BL-82 EM-3.11 Phase A, colour +, as of Phase B, horizon).
 #[derive(Resource, Default)]
 pub struct LodAltState {
     sent: bool,
@@ -810,16 +810,16 @@ fn lod_alt_grid_dims(chunk_w: u16, chunk_h: u16) -> (u32, u32, u32) {
 }
 
 /// Broadcasts the downsampled `lod_alt` (height) + `lod_base` (colour, BL-82
-/// EM-3.11 Phase A) grid ONCE, as soon as the embedded local-player
-/// [`EmbeddedPlayer`] exists (its `world_data()` is populated synchronously
-/// inside `Client::new`, well before the player reaches in-game — see
-/// [`EmbeddedPlayer::world_data`]).
+/// EM-3.11 Phase A) + `lod_horizon` (occlusion, BL-82 EM-3.11 Phase B, T49.5)
+/// grid ONCE, as soon as the embedded local-player [`EmbeddedPlayer`] exists
+/// (its `world_data()` is populated synchronously inside `Client::new`, well
+/// before the player reaches in-game — see [`EmbeddedPlayer::world_data`]).
 ///
-/// Both layers are sampled in the SAME downsample loop at the SAME `(cx, cy)`
-/// chunk coordinate, so `colors[k]` is always the real `lod_base` colour of
-/// the exact chunk `heights[k]` is the altitude of (spec §3.1's index-
-/// alignment contract) — the client can zip them by array index with no
-/// re-derivation.
+/// All three layers are sampled in the SAME downsample loop at the SAME
+/// `(cx, cy)` chunk coordinate, so `colors[k]`/`horizon[k]` always describe
+/// the exact same chunk `heights[k]` is the altitude of (spec §3.1's
+/// index-alignment contract) — the client can zip them by array index with
+/// no re-derivation.
 ///
 /// v1 has no spectator-only path: without an embedded player (persister
 /// fallback only), there is no `Client`/`WorldData` to read from, so the far
@@ -844,14 +844,17 @@ fn send_far_terrain_once(
     let (stride, grid_w, grid_h) = lod_alt_grid_dims(size.x, size.y);
 
     // BL-82 EM-3.11 Phase A review (ecs-design-reviewer): push ONE
-    // `(height, colour)` sample per iteration into a single Vec, then unzip,
-    // rather than two independently-grown parallel Vecs — this makes it
-    // structurally impossible for a future refactor of this loop (e.g. T49.5
-    // adding a third `horizon` layer) to desync `heights[k]`/`colors[k]`
-    // against each other, since both always come from the SAME `push` call
-    // reading the SAME `cpos`. `unzip` still yields two Vecs of the same
-    // length, matching `NetFarTerrain::encode`'s signature.
-    let samples: Vec<(f32, [u8; 3])> = (0..grid_h)
+    // `(height, colour, horizon)` sample per iteration into a single Vec,
+    // then split it into three parallel Vecs via one for-loop (no
+    // `Iterator::unzip` — that's pair-only; `itertools::multiunzip` isn't a
+    // dependency of this crate, so a hand-rolled loop is the simplest
+    // dependency-free option), rather than growing three Vecs independently
+    // in the closure above — this makes it structurally impossible for a
+    // future refactor of this loop to desync `heights[k]`/`colors[k]`/
+    // `horizon[k]` against each other, since all three always come from the
+    // SAME iteration reading the SAME `cpos`. The loop still yields three
+    // Vecs of the same length, matching `NetFarTerrain::encode`'s signature.
+    let samples: Vec<(f32, [u8; 3], [u8; 4])> = (0..grid_h)
         .flat_map(|j| (0..grid_w).map(move |i| (i, j)))
         .map(|(i, j)| {
             let cx = (i * stride).min(u32::from(size.x) - 1);
@@ -860,10 +863,18 @@ fn send_far_terrain_once(
             let cpos = vek::Vec2::new(cx as i32, cy as i32);
             let alt = world_data.alt_at(cpos).unwrap_or(0.0);
             let col = world_data.col_at(cpos).unwrap_or(vek::Rgb::new(0, 0, 0));
-            (alt, [col.r, col.g, col.b])
+            let horizon = world_data.horizon_at(cpos).unwrap_or([0, 0, 0, 0]);
+            (alt, [col.r, col.g, col.b], horizon)
         })
         .collect();
-    let (heights, colors): (Vec<f32>, Vec<[u8; 3]>) = samples.into_iter().unzip();
+    let mut heights = Vec::with_capacity(samples.len());
+    let mut colors = Vec::with_capacity(samples.len());
+    let mut horizon = Vec::with_capacity(samples.len());
+    for (h, c, o) in samples {
+        heights.push(h);
+        colors.push(c);
+        horizon.push(o);
+    }
 
     // TODO (still open past EM-4.2d): `targets: All` + a global `sent` latch
     // only reaches clients connected AT the single broadcast — a client
@@ -876,14 +887,15 @@ fn send_far_terrain_once(
     // timing matters.
     writer.write(ToClients {
         targets: SendTargets::All,
-        message: NetFarTerrain::encode([grid_w, grid_h], stride, &heights, &colors),
+        message: NetFarTerrain::encode([grid_w, grid_h], stride, &heights, &colors, &horizon),
     });
     state.sent = true;
     tracing::info!(
         grid_w,
         grid_h,
         stride,
-        "far-terrain grid broadcast (EM-3.10b height + BL-82 EM-3.11 Phase A colour)"
+        "far-terrain grid broadcast (EM-3.10b height + BL-82 EM-3.11 Phase A colour + Phase B \
+         horizon)"
     );
 }
 
@@ -2378,14 +2390,14 @@ mod tests {
         assert_eq!(grid_h, 64);
     }
 
-    /// BL-82 EM-3.11 Phase A acceptance (server side): boot the REAL sim +
+    /// BL-82 EM-3.11 Phase A+B acceptance (server side): boot the REAL sim +
     /// embedded player, add the far-terrain broadcast stack, and tick until
     /// [`send_far_terrain_once`] fires. Assert the broadcast `NetFarTerrain`
-    /// message's decoded `colors` layer is non-empty and exactly as long as
-    /// `decode_heights()` (both `grid_w * grid_h`) — the index-alignment
-    /// contract spec §3.1 requires, checked against the REAL broadcast rather
-    /// than only the pure `encode`/`decode` round-trip already covered in
-    /// `xindeler-protocol`.
+    /// message's decoded `colors`/`horizon` layers are both non-empty and
+    /// exactly as long as `decode_heights()` (all `grid_w * grid_h`) — the
+    /// index-alignment contract spec §3.1 requires, checked against the REAL
+    /// broadcast rather than only the pure `encode`/`decode` round-trip
+    /// already covered in `xindeler-protocol`.
     #[test]
     #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
     fn far_terrain_broadcast_colors_are_index_aligned_with_heights() {
@@ -2430,6 +2442,9 @@ mod tests {
         let msg = received.expect("far-terrain grid must be broadcast within MAX_TICKS");
         let heights = msg.decode_heights().expect("heights decode");
         let colors = msg.decode_colors().expect("colors decode");
+        let horizon = msg
+            .decode_horizon()
+            .expect("horizon decode (Phase B always ships it)");
         let expected = msg.grid_size[0] as usize * msg.grid_size[1] as usize;
         assert_eq!(heights.len(), expected);
         assert_eq!(
@@ -2437,9 +2452,10 @@ mod tests {
             expected,
             "colors must be index-aligned with heights (same grid_w * grid_h length)"
         );
-        assert!(
-            msg.decode_horizon().is_none(),
-            "Phase A leaves the horizon layer unshipped (empty ⇒ absent)"
+        assert_eq!(
+            horizon.len(),
+            expected,
+            "horizon must be index-aligned with heights (same grid_w * grid_h length)"
         );
     }
 

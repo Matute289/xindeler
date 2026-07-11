@@ -389,10 +389,10 @@ pub struct TerrainAnchor {
 /// ## Layering (spec §3.2)
 /// Each layer is its own separately-compressed blob rather than one
 /// struct-of-arrays, so a phase can ship its layer without touching the
-/// others' decode paths: [`Self::horizon`] is reserved for the BL-82 EM-3.11
-/// Phase-B horizon-occlusion layer and stays an empty `Vec` (⇒
-/// [`Self::decode_horizon`] returns `None`, "layer absent") until that phase
-/// populates it.
+/// others' decode paths: [`Self::horizon`] carries the BL-82 EM-3.11 Phase-B
+/// horizon-occlusion layer (T49.5) — an empty blob still decodes as `None`
+/// (⇒ [`Self::decode_horizon`] reports "layer absent"), which now covers a
+/// missing/corrupt payload rather than "not shipped yet" (Phase A is merged).
 #[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NetFarTerrain {
     /// Downsampled grid width/height, in samples (row-major storage below).
@@ -411,44 +411,51 @@ pub struct NetFarTerrain {
     /// unused, see `client::WorldData::col_at`), index-aligned with
     /// [`Self::heights`]. Decode with [`Self::decode_colors`].
     pub colors: Vec<u8>,
-    /// Reserved for the BL-82 EM-3.11 Phase-B `lod_horizon` layer (two packed
-    /// west/east `(angle, occluder-height)` records per sample). Empty until
-    /// Phase B ships it — [`Self::decode_horizon`] treats an empty blob as
-    /// "layer absent" (`None`), not a decode error.
+    /// lz4-compressed bincode of the row-major `Vec<[u8; 4]>` packed
+    /// west/east `(angle, occluder-height)` horizon records (BL-82 EM-3.11
+    /// Phase B, decoded server-side via `client::WorldData::horizon_at`),
+    /// index-aligned with [`Self::heights`]/[`Self::colors`]. Decode with
+    /// [`Self::decode_horizon`].
     pub horizon: Vec<u8>,
 }
 
 impl NetFarTerrain {
     /// Serializes (bincode `legacy()`) + compresses (lz4, same scheme as
-    /// [`CompressedChunk`]) a downsampled height + colour grid. `horizon` is
-    /// left empty (Phase A does not send it yet).
+    /// [`CompressedChunk`]) a downsampled height + colour + horizon grid.
     ///
-    /// `heights`/`colors` must be the SAME length and index-aligned (spec
-    /// §3.1's contract — `colors[k]` is the real colour of the exact chunk
-    /// `heights[k]` is the altitude of). This is a cheap, self-documenting
-    /// guard against a future caller/refactor accidentally desyncing the two
-    /// parallel slices (ecs-design-reviewer, BL-82 EM-3.11 Phase A review);
-    /// the actual sampling loop (`xindeler-sim-bridge::send_far_terrain_once`)
-    /// additionally structurally prevents this by pushing one `(height,
-    /// colour)` tuple per cell rather than growing two Vecs independently.
+    /// `heights`/`colors`/`horizon` must be the SAME length and index-aligned
+    /// (spec §3.1's contract — `colors[k]`/`horizon[k]` describe the exact
+    /// same chunk `heights[k]` is the altitude of). This is a cheap,
+    /// self-documenting guard against a future caller/refactor accidentally
+    /// desyncing the parallel slices (ecs-design-reviewer, BL-82 EM-3.11
+    /// Phase A review); the actual sampling loop
+    /// (`xindeler-sim-bridge::send_far_terrain_once`) additionally
+    /// structurally prevents this by pushing one `(height, colour, horizon)`
+    /// tuple per cell rather than growing three Vecs independently.
     #[must_use]
     pub fn encode(
         grid_size: [u32; 2],
         chunk_stride: u32,
         heights: &[f32],
         colors: &[[u8; 3]],
+        horizon: &[[u8; 4]],
     ) -> Self {
         debug_assert_eq!(
             heights.len(),
             colors.len(),
             "heights/colors must be index-aligned (same length)"
         );
+        debug_assert_eq!(
+            heights.len(),
+            horizon.len(),
+            "heights/horizon must be index-aligned (same length)"
+        );
         Self {
             grid_size,
             chunk_stride,
             heights: Self::compress(heights),
             colors: Self::compress(colors),
-            horizon: Vec::new(),
+            horizon: Self::compress(horizon),
         }
     }
 
@@ -965,27 +972,42 @@ mod tests {
         assert_eq!(decoded.get(VVec3::new(3, 4, 5)).ok(), Some(&block));
     }
 
-    /// EM-3.10b (+ BL-82 EM-3.11 Phase A): a downsampled altitude+colour grid
-    /// survives `encode` → `decode_heights`/`decode_colors` byte-for-byte
-    /// (row-major, matching [`NetFarTerrain::grid_size`]); the unshipped
-    /// [`NetFarTerrain::horizon`] layer decodes as `None` (absent, not
-    /// corrupt).
+    /// EM-3.10b (+ BL-82 EM-3.11 Phase A colour, Phase B horizon): a
+    /// downsampled altitude+colour+horizon grid survives `encode` →
+    /// `decode_heights`/`decode_colors`/`decode_horizon` byte-for-byte
+    /// (row-major, matching [`NetFarTerrain::grid_size`]).
     #[test]
     fn net_far_terrain_round_trips() {
         let heights: Vec<f32> = (0..12).map(|i| i as f32 * 1.5).collect();
         let colors: Vec<[u8; 3]> = (0..12).map(|i| [i as u8, i as u8 * 2, 255]).collect();
-        let encoded = NetFarTerrain::encode([4, 3], 8, &heights, &colors);
+        let horizon: Vec<[u8; 4]> = (0..12)
+            .map(|i| [i as u8, i as u8 * 3, i as u8 * 5, 255])
+            .collect();
+        let encoded = NetFarTerrain::encode([4, 3], 8, &heights, &colors, &horizon);
         assert_eq!(encoded.grid_size, [4, 3]);
         assert_eq!(encoded.chunk_stride, 8);
         assert!(!encoded.heights.is_empty());
         assert!(!encoded.colors.is_empty());
         assert!(
-            encoded.horizon.is_empty(),
-            "Phase A never populates the horizon layer"
+            !encoded.horizon.is_empty(),
+            "Phase B populates the horizon layer"
         );
 
         assert_eq!(encoded.decode_heights().expect("round-trips"), heights);
         assert_eq!(encoded.decode_colors().expect("round-trips"), colors);
+        assert_eq!(encoded.decode_horizon().expect("round-trips"), horizon);
+    }
+
+    /// An empty horizon blob (e.g. a message built without ever sampling
+    /// `lod_horizon`) decodes as `None` — "layer absent", not corrupt. Kept
+    /// as its own test now that Phase B normally populates the layer, so the
+    /// "absent" contract itself stays covered.
+    #[test]
+    fn net_far_terrain_empty_horizon_decodes_as_absent() {
+        let heights: Vec<f32> = vec![1.0, 2.0];
+        let colors: Vec<[u8; 3]> = vec![[1, 2, 3], [4, 5, 6]];
+        let mut encoded = NetFarTerrain::encode([2, 1], 8, &heights, &colors, &[[0, 0, 0, 0]; 2]);
+        encoded.horizon = Vec::new();
         assert_eq!(
             encoded.decode_horizon(),
             None,
@@ -995,23 +1017,26 @@ mod tests {
 
     /// A payload whose decoded length doesn't match `grid_size` is rejected
     /// rather than silently misinterpreted (defensive against a future bug in
-    /// the sender) — checked independently for both the height and colour
-    /// layers, since each is its own compressed blob.
+    /// the sender) — checked independently for the height, colour, AND
+    /// horizon layers, since each is its own compressed blob.
     #[test]
     fn net_far_terrain_rejects_length_mismatch() {
-        // `heights`/`colors` are index-aligned with EACH OTHER (both length
-        // 3, `encode`'s own `debug_assert_eq!` contract), but neither matches
-        // the DECLARED 2×2=4 grid — `decode_*` must catch that mismatch.
+        // `heights`/`colors`/`horizon` are index-aligned with EACH OTHER (all
+        // length 3, `encode`'s own `debug_assert_eq!` contract), but none
+        // matches the DECLARED 2×2=4 grid — `decode_*` must catch that
+        // mismatch.
         let heights: Vec<f32> = vec![1.0, 2.0, 3.0];
         let colors: Vec<[u8; 3]> = vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]];
-        let encoded = NetFarTerrain::encode([2, 2], 4, &heights, &colors);
+        let horizon: Vec<[u8; 4]> = vec![[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
+        let encoded = NetFarTerrain::encode([2, 2], 4, &heights, &colors, &horizon);
         assert_eq!(encoded.decode_heights(), None);
         assert_eq!(encoded.decode_colors(), None);
+        assert_eq!(encoded.decode_horizon(), None);
     }
 
     /// `NetFarTerrain` replicates server → client over the loopback exactly
-    /// like [`TerrainAnchor`] (a plain one-shot server message), carrying both
-    /// the height and colour layers together.
+    /// like [`TerrainAnchor`] (a plain one-shot server message), carrying the
+    /// height, colour, AND horizon layers together.
     #[test]
     fn net_far_terrain_replicates() {
         use bevy_replicon::prelude::{SendTargets, ToClients};
@@ -1019,7 +1044,10 @@ mod tests {
         let mut app = new_app();
         let heights = vec![10.0, 20.0, 30.0, 40.0];
         let colors: Vec<[u8; 3]> = vec![[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
-        let payload = NetFarTerrain::encode([2, 2], 16, &heights, &colors);
+        let horizon: Vec<[u8; 4]> = vec![[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [
+            13, 14, 15, 16,
+        ]];
+        let payload = NetFarTerrain::encode([2, 2], 16, &heights, &colors, &horizon);
         app.world_mut().write_message(ToClients {
             targets: SendTargets::All,
             message: payload.clone(),

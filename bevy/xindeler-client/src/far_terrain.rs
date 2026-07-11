@@ -87,16 +87,35 @@
 //! closed by having real data, not by leaning harder on fog. [`FAR_HAZE_BLEND`]
 //! keeps only a SMALL atmospheric-finish blend (dialled back from round 11's
 //! 0.35 now that colour is real) — a light haze cue for distance, not a mask
-//! for missing detail. Phase B (horizon occlusion + a full sky-blend
-//! silhouette, tracked separately) is what dissolves the far mesh's hard top
-//! *edge* into atmosphere; this phase only fixes the mesh's own colour.
+//! for missing detail. Phase B (below) is what dissolves the far mesh's hard
+//! top *edge* into atmosphere; Phase A only fixed the mesh's own colour.
+//!
+//! ## BL-82 EM-3.11 Phase B: the curved, dissolving horizon
+//! `docs/design/specs/2026-07-11-bl82-full-horizon-lod-terrain-design.md`
+//! §3.4 (resolved via the task board's `[Q-B1]` worksheet to the "A+C
+//! synthesis") replaces the mesh's plain `StandardMaterial` with
+//! [`crate::far_terrain_material::FarTerrainMaterial`]
+//! (`ExtendedMaterial<StandardMaterial, FarTerrainExtension>`): a vertex
+//! shader bends the far field down and away from the camera (Matías's
+//! "Option C" world-curvature trick), and a fragment shader adds a soft
+//! `lod_horizon`-based sun-occlusion term and dissolves the silhouette
+//! toward the live atmosphere colour by distance/height — see that module's
+//! doc comments for the full shader design. [`DecodedFarTerrain::horizon`]
+//! carries the BL-82 EM-3.11 Phase B `NetFarTerrain::horizon` layer
+//! (index-aligned with `colors`/`heights`, T49.5), baked into a per-quad
+//! [`crate::far_terrain_material::ATTRIBUTE_FAR_HORIZON`] vertex attribute
+//! the same way [`cell_color`] already bakes per-quad vertex colour. This is
+//! what lets T49.7 lower `fog_density` back down — the mesh no longer relies
+//! solely on fog to hide its edge.
 //!
 //! ## Purity
 //! 100% Bevy + the protocol message + `terrain_stream::{CHUNK_EDGE,
-//! TerrainCameraAnchor}` + `lod::CullingConfig` + (EM-3.11 round 11)
+//! TerrainCameraAnchor}` + `lod::CullingConfig` + `light::Sun` (read-only,
+//! Phase B's live sun direction) + (EM-3.11 round 11 / Phase B)
 //! `xindeler-oracle-host`'s headless-safe `AtmosphereController`/
-//! `AtmosphereProfile` types (read-only, for [`FAR_HAZE_BLEND`]) — no specs.
-//! Compiled only under the `listen-server` feature.
+//! `AtmosphereProfile` types (read-only, for [`FAR_HAZE_BLEND`] and the
+//! Phase-B material's fog/sky uniforms) — no specs. Compiled only under the
+//! `listen-server` feature.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -108,6 +127,10 @@ use xindeler_oracle_host::{AtmosphereController, AtmosphereProfile};
 use xindeler_protocol::NetFarTerrain;
 
 use crate::{
+    far_terrain_material::{
+        ATTRIBUTE_FAR_HORIZON, FAR_MESH_BEND_STRENGTH, FarTerrainExtension, FarTerrainMaterial,
+        FarTerrainMaterialPlugin,
+    },
     lod::CullingConfig,
     terrain_stream::{CHUNK_EDGE, TerrainCameraAnchor},
 };
@@ -126,7 +149,8 @@ pub struct FarTerrainPlugin;
 
 impl Plugin for FarTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (receive_far_terrain, retile_far_mesh));
+        app.add_plugins(FarTerrainMaterialPlugin)
+            .add_systems(Update, (receive_far_terrain, retile_far_mesh));
 
         // Debug-only, opt-in (`XINDELER_SMOKE_FAR_MESH_CAM=1`): parks the
         // camera high above the anchor looking outward so a
@@ -177,6 +201,11 @@ struct DecodedFarTerrain {
     /// Real per-cell RGB colour (BL-82 EM-3.11 Phase A), index-aligned with
     /// `heights` (`colors[j * grid_w + i]` is the colour of cell `(i, j)`).
     colors: Vec<[u8; 3]>,
+    /// Packed west/east `(angle, occluder-height)` horizon record (BL-82
+    /// EM-3.11 Phase B), index-aligned with `heights`/`colors`. Falls back to
+    /// all-zero ("no occlusion, sun never blocked") per cell when the server
+    /// message's horizon layer doesn't decode — see [`receive_far_terrain`].
+    horizon: Vec<[u8; 4]>,
 }
 
 /// Marks the currently-spawned far-terrain mesh entity (so a smoke/debug
@@ -202,7 +231,11 @@ struct FarMeshState {
 /// layers must decode — a message missing (or corrupt in) either is dropped
 /// wholesale (same "undecodable ⇒ drop" behaviour the height-only v1 had),
 /// since a mesh with real heights but no real colour would just fall back to
-/// a single flat colour anyway.
+/// a single flat colour anyway. BL-82 EM-3.11 Phase B: the horizon layer is
+/// treated more leniently — it's a shading REFINEMENT (soft sun-occlusion),
+/// not core geometry/colour, so a missing/corrupt horizon blob (e.g. an
+/// older server that hasn't rebuilt yet) falls back to an all-zero "no
+/// occlusion" record per cell rather than dropping the whole far mesh.
 fn receive_far_terrain(
     mut commands: Commands,
     mut messages: MessageReader<NetFarTerrain>,
@@ -222,12 +255,19 @@ fn receive_far_terrain(
         warn!("dropping undecodable far-terrain grid (colors)");
         return;
     };
+    let horizon = msg.decode_horizon().unwrap_or_else(|| {
+        if !msg.horizon.is_empty() {
+            warn!("dropping undecodable far-terrain grid (horizon); falling back to no-occlusion");
+        }
+        vec![[0u8; 4]; heights.len()]
+    });
     commands.insert_resource(FarTerrainData(DecodedFarTerrain {
         grid_w: msg.grid_size[0],
         grid_h: msg.grid_size[1],
         chunk_stride: msg.chunk_stride,
         heights,
         colors,
+        horizon,
     }));
 }
 
@@ -267,7 +307,7 @@ fn retile_far_mesh(
     atmosphere: Option<Res<AtmosphereController>>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<BevyMesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<FarTerrainMaterial>>,
     mut perf_log: Local<Option<bool>>,
 ) {
     let Some(data) = data else { return };
@@ -307,27 +347,70 @@ fn retile_far_mesh(
     // "no per-frame cost" design goal (a weather change fully lands in the
     // far mesh's colour the next time the camera drifts far enough to
     // re-tile, not instantly).
-    let haze = Vec3::from_array(atmosphere.map_or_else(
-        || AtmosphereProfile::default().fog_color,
-        |a| a.current.fog_color,
-    ));
+    // BL-82 EM-3.11 Phase B: also grabs `sky_color` alongside `fog_color` in
+    // the SAME `map_or_else` (an `Option<Res<_>>` is consumed by value, so
+    // both must come out of one read) — [`FarTerrainExtension::sky_color`]
+    // is the Phase-B silhouette-dissolve target, `haze` (fog colour) stays
+    // Phase A's vertex-colour atmospheric finish.
+    let (haze, sky_color) = atmosphere.map_or_else(
+        || {
+            let defaults = AtmosphereProfile::default();
+            (
+                Vec3::from_array(defaults.fog_color),
+                Vec3::from_array(defaults.sky_color),
+            )
+        },
+        |a| {
+            (
+                Vec3::from_array(a.current.fog_color),
+                Vec3::from_array(a.current.sky_color),
+            )
+        },
+    );
 
     let hole_radius = culling.chunk_render_distance + rebuild_slack;
     let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius, haze);
+    // BL-82 EM-3.11 Phase B: `bend_start` is set to THIS re-tile's own
+    // `hole_radius` — the exact invariant the vertex shader's `max(d -
+    // bend_start, 0.0)` clamp relies on to guarantee zero bend across the
+    // whole near band (module docs' "Purity"/Phase-B section;
+    // `far_terrain_material.rs`'s doc comments). `sun_direction` starts at
+    // `FarTerrainExtension::default()`'s placeholder and, like `fog_color`/
+    // `sky_color`, is kept live every frame by
+    // `far_terrain_material::sync_far_terrain_material` — no per-tile cost.
+    //
+    // Debug-only, opt-in override (`XINDELER_FAR_MESH_BEND_STRENGTH=<f32>`,
+    // e.g. `0` to disable) so the bend can be A/B'd against
+    // [`FAR_MESH_BEND_STRENGTH`] without a rebuild — same convention as
+    // `XINDELER_SMOKE_FAR_MESH_CAM`/`XINDELER_FAR_MESH_PERF_LOG` above.
+    let bend_strength = std::env::var("XINDELER_FAR_MESH_BEND_STRENGTH")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(FAR_MESH_BEND_STRENGTH);
     let new_entity = mesh.map(|mesh| {
         commands
             .spawn((
                 FarTerrainMesh,
                 Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    // The mesh is a single coarse sheet with no interior —
-                    // both faces must shade the same way regardless of which
-                    // side the winding ends up facing.
-                    cull_mode: None,
-                    perceptual_roughness: 1.0,
-                    reflectance: 0.02,
-                    ..default()
+                MeshMaterial3d(materials.add(FarTerrainMaterial {
+                    base: StandardMaterial {
+                        base_color: Color::WHITE,
+                        // The mesh is a single coarse sheet with no
+                        // interior — both faces must shade the same way
+                        // regardless of which side the winding ends up
+                        // facing.
+                        cull_mode: None,
+                        perceptual_roughness: 1.0,
+                        reflectance: 0.02,
+                        ..default()
+                    },
+                    extension: FarTerrainExtension {
+                        bend_strength,
+                        bend_start: hole_radius,
+                        fog_color: haze.extend(1.0),
+                        sky_color: sky_color.extend(1.0),
+                        ..default()
+                    },
                 })),
                 Transform::IDENTITY, // positions are already absolute world-space
                 Visibility::Visible,
@@ -459,6 +542,7 @@ fn far_mesh_from_heights(
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut horizons: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     for j in 0..data.grid_h {
@@ -499,11 +583,20 @@ fn far_mesh_from_heights(
             let cell_rgb = data.colors[(j * data.grid_w + i) as usize];
             let color = cell_color(cell_rgb, haze).to_linear().to_f32_array();
 
+            // BL-82 EM-3.11 Phase B: same per-quad "own cell" convention as
+            // colour above — the horizon record is per sample/cell, baked
+            // flat across all 4 (duplicated) vertices of the quad. Bytes are
+            // normalised to `[0.0, 1.0]` so the WGSL fragment shader can use
+            // them directly (`far_terrain_material.wgsl`'s occlusion math).
+            let cell_horizon = data.horizon[(j * data.grid_w + i) as usize];
+            let horizon = cell_horizon.map(|b| f32::from(b) / 255.0);
+
             let base = positions.len() as u32;
             for p in [p00, p10, p11, p01] {
                 positions.push(p.to_array());
                 normals.push(normal.to_array());
                 colors.push(color);
+                horizons.push(horizon);
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -520,6 +613,7 @@ fn far_mesh_from_heights(
     mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(ATTRIBUTE_FAR_HORIZON, horizons);
     mesh.insert_indices(Indices::U32(indices));
     Some(mesh)
 }
@@ -545,7 +639,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .add_plugins(AssetPlugin::default())
             .init_asset::<BevyMesh>()
-            .init_asset::<StandardMaterial>()
+            .init_asset::<FarTerrainMaterial>()
             .insert_resource(CullingConfig {
                 chunk_render_distance: 100.0,
                 sprite_render_distance: 50.0,
@@ -617,6 +711,7 @@ mod tests {
             chunk_stride: stride,
             heights: vec![height; (w * h) as usize],
             colors: vec![[128, 128, 128]; (w * h) as usize],
+            horizon: vec![[0, 0, 0, 0]; (w * h) as usize],
         }
     }
 
@@ -807,31 +902,99 @@ mod tests {
         }
     }
 
-    /// BL-82 EM-3.11 round 11 ("beige horizon"): the durable regression this
-    /// bug was missing — nothing previously checked that the shipped fog
-    /// density actually covers the far mesh's own nearest visible point.
-    /// Reproduces bevy_pbr's exact `FogFalloff::ExponentialSquared` opacity
-    /// formula (`1 - exp(-(distance·density)²)`, `bevy_pbr/src/render/
-    /// fog.wgsl`'s `exponential_squared_fog`) against the REAL production
-    /// constants (`AtmosphereProfile::default().fog_density`,
-    /// `CullingConfig::default().chunk_render_distance`, `HOLE_MARGIN_CHUNKS`,
-    /// `CHUNK_EDGE`) — not hand-copied numbers — so a future change to ANY of
-    /// them that breaks the "fog must already be ~fully opaque by the time
-    /// the far mesh can draw" invariant fails HERE, at compile/test time,
-    /// instead of showing up as a live beige strip again.
+    /// BL-82 EM-3.11 Phase B: `far_mesh_from_heights` bakes each quad's
+    /// [`ATTRIBUTE_FAR_HORIZON`] vertex data from its OWN originating cell's
+    /// `NetFarTerrain::horizon` sample (the same per-quad convention
+    /// [`far_mesh_assigns_each_quads_own_cell_colour`] pins for colour),
+    /// normalising each packed byte to `[0.0, 1.0]` so the WGSL fragment
+    /// shader can consume it directly.
     #[test]
-    fn default_fog_density_all_but_hides_the_far_mesh_at_its_hole_radius() {
+    fn far_mesh_assigns_each_quads_own_cell_horizon() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let mut data = flat_grid(2, 1, 0.0, 1); // 2 side-by-side quads
+        data.horizon = vec![[0, 64, 128, 255], [255, 0, 32, 200]];
+
+        let mesh =
+            far_mesh_from_heights(&data, Vec2::new(-1_000_000.0, -1_000_000.0), 1.0, TEST_HAZE)
+                .expect("non-empty mesh");
+        let Some(VertexAttributeValues::Float32x4(horizons)) =
+            mesh.attribute(ATTRIBUTE_FAR_HORIZON)
+        else {
+            panic!("far-horizon attribute must be stored as Float32x4");
+        };
+        assert_eq!(horizons.len(), 2 * 4, "2 quads × 4 verts");
+
+        let expected_cell0 = data.horizon[0].map(|b| f32::from(b) / 255.0);
+        let expected_cell1 = data.horizon[1].map(|b| f32::from(b) / 255.0);
+        for h in &horizons[0..4] {
+            assert_eq!(
+                *h, expected_cell0,
+                "quad 0's 4 vertices share ITS OWN cell's horizon"
+            );
+        }
+        for h in &horizons[4..8] {
+            assert_eq!(
+                *h, expected_cell1,
+                "quad 1's 4 vertices share ITS OWN cell's horizon"
+            );
+        }
+    }
+
+    /// BL-82 EM-3.11 Phase B (T49.7) — this test's invariant is DELIBERATELY
+    /// RELAXED from round 11's `default_fog_density_all_but_hides_the_far_
+    /// mesh_at_its_hole_radius`, which required fog ALONE to be ≥99.9%
+    /// opaque at the far mesh's `hole_radius` (a "fog is the only mask"
+    /// world, before this phase). That invariant is now the WRONG bar:
+    /// `far_terrain_material.wgsl`'s vertex-curvature bend + horizon-
+    /// occlusion + sky-blend dissolve (T49.6) does the edge-hiding work
+    /// today, so fog no longer needs to fully mask the mesh — cranking
+    /// `fog_density` to chase 99.9% opacity there is exactly what over-hazed
+    /// the near/mid field in round 11 (this phase's whole reason for
+    /// touching the constant: dial it back toward the clearer EM-3.11f
+    /// value once the mesh stopped depending on fog alone). Reproduces
+    /// bevy_pbr's exact `FogFalloff::ExponentialSquared` opacity formula
+    /// (`1 - exp(-(distance·density)²)`, `bevy_pbr/src/render/fog.wgsl`'s
+    /// `exponential_squared_fog`) against the REAL production constants —
+    /// not hand-copied numbers — and asserts BOTH halves of the new trade so
+    /// a future change can't silently regress either direction:
+    /// - fog is still a MEANINGFUL assist at `hole_radius` (a much looser
+    ///   sanity floor than round 11's near-total-mask bar — the material, not
+    ///   fog, is now responsible for closing the rest of the gap);
+    /// - the near/mid field (50 m, the distance round 11's playtest
+    ///   specifically complained about) reads clearly, not hazy — the concrete
+    ///   symptom this phase exists to fix.
+    #[test]
+    fn fog_density_gives_a_reasonable_assist_without_over_hazing_the_near_field() {
         let culling = CullingConfig::default();
         let hole_radius = culling.chunk_render_distance + HOLE_MARGIN_CHUNKS * CHUNK_EDGE;
         let density = AtmosphereProfile::default().fog_density;
 
-        let x = hole_radius * density;
-        let opacity = 1.0 - (-(x * x)).exp();
+        let opacity_at = |d: f32| {
+            let x = d * density;
+            1.0 - (-(x * x)).exp()
+        };
+
+        let hole_opacity = opacity_at(hole_radius);
         assert!(
-            opacity >= 0.999,
-            "fog must be ≥99.9% opaque at the far mesh's hole_radius ({hole_radius}m): got \
-             {opacity} (density {density}) — the far mesh's raw colour would show through as a \
-             visible 'beige horizon' strip otherwise"
+            hole_opacity >= 0.90,
+            "fog should still meaningfully assist at the far mesh's hole_radius ({hole_radius}m): \
+             got {hole_opacity} (density {density}) — the material's own dissolve \
+             (far_terrain_material.wgsl) now does most of the edge-hiding work, but fog \
+             collapsing toward zero here would be a real regression, not just an over-strict test"
+        );
+
+        let near_field_opacity = opacity_at(50.0);
+        assert!(
+            near_field_opacity < 0.15,
+            "T49.7's whole point: restore the near/mid clarity round 11's 0.00913 over-hazed \
+             (~19% at 50m) — got {near_field_opacity} at density {density}"
+        );
+
+        assert!(
+            density < 0.00913,
+            "must be lower than round 11's over-tuned 0.00913 — this phase's entire reason for \
+             touching fog_density at all"
         );
     }
 }
