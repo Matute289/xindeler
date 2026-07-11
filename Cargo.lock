@@ -11956,6 +11956,7 @@ name = "xindeler-oracle-host"
 version = "0.18.0"
 dependencies = [
  "bevy",
+ "bevy_replicon",
  "prometheus",
  "ron",
  "serde",

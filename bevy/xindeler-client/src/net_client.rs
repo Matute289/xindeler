@@ -40,13 +40,15 @@
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::RepliconPlugins;
+use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -75,6 +77,11 @@ impl Plugin for NetClientPlugin {
         // `QuinnetTransport`'s `Startup`-ordering doc comment for why this
         // is a correctness requirement, not a style preference).
         app.add_plugins((RepliconPlugins, XindelerProtocolPlugin));
+        // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
+        // registration — see `xindeler_oracle_host::atmosphere_sync`'s
+        // module doc comment for why this can't live in
+        // `XindelerProtocolPlugin` itself.
+        app.add_plugins(AtmosphereSyncMessagePlugin);
 
         // The transport seam: dials `self.config.server_addr` at `Startup`.
         app.add_plugins(QuinnetTransport.client_plugins(&self.config));
@@ -96,6 +103,9 @@ impl Plugin for NetClientPlugin {
             // `HudToast` arrival — verbatim reuse, same as every other
             // consumer plugin in this list (module doc comment).
             HudToastViewPlugin,
+            // BL-82 EM-4.9 (Phase D): retargets `AtmosphereController` on
+            // `SetClientAtmosphere` arrival.
+            AtmosphereSyncViewPlugin,
         ));
     }
 }

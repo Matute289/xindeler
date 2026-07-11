@@ -1,0 +1,24 @@
+// Mist-Bound Shade — the grey undead minion of the Mist-Bound "Mist-Bound"
+// DmEvent drill (BL-82 EM-4.9, T51.4/spec §5.2). Lore: `lore/40-planes/
+// umbriel.md` — the curse-domains of Umbriel, the grey echo; restless dead
+// that hunt the mist.
+//
+// Schema: `EntityTemplate` in bevy/xindeler-oracle-host/src/entity_template.rs.
+// `body: "husk"` — VERIFIED against `common::npc::NpcBody`'s `FromStr`
+// (`common/src/npc.rs`): "husk" is a real, spawnable species keyword under
+// the `biped_small` body category (`assets/common/npc_names.ron`, the SAME
+// vocabulary the in-game `/spawn` admin command parses), a grey undead
+// humanoid — matches `Body::is_undead()`'s existing family (BL-06). `loot:
+// None` — no frozen loot asset is claimed for this drill fixture (asset-
+// name-freezing law: never invent one). Authoring this sibling template
+// required ZERO Rust changes, per EM-4.7's own acceptance bar.
+(
+    entity_template_id: "mist_bound_shade",
+    body: "husk",
+    stats: (
+        name: Some("Mist-Bound Shade"),
+    ),
+    faction: "enemy",
+    loot: None,
+    ai_behavior_override: "aggro",
+)

@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use bevy::{light::VolumetricFog, prelude::*};
 use xindeler_app::PresentationSet;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+use xindeler_oracle_host::SetClientAtmosphere;
 use xindeler_oracle_host::{
     AtmosphereController, AtmosphereProfile, XindelerAtmospherePlugin,
     atmosphere::DEFAULT_PROFILE_ASSET_PATH,
@@ -197,4 +199,49 @@ fn apply_atmosphere(
         cycle.paused = paused;
         cycle.hour = hour;
     }
+}
+
+// ---------------------------------------------------------------------------
+// BL-82 EM-4.9 (Phase D, T51.8): the client-side half of the atmosphere-
+// replication seam — receives `SetClientAtmosphere` and retargets the
+// SAME `AtmosphereController` `apply_atmosphere` (above) already animates
+// and applies. No new render code: this is purely the wire hookup.
+// ---------------------------------------------------------------------------
+
+/// Retargets [`AtmosphereController`] on every [`SetClientAtmosphere`]
+/// arrival — the client-side counterpart of
+/// `xindeler_oracle_host::atmosphere_sync::send_atmosphere_on_dimension_change`.
+/// `retarget` itself re-sanitizes and animates over the profile's own
+/// `transition_secs` (see that method's doc comment) — this system does
+/// nothing but hand the received profile to it.
+///
+/// `#[cfg(...)]`-gated (not just its PLUGIN below): only ever ADDED under
+/// `listen-server`/`net-client` (see [`AtmosphereSyncViewPlugin`]'s own doc
+/// comment), so the default (voxel-demo) build would otherwise warn
+/// dead-code on this function itself, not just the unconstructed plugin —
+/// mirrors `hud_toast.rs`'s own whole-module gating, applied at the item
+/// level here since `atmosphere.rs` (unlike `hud_toast.rs`) also hosts
+/// always-needed code ([`AtmospherePlugin`] itself).
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+fn receive_atmosphere_updates(
+    mut events: MessageReader<SetClientAtmosphere>,
+    mut controller: ResMut<AtmosphereController>,
+) {
+    for SetClientAtmosphere(profile) in events.read() {
+        info!("received a SetClientAtmosphere update; retargeting the atmosphere controller");
+        controller.retarget(profile.clone());
+    }
+}
+
+/// Installs [`receive_atmosphere_updates`]. Compiled only under the
+/// `listen-server`/`net-client` cargo features (the only modes where
+/// `xindeler-protocol`/replicon are even linked) — mirrors
+/// `hud_toast::HudToastViewPlugin`'s own gating exactly; see `net_client.rs`/
+/// `listen_server.rs` for where this is added alongside that plugin.
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+pub struct AtmosphereSyncViewPlugin;
+
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+impl Plugin for AtmosphereSyncViewPlugin {
+    fn build(&self, app: &mut App) { app.add_systems(Update, receive_atmosphere_updates); }
 }

@@ -79,7 +79,9 @@ pub use registry::{
     sweep_isolation,
 };
 pub use sim_source::{read_default_world, wrap_default_dimension};
-pub use spinup::{DimensionSpinupConfig, DrainDimension, SpinupDimension, WorldGenThreadPool};
+pub use spinup::{
+    DimensionActivated, DimensionSpinupConfig, DrainDimension, SpinupDimension, WorldGenThreadPool,
+};
 pub use teardown::{
     DimensionTornDown, extract_persistent_side_effects_before_teardown,
     teardown_completed_dimensions,
