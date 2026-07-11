@@ -18,13 +18,27 @@
 //! new NPC is indistinguishable, from the mirror's point of view, from one
 //! of [`crate::spawn_test_npcs`]'s own test NPCs.
 //!
-//! ## v1 scope: default dimension only (soft dependency on EM-4.5)
-//! A [`PendingEntityTemplateSpawn`] naming any `DimensionId` other than
-//! [`DimensionId::DEFAULT`] is dropped with a `warn!` — there is no
-//! per-dimension `Server`/`State` handle a spawn call could target yet (the
-//! `DimensionRegistry` only tags the MIRROR's own entities today). Documented
-//! rather than silent; extending this is EM-4.9's job (spawning a DmEvent's
-//! monsters into ITS instanced dimension).
+//! ## BL-82 EM-4.9 (Phase C, T51.6): routes into ANY currently-Active dimension
+//! There is still only ONE real specs `Server`/`State` (one physical terrain,
+//! one physical NPC storage) in this process — `DimensionRegistry` indexes a
+//! SEPARATE, standalone procgen `world::World`/chunk-store per dimension
+//! (`xindeler-dimensions::registry`), but nothing wires that generated
+//! terrain into the sim's own live `TerrainGrid` yet (true per-dimension
+//! physics/terrain simulation is out of scope — see the migration spec's
+//! deferred-items table). So "routing a spawn into dimension X" means: the
+//! real sim NPC is still created in the one physical world (same terrain
+//! everyone else's entities stand on), but its MIRROR is tagged with
+//! dimension X's `DimensionId` (via [`crate::PendingDimensionAttribution`],
+//! consumed by [`crate::mirror_sim_entities`]) so per-client interest
+//! management (`xindeler_protocol::visibility`) scopes its visibility
+//! separately from the default world's own entities — the concrete,
+//! honest meaning of "the minions live in the instanced dimension" for v1.
+//!
+//! A request naming a `DimensionId` that isn't currently registered+`Active`
+//! in the [`DimensionRegistry`] is dropped with a `warn!` (defensive: a
+//! never-activated or already-torn-down dimension must never silently
+//! mis-spawn an entity nowhere any client will ever see it cleaned up from).
+//! [`DimensionId::DEFAULT`] is always accepted (unchanged v1 behavior).
 //!
 //! ## Anti-chaos: a request that can't be resolved is dropped, never panics
 //! - No [`PendingBody`] at all, or its string doesn't parse as a
@@ -39,25 +53,26 @@
 //! never accumulates across ticks, matching every other one-shot request
 //! pattern in this crate (e.g. [`crate::TestNpcState`]'s spawn latch).
 //!
-//! ## Not yet wired into a production `App` (tests-only today, by design)
-//! Neither `EntityTemplatePlugin` (`xindeler-oracle-host`) nor
-//! [`spawn_from_spawning_rules`] has a real
-//! caller yet — no system reads `AssetEvent<DmEvent>`/`Assets<EntityTemplate>`
-//! to trigger a spawn from an actually-ingested file; today they're only
-//! exercised directly (by tests, or a future in-process caller). This
-//! mirrors `DmEventPlugin`'s own not-yet-wired state from EM-4.3/4.4 — both
-//! wait on EM-4.9 (the full DmEvent → dimension → spawn drill) to add the
-//! real producer system. Whoever adds that system MUST give it an explicit
-//! ordering edge (`.before()`/`.chain()`) against
-//! [`apply_pending_entity_template_spawns`] in the same `FixedUpdate` chain
-//! this module is already wired into (see `SimBridgePlugin` in
-//! `crate::lib`), or accept one tick of latency — nothing enforces that
-//! automatically merely by both systems existing in the same `App`.
+//! ## BL-82 EM-4.9: the real producer now exists (`xindeler-server-app::oracle`)
+//! `ServerOraclePlugin`'s `spawn_event_minions` system is the real caller
+//! `spawn_from_spawning_rules` was waiting on (EM-4.3/4.4's `DmEventPlugin`
+//! got its own real caller the same task, `ingest_dm_events`) — it resolves a
+//! `DmEvent`'s `spawning_rules` once its target dimension reaches `Active`
+//! ([`xindeler_dimensions::DimensionActivated`]) and calls this module's
+//! functions exactly like the pre-existing tests already did directly. That
+//! system carries the explicit ordering edge
+//! (`.before(apply_pending_entity_template_spawns)`) this doc comment used to
+//! ask a future caller to remember.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::{
-    ecs::{change_detection::NonSendMut, entity::Entity, system::Query},
+    ecs::{
+        change_detection::NonSendMut,
+        entity::Entity,
+        resource::Resource,
+        system::{Query, Res, ResMut},
+    },
     log::{info, warn},
     prelude::Commands,
 };
@@ -68,6 +83,7 @@ use common::{
     npc,
 };
 use rand::RngExt;
+use xindeler_dimensions::{DimensionLifecycle, DimensionRegistry};
 use xindeler_oracle_host::{
     dm_event::SpawningRules,
     entity_template::{
@@ -78,6 +94,38 @@ use xindeler_oracle_host::{
 use xindeler_protocol::DimensionId;
 
 use crate::SimServer;
+
+/// FIFO queue of dimensions awaiting attribution to the next brand-new,
+/// Agent-bearing sim entity [`crate::mirror_sim_entities`] discovers (BL-82
+/// EM-4.9, Phase C / T51.6).
+///
+/// ## Why a queue, not a direct `specs::Entity -> DimensionId` map
+/// `State::emit_event_now` only QUEUES a `CreateNpcEvent` onto the sim's
+/// event bus — the real specs `Entity` doesn't exist until the sim's OWN
+/// next `tick_sim` call processes
+/// it (one `FixedUpdate` tick later than this module's own
+/// [`apply_pending_entity_template_spawns`] run), so there is no `Entity` to
+/// key a map by at the moment this module requests the spawn. Instead, this
+/// module pushes the TARGET dimension once per non-default-dimension spawn
+/// it successfully requests (in request order); [`crate::mirror_sim_entities`]
+/// pops the front entry the next time it discovers a brand-new sim entity
+/// that also carries an `Agent` component (real players never do — see that
+/// function's own doc comment) and assigns that dimension via
+/// [`crate::SimEntityDimension`], defaulting to [`DimensionId::DEFAULT`] when
+/// the queue is empty (unchanged v1 behavior for ordinary NPC/test spawns).
+///
+/// ## Known, documented limitation
+/// This is a best-effort correlation, not a guaranteed one: if some OTHER
+/// Agent-bearing entity (e.g. `spawn_test_npcs`'s wandering ring, disabled by
+/// default) happens to be discovered by the mirror in the exact same tick a
+/// factory batch materializes, one queue entry could be consumed by the
+/// wrong entity. Acceptable for v1 (a single controlled ORACLE encounter at a
+/// time); a fully robust fix needs the sim itself to carry dimension
+/// identity on the entity at creation time, which would touch the `common`/
+/// `server` logic crates (upstream-merge-sensitive, out of this shell-only
+/// task's scope) — tracked as a follow-up, not attempted here.
+#[derive(Resource, Debug, Default)]
+pub struct PendingDimensionAttribution(pub VecDeque<DimensionId>);
 
 /// Turns a (already-sanitized) `SpawningRules` — e.g. a `DmEvent`'s
 /// `spawning_rules` field, the Mist-Bound-example schema's monster-population
@@ -200,6 +248,8 @@ fn resolve_body(name: &str) -> Option<(npc::NpcKind, comp::Body)> {
 pub fn apply_pending_entity_template_spawns(
     sim: Option<NonSendMut<SimServer>>,
     mut commands: Commands,
+    registry: Res<DimensionRegistry>,
+    mut attribution: ResMut<PendingDimensionAttribution>,
     pending: Query<(
         Entity,
         &PendingEntityTemplateSpawn,
@@ -217,12 +267,24 @@ pub fn apply_pending_entity_template_spawns(
         // must never accumulate across ticks.
         commands.entity(entity).despawn();
 
+        // BL-82 EM-4.9 (Phase C, T51.6): route into any dimension the
+        // registry currently reports `Active` — DEFAULT is always accepted
+        // (unchanged); a never-activated/already-torn-down/still-Spinup
+        // target is a defensive drop, never a mis-spawn. See the module doc
+        // comment for what "routed into dimension X" concretely means today
+        // (one physical sim, mirror-tagged for interest-management scoping).
         if request.dimension != DimensionId::DEFAULT {
-            warn!(
-                dimension = request.dimension.0,
-                "entity_template: v1 only spawns into the default dimension; dropping this request"
-            );
-            continue;
+            let accepts = registry
+                .get(request.dimension)
+                .is_some_and(|state| state.lifecycle() == DimensionLifecycle::Active);
+            if !accepts {
+                warn!(
+                    dimension = request.dimension.0,
+                    "entity_template: target dimension is not registered/Active; dropping this \
+                     spawn request"
+                );
+                continue;
+            }
         }
 
         let Some(body_name) = body.map(|b| b.0.as_str()) else {
@@ -256,6 +318,15 @@ pub fn apply_pending_entity_template_spawns(
         .with_agent(agent);
         npc.loot = loot_spec;
 
+        // BL-82 EM-4.9: record the target dimension BEFORE queuing the
+        // event, in request order, so `mirror_sim_entities` can attribute it
+        // to the resulting sim entity once it materializes (see
+        // `PendingDimensionAttribution`'s doc comment). Never pushed for
+        // DEFAULT — that's the mirror's own unattributed fallback.
+        if request.dimension != DimensionId::DEFAULT {
+            attribution.0.push_back(request.dimension);
+        }
+
         let wpos = vek::Vec3::new(request.pos[0], request.pos[1], request.pos[2]);
         sim.server.state().emit_event_now(CreateNpcEvent {
             pos: comp::Pos(wpos),
@@ -266,6 +337,7 @@ pub fn apply_pending_entity_template_spawns(
         info!(
             body = body_name,
             ?preset,
+            dimension = request.dimension.0,
             "entity_template: spawned a factory NPC through the sim's public event bus"
         );
     }

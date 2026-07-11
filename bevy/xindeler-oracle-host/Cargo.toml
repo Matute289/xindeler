@@ -35,6 +35,18 @@ prometheus = { workspace = true }
 # higher-level -> lower-level) edge instead, to embed the type in
 # `AiGatewayConfig`. See `ai_gateway`'s module doc for the full reasoning.
 xindeler-protocol = { path = "../xindeler-protocol" }
+# BL-82 EM-4.9 (Phase D, `atmosphere_sync.rs`): the per-dimension
+# `SetClientAtmosphere` targeted message mirrors `xindeler_protocol::narrative`'s
+# `HudToast`/`SendTargets::Single` pattern exactly, but the payload
+# (`AtmosphereProfile`) lives in THIS crate (`atmosphere.rs`) — declaring the
+# message in `xindeler-protocol` instead would need a backwards dependency
+# edge (that crate never depends on this one). This crate already depends on
+# `xindeler-protocol` (for `ClientViewpoint`/`DimensionId`, see the line
+# above), so taking `bevy_replicon` directly here (rather than only via that
+# crate) is the legal, non-circular way to register + send/receive its own
+# message type. Pinned EXACT to match every other Bevy-migration crate's own
+# pin (BL-82 [Q5]=A).
+bevy_replicon = "=0.41.1"
 # `DmEventLoader` (EM-4.3): ORACLE's LLM-side tooling emits JSON comfortably —
 # `.dmevent.json` is parsed with this, `.dmevent.ron` with `ron` above (spec
 # §5.1/§0.4).

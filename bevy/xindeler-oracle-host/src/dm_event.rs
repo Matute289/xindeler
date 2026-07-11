@@ -17,20 +17,24 @@
 //! inherited for free.
 //!
 //! ## v1 scope
-//! EM-4.3/4.4 only **load + validate**: nothing in this module spins up a
-//! dimension, applies the atmosphere override, or spawns monsters — that is
-//! EM-4.5 (`DimensionRegistry`) / EM-4.7 (entity factory) / EM-4.8 (narrative
-//! hooks) / EM-4.9 (the end-to-end drill), wired incrementally as those land.
-//! Server-authoritative note: only a server-side host is meant to ever
-//! register [`DmEventPlugin`] — the client only ever receives the resulting
-//! normal net state (atmosphere changes, entity spawns), never a raw
-//! `DmEvent` or file. **Nothing enforces that today** — this PR wires
-//! [`DmEventPlugin`]/[`register_oracle_source`] into no running binary at
-//! all (`xindeler-server-app` doesn't even depend on this crate yet); when
-//! EM-4.5 does the real wiring, it must land in `xindeler-server-app` only,
-//! never `xindeler-client` (which already depends on this crate for
-//! [`atmosphere`](crate::atmosphere)) — a crate/feature boundary would make
-//! that structural rather than doc-comment-only, worth revisiting then.
+//! EM-4.3/4.4 only **load + validate**: nothing in THIS module spins up a
+//! dimension, applies the atmosphere override, or spawns monsters — those
+//! seams are EM-4.5 (`DimensionRegistry`) / EM-4.7 (entity factory) / EM-4.8
+//! (narrative hooks) / EM-4.9 (the end-to-end drill).
+//!
+//! **Update (BL-82 EM-4.9, 2026-07-11):** the real wiring landed.
+//! `xindeler-sim-bridge::oracle::ServerOraclePlugin` calls
+//! [`register_oracle_source`] BEFORE `AssetPlugin` in `main.rs` and adds
+//! [`DmEventPlugin`] AFTER it, then a producer system set
+//! (`ingest_dm_events`/`spawn_event_minions`/`retire_dm_events`) reads
+//! `AssetEvent<DmEvent>` to drive a real dimension spinup + factory spawn +
+//! narrative-hook registration — see that module's own doc comment for the
+//! full chain. Server-authoritative note: only that server-side shell
+//! registers [`DmEventPlugin`] — `xindeler-client` (which depends on this
+//! crate only for [`atmosphere`](crate::atmosphere)) never adds it, and the
+//! client only ever receives the resulting normal net state (replicated
+//! entities, `HudToast`, the atmosphere-replication seam), never a raw
+//! `DmEvent` or file.
 
 use std::path::PathBuf;
 
@@ -517,6 +521,41 @@ mod tests {
         // sanitize pass is a no-op and both extensions must agree exactly.
         assert_eq!(from_ron, original);
         assert_eq!(from_json, original);
+    }
+
+    /// BL-82 EM-4.9 (T51.5): the shipped `mist_bound.dmevent.ron` (the
+    /// canonical example both the E2E drill test and a real human drop use)
+    /// parses AND `sanitize()` is a no-op — every value in it must already
+    /// sit inside `dm_event::bounds`/`atmosphere::bounds`, per spec §5.1's
+    /// own comments.
+    #[test]
+    fn shipped_mist_bound_dmevent_parses_and_is_already_sane() {
+        use crate::atmosphere::WeatherEffect;
+
+        let text = include_str!("../../../assets/xindeler/oracle_events/mist_bound.dmevent.ron");
+        let mut parsed: DmEvent = ron::from_str(text).expect("mist_bound.dmevent.ron parses");
+
+        assert_eq!(parsed.dimension_config.seed_modifier, 1_298_754_643);
+        assert_eq!(
+            parsed.dimension_config.biome_profile,
+            "mist_bound_grey_forest"
+        );
+        assert_eq!(parsed.atmosphere.time_lock, Some(23.5));
+        assert_eq!(parsed.atmosphere.weather_effect, WeatherEffect::Rain);
+        assert_eq!(parsed.spawning_rules.entity_templates, vec![
+            "mist_bound_shade".to_owned()
+        ]);
+        assert!((parsed.spawning_rules.spawn_count - 15.0).abs() < f32::EPSILON);
+        assert_eq!(parsed.spawning_rules.ai_behavior_override, "aggro");
+        assert!(parsed.narrative.world_rumor.is_some());
+        assert!(parsed.narrative.on_enter_message.is_some());
+
+        let before = parsed.clone();
+        parsed.sanitize();
+        assert_eq!(
+            parsed, before,
+            "mist_bound.dmevent.ron should already be sane (sanitize must be a no-op)"
+        );
     }
 
     #[test]

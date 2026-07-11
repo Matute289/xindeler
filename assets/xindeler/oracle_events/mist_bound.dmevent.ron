@@ -1,0 +1,43 @@
+// Mist-Bound — the canonical BL-82 EM-4.9 example DmEvent (T51.5, spec §5.1).
+// Lore: `lore/40-planes/umbriel.md` — the mist-walled curse-domains of
+// Umbriel, the grey echo; colourless, cold, restless dead, "cross by dark,
+// come back by dawn." Shipped as a real, committed sample under
+// `assets/xindeler/oracle_events/` — both the file the E2E drill test copies
+// into its watched tempdir, and the file a human can drop live into
+// `<userdata>/oracle_events` (or `XINDELER_ORACLE_EVENTS_DIR`) to trigger the
+// same encounter.
+//
+// Schema: `DmEvent` in bevy/xindeler-oracle-host/src/dm_event.rs.
+// `atmosphere` reuses `AtmosphereProfile` directly — every clamp
+// `AtmosphereProfile::sanitize` enforces is inherited for free. All values
+// below are already in-bounds (see the clamp tables in `dm_event::bounds` /
+// `atmosphere::bounds`) — dropping this file must be a sanitize no-op.
+(
+    dimension_config: (
+        seed_modifier: 1298754643,        // "MIST" — any u64 is a legal seed
+        biome_profile: "mist_bound_grey_forest",  // carried as data (true biome injection deferred, spec §4)
+    ),
+    atmosphere: (
+        // Grey echo: desaturated, cold, oppressive but not a full whiteout.
+        fog_density: 0.020,               // heavy mist (clamp ceiling 1.0 ≈ 3 m whiteout)
+        fog_color: (0.30, 0.31, 0.33),    // "dark black / light black" grey
+        sky_color: (0.06, 0.06, 0.07),    // near-black starless sky
+        fog_volume_density: 0.6,
+        ambient_light_intensity: 0.15,
+        sun_illuminance: 1500.0,          // "a flame gives half its light" — dim
+        ambient_sky: (color: (0.42, 0.44, 0.48), brightness: 900.0),
+        weather_effect: Rain,             // DATA ONLY (no VFX until EM-5.x)
+        time_lock: Some(23.5),            // locked 23.5h — deep night, dread dimension
+        transition_secs: 4.0,
+    ),
+    spawning_rules: (
+        entity_templates: ["mist_bound_shade"],
+        spawn_count: 15.0,                // within the (0..=200) clamp
+        spawn_radius: 40.0,
+        ai_behavior_override: "aggro",    // hunts: notices from 2x range, no warn-up, never flees
+    ),
+    narrative: (
+        world_rumor: Some("A grey mist swallows the village; they say the dead walk the Mist-Bound."),
+        on_enter_message: Some("The veil parts. You have crossed into the Mist-Bound."),
+    ),
+)

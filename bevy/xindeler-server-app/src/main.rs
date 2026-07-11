@@ -157,8 +157,21 @@ fn main() -> AppExit {
         Err(_) => SimServerConfig::default().replicon_addr,
     };
 
-    App::new()
-        .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)))
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)));
+
+    // BL-82 EM-4.9: register the `oracle://` custom `AssetSource` BEFORE
+    // `AssetPlugin` is added below — `register_oracle_source`'s own doc
+    // comment states the contract ("asset sources must be registered before
+    // adding AssetPlugin... registered sources are built at that point and
+    // not after"). `ServerOraclePlugin` (added inside `SimServerPlugin`,
+    // AFTER `AssetPlugin`) is the other half of the two-phase sequence.
+    xindeler_oracle_host::register_oracle_source(
+        &mut app,
+        &xindeler_oracle_host::default_events_dir(),
+    );
+
+    app
         // BL-82 EM-4.10 T48.6: headless-safe (`bevy_asset` pulls in no
         // render/window deps — same posture `xindeler-oracle-host`'s own
         // Cargo.toml documents). Needed so `PredictiveGcConfigPlugin`

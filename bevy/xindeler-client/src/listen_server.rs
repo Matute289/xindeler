@@ -34,6 +34,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
 use xindeler_app::settings::userdata_dir;
+use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
     LodAltStreamPlugin, PlayerBridgePlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
@@ -41,9 +42,10 @@ use xindeler_sim_bridge::{
 };
 
 use crate::{
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -183,12 +185,23 @@ impl Plugin for ListenServerPlugin {
             // installs both from `block_palette.ron`).
             crate::palette_material::PaletteMaterialPlugin,
         ));
+        // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
+        // registration — see `xindeler_oracle_host::atmosphere_sync`'s
+        // module doc comment for why this can't live in
+        // `XindelerProtocolPlugin` itself. Dormant on the listen-server path
+        // today (nothing populates `DimensionAtmospheres` there — see that
+        // plugin's own doc comment), harmless to register. Split into its
+        // own call — the tuple above is already at the 15-plugin ceiling.
+        app.add_plugins(AtmosphereSyncMessagePlugin);
         // BL-82 EM-4.8: minimal timed-fade `bevy_ui` toast, rendered on
         // `HudToast` arrival (the server-side hook lives in
         // `xindeler_protocol::narrative`). Pure Bevy. Split into its own
         // `add_plugins` call — the tuple above is already at the 15-plugin
         // ceiling `bevy_app`'s `Plugins` trait impls support.
         app.add_plugins(HudToastViewPlugin);
+        // BL-82 EM-4.9 (Phase D): retargets `AtmosphereController` on
+        // `SetClientAtmosphere` arrival.
+        app.add_plugins(AtmosphereSyncViewPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

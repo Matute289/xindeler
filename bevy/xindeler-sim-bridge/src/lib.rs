@@ -98,7 +98,12 @@
 //! F for why this comment needed correcting.
 
 mod entity_factory;
-pub use entity_factory::{apply_pending_entity_template_spawns, spawn_from_spawning_rules};
+pub use entity_factory::{
+    PendingDimensionAttribution, apply_pending_entity_template_spawns, spawn_from_spawning_rules,
+};
+
+mod oracle;
+pub use oracle::ServerOraclePlugin;
 
 mod player;
 pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
@@ -223,6 +228,19 @@ pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
 #[derive(Resource, Default, Debug)]
 pub struct SimRegionCache(pub HashMap<specs::Entity, RegionKey>);
 
+/// The [`DimensionId`] each currently-mirrored sim entity was assigned WHEN
+/// FIRST SEEN (BL-82 EM-4.9, Phase C / T51.6) — decided once, in
+/// [`mirror_sim_entities`], and never revisited afterward (there is no
+/// player/NPC dimension-TRANSFER path yet; a mirror keeps the dimension it
+/// was created with for its whole lifetime). Defaults every entity to
+/// [`DimensionId::DEFAULT`] unless [`PendingDimensionAttribution`] had a
+/// pending non-default assignment waiting for it — see that resource's own
+/// doc comment for the full correlation mechanism and its documented limits.
+/// Entries are pruned alongside [`SimMirror`]/[`SimLoadoutCache`]/
+/// [`SimRegionCache`] when an entity disappears.
+#[derive(Resource, Default, Debug)]
+pub struct SimEntityDimension(pub HashMap<specs::Entity, DimensionId>);
+
 /// EM-4.10 Finding C: reused scratch buffers for [`mirror_sim_entities`],
 /// matching [`SimLoadoutCache`]/[`SimRegionCache`]'s "one resource, cleared
 /// not reallocated" pattern. The mirror loop used to allocate fresh `seen`/
@@ -251,6 +269,10 @@ struct MirrorScratch {
         Option<NetLoadout>,
         Option<NetUid>,
         RegionKey,
+        // BL-82 EM-4.9: the dimension this entity was assigned (see
+        // `SimEntityDimension`'s doc comment) — DEFAULT for every entity
+        // today except a factory batch routed at a real event dimension.
+        DimensionId,
     )>,
     /// `seen` collapsed into a set for the stale-mirror sweep (see
     /// [`mirror_sim_entities`]).
@@ -362,6 +384,16 @@ pub struct SimBridgePlugin;
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimMirror>();
+        // BL-82 EM-4.9 (Phase C): the factory-spawn <-> mirror dimension
+        // correlation resources — see `PendingDimensionAttribution`'s and
+        // `SimEntityDimension`'s own doc comments. Initialized here (rather
+        // than in `SimEntityMirrorPlugin`) since `apply_pending_entity_
+        // template_spawns` (this plugin's own chain, below) is the FIRST of
+        // the two systems that touches either resource; `init_resource` is
+        // idempotent, so `SimEntityMirrorPlugin` initializing them again
+        // later is harmless.
+        app.init_resource::<entity_factory::PendingDimensionAttribution>();
+        app.init_resource::<SimEntityDimension>();
         // EM-4.5: DimensionRegistry + the full lifecycle state machine —
         // every dimension-tagging consumer of this bridge needs it, so it's
         // wired here rather than as an optional add-on plugin (unlike
@@ -966,6 +998,21 @@ impl Plugin for SimEntityMirrorPlugin {
                     .after(xindeler_dimensions::spinup::handle_drain_requests)
                     .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
                     .before(xindeler_dimensions::teardown::teardown_completed_dimensions),
+            )
+            // BL-82 EM-4.9 (Phase C): releases an NPC-only dimension's
+            // occupancy on drain so it can actually reach `Teardown` — see
+            // `release_dimension_occupants_on_drain_request`'s own doc
+            // comment for the "stuck in Draining forever" gap this closes.
+            // Ordered the SAME way as `delete_specs_entities_for_torn_down_
+            // dimensions` above (after the drain request is applied, before
+            // the teardown-completion pass reads the resulting lifecycle),
+            // and explicitly before that sibling system too so a same-tick
+            // Draining -> Teardown this system causes is visible to it.
+            .add_systems(
+                FixedUpdate,
+                release_dimension_occupants_on_drain_request
+                    .after(xindeler_dimensions::spinup::handle_drain_requests)
+                    .before(delete_specs_entities_for_torn_down_dimensions),
             );
     }
 }
@@ -1502,9 +1549,11 @@ fn mirror_sim_entities(
     // `SimBridgePlugin::build`, which runs before this plugin per its own
     // "Add AFTER SimBridgePlugin" doc) always inserts it, so this is a plain
     // resource, not optional. `ResMut` (not `Res`): besides (a) tagging every
-    // NEWLY-mirrored entity with `DimensionId`/`DimensionRoot` — dimension
-    // 0's root entity, wrapped by `ensure_default_dimension` — and (b)
-    // gating NEW mirror creation on `DimensionLifecycle::
+    // NEWLY-mirrored entity with `DimensionId`/`DimensionRoot` — ITS assigned
+    // dimension's root entity (BL-82 EM-4.9, Phase C: generalized from a
+    // DEFAULT-only tag once entity-factory batches could target a real
+    // non-default dimension; see `SimEntityDimension`'s doc comment) — and
+    // (b) gating NEW mirror creation on `DimensionLifecycle::
     // accepts_new_entrants`, this system ALSO (c) keeps `DimensionState`'s
     // occupant bookkeeping in sync with what's actually mirrored
     // (`try_add_occupant`/`remove_occupant`) — see the should-fix note this
@@ -1524,6 +1573,11 @@ fn mirror_sim_entities(
     // actually changed, since replicon's `VisibilityFilter` re-evaluates
     // every connected client on every insert/replace.
     mut region_cache: bevy::ecs::system::ResMut<SimRegionCache>,
+    // BL-82 EM-4.9 (Phase C): the pending non-default-dimension attribution
+    // queue (populated by `apply_pending_entity_template_spawns`) and the
+    // per-entity dimension decision cache — see their own doc comments.
+    mut attribution: bevy::ecs::system::ResMut<PendingDimensionAttribution>,
+    mut entity_dims: bevy::ecs::system::ResMut<SimEntityDimension>,
     // EM-4.10 Finding C: reused scratch buffers — see `MirrorScratch`'s doc
     // comment. `.clear()`ed below instead of freshly allocated every tick.
     mut scratch: bevy::ecs::system::ResMut<MirrorScratch>,
@@ -1558,6 +1612,12 @@ fn mirror_sim_entities(
     // future entity that somehow lacks one still mirrors its other fields
     // rather than being silently dropped (additive-only requirement).
     let uids = ecs.read_storage::<Uid>();
+    // BL-82 EM-4.9 (Phase C): read ONLY to gate `PendingDimensionAttribution`
+    // consumption to Agent-bearing (NPC) entities — real players never carry
+    // `Agent` server-side, so a same-tick player login can never consume a
+    // factory batch's queued dimension entry. See `PendingDimensionAttribution`'s
+    // doc comment for the full correlation mechanism and its documented limits.
+    let agents = ecs.read_storage::<comp::Agent>();
 
     // EM-4.2d (superseded by EM-4.10 Finding C below): this mirror loop used
     // to allocate `seen`/`updates`/`seen_set` fresh every tick over all
@@ -1602,6 +1662,7 @@ fn mirror_sim_entities(
         inventories.maybe(),
         character_states.maybe(),
         uids.maybe(),
+        agents.maybe(),
     )
         .lend_join();
     while let Some((
@@ -1615,6 +1676,7 @@ fn mirror_sim_entities(
         inventory,
         character_state,
         uid,
+        agent,
     )) = it.next()
     {
         // Region-map visibility predicate (see doc comment).
@@ -1661,15 +1723,42 @@ fn mirror_sim_entities(
         // `NonZeroU64`; `NetUid` carries the same value as a plain `u64` so
         // the wire type stays serde-simple).
         let net_uid = uid.map(|u| NetUid(u.0.get()));
-        // EM-4.2d: which region (single dimension, `DimensionId::default()` —
-        // see `xindeler_protocol::visibility`'s module doc comment for the
-        // EM-4.5 extension point) this entity currently occupies, computed
+        // BL-82 EM-4.9 (Phase C, T51.6): decide THIS entity's dimension once
+        // — reused on every later tick via `entity_dims`, never revisited
+        // (no dimension-transfer path exists yet). A brand-new (not-yet-
+        // decided) entity that ALSO carries an `Agent` (an NPC — real
+        // players never do) consumes the front of the pending attribution
+        // queue if the registry still reports that dimension `Active`;
+        // otherwise (no Agent, empty queue, or a stale/rejected candidate)
+        // it falls back to `DimensionId::DEFAULT`, exactly like every
+        // pre-EM-4.9 mirrored entity. See `PendingDimensionAttribution`'s
+        // doc comment for the full mechanism and its documented limits.
+        let entity_dimension = *entity_dims.0.entry(entity).or_insert_with(|| {
+            if agent.is_some()
+                && let Some(&candidate) = attribution.0.front()
+            {
+                attribution.0.pop_front();
+                let accepts = registry
+                    .get(candidate)
+                    .is_some_and(|state| state.accepts_new_entrants());
+                if accepts {
+                    candidate
+                } else {
+                    DimensionId::DEFAULT
+                }
+            } else {
+                DimensionId::DEFAULT
+            }
+        });
+        // EM-4.2d: which region this entity currently occupies, computed
         // from the RAW sim position (`pos.0`, sim axes) — NOT `net_pos`
         // (already Bevy-axis-converted above) — matching exactly what
         // `common::region::RegionMap`/`server/src/sys/subscription.rs` key
-        // entities by.
-        let region_key =
-            region_key_for_pos(DimensionId::default(), vek::Vec2::new(pos.0.x, pos.0.y));
+        // entities by. `entity_dimension` (not a hardcoded
+        // `DimensionId::default()`) so two dimensions occupying the SAME
+        // grid cell never collide (see `xindeler_protocol::visibility`'s
+        // module doc comment for the EM-4.5 extension point this realizes).
+        let region_key = region_key_for_pos(entity_dimension, vek::Vec2::new(pos.0.x, pos.0.y));
         updates.push((
             entity,
             net_pos,
@@ -1680,6 +1769,7 @@ fn mirror_sim_entities(
             net_loadout,
             net_uid,
             region_key,
+            entity_dimension,
         ));
     }
     drop(it);
@@ -1695,16 +1785,8 @@ fn mirror_sim_entities(
         inventories,
         character_states,
         uids,
+        agents,
     ));
-
-    // EM-4.5: whether dimension 0 currently accepts a NEW mirror entity, and
-    // its root entity — both computed as OWNED values (not a held `&
-    // DimensionState` borrow) so the loop below can still call the
-    // registry's `&mut self` occupant methods (`try_add_occupant`/
-    // `remove_occupant`) without a borrow-checker conflict. See
-    // `mirror_admits_new_entity`'s doc comment for the gating rule.
-    let dimension0_accepts_new = mirror_admits_new_entity(registry.get(DimensionId::DEFAULT));
-    let dimension0_root = registry.get(DimensionId::DEFAULT).map(DimensionState::root);
 
     for (
         sim_entity,
@@ -1716,6 +1798,7 @@ fn mirror_sim_entities(
         net_loadout,
         net_uid,
         region_key,
+        entity_dimension,
     ) in updates.drain(..)
     {
         let is_local_player = player_sim_entity == Some(sim_entity);
@@ -1770,29 +1853,30 @@ fn mirror_sim_entities(
                 }
             },
             None => {
-                // EM-4.5: don't create a NEW mirror for a dimension that
-                // isn't accepting new entrants (spec §1.8's acceptance bar
-                // extended to the mirror: "no new player can join once
-                // Draining" applies just as much to a wandering NPC as to a
-                // human player). Existing mirrors (the `Some` arm above)
-                // keep updating regardless — "existing players may finish/
-                // leave normally" during `Draining`.
-                if !dimension0_accepts_new {
+                // EM-4.5 (BL-82 EM-4.9: generalized from a DEFAULT-only
+                // check to THIS entity's own assigned dimension): don't
+                // create a NEW mirror for a dimension that isn't accepting
+                // new entrants (spec §1.8's acceptance bar extended to the
+                // mirror: "no new player can join once Draining" applies
+                // just as much to a wandering NPC as to a human player).
+                // Existing mirrors (the `Some` arm above) keep updating
+                // regardless — "existing players may finish/leave normally"
+                // during `Draining`. A dimension that vanished between the
+                // join loop's decision (above) and here (raced teardown) is
+                // the same defensive `None` case — skip this tick, retry
+                // next (the sim entity is NOT lost; it simply stays
+                // unmirrored until then).
+                let Some(dimension_state) = registry.get(entity_dimension) else {
+                    continue;
+                };
+                if !mirror_admits_new_entity(Some(dimension_state)) {
                     continue;
                 }
-                // First sighting: spawn the replicated mirror entity, tagged
-                // with the default dimension's identity (EM-4.5: every
-                // entity belonging to an instance carries `DimensionId` +
-                // the `DimensionRoot` relationship — `dimension0_root` is
-                // `Some` here because `dimension0_accepts_new` was just
-                // checked true, which only holds for a registered
-                // dimension).
-                let root = dimension0_root
-                    .expect("dimension0_accepts_new is true only when dimension0_root is Some");
+                let root = dimension_state.root();
                 let mut ec = commands.spawn((
                     Replicated,
                     SimEntity(sim_entity),
-                    DimensionId::DEFAULT,
+                    entity_dimension,
                     DimensionRoot(root),
                     net_pos,
                     net_ori,
@@ -1814,19 +1898,20 @@ fn mirror_sim_entities(
                 }
                 let bevy_entity = ec.id();
                 mirror.0.insert(sim_entity, bevy_entity);
-                // EM-4.5: this mirror now counts as an occupant of dimension
-                // 0 (see the `registry` param's doc comment for why this
-                // matters: without it, `begin_draining` would always see
-                // zero occupants and skip straight to `Teardown`). Can only
-                // fail if the dimension stopped accepting entrants in the
-                // instant between the check above and here — impossible
+                // EM-4.5: this mirror now counts as an occupant of ITS
+                // dimension (see the `registry` param's doc comment for why
+                // this matters: without it, `begin_draining` would always
+                // see zero occupants and skip straight to `Teardown`). Can
+                // only fail if the dimension stopped accepting entrants in
+                // the instant between the check above and here — impossible
                 // within one system's single-threaded body, but handled
                 // rather than `.unwrap()`ed for robustness against a future
                 // refactor that makes this async.
-                if let Err(err) = registry.try_add_occupant(DimensionId::DEFAULT, bevy_entity) {
+                if let Err(err) = registry.try_add_occupant(entity_dimension, bevy_entity) {
                     tracing::warn!(
                         ?err,
-                        "failed to register new mirror as a dimension-0 occupant"
+                        dimension = entity_dimension.0,
+                        "failed to register new mirror as a dimension occupant"
                     );
                 }
             },
@@ -1851,16 +1936,24 @@ fn mirror_sim_entities(
         .filter(|e| !scratch.seen_set.contains(e))
         .collect();
     for sim_entity in stale {
+        // BL-82 EM-4.9: this entity's OWN assigned dimension (defaults to
+        // DEFAULT if, somehow, it was never decided — can't happen in
+        // practice since every mirrored entity gets an entry the tick it's
+        // first seen, but stays a safe fallback rather than an `.unwrap()`).
+        let dimension = entity_dims
+            .0
+            .remove(&sim_entity)
+            .unwrap_or(DimensionId::DEFAULT);
         if let Some(bevy_entity) = mirror.0.remove(&sim_entity) {
             commands.entity(bevy_entity).despawn();
-            // EM-4.5: this mirror is leaving dimension 0 — the exact
+            // EM-4.5: this mirror is leaving ITS dimension — the exact
             // "existing players may finish/leave normally" exit condition
             // that drives `Draining -> Teardown` (see `remove_occupant`'s
-            // doc comment). A no-op `Ok(false)` if dimension 0 isn't
+            // doc comment). A no-op `Ok(false)` if that dimension isn't
             // `Draining` (the common case) or the entity wasn't tracked as
             // an occupant (e.g. it despawned before ever completing
             // `try_add_occupant`, an edge case handled gracefully there).
-            let _ = registry.remove_occupant(DimensionId::DEFAULT, bevy_entity);
+            let _ = registry.remove_occupant(dimension, bevy_entity);
         }
         // Drop the cached loadout too, so a re-used specs index doesn't inherit
         // a stale entry (EM-3.8d).
@@ -1910,6 +2003,64 @@ fn mirror_sim_entities(
 /// reach `Teardown`, this system must not delete every currently-mirrored
 /// specs entity in the live game (which is what "the torn-down dimension's
 /// specs entities" would mean for dimension 0 today).
+/// BL-82 EM-4.9 (Phase C): releases every occupant of a dimension the moment
+/// its admin-triggered [`DrainDimension`] request is seen — the fix for a
+/// gap [`try_add_occupant`]/[`remove_occupant`]'s pre-EM-4.9 usage never
+/// surfaced: EVERY mirrored entity (not just connected players) has always
+/// counted as an occupant (see the existing `mirrors_sim_npc_to_replicon_
+/// client` test's own assertion that a mirrored TEST NPC counts as a
+/// dimension-0 occupant), but `remove_occupant` is only EVER called from the
+/// mirror's own stale-entity sweep — which fires when a sim entity
+/// disappears (dies / a player disconnects). An NPC never "disconnects" on
+/// its own, so a dimension populated ONLY by ORACLE-spawned minions (no
+/// player ever transferred into it — the exact shape of EM-4.9's minimum
+/// gate, per the migration spec's own honesty about the deferred player-
+/// transfer leg) would sit in `Draining` FOREVER once admin-drained,
+/// silently blocking `DimensionLifecycle::Teardown` — and therefore
+/// [`delete_specs_entities_for_torn_down_dimensions`]/`teardown_completed_
+/// dimensions` — from ever running. `DimensionId::DEFAULT` is unaffected
+/// either way (`begin_draining` already rejects it outright, EM-4.10 Finding
+/// D), so this system explicitly skips it (nothing to release, and
+/// iterating its — often large — occupant set on every `DrainDimension`
+/// would be pure waste).
+///
+/// This does NOT despawn anything itself — it only clears the OCCUPANCY
+/// bookkeeping (`DimensionRegistry::remove_occupant`), which is exactly what
+/// lets a fully-occupant-drained `Draining` dimension auto-advance to
+/// `Teardown` (the same real, tested exit condition a player logging out of
+/// the last-occupied slot already drives — see that method's own doc
+/// comment). Once `Teardown` is reached, the EXISTING
+/// [`delete_specs_entities_for_torn_down_dimensions`] (sim-side) and
+/// `teardown_completed_dimensions` (Bevy-side `DimensionRoot` cascade-despawn)
+/// take over, unmodified.
+///
+/// `.after(handle_drain_requests)` (so this tick's `Active -> Draining`
+/// transition, if any, has already happened) and `.before(delete_specs_
+/// entities_for_torn_down_dimensions)` (so a same-tick Draining -> Teardown
+/// this system causes is visible to that system in the SAME `FixedUpdate`
+/// pass, not one tick later).
+fn release_dimension_occupants_on_drain_request(
+    mut requests: bevy::ecs::message::MessageReader<xindeler_dimensions::DrainDimension>,
+    mut registry: bevy::ecs::system::ResMut<DimensionRegistry>,
+    mirrors: bevy::ecs::system::Query<(Entity, &DimensionId), bevy::ecs::query::With<SimEntity>>,
+) {
+    for &xindeler_dimensions::DrainDimension(dimension) in requests.read() {
+        if dimension == DimensionId::DEFAULT {
+            continue;
+        }
+        for (entity, tag) in &mirrors {
+            if *tag != dimension {
+                continue;
+            }
+            // `Ok(false)`/an error both mean "nothing left to do for this
+            // entity" (already untracked, or the dimension isn't Draining) —
+            // neither is worth a log; the meaningful signal
+            // (`teardowns_total`) is already observed elsewhere.
+            let _ = registry.remove_occupant(dimension, entity);
+        }
+    }
+}
+
 fn delete_specs_entities_for_torn_down_dimensions(
     sim: Option<NonSendMut<SimServer>>,
     registry: bevy::ecs::system::Res<DimensionRegistry>,
@@ -3401,6 +3552,247 @@ mod tests {
                  — spawning_rules.ai_behavior_override must have overridden it to \"stalk\""
             );
         }
+    }
+
+    /// BL-82 EM-4.9 (Phase C, T51.6): a factory batch targeted at a REAL
+    /// non-default `DimensionId` — not the DEFAULT-only v1 scope EM-4.7
+    /// shipped with — is (a) actually spawned (the factory sink no longer
+    /// drops it), (b) its MIRROR entities are tagged with THAT dimension,
+    /// not `DimensionId::DEFAULT` (proving `mirror_sim_entities`'s
+    /// attribution mechanism — `PendingDimensionAttribution`/
+    /// `SimEntityDimension` — works end to end), and (c) admin-draining the
+    /// event dimension actually reaches `Teardown` and deletes the sim-side
+    /// minions, even though nothing ever "logs out" of it (see
+    /// `release_dimension_occupants_on_drain_request`'s doc comment for why
+    /// that needs its own fix — an NPC-only dimension has no natural
+    /// occupant-departure trigger).
+    #[test]
+    #[ignore = "boots a real world + spins up a second real dimension: needs assets + LFS; run \
+                locally with XINDELER_ASSETS"]
+    fn entity_factory_routes_into_a_real_non_default_dimension_and_cleans_up_on_retire() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use xindeler_dimensions::{
+            DimensionSpinupConfig, DrainDimension, SpinupDimension, WorldGenThreadPool,
+        };
+        use xindeler_oracle_host::{
+            dm_event::SpawningRules,
+            entity_template::{EntityTemplate, EntityTemplateStats},
+        };
+
+        const EVENT_DIMENSION: DimensionId = DimensionId(7);
+        const EXPECTED_MINIONS: usize = 5;
+        const MINION_NAME: &str = "Mist-Bound Routing Test Shade";
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let thread_pool = Arc::clone(sim.server.state().thread_pool());
+
+        let mut server_app = App::new();
+        server_app
+            .add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+            ))
+            .finish();
+        server_app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        server_app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        // A REAL spinup needs a real `WorldGenThreadPool` (the sim's own,
+        // matching `xindeler-server-app::dimensions::install_default_
+        // dimension`'s own reuse — no second pool is built).
+        server_app.insert_resource(WorldGenThreadPool(thread_pool));
+        server_app.insert_non_send(sim);
+
+        // Terrain-ready preamble (same shape the Mist-Bound test uses):
+        // minions still physically live in the ONE real terrain (see the
+        // module's `entity_factory` doc comment for why), so wait for the
+        // centre chunk before ever spawning anything.
+        {
+            let mut sim = server_app.world_mut().non_send_mut::<SimServer>();
+            sim.server.create_centered_persister(server::MIN_VD);
+        }
+        for _ in 0..800 {
+            server_app.update();
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre_chunk = vek::Vec2::new(size.x as i32, size.y as i32) / 2;
+            if sim
+                .server
+                .state()
+                .terrain()
+                .get_key_arc(centre_chunk)
+                .is_some()
+            {
+                break;
+            }
+        }
+        let (centre, alt) = {
+            let sim = server_app.world().non_send::<SimServer>();
+            let size = sim.server.world().sim().get_size();
+            let centre = vek::Vec2::new(size.x as f32, size.y as f32) * 32.0 * 0.5;
+            let alt = sim
+                .server
+                .world()
+                .sim()
+                .get_alt_approx(centre.map(|e| e as i32))
+                .unwrap_or(0.0);
+            (centre, alt)
+        };
+
+        // Spin up a SECOND, real dimension — same mechanism the debug-command
+        // path (`xindeler-server-app::dimensions`) drives, to `Active`.
+        server_app.world_mut().write_message(SpinupDimension {
+            id: EVENT_DIMENSION,
+            base_seed: 0,
+            config: DimensionSpinupConfig::default(),
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            server_app.update();
+            if server_app
+                .world()
+                .resource::<DimensionRegistry>()
+                .lifecycle(EVENT_DIMENSION)
+                == Some(DimensionLifecycle::Active)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the event dimension never reached Active within the boot deadline"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // A small batch of Agent-bearing minions, targeted at the EVENT
+        // dimension (NOT `DimensionId::DEFAULT`).
+        let mut templates = HashMap::new();
+        templates.insert("sentinel_owl".to_owned(), EntityTemplate {
+            entity_template_id: "sentinel_owl".to_owned(),
+            body: "snowy_owl".to_owned(),
+            stats: EntityTemplateStats {
+                name: Some(MINION_NAME.to_owned()),
+            },
+            faction: "enemy".to_owned(),
+            loot: None,
+            ai_behavior_override: "aggro".to_owned(),
+        });
+        let rules = SpawningRules {
+            entity_templates: vec!["sentinel_owl".to_owned()],
+            spawn_count: EXPECTED_MINIONS as f32,
+            spawn_radius: 10.0,
+            ai_behavior_override: "aggro".to_owned(),
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(0xF00D_CAFE);
+        {
+            let mut commands = server_app.world_mut().commands();
+            spawn_from_spawning_rules(
+                &mut commands,
+                &templates,
+                &rules,
+                [centre.x, centre.y, alt + 3.0],
+                EVENT_DIMENSION,
+                &mut rng,
+            );
+        }
+        server_app.world_mut().flush();
+
+        for _ in 0..10 {
+            server_app.update();
+        }
+
+        // (a) actually spawned + (b) mirror-tagged with the EVENT dimension,
+        // not DEFAULT. `With<SimEntity>` excludes the dimension's own ROOT
+        // entity (`handle_spinup_requests` tags the root itself with a bare
+        // `DimensionId` too — it is not one of the 5 minion mirrors).
+        let event_tagged_count = server_app
+            .world_mut()
+            .query_filtered::<&DimensionId, With<SimEntity>>()
+            .iter(server_app.world())
+            .filter(|id| **id == EVENT_DIMENSION)
+            .count();
+        assert_eq!(
+            event_tagged_count, EXPECTED_MINIONS,
+            "all {EXPECTED_MINIONS} minions' mirror entities must be tagged with the EVENT \
+             dimension, not DimensionId::DEFAULT — got {event_tagged_count}"
+        );
+        let region_dimensions_match: bool = server_app
+            .world_mut()
+            .query_filtered::<(&DimensionId, &xindeler_protocol::RegionKey), With<SimEntity>>()
+            .iter(server_app.world())
+            .filter(|(id, _)| **id == EVENT_DIMENSION)
+            .all(|(_, region)| region.dimension == EVENT_DIMENSION);
+        assert!(
+            region_dimensions_match,
+            "every EVENT-dimension-tagged mirror's RegionKey must ALSO carry the event dimension \
+             (interest management scoping falls out of this for free — see \
+             xindeler_protocol::visibility)"
+        );
+        assert_eq!(
+            server_app
+                .world()
+                .resource::<DimensionRegistry>()
+                .get(EVENT_DIMENSION)
+                .expect("still Active/registered")
+                .occupant_count(),
+            EXPECTED_MINIONS,
+            "every minion must count as an occupant of the EVENT dimension (this is what makes \
+             the retire-and-teardown half below a REAL exit condition, not an always-empty one)"
+        );
+
+        // (c) admin-drain the event dimension: it must actually reach
+        // Teardown (not get stuck in Draining forever) and delete the
+        // sim-side minions.
+        server_app
+            .world_mut()
+            .write_message(DrainDimension(EVENT_DIMENSION));
+        for _ in 0..20 {
+            server_app.update();
+        }
+
+        assert!(
+            server_app
+                .world()
+                .resource::<DimensionRegistry>()
+                .get(EVENT_DIMENSION)
+                .is_none(),
+            "the event dimension must be fully removed from the registry after draining (Draining \
+             -> Teardown -> removed), not stuck mid-lifecycle"
+        );
+        assert_eq!(
+            server_app
+                .world_mut()
+                .query::<&DimensionId>()
+                .iter(server_app.world())
+                .filter(|id| **id == EVENT_DIMENSION)
+                .count(),
+            0,
+            "no mirror entity may still carry the torn-down event dimension's id (zero-leak)"
+        );
+
+        let surviving_minions = {
+            use common::comp;
+            use specs::{Join, WorldExt};
+
+            let sim = server_app.world().non_send::<SimServer>();
+            let ecs = sim.server.state().ecs();
+            let stats = ecs.read_storage::<comp::Stats>();
+            (&stats)
+                .join()
+                .filter(|stat| matches!(&stat.name, comp::Content::Plain(n) if n == MINION_NAME))
+                .count()
+        };
+        assert_eq!(
+            surviving_minions, 0,
+            "the event dimension's minions must be deleted from the sim itself on teardown, not \
+             just un-mirrored (zero-leak on the sim side, not only the Bevy side)"
+        );
     }
 
     /// Identifies the wandering test NPCs SPECIFICALLY, on the sim side, by

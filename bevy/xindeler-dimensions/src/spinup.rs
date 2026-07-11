@@ -89,6 +89,23 @@ pub struct SpinupDimension {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct DrainDimension(pub DimensionId);
 
+/// Fired exactly once, the instant a dimension's `Spinup -> Active`
+/// transition completes (BL-82 EM-4.9, T51.2): the "Active edge" a
+/// `DmEvent`-triggered producer needs to know WHEN it's safe to resolve
+/// `spawning_rules`/pre-load terrain/spawn minions into a freshly-spun-up
+/// dimension, without polling `DimensionRegistry::lifecycle` itself every
+/// tick. Emitted by [`poll_spinup_tasks`] right after
+/// [`crate::registry::DimensionRegistry::complete_spinup`] succeeds — the
+/// SAME site that already logs "dimension spinup complete (Spinup ->
+/// Active)", just also observable as a real message a downstream system can
+/// `MessageReader` on. `DimensionId::DEFAULT`'s own boot-time wrap
+/// (`xindeler_dimensions::wrap_default_dimension`, called directly by the
+/// shells rather than through [`SpinupDimension`]) does NOT go through this
+/// path, so this message never fires for dimension 0 — consumers that only
+/// care about EVENT dimensions don't need to filter it out.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DimensionActivated(pub DimensionId);
+
 /// The sim's rayon thread pool, reused for dimension-spinup world generation
 /// (the SAME `Arc<rayon::ThreadPool>` `Server::state().thread_pool()`
 /// already built for the default dimension's own worldgen — no second pool
@@ -177,18 +194,26 @@ pub fn handle_spinup_requests(
 }
 
 /// Polls in-flight spinup tasks; once one finishes, completes the
-/// dimension's transition into `Active` (real world/index now in hand).
-/// Mirrors the existing `is_finished()`/`block_on` pattern
+/// dimension's transition into `Active` (real world/index now in hand) and
+/// fires [`DimensionActivated`] (EM-4.9). Mirrors the existing
+/// `is_finished()`/`block_on` pattern
 /// `xindeler-render-voxel::pipeline::apply_chunk_meshes` already uses for
 /// its own `AsyncComputeTaskPool` chunk-mesh tasks.
-pub fn poll_spinup_tasks(mut registry: ResMut<DimensionRegistry>, mut tasks: ResMut<SpinupTasks>) {
+pub fn poll_spinup_tasks(
+    mut registry: ResMut<DimensionRegistry>,
+    mut tasks: ResMut<SpinupTasks>,
+    mut activated: MessageWriter<DimensionActivated>,
+) {
     let mut i = 0;
     while i < tasks.0.len() {
         if tasks.0[i].task.is_finished() {
             let SpinupTask { id, task } = tasks.0.swap_remove(i);
             let (world, index) = block_on(task); // finished — returns immediately
             match registry.complete_spinup(id, Arc::new(world), index) {
-                Ok(()) => tracing::info!(?id, "dimension spinup complete (Spinup -> Active)"),
+                Ok(()) => {
+                    tracing::info!(?id, "dimension spinup complete (Spinup -> Active)");
+                    activated.write(DimensionActivated(id));
+                },
                 Err(err) => tracing::error!(?err, ?id, "failed to complete dimension spinup"),
             }
         } else {
@@ -344,8 +369,21 @@ mod tests {
         // rather than a fixed iteration count.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut lifecycle = None;
+        let mut saw_activated = false;
         while std::time::Instant::now() < deadline {
             app.update();
+            // BL-82 EM-4.9: `DimensionActivated` must fire the SAME tick the
+            // registry flips to `Active` — drain-and-remember rather than a
+            // single post-loop check, since `Messages<T>` is only readable
+            // for ~2 frames before its double-buffer rotates it out.
+            if app
+                .world_mut()
+                .resource_mut::<bevy::ecs::message::Messages<DimensionActivated>>()
+                .drain()
+                .any(|DimensionActivated(id)| id == DimensionId(1))
+            {
+                saw_activated = true;
+            }
             let registry = app.world().resource::<DimensionRegistry>();
             lifecycle = registry.lifecycle(DimensionId(1));
             if lifecycle == Some(crate::lifecycle::DimensionLifecycle::Active) {
@@ -357,6 +395,11 @@ mod tests {
             lifecycle,
             Some(crate::lifecycle::DimensionLifecycle::Active),
             "dimension should reach Active once its async spinup task completes"
+        );
+        assert!(
+            saw_activated,
+            "DimensionActivated(DimensionId(1)) must fire once the dimension reaches Active \
+             (EM-4.9's producer relies on this edge instead of polling lifecycle() itself)"
         );
     }
 }
