@@ -83,8 +83,19 @@
 //!   already do for the listen-server's own spectator fallback path.
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
-//! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
-//! consumer under `bevy/` — the client stays pure.
+//! bridge only calls the sim's public API. This crate and
+//! `xindeler-server-app::login` (BL-82 EM-4.2c) are the two legal `specs`
+//! consumers under `bevy/` — the client stays pure. `login` is a sanctioned
+//! exception (phase-4 plan §1.2: the replicon login handshake lives in the
+//! server-app shell and touches the sim's `ecs()` directly to create the
+//! login-session entity and set `Presence`/`PresenceKind`, calling the SAME
+//! public entry points — `LoginProvider::verify`/`login_with_ip`,
+//! `CharacterLoader`, `StateExt` — the legacy path uses); it does not
+//! reimplement or bypass this crate's mirroring, so the "bridge is the only
+//! writer into the sim from Bevy" invariant this crate itself upholds is
+//! unaffected. See
+//! `docs/design/specs/2026-07-10-bl82-wave3-regression-fixes-design.md` Finding
+//! F for why this comment needed correcting.
 
 mod entity_factory;
 pub use entity_factory::{apply_pending_entity_template_spawns, spawn_from_spawning_rules};

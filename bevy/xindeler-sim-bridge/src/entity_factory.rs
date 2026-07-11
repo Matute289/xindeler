@@ -4,10 +4,11 @@
 //! into a REAL sim NPC, through the exact same public event bus
 //! (`NpcBuilder` + `CreateNpcEvent` + `State::emit_event_now`)
 //! [`crate::spawn_test_npcs`] already uses. Lives in THIS crate because it is
-//! "the ONLY legal `specs` consumer under `bevy/`" (this crate's own lib.rs
-//! module doc) — `xindeler-oracle-host` never embeds a `specs::World` itself
-//! (isolation-law rule 4: writes into the sim go through its public APIs
-//! only).
+//! one of the two sanctioned `specs` consumers under `bevy/` (this crate's
+//! own lib.rs module doc — the other is `xindeler-server-app::login`'s
+//! narrow, sanctioned exception, BL-82 EM-4.2c) — `xindeler-oracle-host`
+//! never embeds a `specs::World` itself (isolation-law rule 4: writes into
+//! the sim go through its public APIs only).
 //!
 //! Once [`apply_pending_entity_template_spawns`] requests the NPC, the
 //! EXISTING [`crate::mirror_sim_entities`] system mirrors it into

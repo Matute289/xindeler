@@ -1,4 +1,7 @@
-use crate::settings::{AdminRecord, Ban, Banlist, WhitelistRecord, banlist::NormalizedIpAddr};
+use crate::{
+    Client,
+    settings::{AdminRecord, Ban, Banlist, WhitelistRecord, banlist::NormalizedIpAddr},
+};
 use authc::{AuthClient, AuthClientError, AuthToken, Uuid};
 use chrono::Utc;
 use common::comp::{AdminRole, Player};
@@ -49,6 +52,9 @@ pub fn derive_singleplayer_uuid() -> Uuid { derive_uuid("singleplayer") }
 /// context — e.g. a Bevy system driving the replicon login handshake
 /// (`xindeler-server-app::login`) — can reuse the SAME check instead of
 /// reaching past this crate's public API into raw `WriteStorage`/`Entities`.
+/// This is an ADDITIVE new entry point (not a widened existing one) — see
+/// [`LoginProvider::login_with_ip`]'s doc comment for why that distinction
+/// matters under the isolation law.
 #[must_use]
 pub fn count_players(world: &specs::World) -> usize {
     let entities = world.entities();
@@ -145,26 +151,67 @@ impl LoginProvider {
     }
 
     /// Resolves a [`PendingLogin`] against the ban/whitelist/player-count
-    /// rules, exactly as the legacy TCP/QUIC path does (`server/src/sys/
-    /// msg/register.rs`).
+    /// rules for a legacy TCP/QUIC connection (`server/src/sys/
+    /// msg/register.rs`), reading the connecting IP off `client`.
     ///
-    /// `ip` is the connecting socket's address, pre-resolved by the caller
-    /// (BL-82 EM-4.2c widened this from a `&Client` parameter to a plain
-    /// `Option<NormalizedIpAddr>` — the ONLY thing this function ever did
-    /// with `Client` was read its address via `connected_from_addr()`; every
-    /// other check here — [`ban_applies`], whitelist lookup, player-count
-    /// cap — is transport-agnostic. This lets a caller with no legacy
-    /// `Client` at all, e.g. the new replicon+quinnet login handshake in
-    /// `xindeler-server-app`, reuse this EXACT function instead of
-    /// reimplementing its checks). `None` means either a loopback/mpsc
-    /// connection (legacy behavior, unchanged) or a transport that doesn't
-    /// yet surface a client IP (the replicon+quinnet transport, as of
-    /// EM-4.2c — IP bans don't apply over it yet; UUID-based
+    /// `pub(crate)` — unchanged from upstream. BL-82 EM-4.2c needed this
+    /// same logic reachable from `xindeler-server-app` (the replicon login
+    /// handshake, which has no legacy `Client` to read an IP from) but does
+    /// NOT widen this function to do it — see [`Self::login_with_ip`],
+    /// which this delegates to, for the additive entry point that serves
+    /// that caller instead. Keeping this signature/visibility identical to
+    /// parent means the isolation-law surface crossed by EM-4.2c is limited
+    /// to one new function, not a modified existing one.
+    pub(crate) fn login<R>(
+        pending: &mut PendingLogin,
+        client: &Client,
+        admins: &HashMap<Uuid, AdminRecord>,
+        whitelist: &HashMap<Uuid, WhitelistRecord>,
+        banlist: &Banlist,
+        player_count_exceeded: impl FnOnce(String, Uuid) -> (bool, R),
+        make_ip_ban_upgrade: impl FnOnce(NormalizedIpAddr, Uuid, String),
+    ) -> Option<Result<R, RegisterError>> {
+        // We ignore mpsc connections since those aren't to an external
+        // process.
+        let ip = client
+            .connected_from_addr()
+            .socket_addr()
+            .map(|s| s.ip())
+            .map(NormalizedIpAddr::from);
+        Self::login_with_ip(
+            pending,
+            ip,
+            admins,
+            whitelist,
+            banlist,
+            player_count_exceeded,
+            make_ip_ban_upgrade,
+        )
+    }
+
+    /// Resolves a [`PendingLogin`] against the ban/whitelist/player-count
+    /// rules, exactly as [`Self::login`] does for a legacy `Client` (which is
+    /// now a thin wrapper around this that reads the IP off `client`).
+    ///
+    /// `ip` is the connecting socket's address, pre-resolved by the caller.
+    /// This lets a caller with no legacy `Client` at all — e.g. the replicon
+    /// +quinnet login handshake in `xindeler-server-app::login` (BL-82
+    /// EM-4.2c) — reuse this EXACT check logic instead of reimplementing
+    /// ban/whitelist/player-count-cap itself. `None` means either a
+    /// loopback/mpsc connection (legacy behavior, unchanged) or a transport
+    /// that doesn't yet surface a client IP (the replicon+quinnet transport,
+    /// as of EM-4.2c — IP bans don't apply over it yet; UUID-based
     /// ban/whitelist/player-count-cap checks below are unaffected).
     ///
-    /// Public (was `pub(crate)`): EM-4.2c is the first caller outside this
-    /// crate.
-    pub fn login<R>(
+    /// Public and additive (added BL-82 EM-4.2c): this is a BRAND NEW entry
+    /// point, not a widened one — [`Self::login`]'s own `pub(crate)`
+    /// visibility and `&Client`-taking signature are unchanged from
+    /// upstream, so `register.rs` (the legacy caller) needed zero edits.
+    /// This is the isolation-law-compliant shape of the fix described in
+    /// `docs/design/tasks/48-bl82-wave3-regression-fixes-tasks.md` (T48.4,
+    /// Finding E, option (a)): "host the function inside `server` itself...
+    /// so the crate boundary is not crossed by widening `login`."
+    pub fn login_with_ip<R>(
         pending: &mut PendingLogin,
         ip: Option<NormalizedIpAddr>,
         admins: &HashMap<Uuid, AdminRecord>,

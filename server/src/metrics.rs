@@ -28,6 +28,15 @@ pub struct PlayerMetrics {
     pub clients_connected: IntCounter,
     pub players_connected: IntCounter,
     pub clients_disconnected: IntCounterVec, // timeout, network_error, gracefully
+    /// BL-82 EM-4.10 (Finding E / T48.4): count of `InventoryUpdateBuffer`
+    /// events drained-and-dropped for an entity with no legacy `Client` —
+    /// i.e. a replicon-authenticated player (`xindeler-server-app::login`),
+    /// which never gets a `Client` component. This USED to be an
+    /// always-true invariant enforced by a `dev_panic!` in
+    /// `server/src/sys/entity_sync.rs`; now that two transports legitimately
+    /// coexist it is expected traffic, but must stay observable rather than
+    /// silently dropped — see that module for where this increments.
+    pub replicon_inventory_updates_dropped: IntCounter,
 }
 
 pub struct NetworkRequestMetrics {
@@ -193,15 +202,22 @@ impl PlayerMetrics {
             ),
             &["reason"],
         )?;
+        let replicon_inventory_updates_dropped = IntCounter::with_opts(Opts::new(
+            "replicon_inventory_updates_dropped_total",
+            "count of InventoryUpdateBuffer events drained-and-dropped for entities with no \
+             legacy Client (replicon-authenticated players) — see server/src/sys/entity_sync.rs",
+        ))?;
 
         registry.register(Box::new(clients_connected.clone()))?;
         registry.register(Box::new(players_connected.clone()))?;
         registry.register(Box::new(clients_disconnected.clone()))?;
+        registry.register(Box::new(replicon_inventory_updates_dropped.clone()))?;
 
         Ok(Self {
             clients_connected,
             players_connected,
             clients_disconnected,
+            replicon_inventory_updates_dropped,
         })
     }
 }

@@ -1,13 +1,17 @@
 //! BL-82 EM-4.2c: login/session handshake for the new replicon+quinnet
 //! transport (spec §1.2). A [`xindeler_protocol::LoginRequest`] is answered by
-//! calling the EXACT SAME public entry points the legacy TCP/QUIC path uses
+//! calling the EXACT SAME check logic the legacy TCP/QUIC path uses
 //! (`server/src/sys/msg/{register,character_screen}.rs`):
-//! `LoginProvider::verify`/`LoginProvider::login` for
+//! `LoginProvider::verify`/`LoginProvider::login_with_ip` for
 //! auth+ban+whitelist+player-count-cap+duplicate-login, then
 //! `CharacterLoader::load_character_list`/`load_character_data`, then
 //! `StateExt::initialize_character_data`/`update_character_data` to set
 //! `Presence`/`PresenceKind` and register the `CharacterId` in `IdMaps` — no
 //! auth/persistence logic is reimplemented anywhere in this module.
+//! `LoginProvider::login_with_ip` is an ADDITIVE entry point added alongside
+//! (not instead of) the legacy, `&Client`-taking `LoginProvider::login` —
+//! see `server::login_provider`'s doc comments (Finding E / T48.4) for why
+//! that distinction keeps the isolation law's crate-boundary rule intact.
 //!
 //! ## Why a SEPARATE `CharacterLoader` instance ([`RepliconCharacterLoader`])
 //! `CharacterLoader::messages()` drains a single crossbeam channel with
@@ -45,7 +49,7 @@
 //! ## Known gaps (documented, not silently dropped)
 //! - **No IP-ban enforcement over this transport yet**: `xindeler-transport`
 //!   doesn't surface a connecting client's IP today, so [`LoginProvider::
-//!   login`] is always called with `ip: None` here — UUID-based
+//!   login_with_ip`] is always called with `ip: None` here — UUID-based
 //!   ban/whitelist/player-count-cap checks are fully enforced; only the
 //!   IP-ban/IP-ban-upgrade half is inactive for this transport. Follow-up:
 //!   thread a real IP through once `xindeler-transport`/`bevy_quinnet` exposes
@@ -172,7 +176,7 @@ enum LoginStage {
     },
 }
 
-/// What [`LoginProvider::login`]'s `extra_checks` closure hands back on
+/// What [`LoginProvider::login_with_ip`]'s `extra_checks` closure hands back on
 /// success (mirrors `register.rs`'s own `extra_checks` closure's result
 /// shape, simplified: no `PlayerListUpdate`/legacy-`Client` bookkeeping is
 /// relevant to a replicon-only entity).
@@ -260,9 +264,11 @@ fn intake_login_requests(
 }
 
 /// Phase 2: advances every session in [`LoginStage::Auth`] by polling
-/// [`LoginProvider::login`] — the SAME ban/whitelist/player-count-cap checks
-/// and duplicate-login detection the legacy path uses (see that function's
-/// doc comment for how it was widened to accept an IP-agnostic caller).
+/// [`LoginProvider::login_with_ip`] — the SAME ban/whitelist/player-count-cap
+/// checks and duplicate-login detection the legacy path's `LoginProvider::
+/// login` uses, exposed additively via the IP-taking sibling function (see
+/// that function's doc comment for why it's a new function rather than a
+/// widened `login`).
 fn advance_auth(
     sim: &mut SimServer,
     logins: &mut PendingLogins,
@@ -285,7 +291,7 @@ fn advance_auth(
             let LoginStage::Auth(pending) = &mut session.stage else {
                 continue;
             };
-            let outcome = LoginProvider::login(
+            let outcome = LoginProvider::login_with_ip(
                 pending,
                 // No client IP surfaced by this transport yet — see the
                 // module doc comment's "known gaps" section.
@@ -689,7 +695,7 @@ fn map_register_error(err: RegisterError) -> LoginError {
         RegisterError::Banned(info) => LoginError::Banned(info.reason),
         RegisterError::NotOnWhitelist => LoginError::NotOnWhitelist,
         RegisterError::TooManyPlayers => LoginError::TooManyPlayers,
-        // Never actually produced by `LoginProvider::login` today, but
+        // Never actually produced by `LoginProvider::login_with_ip` today, but
         // mapped for exhaustiveness rather than left to panic if that ever
         // changes.
         RegisterError::Kicked(msg) => LoginError::Auth(msg),
