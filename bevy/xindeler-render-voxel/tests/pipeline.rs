@@ -42,7 +42,8 @@ use xindeler_render_voxel::{
     pipeline::{
         ChunkLayerMap, ChunkMaterials, ChunkMeshIndex, ChunkMeshPipelinePlugin, ChunkMeshQueue,
         ChunkUploadBudget, ChunkUploadStats, ChunkVolume, ChunkVolumeProvider, FluidChunkMesh,
-        PlaceholderChunkMesh, PlaceholderHazeTint, TerrainChunkMesh,
+        PlaceholderChunkMesh, PlaceholderColorHint, PlaceholderHazeTint, PlaceholderViewerHeight,
+        TerrainChunkMesh,
     },
 };
 
@@ -935,4 +936,283 @@ fn placeholder_material_blend_leans_more_toward_the_haze_tint_than_round_15_did(
              findings log's round-16 section"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// BL-82 EM-3.11 round 17 — real per-chunk colour hint (the "franja
+// beige... del fin del mapa" fix)
+// ---------------------------------------------------------------------------
+
+/// `with_z_bounds`'s `max_z + 2` margin over [`test_app`]'s `MAX_Z` — the
+/// exact `z_hi` every placeholder in that harness gets, so tests can build a
+/// [`PlaceholderColorHint`] whose `expected_surface_z` is "close" (matches)
+/// or "far" (doesn't match) without hardcoding the arithmetic twice.
+const TEST_PLACEHOLDER_Z_HI: f32 = (MAX_Z + 2) as f32;
+
+/// A real per-chunk colour hint (round-17 module docs: sourced from the same
+/// grid `xindeler_client::far_terrain` already uses to colour the far mesh)
+/// must be trusted, verbatim (no `PlaceholderHazeTint` installed here), when
+/// its `expected_surface_z` sits close to the placeholder's own `z_hi` — the
+/// "this is plausibly an ordinary outdoor/frontier chunk" case this round's
+/// live evidence (up to 16 simultaneous placeholders per burst, ~every 0.2s
+/// during active exploration) targets.
+#[test]
+fn placeholder_uses_a_color_hint_when_the_chunk_is_plausibly_outdoor() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15); // a plausible real grass green
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+        }));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        hint_color.to_srgba(),
+        "with no PlaceholderHazeTint installed and a matching-surface colour hint, base_color \
+         must be the hint colour verbatim, not the shared neutral rock-grey"
+    );
+}
+
+/// A colour hint whose `expected_surface_z` sits FAR from the placeholder's
+/// own `z_hi` (round-17 module docs: `SURFACE_HINT_TOLERANCE`) must be
+/// IGNORED — this is the guard that keeps the original EM-3.11h "camera
+/// standing inside the placeholder, looking at its own inner faces" cave
+/// scenario from getting a nonsensical bright-surface colour for a spot that
+/// will actually render dark underground. The placeholder must fall back to
+/// the plain shared rock-grey, exactly as if no hint were installed at all.
+#[test]
+fn placeholder_ignores_a_color_hint_whose_surface_is_far_from_the_chunk() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            // Recorded surface hundreds of metres above this chunk's own
+            // z_hi — exactly what a coarse far-terrain sample would say for
+            // a column whose near-pipeline volume is actually a deep cave.
+            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI + 500.0))
+        }));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        Color::srgb(0.35, 0.33, 0.30).to_srgba(),
+        "a colour hint whose expected_surface_z is far from the placeholder's own z_hi must be \
+         rejected — the chunk is plausibly underground/cave, so the shared neutral rock-grey (not \
+         a misleading bright outdoor colour) is the correct fallback"
+    );
+}
+
+/// The `bevy-migration-reviewer`-flagged gap in the FIRST version of this
+/// guard: a matching `expected_surface_z` alone does NOT reliably detect
+/// "camera standing inside an ordinary cave under otherwise-normal terrain"
+/// (the ORIGINAL EM-3.11h bug) — an ordinary cave tunnel leaves the column's
+/// own recorded surface height looking completely normal, so the
+/// surface-height check alone would happily trust a bright outdoor colour
+/// while the viewer is actually below ground looking at the box's own inner
+/// faces. `PlaceholderViewerHeight` closes this: even with a perfectly
+/// matching surface hint, if the live viewer is AT the placeholder's own
+/// chunk (or immediately adjacent) and sits well BELOW its `z_hi`, the hint
+/// must still be rejected.
+#[test]
+fn placeholder_ignores_a_matching_color_hint_when_the_viewer_is_below_the_surface() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            // Surface hint MATCHES z_hi exactly — the check this test cares
+            // about is the viewer-height one, not the surface one.
+            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+        }));
+    // The viewer is AT this exact chunk (near_viewer = true) but far below
+    // its own z_hi — plausibly deep inside a cave under otherwise-ordinary
+    // terrain, exactly the scenario a surface-only check would miss.
+    app.world_mut().insert_resource(PlaceholderViewerHeight {
+        chunk_key: VVec2::new(3, 3),
+        height: TEST_PLACEHOLDER_Z_HI - 500.0,
+    });
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        Color::srgb(0.35, 0.33, 0.30).to_srgba(),
+        "a colour hint must be rejected when the live viewer is well below the placeholder's own \
+         z_hi, even if the surface-height check alone would have passed — this is the actual \
+         'camera inside a cave' failure condition, not inferrable from column-height variance \
+         alone"
+    );
+}
+
+/// A SECOND `bevy-migration-reviewer` pass on the height-veto above caught a
+/// real regression it introduced: applying it with NO positional scoping
+/// would reject a perfectly ordinary hillside chunk far from the viewer's
+/// own position just because the viewer happens to stand in a valley well
+/// below that distant chunk's elevation — reintroducing the flat neutral
+/// patch this whole round exists to remove, for the extremely common case of
+/// simply looking at hilly/mountainous terrain from lower ground. This test
+/// pins the fix: a colour hint for a chunk FAR from
+/// [`PlaceholderViewerHeight::chunk_key`] must be trusted purely on the
+/// surface-height check, REGARDLESS of how far below it the viewer is.
+#[test]
+fn placeholder_trusts_a_distant_matching_hint_even_when_the_viewer_is_far_below_it() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+        }));
+    // The viewer is many chunks away (well outside VIEWER_PROXIMITY_CHUNKS)
+    // AND far below this chunk's z_hi — the exact "camera in a valley,
+    // looking at a distant hillside" case the scoping fix targets. Must NOT
+    // be treated as "camera inside this chunk's cave".
+    app.world_mut().insert_resource(PlaceholderViewerHeight {
+        chunk_key: VVec2::new(30, 30),
+        height: TEST_PLACEHOLDER_Z_HI - 500.0,
+    });
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        hint_color.to_srgba(),
+        "a colour hint for a chunk FAR from the viewer's own position must be trusted on the \
+         surface-height check alone, even if the viewer is far below its z_hi — the height veto \
+         must only apply near the viewer's own chunk, not globally, or it would flatten every \
+         hillside-from-a-valley view back to the neutral placeholder colour"
+    );
+}
+
+/// Two SIMULTANEOUS placeholders for adjacent chunks with DIFFERENT real
+/// colour hints must render with DIFFERENT base colours — the core round-17
+/// fix: many chunks along a moving streaming frontier are routinely
+/// placeholder AT ONCE (this round's live evidence: up to 16 simultaneously,
+/// recurring every ~0.2-0.4s during active exploration), and sharing ONE
+/// flat neutral colour across all of them is what made that cluster read as
+/// a solid, out-of-place "wall"/"strip" rather than a patchwork of
+/// roughly-correct terrain colours.
+#[test]
+fn simultaneous_placeholders_with_different_hints_get_different_colours() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let green = Color::srgb(0.2, 0.55, 0.15);
+    let grey_rock = Color::srgb(0.5, 0.5, 0.52);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            match (key.x, key.y) {
+                (3, 3) => Some((green, TEST_PLACEHOLDER_Z_HI)),
+                (3, 4) => Some((grey_rock, TEST_PLACEHOLDER_Z_HI)),
+                _ => None,
+            }
+        }));
+
+    let mut queue = app.world_mut().resource_mut::<ChunkMeshQueue>();
+    queue.mark_dirty(VVec2::new(3, 3));
+    queue.mark_dirty(VVec2::new(3, 4));
+    app.update();
+
+    let world = app.world_mut();
+    let mut colors: Vec<(VVec2<i32>, bevy::color::Srgba)> = Vec::new();
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        let key = world
+            .get::<TerrainChunkMesh>(entity)
+            .expect("key marker")
+            .key;
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .expect("material component")
+            .0
+            .clone();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let material = materials.get(&handle).expect("material asset resolves");
+        colors.push((key, material.base_color.to_srgba()));
+    }
+
+    assert_eq!(
+        colors.len(),
+        2,
+        "both chunks must have spawned a placeholder"
+    );
+    let (_, c0) = colors[0];
+    let (_, c1) = colors[1];
+    assert_ne!(
+        c0, c1,
+        "two simultaneous placeholders with different real colour hints must render with \
+         different base colours, not the one shared neutral grey — this is what lets a whole \
+         cluster of frontier placeholders read as roughly-correct varied terrain instead of a \
+         flat, obviously-fake slab"
+    );
 }
