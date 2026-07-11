@@ -39,8 +39,8 @@
 //! pattern in this crate (e.g. [`crate::TestNpcState`]'s spawn latch).
 //!
 //! ## Not yet wired into a production `App` (tests-only today, by design)
-//! Neither `EntityTemplatePlugin`/`ComponentSpawnRegistry`
-//! (`xindeler-oracle-host`) nor [`spawn_from_spawning_rules`] has a real
+//! Neither `EntityTemplatePlugin` (`xindeler-oracle-host`) nor
+//! [`spawn_from_spawning_rules`] has a real
 //! caller yet — no system reads `AssetEvent<DmEvent>`/`Assets<EntityTemplate>`
 //! to trigger a spawn from an actually-ingested file; today they're only
 //! exercised directly (by tests, or a future in-process caller). This
@@ -70,9 +70,8 @@ use rand::RngExt;
 use xindeler_oracle_host::{
     dm_event::SpawningRules,
     entity_template::{
-        AgentPreset, ComponentSpawnRegistry, EntityTemplate, PendingAiBehavior, PendingBody,
-        PendingEntityTemplateSpawn, PendingFaction, PendingLoot, PendingStats,
-        spawn_entity_template,
+        AgentPreset, EntityTemplate, PendingAiBehavior, PendingBody, PendingEntityTemplateSpawn,
+        PendingFaction, PendingLoot, PendingStats, spawn_entity_template,
     },
 };
 use xindeler_protocol::DimensionId;
@@ -128,7 +127,6 @@ use crate::SimServer;
 /// are.
 pub fn spawn_from_spawning_rules(
     commands: &mut Commands,
-    registry: &ComponentSpawnRegistry,
     templates: &HashMap<String, EntityTemplate>,
     rules: &SpawningRules,
     origin: [f32; 3],
@@ -164,9 +162,7 @@ pub fn spawn_from_spawning_rules(
             origin[1] + angle.sin() * dist,
             origin[2],
         ];
-        spawned.push(spawn_entity_template(
-            commands, registry, &resolved, pos, dimension,
-        ));
+        spawned.push(spawn_entity_template(commands, &resolved, pos, dimension));
     }
     spawned
 }

@@ -16,7 +16,9 @@ use bevy::{
 };
 use bevy_replicon::prelude::RepliconPlugins;
 use tokio::sync::Notify;
-use xindeler_dimensions::{DimensionsPlugin, teardown_completed_dimensions};
+use xindeler_dimensions::{
+    DimensionsPlugin, PredictiveGcConfigPlugin, teardown_completed_dimensions,
+};
 use xindeler_oracle_host::AiGatewayPlugin;
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
@@ -80,6 +82,12 @@ impl Plugin for SimServerPlugin {
         // wrapping refactor of already-existing state, not a behavior
         // change (see `dimensions.rs`'s doc comment).
         app.add_plugins(DimensionsPlugin);
+        // BL-82 EM-4.10 T48.6: loads `predictive_gc`'s tuning constants from
+        // `assets/xindeler/dimensions/default.predictive_gc.ron` (retunable
+        // without a rebuild) instead of leaving them as the compiled-in
+        // `PredictiveGc::default()` `DimensionsPlugin` just inserted above —
+        // requires the `AssetPlugin` `main.rs` now adds before this plugin.
+        app.add_plugins(PredictiveGcConfigPlugin::default());
         dimensions::install_default_dimension(app, &sim);
         dimensions::init_debug_state(app);
         app.insert_resource(self.config.debug_dimension_commands.clone());

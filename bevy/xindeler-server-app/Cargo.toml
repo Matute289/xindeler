@@ -34,7 +34,18 @@ agent = { package = "xindeler-server-agent", path = "../../server/agent", option
 # beyond `std`: `main() -> AppExit` needs `impl Termination for AppExit`,
 # which bevy_app gates on `#[cfg(feature = "std")]` (same feature
 # `bevy/xindeler-app`'s Cargo.toml enables for the same reason).
-bevy = { version = "=0.19.0", default-features = false, features = ["std"] }
+# `bevy_asset` (BL-82 EM-4.10 T48.6): `main.rs` adds a real `AssetPlugin`
+# (headless, no render/window deps pulled in) so `PredictiveGcConfigPlugin`
+# (`xindeler-dimensions`) can load its RON config. Requested explicitly here
+# too — it already reaches this binary transitively via `xindeler-dimensions`/
+# `xindeler-oracle-host`, but `main.rs` uses `bevy::asset::AssetPlugin`
+# directly, so this crate should not rely on that being an accident of some
+# other crate's feature list (same explicit-request discipline
+# `xindeler-dimensions`'s own Cargo.toml documents for its `PredictiveGcAsset`).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_asset",
+] }
 # The embedded specs simulation (EM-4.1, mirrors EM-1.5's non-send-resource
 # pattern in xindeler-sim-bridge). Default features (worldgen + plugins +
 # persistent_world + simd — same as xindeler-sim-bridge's `server` dep), NOT

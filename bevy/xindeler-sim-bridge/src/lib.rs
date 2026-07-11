@@ -2931,7 +2931,7 @@ mod tests {
     #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
     fn entity_template_factory_spawns_a_real_agro_npc_and_mirrors_it() {
         use xindeler_oracle_host::entity_template::{
-            ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats, spawn_entity_template,
+            EntityTemplate, EntityTemplateStats, spawn_entity_template,
         };
 
         const MAX_TICKS: u32 = 4000;
@@ -3016,19 +3016,16 @@ mod tests {
             ..EntityTemplate::default()
         };
 
-        let registry = ComponentSpawnRegistry::with_builtins();
         {
             let mut commands = server_app.world_mut().commands();
             spawn_entity_template(
                 &mut commands,
-                &registry,
                 &aggro_template,
                 [centre.x, centre.y, alt + 3.0],
                 xindeler_protocol::DimensionId::DEFAULT,
             );
             spawn_entity_template(
                 &mut commands,
-                &registry,
                 &malformed_behavior_template,
                 [centre.x + 5.0, centre.y, alt + 3.0],
                 xindeler_protocol::DimensionId::DEFAULT,
@@ -3181,7 +3178,7 @@ mod tests {
         use rand_chacha::ChaCha8Rng;
         use xindeler_oracle_host::{
             DmEvent, SpawningRules,
-            entity_template::{ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats},
+            entity_template::{EntityTemplate, EntityTemplateStats},
         };
 
         const EXPECTED_MINIONS: usize = 15;
@@ -3307,13 +3304,11 @@ mod tests {
             ai_behavior_override: "flee".to_owned(),
         });
 
-        let registry = ComponentSpawnRegistry::with_builtins();
         let mut rng = ChaCha8Rng::seed_from_u64(0xBADD_C0DE);
         {
             let mut commands = server_app.world_mut().commands();
             spawn_from_spawning_rules(
                 &mut commands,
-                &registry,
                 &templates,
                 &event.spawning_rules,
                 [centre.x, centre.y, alt + 3.0],
