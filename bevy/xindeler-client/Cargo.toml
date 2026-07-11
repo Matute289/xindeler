@@ -87,3 +87,10 @@ xindeler-transport = { path = "../xindeler-transport", optional = true }
 
 # (Tests that validate the smoke harness's baked extreme profile parses use
 # `ron`, now a normal dependency above — EM-3.8.)
+
+[dev-dependencies]
+# BL-82 EM-3.12: the real-embedded-world camera-collision integration test
+# (`terrain_stream.rs`) boots a real `xindeler-sim-bridge::boot_test_server`
+# world into a scratch dir, same as that crate's own `#[ignore]`d
+# `streams_real_chunks_to_local_client` test.
+tempfile = { workspace = true }
