@@ -47,7 +47,7 @@ use std::{
     time::Duration,
 };
 use strum::Display;
-use tracing::warn;
+use tracing::{info, warn};
 use vek::*;
 
 pub const MOVEMENT_THRESHOLD_VEL: f32 = 3.0;
@@ -1350,7 +1350,8 @@ pub fn handle_jump(
     _update: &mut StateUpdate,
     strength: f32,
 ) -> bool {
-    input_is_pressed(data, InputKind::Jump)
+    let jump_pressed = input_is_pressed(data, InputKind::Jump);
+    let fired = jump_pressed
         .then(|| data.body.jump_impulse())
         .flatten()
         .and_then(|impulse| {
@@ -1376,7 +1377,39 @@ pub fn handle_jump(
                     * data.stats.jump_modifier,
             ));
         })
-        .is_some()
+        .is_some();
+    // BL-82 EM-3.11r diagnostic (Matías's "jump a lot and sometimes don't reach
+    // the ground, looks like jumping from mid-air" report): logs every jump
+    // ATTEMPT (input held) that this gate's `on_ground`/`in_liquid` check
+    // allowed or denied, plus every attempt made while already airborne. If
+    // this ever logged a "fired" attempt with `on_ground: None`, that would be
+    // a genuine physics bug (a mid-air jump); if it never does, the reported
+    // symptom is a rendering/interpolation artifact, not a sim-side grounded-
+    // state defect. Opt-in (env read cached once, same pattern as
+    // `XINDELER_SLOW_SYS_MS`/`XINDELER_SPRITE_PERF_LOG`) — zero cost when
+    // unset, since this only runs the extra branch on an actual jump-input
+    // press, not every tick for every entity.
+    if jump_pressed && jump_diagnostics_enabled() {
+        info!(
+            entity = ?data.entity,
+            fired,
+            on_ground = ?data.physics.on_ground,
+            in_liquid = ?data.physics.in_liquid(),
+            pos_z = data.pos.0.z,
+            vel_z = data.vel.0.z,
+            "BL-82 EM-3.11r jump gate"
+        );
+    }
+    fired
+}
+
+/// Whether [`handle_jump`]'s diagnostic logging (`XINDELER_JUMP_PERF_LOG=1`)
+/// is enabled — read once and cached (see `common/ecs/src/system.rs`'s
+/// `slow_system_threshold_ms` for the same pattern), since this is called on
+/// the hot per-entity-per-tick `handle_jump` path.
+fn jump_diagnostics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("XINDELER_JUMP_PERF_LOG").is_ok_and(|v| v != "0"))
 }
 
 pub fn handle_walljump(
