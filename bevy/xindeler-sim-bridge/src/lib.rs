@@ -106,9 +106,14 @@ mod oracle;
 pub use oracle::ServerOraclePlugin;
 
 mod player;
+// BL-82 EM-4.11 follow-up (bevy-migration-reviewer audit): `tick_player` and
+// `TickPerfLog` are deliberately NOT re-exported here — no crate outside
+// `xindeler-sim-bridge` actually calls/names them (verified by grep; every
+// mention elsewhere is doc-comment prose, not a resolved reference), so they
+// stay `pub(crate)` in `player.rs` rather than widening the crate's public
+// API surface for a scheduling detail + a pure diagnostic type.
 pub use player::{
     EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
-    tick_player,
 };
 
 use std::{
