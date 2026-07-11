@@ -121,6 +121,21 @@ pub const ATTRIBUTE_FAR_HORIZON: MeshVertexAttribute =
 /// curvature (no fisheye/globe look) at normal eye height, reading only as
 /// "the ground recedes out there" exactly per the design note's ask.
 /// `0.0` is a valid, fully-supported disable (module docs).
+///
+/// ## Data-driven-content cleanup (comprehensive-review Finding 2)
+/// This constant is no longer the LIVE source of truth — `far_terrain::
+/// retile_far_mesh` now reads the actual bend strength (and the sibling
+/// `bend_start` scale) from `xindeler_oracle_host::AtmosphereController`'s
+/// live `AtmosphereProfile` (`far_mesh_bend_strength`/
+/// `far_mesh_bend_start_scale`), backed by `assets/xindeler/atmosphere/
+/// default.atmo.ron` — hot-reloadable, and overridable per-biome/vantage via
+/// a DmEvent atmosphere override, exactly like every sibling atmosphere-
+/// tuning parameter. This constant remains: (a) the compiled-in fallback
+/// `retile_far_mesh` uses when no `AtmosphereController` exists (e.g. a bare
+/// test app, via `FarTerrainExtension::default`), and (b) the value the
+/// shipped `default.atmo.ron` MUST equal so the first applied profile is a
+/// behavior-preserving no-op — pinned by this module's own
+/// `atmosphere_default_bend_strength_matches_the_compiled_in_fallback` test.
 pub const FAR_MESH_BEND_STRENGTH: f32 = 0.00005;
 
 /// Extension driving the far-terrain vertex bend + horizon/sky-blend
@@ -134,9 +149,10 @@ pub struct FarTerrainExtension {
     #[uniform(100)]
     pub bend_strength: f32,
     /// Radial distance (world metres, camera-relative) at which the bend
-    /// begins ramping — set to the far mesh's `hole_radius` so the bend is
-    /// EXACTLY zero across the whole near band (no seam against the near,
-    /// block-accurate terrain).
+    /// begins ramping — set to the far mesh's `hole_radius`, scaled by the
+    /// live `AtmosphereProfile::far_mesh_bend_start_scale` (`>= 1.0`), so the
+    /// bend is EXACTLY zero across the whole near band (no seam against the
+    /// near, block-accurate terrain) for any scale in that range.
     #[uniform(101)]
     pub bend_start: f32,
     /// Live "direction from a fragment toward the sun" (world space, xyz
@@ -326,5 +342,27 @@ mod tests {
                 "bend_strength=0.0 must be a clean disable at every distance"
             );
         }
+    }
+
+    /// Data-driven-content cleanup (comprehensive-review Finding 2): the
+    /// compiled-in [`super::FAR_MESH_BEND_STRENGTH`] fallback and the shipped
+    /// `default.atmo.ron`'s `far_mesh_bend_strength` (via
+    /// `AtmosphereProfile::default()`, which `atmosphere.rs`'s own test pins
+    /// to the shipped RON file) MUST agree — see [`super::
+    /// FAR_MESH_BEND_STRENGTH`]'s doc comment for why both need to exist and
+    /// stay in sync (a headless crate can't reference this render-crate
+    /// constant directly, so the two copies are hand-kept-equal; this test
+    /// is what actually enforces it).
+    #[test]
+    fn atmosphere_default_bend_strength_matches_the_compiled_in_fallback() {
+        use xindeler_oracle_host::AtmosphereProfile;
+
+        assert!(
+            (AtmosphereProfile::default().far_mesh_bend_strength - super::FAR_MESH_BEND_STRENGTH)
+                .abs()
+                < f32::EPSILON,
+            "AtmosphereProfile::default().far_mesh_bend_strength must equal the compiled-in \
+             FAR_MESH_BEND_STRENGTH fallback so the first applied profile is a visual no-op"
+        );
     }
 }

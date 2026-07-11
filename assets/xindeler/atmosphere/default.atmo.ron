@@ -38,4 +38,14 @@
     time_lock: None,
     // Seconds over which a change TO this profile interpolates.
     transition_secs: 5.0,
+    // Far-terrain world-curvature vertex bend (BL-82 EM-3.11 Phase B,
+    // data-driven-content cleanup): metres of downward displacement per
+    // metre² of camera-relative distance beyond the far mesh's bend_start
+    // radius. See AtmosphereProfile::far_mesh_bend_strength's doc comment
+    // for the full curve-shape reasoning; 0.0 disables the bend entirely
+    // (a valid, first-class per-biome/vantage override).
+    far_mesh_bend_strength: 0.00005,
+    // Multiplier on the far mesh's geometrically-derived bend_start radius;
+    // 1.0 reproduces the original unscaled behavior.
+    far_mesh_bend_start_scale: 1.0,
 )

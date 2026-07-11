@@ -56,7 +56,7 @@
 //! (`register_oracle_source`, BEFORE `AssetPlugin` — a `main.rs`-level
 //! concern, unaffected by where the plugin struct itself is defined).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     app::{App, FixedUpdate, Plugin},
@@ -78,7 +78,7 @@ use xindeler_dimensions::{
 };
 use xindeler_oracle_host::{
     ChroniclePlugin, DimensionAtmospheres, DmEvent, DmEventPlugin, EntityTemplate,
-    EntityTemplatePlugin,
+    EntityTemplatePlugin, OracleEventManifest, OracleEventManifestPlugin,
 };
 use xindeler_protocol::NarrativeHooks;
 
@@ -464,16 +464,21 @@ fn cleanup_dimension_side_tables_on_teardown(
     }
 }
 
-/// The ONE canonical, shipped event this drill's producer knows about by
-/// name (`assets/xindeler/oracle_events/mist_bound.dmevent.ron`). A general
-/// "scan the whole oracle:// directory for any file" watcher is a nicer v2
-/// (out of this task's scope, which is specifically the ONE Mist-Bound
-/// example) — see [`request_well_known_events`]'s doc comment for why even
-/// this single well-known path needs an explicit pre-request. Bare filenames
-/// (not `oracle://`-prefixed) — [`request_well_known_events`] builds the
-/// asset-server load path, [`retire_dm_events`] builds the on-disk path;
-/// both derive from this ONE list so they can never drift apart.
-const WELL_KNOWN_EVENT_FILENAMES: &[&str] = &["mist_bound.dmevent.ron"];
+// The canonical, shipped events this drill's producer knows about by name
+// are now DATA (BL-82 EM-4.9 follow-up, data-driven-content cleanup):
+// `xindeler_oracle_host::OracleEventManifest`, loaded from
+// `assets/xindeler/oracle_events/manifest.oracle_manifest.ron`
+// (`xindeler_oracle_host::oracle_manifest::DEFAULT_MANIFEST_ASSET_PATH`).
+// Before this cleanup the list was a compiled-in `&[&str]` constant —
+// shipping a second canonical event required a Rust code change + recompile;
+// see that module's own doc comment for the full rationale. A general "scan
+// the whole oracle:// directory for any file" watcher remains a nicer v2
+// (out of scope here — see `request_well_known_events_from_manifest`'s doc
+// comment for why even an explicit per-file pre-request is required at all).
+// Bare filenames (not `oracle://`-prefixed) — `request_well_known_events_
+// from_manifest` builds the asset-server load path, `retire_dm_events`
+// builds the on-disk path; both derive from the SAME manifest entries so
+// they can never drift apart.
 
 /// The directory `oracle://` is rooted at (BL-82 EM-4.9) — resolved
 /// independently here via the SAME `xindeler_oracle_host::default_events_dir`
@@ -488,23 +493,59 @@ const WELL_KNOWN_EVENT_FILENAMES: &[&str] = &["mist_bound.dmevent.ron"];
 #[derive(Resource, Debug, Clone)]
 struct OracleEventsDir(std::path::PathBuf);
 
-/// Holds the [`Handle`]s [`request_well_known_events`] requests, alive for
-/// the App's whole lifetime — without a surviving strong handle,
-/// `Assets<DmEvent>` would unload the asset again the moment the initial
-/// (possibly failed, if the file doesn't exist yet) load settles, and no
-/// later file-watcher event would have anything to attach to.
+/// Holds the strong handle to the loaded [`OracleEventManifest`] (keeps it —
+/// and its file watch, if `file_watcher` is active — alive for the App's
+/// whole lifetime, same rationale [`WellKnownEventHandles`] documents for the
+/// individual `DmEvent` handles it names) plus the set of filenames already
+/// requested (so a manifest hot-reload that re-lists an already-requested
+/// name is a no-op, not a duplicate `AssetServer::load` call).
+#[derive(Resource)]
+struct OracleEventManifestHandle {
+    handle: Handle<OracleEventManifest>,
+    requested_filenames: HashSet<String>,
+}
+
+/// Holds the [`Handle`]s [`request_well_known_events_from_manifest`]
+/// requests, alive for the App's whole lifetime — without a surviving strong
+/// handle, `Assets<DmEvent>` would unload the asset again the moment the
+/// initial (possibly failed, if the file doesn't exist yet) load settles, and
+/// no later file-watcher event would have anything to attach to.
 #[derive(Resource, Default)]
 struct WellKnownEventHandles(Vec<Handle<DmEvent>>);
 
 /// `AssetId<DmEvent> -> filename` for every handle
-/// [`request_well_known_events`] requested — lets [`retire_dm_events`] map a
-/// registered `DmEvent` asset back to the on-disk filename it must poll for
-/// existence.
+/// [`request_well_known_events_from_manifest`] requested — lets
+/// [`retire_dm_events`] map a registered `DmEvent` asset back to the on-disk
+/// filename it must poll for existence.
 #[derive(Resource, Default)]
-struct WellKnownEventFilenames(HashMap<AssetId<DmEvent>, &'static str>);
+struct WellKnownEventFilenames(HashMap<AssetId<DmEvent>, String>);
 
-/// Requests every [`WELL_KNOWN_EVENT_FILENAMES`] entry at `Startup`, whether
-/// or not the file exists yet.
+/// Requests the [`OracleEventManifest`] asset at `Startup` (whether or not the
+/// file exists yet — same "request eagerly, tolerate a failed first attempt"
+/// posture every RON-asset boot path in this codebase already follows, e.g.
+/// `xindeler_dimensions::predictive_gc`'s `PredictiveGcConfigPlugin`).
+fn request_oracle_event_manifest(
+    asset_server: Res<AssetServer>,
+    manifest_path: Res<OracleEventManifestPath>,
+    mut commands: Commands,
+) {
+    commands.insert_resource(OracleEventManifestHandle {
+        handle: asset_server.load(manifest_path.0.clone()),
+        requested_filenames: HashSet::new(),
+    });
+}
+
+/// Asset path (relative to the asset source root) the manifest is loaded
+/// from — a resource (not a captured closure) so [`request_oracle_event_
+/// manifest`] stays a plain function item like every other system in this
+/// module, mirroring [`OracleEventsDir`]'s own "small config resource, not a
+/// closure" convention.
+#[derive(Resource, Debug, Clone)]
+struct OracleEventManifestPath(String);
+
+/// Once the [`OracleEventManifest`] asset loads (or hot-reloads with newly
+/// added entries), requests an [`AssetServer`] handle for every NOT-yet-
+/// requested `event_filenames` entry, whether or not that file exists yet.
 ///
 /// ## Why this is required, not just a nicety
 /// `bevy_asset`'s file watcher ONLY reloads paths that already have an
@@ -515,20 +556,40 @@ struct WellKnownEventFilenames(HashMap<AssetId<DmEvent>, &'static str>);
 /// merely by watching the directory. Without this system, a human (or this
 /// drill's test) dropping `mist_bound.dmevent.ron` live into
 /// `<userdata>/oracle_events` would silently do NOTHING — no `AssetEvent`
-/// ever fires, so [`ingest_dm_events`] never sees it. Requesting the
-/// well-known path eagerly at boot (the file usually doesn't exist yet, so
-/// this first load is EXPECTED to fail quietly — same as the `dm_event.rs`
-/// test's own "let the failed first attempt settle" step) means the file
-/// WRITE later is what completes an already-outstanding request, which the
-/// watcher DOES observe.
-fn request_well_known_events(
+/// ever fires, so [`ingest_dm_events`] never sees it. Requesting each
+/// well-known path eagerly (the file usually doesn't exist yet, so this first
+/// load is EXPECTED to fail quietly — same as the `dm_event.rs` test's own
+/// "let the failed first attempt settle" step) means the file WRITE later is
+/// what completes an already-outstanding request, which the watcher DOES
+/// observe.
+fn request_well_known_events_from_manifest(
     asset_server: Res<AssetServer>,
+    manifest_assets: Res<Assets<OracleEventManifest>>,
+    mut manifest_events: MessageReader<AssetEvent<OracleEventManifest>>,
+    mut manifest_handle: Option<ResMut<OracleEventManifestHandle>>,
     mut handles: ResMut<WellKnownEventHandles>,
     mut filenames: ResMut<WellKnownEventFilenames>,
 ) {
-    for filename in WELL_KNOWN_EVENT_FILENAMES {
+    let Some(manifest_handle) = manifest_handle.as_mut() else {
+        return; // `request_oracle_event_manifest` hasn't run yet this frame
+    };
+    let relevant = manifest_events.read().any(|event| {
+        matches!(event, AssetEvent::Added { id } | AssetEvent::Modified { id }
+            if *id == manifest_handle.handle.id())
+    });
+    if !relevant {
+        return;
+    }
+    let Some(manifest) = manifest_assets.get(&manifest_handle.handle) else {
+        return;
+    };
+    for filename in &manifest.event_filenames {
+        if manifest_handle.requested_filenames.contains(filename) {
+            continue;
+        }
+        manifest_handle.requested_filenames.insert(filename.clone());
         let handle: Handle<DmEvent> = asset_server.load(format!("oracle://{filename}"));
-        filenames.0.insert(handle.id(), filename);
+        filenames.0.insert(handle.id(), filename.clone());
         handles.0.push(handle);
     }
 }
@@ -551,26 +612,43 @@ pub struct ServerOraclePlugin {
     /// doesn't need to override it (e.g. an in-process test that also calls
     /// `register_oracle_source` with the default).
     pub events_dir: std::path::PathBuf,
+    /// Asset path (relative to the asset source root) the well-known-event
+    /// manifest is loaded from — see [`request_oracle_event_manifest`].
+    /// Defaults to [`xindeler_oracle_host::oracle_manifest::
+    /// DEFAULT_MANIFEST_ASSET_PATH`] (the shipped manifest) for any caller
+    /// that doesn't need to override it, mirroring
+    /// `xindeler_dimensions::predictive_gc::PredictiveGcConfigPlugin::
+    /// config_path`'s own "overridable, sane default" convention.
+    pub manifest_path: String,
 }
 
 impl Default for ServerOraclePlugin {
     fn default() -> Self {
         Self {
             events_dir: xindeler_oracle_host::default_events_dir(),
+            manifest_path: xindeler_oracle_host::oracle_manifest::DEFAULT_MANIFEST_ASSET_PATH
+                .to_owned(),
         }
     }
 }
 
 impl Plugin for ServerOraclePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((DmEventPlugin, EntityTemplatePlugin, ChroniclePlugin));
+        app.add_plugins((
+            DmEventPlugin,
+            EntityTemplatePlugin,
+            ChroniclePlugin,
+            OracleEventManifestPlugin,
+        ));
         app.init_resource::<NextDimensionId>();
         app.init_resource::<OracleEventRegistry>();
         app.init_resource::<EntityTemplateHandles>();
         app.init_resource::<WellKnownEventHandles>();
         app.init_resource::<WellKnownEventFilenames>();
         app.insert_resource(OracleEventsDir(self.events_dir.clone()));
-        app.add_systems(bevy::app::Startup, request_well_known_events);
+        app.insert_resource(OracleEventManifestPath(self.manifest_path.clone()));
+        app.add_systems(bevy::app::Startup, request_oracle_event_manifest);
+        app.add_systems(FixedUpdate, request_well_known_events_from_manifest);
 
         app.add_systems(
             FixedUpdate,
@@ -669,15 +747,18 @@ mod tests {
         // wrong-by-default would be a silent trap for a future test that does.
         app.add_plugins(ServerOraclePlugin {
             events_dir: oracle_root.clone(),
+            ..Default::default()
         });
         app.finish();
         app.update();
 
         // Drop the SHIPPED Mist-Bound fixture into the watched oracle dir.
-        // `ServerOraclePlugin`'s own `request_well_known_events` (`Startup`)
-        // already requested this exact well-known path a moment ago (see
-        // that function's doc comment for why a pre-existing outstanding
-        // handle is required for the watcher to notice this write at all) —
+        // `ServerOraclePlugin`'s own manifest→handle-request chain
+        // (`request_oracle_event_manifest` at `Startup`, then
+        // `request_well_known_events_from_manifest`) already requested this
+        // exact well-known path a moment ago (see that function's doc
+        // comment for why a pre-existing outstanding handle is required for
+        // the watcher to notice this write at all) —
         // let that settle first, mirroring `dm_event.rs`'s own hot-reload
         // test's "let the failed first attempt settle" step.
         for _ in 0..20 {
@@ -776,6 +857,63 @@ mod tests {
         panic!(
             "spawn_event_minions never staged the expected 15 PendingEntityTemplateSpawn requests \
              for dimension {dimension:?} within the deadline"
+        );
+    }
+
+    /// BL-82 EM-4.9 follow-up (comprehensive-review Finding 3): pins the
+    /// cross-crate invariant `xindeler_oracle_host::dm_event::bounds::
+    /// SPAWN_RADIUS`'s own doc comment describes — its ceiling MUST stay
+    /// comfortably under half the world size THIS crate's [`event_gen_opts`]
+    /// actually spins up event dimensions with. Before this test the
+    /// invariant was enforced ONLY by cross-referencing doc comments between
+    /// two different crates, no compile-time or test-level assertion — and
+    /// this EXACT invariant already broke silently once (an earlier
+    /// `SPAWN_RADIUS` ceiling of 2000.0 exceeded the world size spun up for
+    /// event dimensions, so `spawn_event_minions`'s terrain-readiness gate
+    /// waited forever for chunks outside the generated range, and minions
+    /// silently never spawned — see `dm_event::bounds::SPAWN_RADIUS`'s own
+    /// doc comment for the full postmortem). A future edit to EITHER
+    /// constant in isolation (tightening/loosening `event_gen_opts`'s
+    /// `x_lg`/`y_lg`, or raising `SPAWN_RADIUS`'s ceiling) now fails CI
+    /// instead of silently reintroducing that bug.
+    #[test]
+    fn spawn_radius_ceiling_stays_under_the_event_dimension_half_extent() {
+        use xindeler_oracle_host::dm_event::bounds::SPAWN_RADIUS;
+
+        // Mirrors `spawn_event_minions`'s own local `CHUNK_SIZE` constant
+        // (32 blocks/chunk, `common::terrain::TERRAIN_CHUNK_BLOCKS_LG = 5` —
+        // `1 << 5 == 32`) — duplicated as a literal here for the exact same
+        // reason `spawn_event_minions` duplicates it rather than importing
+        // `common`: this shell crate's only other source of that number is
+        // the same local convention, so keeping this test's copy in the same
+        // style keeps both readable side by side without a new dependency
+        // edge just for one constant.
+        const CHUNK_SIZE: f32 = 32.0;
+
+        // Computes the SAME half-extent-from-centre `world::sim::WorldSim::
+        // get_size` (`MapSizeLg::chunks()`, `(1 << x_lg, 1 << y_lg)` chunks)
+        // yields for a REAL spinup of `opts` — without actually spinning up
+        // a `WorldSim` (far too slow/heavy for a unit test), since
+        // `event_gen_opts()` only returns the `GenOpts` shape, not a live
+        // world. Mirrors `spawn_event_minions`'s own
+        // `size * CHUNK_SIZE * 0.5` computation exactly.
+        let half_extent_of = |lg: u32| (1u32 << lg) as f32 * CHUNK_SIZE / 2.0;
+
+        let opts = event_gen_opts();
+        // The tighter of the two axes is the real constraint — `spawn_event_
+        // minions` scatters a circular radius around the centre, so BOTH
+        // axes must comfortably fit it, not just one (today `x_lg == y_lg`,
+        // but this stays correct if that ever changes).
+        let world_half_extent = half_extent_of(opts.x_lg).min(half_extent_of(opts.y_lg));
+
+        assert!(
+            SPAWN_RADIUS.1 < world_half_extent,
+            "dm_event::bounds::SPAWN_RADIUS.1 ({}) must stay strictly under event_gen_opts()'s \
+             own world half-extent ({world_half_extent}) — otherwise spawn_event_minions's \
+             terrain-readiness gate waits forever for chunks outside the generated range and \
+             minions silently never spawn (this exact bug happened once before with a prior \
+             2000.0 ceiling; see dm_event::bounds::SPAWN_RADIUS's doc comment)",
+            SPAWN_RADIUS.1
         );
     }
 }

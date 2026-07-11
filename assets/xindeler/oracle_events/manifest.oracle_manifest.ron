@@ -1,0 +1,23 @@
+// Manifest of canonical ORACLE `.dmevent.ron` files (BL-82 EM-4.9 follow-up,
+// data-driven-content cleanup).
+//
+// Schema: `OracleEventManifest` in
+// bevy/xindeler-oracle-host/src/oracle_manifest.rs. Consumed by
+// `xindeler_sim_bridge::oracle::ServerOraclePlugin`'s
+// `request_well_known_events_from_manifest` system, which requests an
+// `AssetServer` handle for every listed bare filename (relative to the
+// `oracle://` watch directory) once this manifest loads — required so a
+// LATER human/ORACLE write of that exact path is noticed by `bevy_asset`'s
+// file watcher (see that module's own doc comment for why an outstanding
+// handle is a hard requirement, not a nicety).
+//
+// Adding a new canonical event to this list is a DATA change: drop the new
+// name below, no Rust code change or recompile needed. This is deliberately
+// a fixed, explicit list (v1 scope) — a general "scan the whole oracle://
+// directory" watcher is a nicer v2, tracked as a deferred follow-up in
+// `xindeler_sim_bridge::oracle`'s module doc.
+(
+    event_filenames: [
+        "mist_bound.dmevent.ron",
+    ],
+)

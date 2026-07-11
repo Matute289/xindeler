@@ -9,7 +9,10 @@
 //! actually spawns into the sim) are the first real systems.
 //! [`atmosphere_sync`] (EM-4.9, Phase D) is the newest: the per-dimension
 //! `SetClientAtmosphere` targeted message, the server→client half of the
-//! Mist-Bound drill's atmosphere-replication seam. Remaining systems land per
+//! Mist-Bound drill's atmosphere-replication seam. [`oracle_manifest`]
+//! (EM-4.9 follow-up, data-driven-content cleanup) is the RON asset naming
+//! which canonical `.dmevent.ron` files the host should proactively request
+//! a handle for — see its own doc comment for why. Remaining systems land per
 //! `docs/design/tasks/45-engine-migration-tasks.md` /
 //! `docs/design/tasks/47-bl82-phase4-remaining-tasks.md` /
 //! `docs/design/tasks/51-bl82-em49-e2e-drill-tasks.md`. Isolation law: logic
@@ -22,6 +25,7 @@ pub mod atmosphere_sync;
 pub mod chronicle;
 pub mod dm_event;
 pub mod entity_template;
+pub mod oracle_manifest;
 
 use bevy::app::{App, Plugin};
 
@@ -46,6 +50,10 @@ pub use crate::{
         AgentPreset, EntityTemplate, EntityTemplateLoader, EntityTemplatePlugin,
         EntityTemplateStats, PendingAiBehavior, PendingBody, PendingEntityTemplateSpawn,
         PendingFaction, PendingLoot, PendingStats, spawn_entity_template,
+    },
+    oracle_manifest::{
+        DEFAULT_MANIFEST_ASSET_PATH, OracleEventManifest, OracleEventManifestLoader,
+        OracleEventManifestPlugin,
     },
 };
 

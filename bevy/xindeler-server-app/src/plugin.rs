@@ -243,6 +243,7 @@ impl Plugin for SimServerPlugin {
         // `SimServerConfig::events_dir`'s own doc comment for why).
         app.add_plugins(ServerOraclePlugin {
             events_dir: self.config.events_dir.clone(),
+            ..Default::default()
         });
 
         // EM-4.2b: the transport seam — this crate names ONLY
