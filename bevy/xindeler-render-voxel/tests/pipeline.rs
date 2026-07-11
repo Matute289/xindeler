@@ -725,3 +725,47 @@ fn placeholder_material_is_unlit_with_a_visible_floor() {
          included"
     );
 }
+
+/// BL-82 EM-3.11 round 14 regression: Matías reported the distant tree/
+/// mountain background periodically disappearing for 1-2 frames while
+/// walking, root-caused (pipeline module docs, round-14 section) to
+/// `DistanceFog` washing this UNLIT placeholder's own "obviously a
+/// placeholder" rock-grey out to the pale fog/sky colour at the exact
+/// render-distance band where a never-before-meshed chunk typically
+/// appears — reading as empty sky rather than a crude stand-in box. Pins
+/// `fog_enabled: false` so a future edit can't silently reintroduce the
+/// washout (this headless suite has no renderer to measure the actual
+/// on-screen fog blend, so the material-definition property that makes the
+/// washout impossible in the first place is what's checkable here, same
+/// approach as the sibling `unlit`/floor-luminance assertions above).
+#[test]
+fn placeholder_material_is_immune_to_distance_fog() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert!(
+        !material.fog_enabled,
+        "the placeholder material must disable DistanceFog (BL-82 EM-3.11 round 14): fog \
+         application is gated only by `fog_enabled`, never by `unlit`, so at the ~90-99%-opaque \
+         render-distance band where new chunks stream in, a fog-enabled placeholder washes out to \
+         the pale fog/sky colour and reads as empty background rather than a visible placeholder"
+    );
+}
