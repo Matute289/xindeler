@@ -106,7 +106,10 @@ mod oracle;
 pub use oracle::ServerOraclePlugin;
 
 mod player;
-pub use player::{EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, tick_player};
+pub use player::{
+    EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
+    tick_player,
+};
 
 use std::{
     collections::HashMap,
@@ -298,8 +301,11 @@ struct AuroraScratch {
 ///
 /// ## EM-3.11b: FixedUpdate, not Update
 /// This system (plus its `.after(tick_sim)` chain: `ensure_terrain_anchor`,
-/// `stream_terrain_changes`, `spawn_test_npcs`, `mirror_sim_entities`, and
-/// [`crate::tick_player`]) used to run in `Update`. In the headless
+/// `stream_terrain_changes`, `spawn_test_npcs`, and `mirror_sim_entities`)
+/// used to run in `Update`. BL-82 EM-4.11 later moved [`crate::tick_player`]
+/// OUT of this chain onto `Update` (see its own doc for why) — the light
+/// client predictor is the one system that DOES want frame rate now; every
+/// other member of this chain stays here. In the headless
 /// `xindeler-server-app` shell that's fine — `ScheduleRunnerPlugin::run_loop`
 /// paces the WHOLE App at 30 TPS, so `Update` only fires 30×/s. But in the
 /// WINDOWED listen-server path (`xindeler-client --listen-server`) `Update`
@@ -367,11 +373,13 @@ pub fn tick_sim(time: Res<Time>, sim: Option<NonSendMut<SimServer>>) {
 }
 
 /// The sim's fixed tick rate (30 TPS — matches `xindeler-server-app::sim::
-/// SIM_TICK_INTERVAL` and server-cli's `TPS` const, and `player::PLAYER_TPS`
-/// the embedded player's `Clock` already assumed). The windowed listen-server
-/// shell configures `Time::<Fixed>::from_hz(SIM_TICK_HZ)` (EM-3.11b) so
-/// [`tick_sim`] (and [`crate::tick_player`], moved to the same schedule)
-/// finally run at the rate the sim was designed for instead of display rate.
+/// SIM_TICK_INTERVAL` and server-cli's `TPS` const, and `player::PLAYER_TPS`,
+/// still used to seed the embedded player's BOOTSTRAP clock — see
+/// `player::boot_embedded_player`'s doc). The windowed listen-server shell
+/// configures `Time::<Fixed>::from_hz(SIM_TICK_HZ)` (EM-3.11b) so [`tick_sim`]
+/// finally runs at the rate the sim was designed for instead of display rate.
+/// BL-82 EM-4.11: [`crate::tick_player`] no longer shares this schedule — it
+/// now runs once per rendered `Update` frame instead (see its own doc).
 pub const SIM_TICK_HZ: f64 = 30.0;
 
 /// Registers the bridge types and the [`tick_sim`] system.
@@ -907,33 +915,39 @@ fn sim_ori_to_bevy(q: vek::Quaternion<f32>) -> Quat {
 /// gate — same as the terrain stream), and only after [`tick_sim`] so it reads
 /// post-tick sim state.
 ///
-/// ## EM-3.11o: also reads [`EmbeddedPlayer`], so also runs after `tick_player`
-/// [`spawn_test_npcs`] now centres the wandering-NPC ring on the embedded
-/// player's real position (see its doc), so this plugin depends on
-/// [`crate::tick_player`] (which writes [`EmbeddedPlayer`]) having already run
-/// this step — the same "reads `EmbeddedPlayer`" dependency
-/// [`LodAltStreamPlugin`]'s doc already calls out for `send_far_terrain_once`.
-/// Unlike that plugin, this one enforces it with an EXPLICIT
-/// `.after(tick_player)` schedule constraint, not just a "register after"
-/// convention in the doc comment — plugin *registration* order does not by
-/// itself guarantee Bevy *execution* order (only `.chain()`/`.before()`/
-/// `.after()` do), so relying on the comment alone was the gap a reviewer
-/// caught here. The constraint is a no-op if `PlayerBridgePlugin` (and thus
-/// `tick_player`) was never registered — see the same-schedule caveat on
-/// [`tick_sim`]'s `.after()` usage.
+/// ## EM-3.11o / BL-82 EM-4.11: reads [`EmbeddedPlayer`], one frame stale
+/// [`spawn_test_npcs`] centres the wandering-NPC ring on the embedded
+/// player's real position (see its doc), so it reads [`EmbeddedPlayer`]
+/// (written by [`crate::tick_player`]). EM-3.11o added an EXPLICIT
+/// `.after(tick_player)` constraint for this, back when both systems lived in
+/// `FixedUpdate`. **EM-4.11 moved `tick_player` to `Update`** (frame-rate
+/// local prediction — see its doc). Within one rendered frame, Bevy's
+/// default schedule order runs the WHOLE `FixedUpdate` step (this system
+/// included) BEFORE `Update`, so the cross-schedule `.after(tick_player)`
+/// edge no longer type-checks (`tick_player` is not a member of
+/// `FixedUpdate` any more) and has been removed. Net effect: this system now
+/// reads `EmbeddedPlayer`'s position as of the END of the PREVIOUS rendered
+/// frame's `tick_player` call, not the current one — a harmless one-frame
+/// staleness (this is a one-shot spawn, not a per-tick read; centring a
+/// wandering-NPC ring one frame late is imperceptible), unlike the removed
+/// constraint's actual job (which was preventing this system from running
+/// BEFORE `tick_player` had ever populated `EmbeddedPlayer` at all the very
+/// first time — still true regardless of schedule, since
+/// `spawn_test_npcs`'s own one-shot latch plus `Option<..>` gates on the
+/// position being `Some` already handle "not spawned yet" defensively).
 ///
-/// Add AFTER [`SimBridgePlugin`] AND AFTER [`crate::PlayerBridgePlugin`] (for
-/// registration-order hygiene matching the explicit constraint below; the
-/// constraint itself is what actually enforces the dependency).
+/// Add AFTER [`SimBridgePlugin`]. Registration order relative to
+/// [`crate::PlayerBridgePlugin`] no longer matters for this ordering (they are
+/// different schedules now).
 pub struct SimEntityMirrorPlugin;
 
 impl Plugin for SimEntityMirrorPlugin {
     fn build(&self, app: &mut App) {
         // EM-3.11b: FixedUpdate alongside `tick_sim` — see its doc. Chaining
         // `.after(tick_sim)` requires both to live in the same schedule.
-        // EM-3.11o: also `.after(tick_player)` — see this plugin's doc for
-        // why an explicit constraint (not just registration order) is
-        // required now that `spawn_test_npcs` reads `EmbeddedPlayer`.
+        // BL-82 EM-4.11: the former `.after(tick_player)` constraint was
+        // removed here — `tick_player` no longer runs in `FixedUpdate` (see
+        // this plugin's doc comment above).
         //
         // EM-4.2f: `init_resource` only INSERTS if missing (never overwrites),
         // so if `xindeler-oracle-host`'s `AiGatewayPlugin` already inserted a
@@ -966,7 +980,6 @@ impl Plugin for SimEntityMirrorPlugin {
                 (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
                     .chain()
                     .after(tick_sim)
-                    .after(tick_player)
                     .after(ensure_default_dimension)
                     .run_if(in_state(ClientState::Disconnected)),
             )

@@ -142,15 +142,17 @@ impl Plugin for ListenServerPlugin {
             // (EM-3.7b). Specs/client crate stays inside the bridge.
             //
             // EM-3.11o: registered BEFORE `SimEntityMirrorPlugin` — its
-            // `spawn_test_npcs` system now reads `EmbeddedPlayer` (written by
-            // this plugin's `tick_player`), matching the "add AFTER
+            // `spawn_test_npcs` system reads `EmbeddedPlayer` (written by this
+            // plugin's `tick_player`), matching the "add AFTER
             // PlayerBridgePlugin" convention `LodAltStreamPlugin` below
-            // already follows. `SimEntityMirrorPlugin` also carries an
-            // explicit `.after(tick_player)` schedule constraint (see its
-            // doc), so this ordering is redundant-but-consistent rather than
-            // load-bearing — a reviewer flagged the previous
-            // registration-order mismatch as worth fixing regardless, since
-            // registration order alone would NOT have been sufficient.
+            // already follows. BL-82 EM-4.11: `tick_player` now runs in
+            // `Update` (frame-rate local prediction), NOT `FixedUpdate`
+            // alongside `SimEntityMirrorPlugin`'s systems any more, so the
+            // explicit `.after(tick_player)` constraint that plugin used to
+            // carry has been removed (a cross-schedule ordering constraint no
+            // longer applies) — see that plugin's doc for the resulting
+            // one-frame-stale-but-harmless read. This registration order is
+            // now purely a documentation convention, not load-bearing.
             PlayerBridgePlugin,
             // Server shell: entity mirror (sim entities → replicated Bevy
             // entities) + one-shot test-NPC spawn (EM-3.7). Specs stays inside.

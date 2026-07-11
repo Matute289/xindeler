@@ -247,6 +247,14 @@ pub struct NetLocalPlayer;
 pub struct PredictedLocalTransform {
     pub pos: Vec3,
     pub ori: Quat,
+    /// Forward-looking: no current reader (`xindeler-client::entity_view`'s
+    /// `interpolate_entities` only drives `Transform` from `pos`/`ori`; its
+    /// own `Interpolated` presentation buffer has no velocity field either).
+    /// Carried here anyway — mirroring every other mirrored entity's
+    /// [`NetVel`] — for a future consumer (camera lean/tilt, animation blend
+    /// weight, etc.) that wants the local player's own predicted velocity
+    /// without a second lookup; negligible cost (one axis-swap per frame) to
+    /// keep it current.
     pub vel: Vec3,
 }
 
