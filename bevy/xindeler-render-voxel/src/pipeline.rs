@@ -156,6 +156,55 @@
 //! timing/throughput/geometry, keeps the placeholder reading as "something is
 //! loading here" at every distance instead of dissolving into the horizon.
 //!
+//! ## BL-82 EM-3.11 follow-up (2026-07-11) — the placeholder/far-mesh seam
+//! A `bevy-migration-reviewer` MAJOR (explicitly flagged UNTESTED — a
+//! hypothesis, not a confirmed bug) worried that round 14's `fog_enabled:
+//! false` and `xindeler-client`'s far-mesh dissolve (PR #60,
+//! `far_terrain_material.rs`) — both landed the same session, never tested
+//! together — could trade "background disappears" for a NEW artifact: a
+//! flat, un-fogged placeholder popping visibly next to the heavily
+//! fog/haze-dissolved far mesh right at `chunk_render_distance`.
+//!
+//! Reproduced and confirmed with the same frozen-camera consecutive-frame
+//! technique round 14 used (`XINDELER_SMOKE_FAR_MESH_CAM=1` + a temporary
+//! per-frame burst capture): a solid, hard-edged, warm rock-grey box is
+//! plainly visible against the horizon for ~10+ consecutive captured frames
+//! (`burst_00201.png`–`burst_00210.png` of that run) before resolving into
+//! real meshed terrain — exactly the hypothesized artifact, real and
+//! visible, though categorically milder than round 14's bug (the box IS
+//! visible, just starkly flat next to its surroundings, rather than
+//! invisible). Root cause: near `chunk_render_distance`, real terrain and the
+//! far mesh's own near edge are BOTH already heavily blended toward the
+//! atmosphere's fog/sky colour (real terrain via `DistanceFog`, the far mesh
+//! via `DistanceFog` PLUS its own dissolve once beyond `bend_start` — see
+//! `far_terrain_material.wgsl`) — round 14 made the placeholder the ONE thing
+//! in that band immune to any such blending, so it now reads as a distinctly
+//! flat, saturated slab against an otherwise uniformly hazy scene.
+//!
+//! Fix: [`PlaceholderHazeTint`] — an OPTIONAL, host-installed resource
+//! carrying the live atmosphere colour to blend toward, and
+//! [`PLACEHOLDER_HAZE_BLEND`] — a capped, DISTANCE-INDEPENDENT blend factor
+//! (unlike `DistanceFog`, which ramps toward ~100% with distance — the exact
+//! mechanism round 14 had to disable because it erased the placeholder
+//! entirely). [`sync_placeholder_haze`] re-checks the shared placeholder
+//! material against the live tint every frame one is installed, but only
+//! WRITES when the target colour actually differs from what's applied
+//! (a `bevy-migration-reviewer` finding: `Assets::get_mut` unconditionally
+//! marks an asset modified regardless of whether the value changed, so a
+//! naive unconditional write would re-extract this material into the render
+//! world every frame forever, settled or not — see that function's own doc
+//! comment for why a `resource_changed`-style gate at the registration site,
+//! the seemingly obvious fix, is actually wrong instead: a placeholder can
+//! first appear long after the tint last changed). Absent a tint (e.g. the
+//! synthetic demo, which has no atmosphere), the placeholder stays
+//! [`PLACEHOLDER_BASE_COLOR`] verbatim — current, round-14 behaviour,
+//! unchanged. This softens the box toward its surroundings' general haze
+//! WITHOUT reintroducing per-fragment distance-fog (so it can never wash out
+//! completely the way round 14's bug did) and without touching timing, size,
+//! or throughput — see
+//! `docs/design/specs/2026-07-09-bl82-em311-findings-log.md` for the full
+//! investigation, evidence, and before/after screenshots.
+//!
 //! Instrumentation: `tracing` spans around each mesh task
 //! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
 //! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
@@ -173,7 +222,7 @@ use std::{
 use bevy::{
     app::{App, Plugin, Update},
     asset::{Assets, Handle, RenderAssetUsages},
-    color::Color,
+    color::{Color, Mix},
     ecs::{
         component::Component,
         entity::Entity,
@@ -181,7 +230,7 @@ use bevy::{
         schedule::{
             IntoScheduleConfigs, SystemCondition, SystemSet, common_conditions::resource_exists,
         },
-        system::{Commands, Local, Res, ResMut},
+        system::{Commands, Res, ResMut},
     },
     math::Vec3,
     mesh::{Indices, Mesh as BevyMesh, Mesh3d, PrimitiveTopology},
@@ -438,12 +487,19 @@ pub fn chunk_transform(key: ChunkKey) -> Transform {
     Transform::from_xyz((key.x * sz.x) as f32, 0.0, -(key.y * sz.y) as f32)
 }
 
-/// EM-3.11h — first-load placeholder assets, cached [`Local`] to
-/// [`spawn_chunk_mesh_tasks`]: every placeholder chunk reuses the SAME
-/// unit-box mesh (stretched to the chunk's footprint/height via its
+/// EM-3.11h — first-load placeholder assets: every placeholder chunk reuses
+/// the SAME unit-box mesh (stretched to the chunk's footprint/height via its
 /// per-entity `Transform` scale, [`placeholder_transform`]) and the SAME
 /// material, so spawning one costs a component insert, not a fresh asset.
-#[derive(Default)]
+///
+/// A [`Resource`] (not a [`bevy::ecs::system::Local`] to
+/// [`spawn_chunk_mesh_tasks`] as in EM-3.11h originally) as of the
+/// EM-3.11-follow-up seam-artifact fix (module docs): [`sync_placeholder_haze`]
+/// needs the same material handle to keep its colour live, so the handle can
+/// no longer be private per-system state. Behaviour is otherwise identical —
+/// still exactly one mesh/material pair for the process's whole lifetime,
+/// still created lazily on first use.
+#[derive(Resource, Default)]
 struct PlaceholderAssets {
     mesh: Option<Handle<BevyMesh>>,
     material: Option<Handle<StandardMaterial>>,
@@ -513,6 +569,39 @@ fn placeholder_box_mesh() -> BevyMesh {
     mesh
 }
 
+/// The placeholder's neutral "obviously a placeholder" rock-grey, chosen in
+/// EM-3.11i to stay legible under any lighting condition. Pulled out as a
+/// named const (was inline in [`placeholder_material`]) so
+/// [`sync_placeholder_haze`] can blend FROM this exact value rather than
+/// duplicating the literal.
+const PLACEHOLDER_BASE_COLOR: Color = Color::srgb(0.35, 0.33, 0.30);
+
+/// Capped, distance-independent blend factor [`sync_placeholder_haze`] mixes
+/// [`PlaceholderHazeTint`] into the placeholder's `base_color` by (module
+/// docs' EM-3.11-follow-up section). Deliberately modest and NOT
+/// distance-scaled: round 14 already proved that letting fog ramp toward
+/// ~100% opacity with distance (`DistanceFog`) erases the placeholder
+/// entirely, which is exactly what `fog_enabled: false` exists to prevent.
+/// This is a fixed, one-time tint instead — enough to soften the box toward
+/// its surroundings' general haze (confirmed necessary by a live
+/// frozen-camera capture, module docs) without ever fully washing it out,
+/// however far or long it stays up. Comparable in spirit to
+/// `xindeler-client::far_terrain::FAR_HAZE_BLEND` (0.12, a similar "small
+/// atmospheric finish, not a mask" role for the far mesh's own real colour);
+/// picked slightly higher here because this box is flat/monochrome (no
+/// per-vertex detail of its own to preserve) and sits right at the same
+/// render-distance band the far mesh's near edge is already heavily hazed at.
+const PLACEHOLDER_HAZE_BLEND: f32 = 0.2;
+
+/// Host-installed, OPTIONAL live "haze" colour for the placeholder box
+/// (module docs' EM-3.11-follow-up section) — typically the current
+/// atmosphere's fog colour. Absent entirely is a valid, honestly-degraded
+/// state (e.g. the synthetic voxel-demo, which has no atmosphere concept):
+/// the placeholder then stays [`PLACEHOLDER_BASE_COLOR`] verbatim, exactly
+/// EM-3.11i/round-14 behaviour, unchanged.
+#[derive(Resource, Clone, Copy)]
+pub struct PlaceholderHazeTint(pub Color);
+
 /// EM-3.11i — a neutral rock-grey, genuinely `unlit`. See the module docs'
 /// EM-3.11i section for the full story: the original EM-3.11h material was
 /// a normally-lit `StandardMaterial`, which a real gameplay capture proved
@@ -555,12 +644,63 @@ fn placeholder_box_mesh() -> BevyMesh {
 /// instead of dissolving into the horizon.
 fn placeholder_material() -> StandardMaterial {
     StandardMaterial {
-        base_color: Color::srgb(0.35, 0.33, 0.30),
+        base_color: PLACEHOLDER_BASE_COLOR,
         unlit: true,
         cull_mode: None,
         fog_enabled: false,
         ..Default::default()
     }
+}
+
+/// Keeps the shared placeholder material's `base_color` blended
+/// [`PLACEHOLDER_HAZE_BLEND`] toward the live [`PlaceholderHazeTint`], when a
+/// host has installed one (module docs' EM-3.11-follow-up section). Runs
+/// unconditionally every `Update` (no `run_if`) but only ever WRITES when the
+/// freshly-recomputed target colour actually differs from what's already
+/// applied — see the comment inline below for why a `resource_changed`-style
+/// gate at the registration site would have been the wrong tool here despite
+/// looking like the obvious one.
+fn sync_placeholder_haze(
+    tint: Option<Res<PlaceholderHazeTint>>,
+    assets: Res<PlaceholderAssets>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
+) {
+    let Some(tint) = tint else { return };
+    let Some(mut materials) = materials else {
+        return;
+    };
+    let Some(handle) = assets.material.as_ref() else {
+        return;
+    };
+    let target = PLACEHOLDER_BASE_COLOR.mix(&tint.0, PLACEHOLDER_HAZE_BLEND);
+    // Peek IMMUTABLY first (bevy-migration-reviewer finding): `Assets::
+    // get_mut` returns a change-detection guard whose `DerefMut`/`Drop`
+    // unconditionally mark the asset modified and push `AssetEvent::
+    // Modified` (verified against `bevy_asset-0.19.0`'s `assets.rs`),
+    // regardless of whether the value written is actually different —
+    // driving `bevy_render`'s generic re-extraction path for this material
+    // every single frame, forever, once any placeholder had ever spawned.
+    // A plain `run_if(resource_changed::<PlaceholderHazeTint>)` at the
+    // registration site would dodge that cost but silently break
+    // correctness instead: a chunk (and its placeholder) can first stream in
+    // long AFTER the tint last changed (the common case once the atmosphere
+    // has settled), and that placeholder would then never pick up the
+    // current tint at all. Re-deriving `target` from CURRENT state every
+    // frame and only taking the mutable path when it actually differs from
+    // what's already applied is correct in both the "tint just changed"
+    // and "a fresh placeholder just appeared" cases, while still making the
+    // steady-state (settled atmosphere, no new placeholders) cost a single
+    // cheap immutable lookup + `Color` comparison, no asset-system churn.
+    let Some(current) = materials.get(handle) else {
+        return;
+    };
+    if current.base_color == target {
+        return;
+    }
+    let Some(mut material) = materials.get_mut(handle) else {
+        return;
+    };
+    material.base_color = target;
 }
 
 /// In-flight meshing cap factor: [`spawn_chunk_mesh_tasks`] stops draining
@@ -647,6 +787,7 @@ impl Plugin for ChunkMeshPipelinePlugin {
             .init_resource::<ChunkMeshIndex>()
             .init_resource::<ChunkUploadStats>()
             .init_resource::<ChunkUploadBudget>()
+            .init_resource::<PlaceholderAssets>()
             .add_systems(
                 Update,
                 (
@@ -659,7 +800,21 @@ impl Plugin for ChunkMeshPipelinePlugin {
                 )
                     .chain()
                     .in_set(ChunkMeshPipelineSet),
-            );
+            )
+            // EM-3.11-follow-up (module docs): independent of the removals→
+            // spawn→apply chain above — only needs `Assets<StandardMaterial>`
+            // + the two placeholder resources, and a one-frame lag on the
+            // very first placeholder ever spawned (before its material
+            // exists to tint) is negligible. Deliberately NO `run_if` here —
+            // see [`sync_placeholder_haze`]'s own doc comment for why a
+            // `resource_changed`-gated version (the seemingly obvious
+            // optimization, flagged by a `bevy-migration-reviewer` pass) is
+            // actually WRONG: it would silently stop tinting any placeholder
+            // that first spawns after the tint last changed, which is the
+            // common case once the atmosphere settles. The function itself
+            // already avoids the real cost (an unconditional write every
+            // frame) by peeking before writing.
+            .add_systems(Update, sync_placeholder_haze);
     }
 }
 
@@ -706,7 +861,7 @@ fn spawn_chunk_mesh_tasks(
     mut index: ResMut<ChunkMeshIndex>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut placeholder_materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut placeholder_assets: Local<PlaceholderAssets>,
+    mut placeholder_assets: ResMut<PlaceholderAssets>,
 ) {
     if queue.is_empty() {
         return;

@@ -25,7 +25,7 @@ use std::sync::{
 use bevy::{
     app::App,
     asset::{AssetApp, AssetPlugin, Assets, Handle},
-    color::Luminance,
+    color::{Color, Luminance},
     ecs::{entity::Entity, query::With},
     mesh::{Mesh3d, VertexAttributeValues},
     pbr::{MeshMaterial3d, StandardMaterial},
@@ -42,7 +42,7 @@ use xindeler_render_voxel::{
     pipeline::{
         ChunkLayerMap, ChunkMaterials, ChunkMeshIndex, ChunkMeshPipelinePlugin, ChunkMeshQueue,
         ChunkUploadBudget, ChunkUploadStats, ChunkVolume, ChunkVolumeProvider, FluidChunkMesh,
-        PlaceholderChunkMesh, TerrainChunkMesh,
+        PlaceholderChunkMesh, PlaceholderHazeTint, TerrainChunkMesh,
     },
 };
 
@@ -768,4 +768,106 @@ fn placeholder_material_is_immune_to_distance_fog() {
          render-distance band where new chunks stream in, a fog-enabled placeholder washes out to \
          the pale fog/sky colour and reads as empty background rather than a visible placeholder"
     );
+}
+
+/// BL-82 EM-3.11 follow-up (2026-07-11): with no host-installed
+/// [`PlaceholderHazeTint`] — the common case for any host that doesn't track
+/// atmosphere (e.g. the synthetic voxel-demo) — the placeholder must stay
+/// its plain rock-grey, byte-for-byte the same as round 14. `sync_
+/// placeholder_haze` must be a strict no-op in this configuration, not just
+/// "close enough".
+#[test]
+fn placeholder_material_stays_untinted_without_a_host_haze() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+    app.update(); // give `sync_placeholder_haze` a chance to run at all
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        Color::srgb(0.35, 0.33, 0.30).to_srgba(),
+        "with no PlaceholderHazeTint installed, base_color must stay exactly the round-14 \
+         rock-grey — no host means no tint, not a default tint"
+    );
+}
+
+/// BL-82 EM-3.11 follow-up (2026-07-11) — the reviewer-flagged, now-confirmed
+/// seam artifact (pipeline module docs): a live frozen-camera capture showed
+/// the round-14 fog-immune placeholder reading as a starkly flat, hard-edged
+/// box against the already-heavily-hazed far mesh/real-terrain right at
+/// `chunk_render_distance`. `PlaceholderHazeTint` fixes this by blending the
+/// placeholder's base colour toward a host-installed haze colour — this test
+/// pins that the blend actually happens, and that it is CAPPED (not a full
+/// wash to the tint colour, which would just reintroduce round 14's bug by a
+/// different mechanism).
+#[test]
+fn placeholder_material_blends_toward_a_host_installed_haze_tint() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let tint = Color::srgb(0.66, 0.73, 0.81); // a plausible pale fog colour
+    app.world_mut().insert_resource(PlaceholderHazeTint(tint));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+    app.update(); // let sync_placeholder_haze run against the now-existing material
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    let base = Color::srgb(0.35, 0.33, 0.30).to_srgba();
+    let got = material.base_color.to_srgba();
+    let haze = tint.to_srgba();
+
+    assert_ne!(
+        got, base,
+        "with a PlaceholderHazeTint installed, base_color must move away from the plain rock-grey"
+    );
+    assert_ne!(
+        got, haze,
+        "the blend must be CAPPED, not a full wash to the tint colour — a full wash would \
+         reintroduce round 14's bug (the placeholder becoming indistinguishable from the fog/sky \
+         colour) by a different mechanism"
+    );
+    // Every channel must sit strictly between base and haze (a partial lerp),
+    // not overshoot past either endpoint.
+    for (b, h, g) in [
+        (base.red, haze.red, got.red),
+        (base.green, haze.green, got.green),
+        (base.blue, haze.blue, got.blue),
+    ] {
+        let (lo, hi) = (b.min(h), b.max(h));
+        assert!(
+            g >= lo - 1e-4 && g <= hi + 1e-4,
+            "blended channel {g} must lie between base {b} and haze {h}"
+        );
+    }
 }

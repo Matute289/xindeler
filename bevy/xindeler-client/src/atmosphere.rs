@@ -23,6 +23,7 @@ use xindeler_oracle_host::{
     AtmosphereController, AtmosphereProfile, XindelerAtmospherePlugin,
     atmosphere::DEFAULT_PROFILE_ASSET_PATH,
 };
+use xindeler_render_voxel::pipeline::PlaceholderHazeTint;
 
 use crate::light::{Sun, SunCycle};
 
@@ -61,16 +62,50 @@ impl Plugin for AtmospherePlugin {
         // shipped default.atmo.ron carries (single source of truth, no boot pop);
         // apply_atmosphere lerps/applies it like every other atmosphere knob.
         app.insert_resource(ambient_light_from(&AtmosphereProfile::default()));
+        // BL-82 EM-3.11 follow-up (2026-07-11, `xindeler-render-voxel`
+        // pipeline module docs): boot with a tint already installed so the
+        // very first placeholder ever spawned (before any transition has
+        // made `AtmosphereController` "changed") is tinted too, not just
+        // ones spawned after the first profile animation.
+        app.insert_resource(PlaceholderHazeTint(profile_fog_color(
+            &AtmosphereProfile::default(),
+        )));
         app.add_plugins(XindelerAtmospherePlugin {
             profile_path: PROFILE_ASSET_PATH.to_owned(),
         })
         .add_systems(
             PostUpdate,
-            apply_atmosphere
-                .in_set(PresentationSet)
+            (
+                apply_atmosphere.in_set(PresentationSet),
+                sync_placeholder_haze_tint,
+            )
                 .run_if(resource_changed::<AtmosphereController>),
         );
     }
+}
+
+/// BL-82 EM-3.11 follow-up (2026-07-11) — keeps
+/// [`xindeler_render_voxel::pipeline::PlaceholderHazeTint`] synced from the
+/// live atmosphere's fog colour, the same "fog_color, not sky_color" choice
+/// `far_terrain_material.rs`'s own dissolve makes (module docs there: fog
+/// colour closely matches the physically-based sky's own horizon gradient,
+/// while sky_color is the dark void `ClearColor` tone, only ever visible
+/// where nothing draws at all). Runs alongside [`apply_atmosphere`] under the
+/// same `resource_changed::<AtmosphereController>` gate — a transition
+/// animates the controller every frame it's in flight, so this stays live
+/// throughout, and is a no-op (system doesn't even run) once settled. Writes
+/// through `ResMut` directly (not `Commands::insert_resource`, a
+/// `bevy-migration-reviewer` nit): the resource is unconditionally present
+/// from boot (`AtmospherePlugin::build` inserts the default-profile colour
+/// up front, precisely so the very first placeholder is tinted too), so
+/// there is nothing here that needs `Commands`' "might not exist yet" /
+/// deferred-apply behaviour — a direct mutation lands this same frame
+/// instead of after the next command-flush.
+fn sync_placeholder_haze_tint(
+    controller: Res<AtmosphereController>,
+    mut tint: ResMut<PlaceholderHazeTint>,
+) {
+    tint.0 = profile_fog_color(&controller.current);
 }
 
 /// `DistanceFog` built from a profile. Used both by the camera rig at spawn
