@@ -1,0 +1,17 @@
+// Default predictive-GC tuning config (BL-82 EM-4.10 T48.6).
+//
+// Schema: `PredictiveGcAsset` in bevy/xindeler-dimensions/src/predictive_gc.rs.
+// These values MUST equal `PredictiveGc::default()` (unit-tested there): the
+// first load of this file is a behavior-preserving no-op. They are
+// PLACEHOLDER values, not tuned against real telemetry (no real
+// instanced-dimension usage exists yet to calibrate against — see
+// predictive_gc.rs's module doc) — retune this file by hand once real
+// session-length data exists; no rebuild is required to do so.
+(
+    // N: consecutive declining samples required before condition (a) fires.
+    decline_window_samples: 3,
+    // How often a sample is taken, in whole seconds.
+    sample_period_secs: 30,
+    // M: no occupant may have arrived within this many seconds (condition b).
+    no_arrival_window_secs: 120,
+)

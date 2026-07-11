@@ -156,8 +156,23 @@ fn within_band(point: Vec3, eye: Vec3, max_distance: f32) -> bool {
 }
 
 /// Sets `vis` to the band result, counting the flip for the stats. Kept tiny so
-/// both chunk queries share it.
-fn apply_band(visible: bool, vis: &mut Visibility, shown: &mut u32, hidden: &mut u32) {
+/// both chunk queries share it. `flips` counts an ACTUAL band-boundary
+/// crossing this frame (visible→hidden or vice versa) — separate from
+/// `shown`/`hidden`, which count the current STATE regardless of whether it
+/// changed. BL-82 EM-3.11p round 11: instrumented to test a new hypothesis —
+/// a diagonal camera path may cross this circular distance-band boundary at a
+/// different rate than a straight one (same grid-vs-direction geometry
+/// argument as EM-3.11n's terrain-streaming dirty-marking finding, but
+/// applied to this STEADY-STATE per-frame system instead of new-chunk
+/// arrival), which would cost extra `Changed<Visibility>` propagation work
+/// even with NO terrain streaming in flight.
+fn apply_band(
+    visible: bool,
+    vis: &mut Visibility,
+    shown: &mut u32,
+    hidden: &mut u32,
+    flips: &mut u32,
+) {
     let want = if visible {
         *shown += 1;
         Visibility::Visible
@@ -169,6 +184,7 @@ fn apply_band(visible: bool, vis: &mut Visibility, shown: &mut u32, hidden: &mut
     // `Changed<Visibility>` (and the visibility propagation it drives).
     if *vis != want {
         *vis = want;
+        *flips += 1;
     }
 }
 
@@ -183,22 +199,35 @@ fn cull_chunk_meshes(
     mut terrain: Query<(&TerrainChunkMesh, &mut Visibility), Without<FluidChunkMesh>>,
     mut fluid: Query<(&FluidChunkMesh, &mut Visibility), Without<TerrainChunkMesh>>,
     mut stats: ResMut<CullStats>,
+    mut perf_log: Local<Option<bool>>,
 ) {
     let Some(eye) = camera.iter().next().map(GlobalTransform::translation) else {
         return; // no camera yet — leave everything as-is
     };
     let max = config.chunk_render_distance;
-    let (mut shown, mut hidden) = (0u32, 0u32);
+    let (mut shown, mut hidden, mut flips) = (0u32, 0u32, 0u32);
     for (marker, mut vis) in &mut terrain {
         let visible = within_band(chunk_center_bevy(marker.key), eye, max);
-        apply_band(visible, &mut vis, &mut shown, &mut hidden);
+        apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     for (marker, mut vis) in &mut fluid {
         let visible = within_band(chunk_center_bevy(marker.key), eye, max);
-        apply_band(visible, &mut vis, &mut shown, &mut hidden);
+        apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     stats.chunks_visible = shown;
     stats.chunks_hidden = hidden;
+
+    // BL-82 EM-3.11p round 11: opt-in per-frame flip-rate log (see
+    // `apply_band`'s docs) — gated so the always-on cost is a cached bool
+    // check, not a per-frame env read.
+    let log_enabled = *perf_log
+        .get_or_insert_with(|| std::env::var("XINDELER_CULL_PERF_LOG").is_ok_and(|v| v != "0"));
+    if log_enabled && flips > 0 {
+        debug!(
+            flips,
+            shown, hidden, "EM-3.11p round 11: chunk cull band flips this frame"
+        );
+    }
 }
 
 /// Sprite density band: hides a whole per-chunk sprite parent beyond
@@ -211,18 +240,32 @@ fn cull_sprite_chunks(
     config: Res<CullingConfig>,
     mut parents: Query<(&SpriteChunkParent, &mut Visibility)>,
     mut stats: ResMut<CullStats>,
+    mut perf_log: Local<Option<bool>>,
 ) {
     let Some(eye) = camera.iter().next().map(GlobalTransform::translation) else {
         return;
     };
     let max = config.sprite_render_distance;
-    let (mut shown, mut hidden) = (0u32, 0u32);
+    let (mut shown, mut hidden, mut flips) = (0u32, 0u32, 0u32);
     for (parent, mut vis) in &mut parents {
         let visible = within_band(parent.centroid, eye, max);
-        apply_band(visible, &mut vis, &mut shown, &mut hidden);
+        apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     stats.sprite_parents_visible = shown;
     stats.sprite_parents_hidden = hidden;
+
+    // See `cull_chunk_meshes`'s matching log for why (BL-82 EM-3.11p round
+    // 11): sprite parents dominate entity count, so a per-frame flip burst
+    // here (hiding/showing a whole subtree via `InheritedVisibility`) is a
+    // plausible steady-state cost that could differ by movement heading.
+    let log_enabled = *perf_log
+        .get_or_insert_with(|| std::env::var("XINDELER_CULL_PERF_LOG").is_ok_and(|v| v != "0"));
+    if log_enabled && flips > 0 {
+        debug!(
+            flips,
+            shown, hidden, "EM-3.11p round 11: sprite cull band flips this frame"
+        );
+    }
 }
 
 #[cfg(test)]

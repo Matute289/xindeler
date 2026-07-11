@@ -48,7 +48,7 @@ use crate::atmosphere::{AtmosphereProfile, sane};
 
 /// One dungeon-master event: a self-contained "spin up an instanced
 /// encounter" spec ORACLE's tooling writes as a file (migration spec §5.1's
-/// Ravenloft example — `dimension_config`, `atmosphere`, `spawning_rules`,
+/// Mist-Bound example — `dimension_config`, `atmosphere`, `spawning_rules`,
 /// `narrative`). `#[serde(default)]` throughout so partial files keep
 /// loading as the schema grows, exactly like [`AtmosphereProfile`].
 #[derive(Asset, TypePath, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -488,7 +488,7 @@ mod tests {
         let original = DmEvent {
             dimension_config: DimensionConfig {
                 seed_modifier: 42,
-                biome_profile: "ravenloft_mist".to_owned(),
+                biome_profile: "mist_bound_mist".to_owned(),
             },
             atmosphere: AtmosphereProfile {
                 fog_density: 0.2,
@@ -503,7 +503,7 @@ mod tests {
             },
             narrative: Narrative {
                 world_rumor: Some("A cold mist swallows the village.".to_owned()),
-                on_enter_message: Some("The gate to Ravenloft creaks open.".to_owned()),
+                on_enter_message: Some("The gate to the Mist-Bound creaks open.".to_owned()),
             },
         };
 

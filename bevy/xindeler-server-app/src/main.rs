@@ -32,6 +32,7 @@ mod sim;
 use bevy::{
     MinimalPlugins,
     app::{App, AppExit, PluginGroup, ScheduleRunnerPlugin},
+    asset::AssetPlugin,
 };
 
 use xindeler_oracle_host::AiGatewayConfig;
@@ -41,6 +42,30 @@ use crate::{
     plugin::SimServerPlugin,
     sim::{SIM_TICK_INTERVAL, SimServerConfig},
 };
+
+/// The game asset directory: `XINDELER_ASSETS` first, `VELOREN_ASSETS` as the
+/// transition fallback, then `<cwd>/assets` for dev runs — same precedence
+/// `xindeler_client::atmosphere::assets_root()` documents (duplicated rather
+/// than taking a dependency edge on the client crate for one helper; this
+/// shell has no other reason to depend on `xindeler-client`). Asset NAMES
+/// under the root stay Veloren-verbatim (isolation law #3) — only the env
+/// var rebrands.
+///
+/// Needed explicitly (BL-82 EM-4.10 T48.6): bevy's `AssetPlugin` default
+/// resolves `file_path` relative to `CARGO_MANIFEST_DIR`
+/// (`bevy/xindeler-server-app/`), not the workspace root, so the default
+/// would miss `assets/` entirely.
+fn assets_root() -> std::path::PathBuf {
+    std::env::var_os("XINDELER_ASSETS")
+        .or_else(|| std::env::var_os("VELOREN_ASSETS"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir().map_or_else(
+                |_| std::path::PathBuf::from("assets"),
+                |cwd| cwd.join("assets"),
+            )
+        })
+}
 
 fn main() -> AppExit {
     tracing_subscriber::fmt::init();
@@ -134,6 +159,15 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)))
+        // BL-82 EM-4.10 T48.6: headless-safe (`bevy_asset` pulls in no
+        // render/window deps — same posture `xindeler-oracle-host`'s own
+        // Cargo.toml documents). Needed so `PredictiveGcConfigPlugin`
+        // (`plugin.rs`) can load `predictive_gc`'s tuning constants from a
+        // RON file instead of a compiled-in Rust constant.
+        .add_plugins(AssetPlugin {
+            file_path: assets_root().to_string_lossy().into_owned(),
+            ..Default::default()
+        })
         .add_plugins(SimServerPlugin {
             config: SimServerConfig {
                 no_auth,

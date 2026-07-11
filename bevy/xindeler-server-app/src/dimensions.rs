@@ -141,23 +141,25 @@ pub fn apply_debug_dimension_commands(
 /// ## `teardown` is a snapshot gauge; `teardowns_total` is the durable signal
 /// (EM-4.6 follow-up, found while verifying the phase-4 wave-3 integration)
 /// `xindeler_dimensions::teardown::teardown_completed_dimensions` removes a
-/// dimension's registry entry in the SAME `Update` pass it observes it in
-/// `Teardown` (its own documented "immediate GC" posture — see that
-/// module's doc comment) — so `teardown` (an `IntGauge` reflecting only the
-/// CURRENT registry snapshot) can be, and in the common occupant-less-drain
-/// case reliably IS, zero on every single `/metrics` scrape: an external
-/// poller can never durably catch a dimension "currently in Teardown"
-/// because nothing keeps it there past the tick that discovers it. A
-/// dimension actually being torn down is still a real, meaningful event
-/// operators/tests want to observe — so `teardowns_total` is a genuinely
-/// monotonic `IntCounter`, bumped once per
+/// dimension's registry entry in the SAME `FixedUpdate` tick it observes it
+/// in `Teardown` (its own documented "immediate GC" posture — see that
+/// module's doc comment; EM-4.10 Finding B moved this chain off `Update`
+/// render cadence onto `FixedUpdate` sim cadence, this invariant is
+/// unaffected by that move) — so `teardown` (an `IntGauge` reflecting only
+/// the CURRENT registry snapshot) can be, and in the common
+/// occupant-less-drain case reliably IS, zero on every single `/metrics`
+/// scrape: an external poller can never durably catch a dimension
+/// "currently in Teardown" because nothing keeps it there past the tick
+/// that discovers it. A dimension actually being torn down is still a real,
+/// meaningful event operators/tests want to observe — so `teardowns_total`
+/// is a genuinely monotonic `IntCounter`, bumped once per
 /// [`xindeler_dimensions::DimensionTornDown`] message
 /// [`update_dimension_metrics`] drains — fired unconditionally, exactly
 /// once, at the removal site itself (`teardown_completed_dimensions`), so
 /// unlike a between-tick registry-id diff (this module's first cut, caught
 /// by an `ecs-design-reviewer` pass) it can never silently miss a dimension
 /// whose entire `Spinup -> Active -> Draining -> Teardown` lifecycle happens
-/// to complete within a single `Update` pass. Unlike the gauge, this
+/// to complete within a single `FixedUpdate` tick. Unlike the gauge, this
 /// survives being scraped any time after the event, same as
 /// `xindeler_oracle_host::ai_gateway`'s own `requests_total`/
 /// `fallback_total` counters.

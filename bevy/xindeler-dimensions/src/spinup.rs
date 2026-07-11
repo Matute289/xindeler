@@ -216,6 +216,20 @@ pub fn poll_spinup_tasks(mut registry: ResMut<DimensionRegistry>, mut tasks: Res
 /// with no self-heal path. Rejecting the request at its one entry point,
 /// before `begin_draining` ever runs, closes the hole at its source instead
 /// of only mitigating the destructive symptom two systems downstream.
+///
+/// ## EM-4.10 Finding D update: `begin_draining` now ALSO guards itself
+/// `DimensionRegistry::begin_draining` (see its own doc comment) independently
+/// rejects `DimensionId::DEFAULT` with a typed `DimensionError::
+/// CannotDrainDefault`, so a caller that bypasses this message handler
+/// entirely (a test, a future admin tool) is still protected. In production,
+/// THIS guard always intercepts first (nothing calls `begin_draining`
+/// directly on the message path), so `CannotDrainDefault` is currently
+/// unreachable via `DrainDimension` — the two guards are intentional
+/// defense-in-depth at different layers (this one is closest to the
+/// untrusted input and gives production observability via `tracing::error!`;
+/// the registry one protects every OTHER caller), not redundant cruft. Same
+/// posture `crate::teardown`'s module doc documents for its own now-mostly-
+/// unreachable backstop.
 pub fn handle_drain_requests(
     mut registry: ResMut<DimensionRegistry>,
     mut requests: MessageReader<DrainDimension>,
@@ -277,7 +291,13 @@ mod tests {
 
         app.world_mut()
             .write_message(DrainDimension(DimensionId::DEFAULT));
-        app.update();
+        // EM-4.10 Finding B: `handle_drain_requests` now lives in
+        // `FixedUpdate`, not `Update` — run that schedule directly (rather
+        // than `app.update()`, which would depend on `Time::<Fixed>`'s
+        // real-time accumulator) so this genuinely exercises the guard
+        // instead of trivially passing because the handler never ran at
+        // all.
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
 
         assert_eq!(
             app.world()

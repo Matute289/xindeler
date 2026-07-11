@@ -20,6 +20,23 @@
 //! auto-tune `N`/`M` — that is explicitly out of scope (spec §1.9's own
 //! scope boundary) until real telemetry exists to justify it.
 //!
+//! ## BL-82 EM-4.10 T48.6 — these placeholders are now RON-retunable
+//! [`PredictiveGc`] is genuinely LIVE IN PRODUCTION the moment more than one
+//! dimension exists (`DimensionsPlugin` is unconditionally added by
+//! `xindeler-server-app::SimServerPlugin`) — so these were production balance
+//! numbers living as compiled-in Rust constants, against this project's
+//! data-driven-content convention. [`PredictiveGcAsset`] +
+//! [`PredictiveGcLoader`] load the same shape from a RON file
+//! (`assets/xindeler/dimensions/default.predictive_gc.ron`), mirroring
+//! `xindeler_oracle_host::atmosphere`'s `AtmosphereProfile`/
+//! `AtmosphereProfileLoader` split exactly (minus the interpolation — a
+//! config reload here just replaces [`PredictiveGc`] outright, there is
+//! nothing to animate). [`PredictiveGcConfigPlugin`] is the opt-in Bevy
+//! wiring; see its doc comment for why it is deliberately SEPARATE from
+//! [`crate::plugin::DimensionsPlugin`] (which keeps inserting this module's
+//! compiled-in `Default` as the sane fallback the task's own acceptance bar
+//! asks for).
+//!
 //! The decision logic itself ([`PredictiveGcTracker`]) is a small, pure,
 //! wall-clock-independent state machine — deliberately factored out of the
 //! Bevy system ([`predictive_gc_system`]) so the heuristic's exact firing
@@ -29,7 +46,12 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use bevy::prelude::*;
+use bevy::{
+    asset::{Asset, AssetLoader, LoadContext, io::Reader},
+    prelude::*,
+    reflect::TypePath,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     component::DimensionId, lifecycle::DimensionLifecycle, registry::DimensionRegistry,
@@ -65,6 +87,190 @@ impl Default for PredictiveGc {
             sample_period: Duration::from_secs(30),
             no_arrival_window: Duration::from_secs(120),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RON asset (BL-82 EM-4.10 T48.6) — see the module doc's own section
+// ---------------------------------------------------------------------------
+
+/// Canonical asset path (relative to the `assets/` source root) of the
+/// shipped config [`PredictiveGcConfigPlugin`] boots with. Values MUST equal
+/// [`PredictiveGc::default`] (unit-tested below) so the first load is a
+/// behavior-preserving no-op, exactly like `default.atmo.ron`'s own
+/// same-values-as-the-Rust-`Default` contract.
+pub const DEFAULT_CONFIG_ASSET_PATH: &str = "xindeler/dimensions/default.predictive_gc.ron";
+
+/// RON-loadable shape of [`PredictiveGc`]'s three tuning constants. Kept as a
+/// SEPARATE type from `PredictiveGc` itself (rather than making `PredictiveGc`
+/// an `Asset`) so `PredictiveGc` stays a plain `Resource` every existing unit
+/// test in this module already constructs directly (`PredictiveGc { .. }`) —
+/// this newtype is only the `bevy_asset` boundary, mirroring
+/// `xindeler_oracle_host::atmosphere`'s `AtmosphereProfile`/
+/// `AtmosphereController` split.
+///
+/// Durations round-trip as whole seconds (`u64`), not `std::time::Duration`
+/// directly — this codebase has no established `serde`-for-`Duration`
+/// convention, and `AtmosphereProfile::transition_secs` already establishes
+/// "seconds as a plain number" as the house style for RON-authored durations.
+/// Whole seconds are ample precision for tuning a heuristic that operates on
+/// minutes-scale windows.
+#[derive(Asset, TypePath, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PredictiveGcAsset {
+    pub decline_window_samples: u32,
+    pub sample_period_secs: u64,
+    pub no_arrival_window_secs: u64,
+}
+
+impl Default for PredictiveGcAsset {
+    fn default() -> Self {
+        let defaults = PredictiveGc::default();
+        Self {
+            decline_window_samples: defaults.decline_window_samples,
+            sample_period_secs: defaults.sample_period.as_secs(),
+            no_arrival_window_secs: defaults.no_arrival_window.as_secs(),
+        }
+    }
+}
+
+impl From<PredictiveGcAsset> for PredictiveGc {
+    fn from(asset: PredictiveGcAsset) -> Self {
+        Self {
+            // `.max(1)`: `PredictiveGcTracker::observe` already defends
+            // against 0 internally, but a hand-edited/hostile RON file
+            // setting `decline_window_samples: 0` should read as "1" at the
+            // config boundary too, not merely be silently tolerated deeper
+            // in the pipeline (same "clamp on the way in" posture every
+            // other RON-loaded config in `bevy/` documents, e.g.
+            // `AiGatewayConfig::sanitize`).
+            decline_window_samples: asset.decline_window_samples.max(1),
+            sample_period: Duration::from_secs(asset.sample_period_secs),
+            no_arrival_window: Duration::from_secs(asset.no_arrival_window_secs),
+        }
+    }
+}
+
+/// Async [`AssetLoader`] for `predictive_gc.ron` (mirrors
+/// `AtmosphereProfileLoader`/`EntityTemplateLoader`'s shape exactly).
+#[derive(Default, TypePath)]
+pub struct PredictiveGcLoader;
+
+impl AssetLoader for PredictiveGcLoader {
+    type Asset = PredictiveGcAsset;
+    type Error = BevyError;
+    type Settings = ();
+
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        (): &Self::Settings,
+        _load_context: &mut LoadContext<'_>,
+    ) -> Result<Self::Asset, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let asset: PredictiveGcAsset = ron::de::from_bytes(&bytes)?;
+        Ok(asset)
+    }
+
+    fn extensions(&self) -> &[&str] { &["predictive_gc.ron"] }
+}
+
+/// Holds the strong handle keeping the loaded config (and its file watch, if
+/// the host app's `AssetPlugin` has `file_watcher` on) alive — same
+/// rationale `AtmosphereController::handle` documents.
+#[derive(Resource)]
+struct PredictiveGcConfigHandle(Handle<PredictiveGcAsset>);
+
+/// Registers the [`PredictiveGcAsset`] RON asset pipeline and keeps the live
+/// [`PredictiveGc`] resource in sync with whatever [`Self::config_path`]
+/// resolves to, including a hot-reloaded edit (when the host app's
+/// `AssetPlugin` has `file_watcher` active) — so retuning these constants
+/// never requires a rebuild.
+///
+/// Requires an `AssetPlugin` already present in the host `App` (same
+/// contract [`xindeler_oracle_host::atmosphere::XindelerAtmospherePlugin`]
+/// documents).
+///
+/// ## Deliberately SEPARATE from [`crate::plugin::DimensionsPlugin`]
+/// `DimensionsPlugin` is added by dozens of existing tests via bare
+/// `MinimalPlugins` (no `AssetPlugin`/`AssetServer`) — folding asset
+/// registration into it directly would panic every one of them
+/// (`init_asset_loader` requires `AssetServer` to already exist). A host app
+/// that HAS an `AssetPlugin` (the real dedicated-server shell,
+/// `xindeler-server-app`) adds THIS plugin in ADDITION to `DimensionsPlugin`;
+/// a bare test that only wants the registry/lifecycle machinery keeps getting
+/// `DimensionsPlugin`'s own `PredictiveGc::default()` untouched — the "sane
+/// fallback `Default` for tests that don't want to load an asset" this
+/// task's own acceptance bar asks for.
+pub struct PredictiveGcConfigPlugin {
+    /// Asset path (relative to the asset source root) of the config to boot
+    /// with.
+    pub config_path: String,
+}
+
+impl Default for PredictiveGcConfigPlugin {
+    fn default() -> Self {
+        Self {
+            config_path: DEFAULT_CONFIG_ASSET_PATH.to_owned(),
+        }
+    }
+}
+
+impl Plugin for PredictiveGcConfigPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_asset::<PredictiveGcAsset>()
+            .init_asset_loader::<PredictiveGcLoader>()
+            .add_systems(FixedUpdate, apply_predictive_gc_config);
+
+        let path = self.config_path.clone();
+        app.add_systems(
+            Startup,
+            move |asset_server: Res<AssetServer>, mut commands: Commands| {
+                commands.insert_resource(PredictiveGcConfigHandle(asset_server.load(path.clone())));
+            },
+        );
+    }
+}
+
+/// Applies a loaded/reloaded [`PredictiveGcAsset`] onto the live
+/// [`PredictiveGc`] resource. A no-op until the handle resolves (`Startup`'s
+/// `asset_server.load` is async) — [`predictive_gc_system`] keeps reading
+/// [`crate::plugin::DimensionsPlugin`]'s compiled-in default until then,
+/// exactly the behavior-preserving boot sequence this task's acceptance bar
+/// asks for. Lives in `FixedUpdate` (not `Update`), matching every other
+/// sim-bookkeeping system in this crate post-EM-4.10 Finding B.
+fn apply_predictive_gc_config(
+    handle: Option<Res<PredictiveGcConfigHandle>>,
+    assets: Res<Assets<PredictiveGcAsset>>,
+    mut events: MessageReader<AssetEvent<PredictiveGcAsset>>,
+    mut config: ResMut<PredictiveGc>,
+) {
+    let Some(handle) = handle else { return };
+    let relevant = events.read().any(|event| match event {
+        AssetEvent::Added { id } | AssetEvent::Modified { id } => *id == handle.0.id(),
+        _ => false,
+    });
+    if !relevant {
+        return;
+    }
+    if let Some(asset) = assets.get(&handle.0) {
+        let converted = PredictiveGc::from(*asset);
+        // Skip identical reloads (e.g. a file rewritten with unchanged
+        // content) so `ResMut::deref_mut` doesn't dirty the change tick for
+        // no actual change — same "check-before-write" discipline
+        // `AtmosphereController::is_settled_at` documents for its own
+        // reload path.
+        if converted == *config {
+            return;
+        }
+        *config = converted;
+        tracing::info!(
+            decline_window_samples = config.decline_window_samples,
+            sample_period_secs = config.sample_period.as_secs(),
+            no_arrival_window_secs = config.no_arrival_window.as_secs(),
+            "predictive_gc: applied config from RON asset"
+        );
     }
 }
 
@@ -173,7 +379,7 @@ pub struct PredictiveGcTrackers(HashMap<DimensionId, PredictiveGcTracker>);
 /// zero, overnight) as part of normal, healthy play; predictively draining
 /// (and thus eventually tearing down — see `crate::teardown`'s module doc)
 /// the persistent game world itself would be catastrophic. This heuristic
-/// only ever applies to actual INSTANCED dimensions (Ravenloft-style
+/// only ever applies to actual INSTANCED dimensions (Mist-Bound-style
 /// event/dungeon instances), which is the entire point of spec §1.9's
 /// mechanism in the first place.
 pub fn predictive_gc_system(
@@ -431,6 +637,90 @@ mod tests {
         assert!(
             drains.is_empty(),
             "DimensionId::DEFAULT must never receive a predictive DrainDimension request"
+        );
+    }
+
+    /// BL-82 EM-4.10 T48.6 acceptance: [`PredictiveGcAsset::default`] (what a
+    /// missing/empty RON file falls back to) converts to EXACTLY
+    /// [`PredictiveGc::default`] — the "shipped defaults are behavior-
+    /// preserving" contract, checked at the type level rather than only by
+    /// the shipped file's literal contents (the next test covers that).
+    #[test]
+    fn predictive_gc_asset_default_round_trips_to_predictive_gc_default() {
+        let converted: PredictiveGc = PredictiveGcAsset::default().into();
+        assert_eq!(converted, PredictiveGc::default());
+    }
+
+    /// The shipped `default.predictive_gc.ron` asset parses (via a plain RON
+    /// deserialize, no `AssetServer` needed) and converts to EXACTLY
+    /// [`PredictiveGc::default`] — mirrors
+    /// `entity_template::tests::shipped_sample_templates_parse_and_are_already_sane`'s
+    /// "the checked-in fixture, not just the type default" rigor.
+    #[test]
+    fn shipped_default_config_parses_and_matches_predictive_gc_default() {
+        let text = include_str!("../../../assets/xindeler/dimensions/default.predictive_gc.ron");
+        let parsed: PredictiveGcAsset =
+            ron::from_str(text).expect("default.predictive_gc.ron parses");
+        let converted: PredictiveGc = parsed.into();
+        assert_eq!(
+            converted,
+            PredictiveGc::default(),
+            "the shipped RON file must carry the SAME values as PredictiveGc::default() so the \
+             first load is a behavior-preserving no-op"
+        );
+    }
+
+    /// BL-82 EM-4.10 T48.6's actual bar: "boots with identical values from
+    /// RON" — proven end-to-end with a REAL `AssetServer` reading the REAL
+    /// shipped file off disk (not `include_str!`), starting from a
+    /// deliberately WRONG `PredictiveGc` so the assertion can only pass if
+    /// the shipped asset genuinely overwrote it (a silently-failed load would
+    /// leave the wrong value in place and fail this test).
+    #[test]
+    #[ignore = "boots a real AssetServer against the shipped assets dir; run locally with \
+                VELOREN_ASSETS=\"$(pwd)/assets\" cargo test -p xindeler-dimensions -- --ignored"]
+    fn shipped_predictive_gc_config_loads_via_a_real_asset_server() {
+        use std::path::PathBuf;
+
+        use bevy::{MinimalPlugins, app::PluginGroup, asset::AssetPlugin};
+
+        let assets_root = std::env::var_os("XINDELER_ASSETS")
+            .or_else(|| std::env::var_os("VELOREN_ASSETS"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map_or_else(|_| PathBuf::from("assets"), |cwd| cwd.join("assets"))
+            });
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build());
+        app.add_plugins(AssetPlugin {
+            file_path: assets_root.to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        // Deliberately wrong: only a genuine load of the shipped RON file
+        // (not merely leaving the Rust `Default` alone) can turn this into
+        // `PredictiveGc::default()` below.
+        app.insert_resource(PredictiveGc {
+            decline_window_samples: 999,
+            sample_period: Duration::from_secs(1),
+            no_arrival_window: Duration::from_secs(1),
+        });
+        app.add_plugins(PredictiveGcConfigPlugin::default());
+
+        let mut loaded = false;
+        for _ in 0..500 {
+            app.update();
+            if *app.world().resource::<PredictiveGc>() == PredictiveGc::default() {
+                loaded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            loaded,
+            "the shipped default.predictive_gc.ron asset should have loaded and overwritten the \
+             deliberately-wrong initial PredictiveGc within ~2.5s"
         );
     }
 }

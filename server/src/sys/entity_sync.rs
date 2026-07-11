@@ -1,5 +1,7 @@
 use super::sentinel::{DeletedEntities, TrackedStorages, UpdateTrackers};
-use crate::{EditableSettings, Tick, client::Client, presence::RegionSubscription};
+use crate::{
+    EditableSettings, Tick, client::Client, metrics::PlayerMetrics, presence::RegionSubscription,
+};
 use common::{
     calendar::Calendar,
     comp::{
@@ -21,6 +23,7 @@ use common_ecs::{Job, Origin, Phase, System};
 use common_net::{msg::ServerGeneral, sync::CompSyncPackage};
 use itertools::Either;
 use specs::{Entities, Join, LendJoin, Read, ReadExpect, ReadStorage, Write, WriteStorage};
+use tracing::debug;
 use vek::*;
 
 /// This system will send physics updates to the client
@@ -42,6 +45,7 @@ impl<'a> System<'a> for Sys {
         Write<'a, DeletedEntities>,
         Read<'a, EventBus<Outcome>>,
         ReadExpect<'a, EditableSettings>,
+        ReadExpect<'a, PlayerMetrics>,
         (
             ReadStorage<'a, Pos>,
             ReadStorage<'a, Vel>,
@@ -79,6 +83,7 @@ impl<'a> System<'a> for Sys {
             mut deleted_entities,
             outcomes,
             editable_settings,
+            player_metrics,
             (
                 positions,
                 velocities,
@@ -467,8 +472,27 @@ impl<'a> System<'a> for Sys {
             // management), not something to reintroduce here. This USED to be
             // an always-true invariant (hence the removed `dev_panic!`), but
             // is not anymore now that two transports coexist.
+            //
+            // BL-82 EM-4.10 (Finding E / T48.4): a bare drop here would be
+            // invisible data loss — restore observability (without going
+            // back to a hard `dev_panic!`, which would legitimately panic
+            // every replicon-authenticated player in a `dev`-profile build)
+            // via a debug log + a counter, so a real problem (e.g. this
+            // firing for a LEGACY client that lost its `Client` some other
+            // way) is still detectable.
             let Some(client) = client else {
-                buf.take_events();
+                let dropped = buf.take_events();
+                if !dropped.is_empty() {
+                    player_metrics
+                        .replicon_inventory_updates_dropped
+                        .inc_by(dropped.len() as u64);
+                    debug!(
+                        ?entity,
+                        dropped = dropped.len(),
+                        "dropped InventoryUpdateBuffer events for an entity with no legacy Client \
+                         (expected for a replicon-authenticated player, BL-82 EM-4.2c)"
+                    );
+                }
                 continue;
             };
 

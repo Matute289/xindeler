@@ -9,12 +9,26 @@ workspace = true
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release
-# PR (EM-6.3). No extra features requested: `App`/`Plugin`/ECS/relationships/
-# `bevy::tasks` (the async task-pool machinery [`spinup`] uses) are all part
-# of the mandatory core set even with `default-features = false` — same
-# posture as `xindeler-render-voxel`'s Cargo.toml, which already uses
+# PR (EM-6.3). `App`/`Plugin`/ECS/relationships/`bevy::tasks` (the async
+# task-pool machinery [`spinup`] uses) are all part of the mandatory core set
+# even with `default-features = false` — same posture as
+# `xindeler-render-voxel`'s Cargo.toml, which already uses
 # `AsyncComputeTaskPool`/`Task`/`block_on` off this exact dependency line.
-bevy = { version = "=0.19.0", default-features = false }
+# `bevy_asset` (BL-82 EM-4.10 T48.6): `predictive_gc.rs`'s `PredictiveGcAsset`
+# + `PredictiveGcLoader` need `Asset`/`AssetLoader`/`Assets`/`Handle` — same
+# explicit-request discipline `xindeler-oracle-host`'s Cargo.toml documents
+# for its own asset types, rather than relying on this feature happening to
+# already be enabled transitively (this crate depends on
+# `xindeler-oracle-host`, which already requests it, but that's an implicit
+# coupling a future refactor could silently break).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "bevy_asset",
+] }
+# `PredictiveGcAsset`'s RON shape (T48.6) — same workspace version every
+# other RON-loaded asset type in `bevy/` uses (`AtmosphereProfile`,
+# `EntityTemplate`, `DmEvent`).
+ron = { workspace = true }
+serde = { workspace = true }
 # `world::World::generate`/`generate_chunk` + `WorldOpts`/`GenOpts`/`FileOpts`
 # are re-exported at `server`'s crate root (`server/src/lib.rs`, behind its
 # default-on `worldgen` feature) — taking `server` (rather than a fresh

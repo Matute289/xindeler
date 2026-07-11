@@ -70,7 +70,9 @@ pub use component::{DimensionMembers, DimensionRoot};
 pub use lifecycle::DimensionLifecycle;
 pub use plugin::DimensionsPlugin;
 pub use predictive_gc::{
-    PredictiveGc, PredictiveGcTracker, PredictiveGcTrackers, predictive_gc_system,
+    DEFAULT_CONFIG_ASSET_PATH as PREDICTIVE_GC_DEFAULT_CONFIG_ASSET_PATH, PredictiveGc,
+    PredictiveGcAsset, PredictiveGcConfigPlugin, PredictiveGcLoader, PredictiveGcTracker,
+    PredictiveGcTrackers, predictive_gc_system,
 };
 pub use registry::{
     DimensionError, DimensionId, DimensionRegistry, DimensionState, IsolationViolation,

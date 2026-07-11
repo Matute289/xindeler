@@ -3,24 +3,33 @@
 //!
 //! ## Approach (spec §5.5, already locked)
 //! `EntityTemplate` RON/JSON assets (`entity_template_id` → a small, fixed set
-//! of "component kinds" with params: `body`/`stats`/`faction`/`loot`/
-//! `ai_behavior_override`) + a [`ComponentSpawnRegistry`] mapping each kind
-//! STRING to a spawn closure (`fn(&mut EntityCommands, &ron::Value)`). Bevy
-//! 0.19's BSN would be the native answer but its asset loader hasn't shipped
-//! (0.19 facts doc) — this is the small template loader the spec asks us to
-//! build now, swapped for `.bsn` when it lands.
+//! of "component kinds": `body`/`stats`/`faction`/`loot`/
+//! `ai_behavior_override`) spawn a matching fixed set of `Pending*` descriptor
+//! components via [`spawn_entity_template`]. Bevy 0.19's BSN would be the
+//! native answer but its asset loader hasn't shipped (0.19 facts doc) — this
+//! is the small template loader the spec asks us to build now, swapped for
+//! `.bsn` when it lands.
 //!
-//! ## Why the registry proves this is a real factory, not a switch statement
-//! [`EntityTemplate::component_values`] reads directly off the struct's
-//! fields — it never branches on `entity_template_id`. Authoring a NEW
-//! template (a new `.entity_template.ron` file with a different id) that
-//! only uses the five already-registered kinds therefore requires **zero
-//! Rust changes**: two sample templates ship in `assets/xindeler/
-//! entity_templates/` (a stalking wolf, a fleeing deer) proving exactly that.
-//! [`entity_factory_registry_is_extensible_with_new_component_kinds`] (below)
-//! additionally proves the REGISTRY mechanism itself is genuinely
-//! open-ended — a caller can `register()` a brand new component kind without
-//! touching this module at all.
+//! ## Why this is a direct function, not a runtime registry (BL-82 EM-4.10 T48.7)
+//! An earlier version of this module routed every kind through a
+//! `ComponentSpawnRegistry` (`HashMap<String, fn(&mut EntityCommands,
+//! &ron::Value)>`), framed as letting "a future consumer add a brand-new
+//! component kind without touching `with_builtins`." That framing didn't
+//! hold up: `EntityTemplate::component_values` (the registry's ONLY
+//! producer, since removed) always emitted the exact same fixed five kinds
+//! straight off
+//! this struct's own fields — a genuinely NEW kind is unreachable without
+//! first adding a field to [`EntityTemplate`] in Rust anyway, at which point
+//! adding a `match` arm here is exactly as easy as registering a closure, and
+//! the `HashMap` lookup + RON `Value` round-trip per field bought nothing.
+//! Authoring a NEW template (a new `.entity_template.ron` file with a
+//! different id, reusing the five existing kinds) still requires **zero
+//! Rust changes** — the three sample templates in `assets/xindeler/
+//! entity_templates/` (a stalking wolf, a fleeing deer, a stalking owl) prove
+//! that with the collapsed direct function just as well as the registry did.
+//! A real runtime registry is worth reintroducing only once a SECOND,
+//! differently-shaped producer needs to register kinds at runtime — not
+//! before.
 //!
 //! ## Two-crate split (isolation law)
 //! This crate never embeds a `specs::World` (rule 4: bridge/shell code only
@@ -48,22 +57,18 @@
 //! [`crate::dm_event::bounds::KNOWN_AI_BEHAVIORS`]/`DEFAULT_AI_BEHAVIOR`,
 //! rather than re-declaring a second one that could drift).
 
-use std::collections::HashMap;
-
 use bevy::{
     asset::{Asset, AssetLoader, LoadContext, io::Reader},
-    ecs::system::EntityCommands,
     prelude::*,
     reflect::TypePath,
 };
-use ron::Value;
 use serde::{Deserialize, Serialize};
 use xindeler_protocol::DimensionId;
 
 use crate::dm_event::bounds as dm_bounds;
 
 /// One entity-factory template: `entity_template_id` names it; the other
-/// fields are the fixed set of "component kinds" [`ComponentSpawnRegistry`]
+/// fields are the fixed set of "component kinds" [`spawn_entity_template`]
 /// knows how to turn into descriptor components. `#[serde(default)]`
 /// throughout so partial files keep loading as the schema grows, exactly
 /// like [`crate::dm_event::DmEvent`]/[`crate::atmosphere::AtmosphereProfile`].
@@ -158,31 +163,6 @@ impl EntityTemplate {
             self.ai_behavior_override = dm_bounds::DEFAULT_AI_BEHAVIOR.to_owned();
         }
     }
-
-    /// The template's fields as `(component_kind, value)` pairs, in a fixed
-    /// declaration order — this is the ONLY place template data is turned
-    /// into registry lookups, and it never branches on
-    /// [`Self::entity_template_id`] (see the module doc's "why this isn't a
-    /// switch statement").
-    #[must_use]
-    pub fn component_values(&self) -> [(&'static str, Value); 5] {
-        [
-            ("body", to_value(&self.body)),
-            ("stats", to_value(&self.stats)),
-            ("faction", to_value(&self.faction)),
-            ("loot", to_value(&self.loot)),
-            ("ai_behavior_override", to_value(&self.ai_behavior_override)),
-        ]
-    }
-}
-
-/// Round-trips a typed field through RON into a dynamic [`Value`] — the
-/// bridge between this schema's concrete Rust fields and the registry's
-/// `&Value`-typed closures. Infallible in practice: every field type here is
-/// plain serde data with no custom `Serialize`/`Deserialize` that could fail.
-fn to_value<T: Serialize>(v: &T) -> Value {
-    let text = ron::ser::to_string(v).expect("EntityTemplate fields always serialize to RON");
-    ron::de::from_str(&text).expect("re-parsing just-serialized RON into a Value cannot fail")
 }
 
 // ---------------------------------------------------------------------------
@@ -239,145 +219,37 @@ pub struct PendingEntityTemplateSpawn {
     pub dimension: DimensionId,
 }
 
-// ---------------------------------------------------------------------------
-// ComponentSpawnRegistry
-// ---------------------------------------------------------------------------
-
-/// One registry entry: attaches whatever descriptor component(s) a
-/// component kind implies onto a factory-spawned staging entity, given that
-/// field's value round-tripped through a [`Value`]. `fn`, not a boxed
-/// closure — every built-in entry is a plain function; `register` still
-/// accepts any zero-capture `fn` a caller defines for a NEW kind.
-pub type SpawnClosure = fn(&mut EntityCommands<'_>, &Value);
-
-/// `HashMap<String, fn(&mut EntityCommands, &Value)>` — component-type-name
-/// strings to spawn closures (migration spec §5.5, verbatim). A `Resource` so
-/// a system can look it up without re-registering the built-ins every call.
-#[derive(Resource)]
-pub struct ComponentSpawnRegistry(HashMap<String, SpawnClosure>);
-
-impl Default for ComponentSpawnRegistry {
-    fn default() -> Self { Self::with_builtins() }
-}
-
-impl ComponentSpawnRegistry {
-    /// A registry with no entries at all — for a caller that wants to
-    /// compose its own kind set from scratch.
-    #[must_use]
-    pub fn empty() -> Self { Self(HashMap::new()) }
-
-    /// The registry [`EntityTemplatePlugin`] installs by default: the five
-    /// kinds [`EntityTemplate::component_values`] emits.
-    #[must_use]
-    pub fn with_builtins() -> Self {
-        let mut registry = Self::empty();
-        registry.register("body", spawn_body);
-        registry.register("stats", spawn_stats);
-        registry.register("faction", spawn_faction);
-        registry.register("loot", spawn_loot);
-        registry.register("ai_behavior_override", spawn_ai_behavior);
-        registry
-    }
-
-    /// Registers (or replaces) the closure for `kind`. The whole point of
-    /// this being a runtime `HashMap`, not a `match`: a caller (this crate,
-    /// or a future consumer) can add a brand-new component kind without
-    /// touching [`Self::with_builtins`] at all.
-    pub fn register(&mut self, kind: impl Into<String>, spawn: SpawnClosure) {
-        self.0.insert(kind.into(), spawn);
-    }
-
-    #[must_use]
-    pub fn get(&self, kind: &str) -> Option<SpawnClosure> { self.0.get(kind).copied() }
-}
-
-fn spawn_body(ec: &mut EntityCommands<'_>, value: &Value) {
-    match value.clone().into_rust::<String>() {
-        Ok(name) => {
-            ec.insert(PendingBody(name));
-        },
-        Err(err) => {
-            warn!("entity_template: \"body\" value was not a string ({err}); skipping");
-        },
-    }
-}
-
-fn spawn_stats(ec: &mut EntityCommands<'_>, value: &Value) {
-    match value.clone().into_rust::<EntityTemplateStats>() {
-        Ok(stats) => {
-            ec.insert(PendingStats { name: stats.name });
-        },
-        Err(err) => {
-            warn!("entity_template: \"stats\" value did not parse ({err}); skipping");
-        },
-    }
-}
-
-fn spawn_faction(ec: &mut EntityCommands<'_>, value: &Value) {
-    match value.clone().into_rust::<String>() {
-        Ok(faction) => {
-            ec.insert(PendingFaction(faction));
-        },
-        Err(err) => {
-            warn!("entity_template: \"faction\" value was not a string ({err}); skipping");
-        },
-    }
-}
-
-fn spawn_loot(ec: &mut EntityCommands<'_>, value: &Value) {
-    match value.clone().into_rust::<Option<String>>() {
-        Ok(Some(spec)) => {
-            ec.insert(PendingLoot(spec));
-        },
-        Ok(None) => {},
-        Err(err) => {
-            warn!("entity_template: \"loot\" value was not a string/null ({err}); skipping");
-        },
-    }
-}
-
-fn spawn_ai_behavior(ec: &mut EntityCommands<'_>, value: &Value) {
-    match value.clone().into_rust::<String>() {
-        Ok(behavior) => {
-            ec.insert(PendingAiBehavior(behavior));
-        },
-        Err(err) => {
-            warn!(
-                "entity_template: \"ai_behavior_override\" value was not a string ({err}); \
-                 skipping"
-            );
-        },
-    }
-}
-
 /// Spawns a transient Bevy "pending spawn request" entity for `template` at
-/// `pos`/`dimension`: attaches [`PendingEntityTemplateSpawn`], then feeds
-/// every `(kind, value)` pair from [`EntityTemplate::component_values`]
-/// through `registry`, warning (never panicking) on an unregistered kind.
+/// `pos`/`dimension`: attaches [`PendingEntityTemplateSpawn`] plus the
+/// [`PendingBody`]/[`PendingStats`]/[`PendingFaction`]/[`PendingAiBehavior`]
+/// descriptor components straight off `template`'s own (already-typed)
+/// fields — [`PendingLoot`] only when `template.loot` is `Some`. BL-82
+/// EM-4.10 T48.7: this used to dispatch through a `ComponentSpawnRegistry`
+/// (a runtime `HashMap<String, fn(...)>`) plus a RON `Value` round-trip per
+/// field; collapsed to a direct sequence of inserts since every field here is
+/// already a concrete typed value (no parsing, and thus no per-field parse
+/// failure, is actually possible) — see the module doc's "why this is a
+/// direct function" section.
 ///
 /// Returns the pending entity; `xindeler-sim-bridge`'s adapter system reads
 /// its descriptor components and despawns it once the real sim NPC has been
 /// requested (see that crate's `entity_factory` module).
 pub fn spawn_entity_template(
     commands: &mut Commands,
-    registry: &ComponentSpawnRegistry,
     template: &EntityTemplate,
     pos: [f32; 3],
     dimension: DimensionId,
 ) -> Entity {
     let mut ec = commands.spawn(PendingEntityTemplateSpawn { pos, dimension });
-    for (kind, value) in template.component_values() {
-        match registry.get(kind) {
-            Some(spawn) => spawn(&mut ec, &value),
-            None => {
-                warn!(
-                    kind,
-                    "entity_template: no registered spawn closure for this component kind; \
-                     skipping (data-driven registry has no handler for it)"
-                );
-            },
-        }
+    ec.insert(PendingBody(template.body.clone()));
+    ec.insert(PendingStats {
+        name: template.stats.name.clone(),
+    });
+    ec.insert(PendingFaction(template.faction.clone()));
+    if let Some(loot) = &template.loot {
+        ec.insert(PendingLoot(loot.clone()));
     }
+    ec.insert(PendingAiBehavior(template.ai_behavior_override.clone()));
     ec.id()
 }
 
@@ -518,23 +390,19 @@ fn parse_entity_template(bytes: &[u8], is_json: bool) -> Result<EntityTemplate, 
     Ok(template)
 }
 
-/// Registers the [`EntityTemplate`] asset + loader + a default
-/// [`ComponentSpawnRegistry`]. Requires `AssetPlugin` already present, same
-/// contract as [`crate::dm_event::DmEventPlugin`].
+/// Registers the [`EntityTemplate`] asset + loader. Requires `AssetPlugin`
+/// already present, same contract as [`crate::dm_event::DmEventPlugin`].
 pub struct EntityTemplatePlugin;
 
 impl Plugin for EntityTemplatePlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<EntityTemplate>()
-            .init_asset_loader::<EntityTemplateLoader>()
-            .init_resource::<ComponentSpawnRegistry>();
+            .init_asset_loader::<EntityTemplateLoader>();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::system::EntityCommands;
-
     use super::*;
 
     fn hostile_template() -> EntityTemplate {
@@ -672,18 +540,15 @@ mod tests {
 
     fn spawn_via_system(template: EntityTemplate, dimension: DimensionId) -> (App, Entity) {
         let mut app = App::new();
-        app.insert_resource(ComponentSpawnRegistry::with_builtins());
         app.insert_resource(TestTemplate(template));
         app.init_resource::<TestSpawnedEntity>();
         app.add_systems(
             Startup,
             move |mut commands: Commands,
-                  registry: Res<ComponentSpawnRegistry>,
                   template: Res<TestTemplate>,
                   mut out: ResMut<TestSpawnedEntity>| {
                 out.0 = Some(spawn_entity_template(
                     &mut commands,
-                    &registry,
                     &template.0,
                     [1.0, 2.0, 3.0],
                     dimension,
@@ -765,53 +630,6 @@ mod tests {
         };
         let (app, entity) = spawn_via_system(template, DimensionId::DEFAULT);
         assert!(app.world().get::<PendingLoot>(entity).is_none());
-    }
-
-    /// Proves the registry mechanism itself is genuinely open-ended: a
-    /// caller can register a component kind THIS MODULE has never heard of,
-    /// with no changes here — the acceptance bar's "not a hardcoded switch
-    /// statement" claim, demonstrated directly rather than merely asserted.
-    #[test]
-    fn entity_factory_registry_is_extensible_with_new_component_kinds() {
-        #[derive(Component, Debug, PartialEq, Eq)]
-        struct CustomTag(String);
-
-        fn spawn_custom_tag(ec: &mut EntityCommands<'_>, value: &Value) {
-            if let Ok(tag) = value.clone().into_rust::<String>() {
-                ec.insert(CustomTag(tag));
-            }
-        }
-
-        let mut registry = ComponentSpawnRegistry::with_builtins();
-        registry.register("custom_tag", spawn_custom_tag);
-
-        let mut app = App::new();
-        app.insert_resource(registry);
-        app.init_resource::<TestSpawnedEntity>();
-        app.add_systems(
-            Startup,
-            |mut commands: Commands,
-             registry: Res<ComponentSpawnRegistry>,
-             mut out: ResMut<TestSpawnedEntity>| {
-                let value = to_value(&"hello".to_owned());
-                let mut ec = commands.spawn_empty();
-                if let Some(spawn) = registry.get("custom_tag") {
-                    spawn(&mut ec, &value);
-                }
-                out.0 = Some(ec.id());
-            },
-        );
-        app.update();
-
-        let entity = app
-            .world()
-            .resource::<TestSpawnedEntity>()
-            .0
-            .expect("spawned");
-        assert_eq!(
-            app.world().get::<CustomTag>(entity),
-            Some(&CustomTag("hello".to_owned()))
-        );
     }
 
     #[test]

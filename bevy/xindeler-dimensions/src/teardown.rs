@@ -37,21 +37,25 @@
 //! ## The always-on default dimension is NEVER actually torn down
 //! [`DimensionId::DEFAULT`] is the persistent, always-present single game
 //! world — despawning ITS root would mean cascade-despawning literally every
-//! currently-mirrored entity in the live game. Nothing in EM-4.5's state
-//! machine forbids `DimensionId::DEFAULT` from reaching `Draining`/`Teardown`
-//! (a `DrainDimension(DimensionId::DEFAULT)` admin command issued before any
-//! player has connected — e.g. right at boot, when occupant bookkeeping is
-//! still empty — would legally transition it straight through per
-//! `DimensionRegistry::begin_draining`'s own "already-empty dimension tears
-//! down immediately" rule). Since EM-4.5 only ever LABELLED `Teardown` and
-//! this task is the first code that actually ACTS on that label, refusing to
-//! run the real GC payload against `DimensionId::DEFAULT` is a necessary
-//! safety backstop THIS task must add — not a change to EM-4.5's own state
-//! machine (which still, correctly, allows the transition; this module just
-//! never carries out the destructive half of it for that one id). Flagged in
-//! the PR description as a pre-existing latent gap in EM-4.5's own admin-
-//! command path, not fixed here (out of this task's scope to touch
-//! `begin_draining` itself).
+//! currently-mirrored entity in the live game. EM-4.5's original state
+//! machine did not forbid `DimensionId::DEFAULT` from reaching
+//! `Draining`/`Teardown` (a `DrainDimension(DimensionId::DEFAULT)` admin
+//! command issued before any player has connected — e.g. right at boot, when
+//! occupant bookkeeping is still empty — would legally transition it
+//! straight through per `DimensionRegistry::begin_draining`'s own
+//! "already-empty dimension tears down immediately" rule), so this module
+//! originally added a downstream refusal here as the ONLY backstop.
+//!
+//! **EM-4.10 Finding D (2026-07-10) closed the gap at its SOURCE instead**:
+//! `DimensionRegistry::begin_draining` now rejects `DimensionId::DEFAULT`
+//! outright (a typed `DimensionError::CannotDrainDefault`), so it can no
+//! longer reach `Teardown` through any public API at all — the `if id ==
+//! DimensionId::DEFAULT` guard below in [`teardown_completed_dimensions`] is
+//! now unreachable via any current call path and exists purely as
+//! defense-in-depth (cheap, and protects against a hypothetical future bug
+//! that sets lifecycle state some OTHER way). It is intentionally kept
+//! rather than removed — belt-and-suspenders is the right posture for "would
+//! destroy the live game" territory.
 
 use bevy::prelude::*;
 use tracing::{error, info};
@@ -111,17 +115,19 @@ pub fn extract_persistent_side_effects_before_teardown(id: DimensionId, state: &
     let _ = (id, state);
 }
 
-/// Runs every `Update`, finds every dimension currently sitting in
+/// Runs every `FixedUpdate` tick (EM-4.10 Finding B moved the whole chain off
+/// `Update`/render cadence — see [`crate::plugin::DimensionsPlugin`]'s own
+/// doc comment), finds every dimension currently sitting in
 /// [`crate::lifecycle::DimensionLifecycle::Teardown`], and actually tears it
 /// down: calls the BL-16 hook, despawns the `DimensionRoot` (cascading to
 /// every descendant via Bevy relationships), and removes the dimension's
 /// entry from the registry (dropping its chunk store/world/index whole).
 ///
 /// Ordered LAST in [`crate::plugin::DimensionsPlugin`]'s chain, after the
-/// isolation `debug_assert` sweep has already validated the PREVIOUS frame's
+/// isolation `debug_assert` sweep has already validated the PREVIOUS tick's
 /// fully-settled state (see that plugin's own doc comment for why the sweep
 /// was moved to the FRONT of the chain, not because this system is unsafe to
-/// run near it, but so the sweep never observes the brief same-frame window
+/// run near it, but so the sweep never observes the brief same-tick window
 /// between "registry entry removed" and "despawn commands flushed").
 pub fn teardown_completed_dimensions(
     mut commands: Commands,
@@ -140,8 +146,10 @@ pub fn teardown_completed_dimensions(
     for id in ready {
         // See this module's own doc comment: the always-on default
         // dimension must never actually be destroyed, even if it somehow
-        // reached `Teardown` (a pre-existing EM-4.5 admin-command gap, not
-        // introduced here).
+        // reached `Teardown`. EM-4.10 Finding D closed the only known path
+        // to that state at its source (`DimensionRegistry::begin_draining`
+        // now rejects `DimensionId::DEFAULT` outright), so this is now
+        // unreachable in practice — kept as defense-in-depth.
         if id == DimensionId::DEFAULT {
             error!(
                 ?id,
@@ -222,10 +230,18 @@ mod tests {
             );
         }
 
-        app.update(); // teardown_completed_dimensions removes the registry
-        // entry + queues the despawn; a second update flushes the deferred
+        // EM-4.10 Finding B: the lifecycle chain (incl.
+        // `teardown_completed_dimensions`) now lives in `FixedUpdate`, not
+        // `Update` — run that schedule DIRECTLY (`World::run_schedule`)
+        // rather than `app.update()`, which would otherwise depend on
+        // `Time::<Fixed>`'s real-time accumulator actually crossing a
+        // timestep between these two calls (this crate's `MinimalPlugins`
+        // setup has no deterministic `TimeUpdateStrategy` override, unlike
+        // `xindeler-sim-bridge`'s tests). First run removes the registry
+        // entry + queues the despawn; a second run flushes the deferred
         // command and runs the cascade.
-        app.update();
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
 
         assert!(
             app.world().get_entity(root).is_err(),
@@ -250,9 +266,21 @@ mod tests {
         );
     }
 
-    /// The default dimension is protected even if it somehow reaches
-    /// `Teardown` — the destructive payload refuses to run against it (see
-    /// the module doc comment for why).
+    /// The default dimension is protected — EM-4.10 Finding D closed the gap
+    /// this test used to exercise (this module's own doc comment described
+    /// it as reachable via `begin_draining(DimensionId::DEFAULT)`, e.g. a
+    /// `DrainDimension(DEFAULT)` admin command issued at boot before any
+    /// occupant is registered): `DimensionRegistry::begin_draining` now
+    /// rejects `DimensionId::DEFAULT` at its own entry point, so it can no
+    /// longer reach `Teardown` via any public API at all — the destructive
+    /// payload in THIS module never even gets a chance to run. This test now
+    /// proves that end-to-end (through the real `FixedUpdate` chain, not
+    /// just a direct `begin_draining` call — see `registry`'s own unit test
+    /// for that narrower check). The inline `id == DimensionId::DEFAULT`
+    /// guard inside [`teardown_completed_dimensions`] remains as pure
+    /// defense-in-depth (see the module doc comment) — it is intentionally
+    /// no longer independently exercisable through the public API, which is
+    /// the point of the fix.
     #[test]
     fn teardown_never_despawns_the_default_dimension() {
         let mut app = App::new();
@@ -270,24 +298,39 @@ mod tests {
                 .complete_spinup(DimensionId::DEFAULT, Arc::new(world), index)
                 .unwrap();
             // No occupants ever registered here (mirrors the EXACT boot-time
-            // gap this module's doc comment describes) -> begin_draining
-            // tears it "down" per the label, immediately.
-            registry.begin_draining(DimensionId::DEFAULT).unwrap();
+            // gap this module's doc comment describes) — EM-4.10 Finding D:
+            // `begin_draining` now rejects DEFAULT outright instead of
+            // legally transitioning it toward Teardown.
+            assert_eq!(
+                registry.begin_draining(DimensionId::DEFAULT),
+                Err(DimensionError::CannotDrainDefault)
+            );
             assert_eq!(
                 registry.lifecycle(DimensionId::DEFAULT),
-                Some(DimensionLifecycle::Teardown)
+                Some(DimensionLifecycle::Active),
+                "DEFAULT must stay Active — it must never even reach Draining/Teardown"
             );
         }
 
-        app.update();
-        app.update();
+        // Run the real `FixedUpdate` chain (see the sibling test above for
+        // why `run_schedule` rather than `app.update()`) to prove the whole
+        // pipeline leaves DEFAULT alone end-to-end, not just the direct
+        // `begin_draining` call above.
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
 
-        // Still there — the payload refused to run.
+        // Still there — never even reached the destructive payload.
         assert!(app.world().get_entity(root).is_ok());
         assert!(
             app.world()
                 .resource::<DimensionRegistry>()
                 .contains(DimensionId::DEFAULT)
+        );
+        assert_eq!(
+            app.world()
+                .resource::<DimensionRegistry>()
+                .lifecycle(DimensionId::DEFAULT),
+            Some(DimensionLifecycle::Active)
         );
     }
 
@@ -311,7 +354,11 @@ mod tests {
                 .unwrap();
         }
 
-        app.update();
+        // Run the real `FixedUpdate` chain (see the sibling tests above for
+        // why `run_schedule` rather than `app.update()`) so this genuinely
+        // exercises `teardown_completed_dimensions` deciding to skip a
+        // non-Teardown dimension, not merely a schedule that never fired.
+        app.world_mut().run_schedule(bevy::app::FixedUpdate);
 
         assert!(app.world().get_entity(root).is_ok());
         assert!(

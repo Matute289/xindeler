@@ -266,10 +266,53 @@ impl Plugin for SmokeAutoMovePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SmokeMovePattern::from_env())
             .init_resource::<SmokeAutoMoveState>()
+            .init_resource::<SmokeStuckDetour>()
             .add_systems(
                 Update,
-                smoke_auto_move.after(gather_input).in_set(GameplaySet),
+                (
+                    smoke_auto_move.after(gather_input),
+                    // BL-82 EM-3.11p round 11 (Wave-3 post-merge regression
+                    // hunt): EVERY prior `--smoke-perf-run`/`--smoke-screenshot`
+                    // trial (this round's and all earlier EM-3.11 rounds') left
+                    // `FlyCam::yaw`/`pitch` frozen at their boot default the
+                    // whole run — they only change from real
+                    // `AccumulatedMouseMotion`, which a scripted bot never
+                    // produces. A real player's session ALWAYS includes
+                    // continuous mouse-look while walking; EM-3.11k already
+                    // proved camera rotation has its own distinct render-cost
+                    // profile (TAA history-confidence reset). `XINDELER_
+                    // SMOKE_ROTATE=1` opts a run into a slow, continuous,
+                    // scripted yaw sweep on top of the existing walk pattern,
+                    // closing this blind spot for future rounds without
+                    // requiring a human at the mouse.
+                    smoke_rotate_camera.after(gather_input),
+                )
+                    .in_set(GameplaySet),
             );
+    }
+}
+
+/// Radians/second the scripted camera sweeps when `XINDELER_SMOKE_ROTATE=1`
+/// (see [`SmokeAutoMovePlugin`]'s doc comment). Slow enough to resemble a
+/// human idly looking around while walking, not a disorienting spin.
+const SMOKE_ROTATE_RATE_RAD_S: f32 = 0.6;
+
+/// Continuously sweeps the fly-cam's yaw (never its pitch) at
+/// [`SMOKE_ROTATE_RATE_RAD_S`] when `XINDELER_SMOKE_ROTATE` is set to
+/// anything but `0`/unset — a no-op check (cached env read) otherwise, so
+/// every pre-existing smoke run is unaffected by default.
+fn smoke_rotate_camera(
+    time: Res<Time>,
+    mut cameras: Query<&mut FlyCam>,
+    mut enabled: Local<Option<bool>>,
+) {
+    let enabled = *enabled
+        .get_or_insert_with(|| std::env::var("XINDELER_SMOKE_ROTATE").is_ok_and(|v| v != "0"));
+    if !enabled {
+        return;
+    }
+    for mut fly in &mut cameras {
+        fly.yaw += SMOKE_ROTATE_RATE_RAD_S * time.delta_secs();
     }
 }
 
@@ -283,30 +326,178 @@ struct SmokeAutoMoveState {
     start: Option<Vec3>,
 }
 
+/// BL-82 EM-3.11p round 12 (diagonal-stutter methodology fix): how often
+/// [`stuck_detour_move_dir`] samples horizontal displacement to decide
+/// whether the scripted walker is stuck (e.g. against a tree).
+const STUCK_CHECK_INTERVAL_S: f32 = 1.0;
+/// Minimum horizontal distance (Bevy metres) the character must cover in one
+/// [`STUCK_CHECK_INTERVAL_S`] window to NOT be considered stuck. Well below a
+/// normal walk speed's per-second distance, so only a genuine snag (near-zero
+/// net movement) trips it, not ordinary speed variance.
+const STUCK_DISTANCE_M: f32 = 0.5;
+/// How long a detour lasts once engaged before the walker returns to trying
+/// the original commanded heading again.
+const DETOUR_DURATION_S: f32 = 2.5;
+
+/// Per-run state for [`stuck_detour_move_dir`]'s obstacle-avoidance: this is
+/// what makes `--smoke-perf-run`'s scripted diagonal/straight walk robust to
+/// the world containing normal obstacles (trees, rocks) instead of silently
+/// producing a confounded measurement.
+///
+/// ## Why this exists (BL-82 EM-3.11p, 6 rounds in)
+/// Matías flagged that the diagonal-movement A/B harness's prior rounds were
+/// likely confounded: "cuando lo probás lo que veo es que camina un par de
+/// pasos y enseguida te trabás con el árbol" (when you test it, it walks a
+/// couple steps and immediately gets stuck on a tree). A scripted walker with
+/// a FIXED heading and no obstacle awareness will, in a real procedurally
+/// generated world, eventually walk into a tree/rock and then spend the
+/// REST of a 90-150s measurement window standing still against it —
+/// collapsing the frame-time distribution to "whatever standing still costs"
+/// for most of the window, not "whatever walking straight/diagonally costs".
+/// That would explain why 6 rounds of investigation got noisy, inconsistent
+/// results even after fixing every other methodology bug (fresh userdata,
+/// camera rotation, etc. — round 10).
+#[derive(Resource, Default)]
+struct SmokeStuckDetour {
+    /// Horizontal (xz) position + elapsed time at the last stuck-check.
+    last_check: Option<(Vec3, f32)>,
+    /// `(detour heading, elapsed time the detour ends)`, if currently
+    /// detouring instead of following the commanded pattern.
+    detour: Option<(Vec2, f32)>,
+    /// How many detours have fired back-to-back (reset once a check finds
+    /// the walker moving freely again) — escalates the turn angle so a
+    /// walker cornered against two obstacles doesn't oscillate between the
+    /// same two blocked headings forever.
+    consecutive_detours: u32,
+}
+
+/// Rotates `dir` by 90° · `steps` (steps 1..=3 cycle through right/back/left
+/// before repeating), escalating each time [`stuck_detour_move_dir`] detects
+/// the walker is STILL stuck after a previous detour — a simple, deterministic
+/// wall-follow-style escape that doesn't need real collision/raycast queries
+/// (none are available to this pure-Bevy client; the sim is the only thing
+/// that knows real terrain occupancy).
+fn escalated_turn(dir: Vec2, steps: u32) -> Vec2 {
+    // Cycles through 1/2/3 quarter-turns (right/back/left), never 0 — a
+    // repeated stuck detection must never fall back to the ORIGINAL heading
+    // that just got the walker stuck in the first place.
+    let quarter_turns = ((steps.max(1) - 1) % 3) + 1;
+    let mut d = dir;
+    for _ in 0..quarter_turns {
+        d = Vec2::new(-d.y, d.x); // rotate +90°
+    }
+    d
+}
+
+/// Pure decision function (unit-tested without a GPU/App) for
+/// [`SmokeStuckDetour`]: given the current horizontal position, elapsed run
+/// time, and the walker's originally-commanded heading, returns the heading
+/// to ACTUALLY drive this frame — either the original pattern (normal case),
+/// or a temporary detour heading if a stuck condition was just detected or is
+/// still in effect. Mutates `detector` to track state across calls.
+fn stuck_detour_move_dir(
+    now: f32,
+    horizontal_pos: Vec3,
+    base_dir: Vec2,
+    detector: &mut SmokeStuckDetour,
+) -> Vec2 {
+    // Currently detouring: keep the detour heading until it expires.
+    if let Some((detour_dir, until)) = detector.detour {
+        if now < until {
+            return detour_dir;
+        }
+        detector.detour = None;
+    }
+
+    let Some((last_pos, last_time)) = detector.last_check else {
+        detector.last_check = Some((horizontal_pos, now));
+        return base_dir;
+    };
+
+    if now - last_time < STUCK_CHECK_INTERVAL_S {
+        return base_dir;
+    }
+
+    let travelled = horizontal_pos.distance(last_pos);
+    detector.last_check = Some((horizontal_pos, now));
+
+    if travelled < STUCK_DISTANCE_M {
+        detector.consecutive_detours += 1;
+        let detour_dir = escalated_turn(base_dir, detector.consecutive_detours);
+        detector.detour = Some((detour_dir, now + DETOUR_DURATION_S));
+        detour_dir
+    } else {
+        detector.consecutive_detours = 0;
+        base_dir
+    }
+}
+
+/// How long (seconds) `XINDELER_SMOKE_JUMP_SPAM` holds jump pressed, then
+/// released, then repeats — a square wave chosen to be much faster than a
+/// human could sanely bunny-hop, to stress-test back-to-back jumps for the
+/// BL-82 EM-3.11r "sometimes I don't reach the ground" investigation.
+const JUMP_SPAM_HALF_PERIOD_S: f32 = 0.35;
+
 /// Forces a steady walk (direction from [`SmokeMovePattern`]) + matching look
 /// while the player exists, and raises [`crate::smoke::SmokePlayerMoved`] once
 /// the character has actually travelled [`SMOKE_MOVE_THRESHOLD`], so the
 /// capture/measurement lands on a frame that shows the walking player. Only
 /// meaningful once a player entity is mirrored.
+///
+/// BL-82 EM-3.11r: when `XINDELER_SMOKE_JUMP_SPAM` is set to anything but
+/// `0`/unset, also drives a repeated jump-press/release square wave on top of
+/// the walk, so a scripted, reproducible "jump a lot" run is possible without
+/// a human at the keyboard (Matías's report). Off by default — every
+/// pre-existing smoke/perf run is unaffected.
+///
+/// BL-82 EM-3.11p round 12: ALWAYS runs [`stuck_detour_move_dir`] so a
+/// scripted run can no longer silently collapse into "standing still against
+/// a tree for the rest of the measurement window" (see
+/// [`SmokeStuckDetour`]'s doc comment). This changes behavior only when the
+/// walker is ACTUALLY stuck — the commanded heading (and every existing
+/// straight-walk screenshot smoke test) is bit-for-bit unaffected in the
+/// normal, unobstructed case.
 fn smoke_auto_move(
+    time: Res<Time>,
     player: Query<&Transform, With<NetLocalPlayer>>,
     pattern: Res<SmokeMovePattern>,
     mut input: ResMut<LocalPlayerInput>,
     mut state: ResMut<SmokeAutoMoveState>,
+    mut stuck: ResMut<SmokeStuckDetour>,
     mut moved: ResMut<crate::smoke::SmokePlayerMoved>,
+    mut jump_spam_enabled: Local<Option<bool>>,
 ) {
     let Ok(tf) = player.single() else {
         return;
     };
-    let move_dir = pattern.move_dir();
+    let jump_spam_enabled = *jump_spam_enabled
+        .get_or_insert_with(|| std::env::var("XINDELER_SMOKE_JUMP_SPAM").is_ok_and(|v| v != "0"));
+    let jump = jump_spam_enabled
+        && ((time.elapsed_secs() / JUMP_SPAM_HALF_PERIOD_S) as u64).is_multiple_of(2);
+    let pos = tf.translation;
+    let was_detouring = stuck.detour.is_some();
+    let horizontal_pos = Vec3::new(pos.x, 0.0, pos.z);
+    let move_dir = stuck_detour_move_dir(
+        time.elapsed_secs(),
+        horizontal_pos,
+        pattern.move_dir(),
+        &mut stuck,
+    );
+    if !was_detouring && stuck.detour.is_some() {
+        info!(
+            pos = ?pos,
+            detour_dir = ?move_dir,
+            consecutive = stuck.consecutive_detours,
+            "BL-82 EM-3.11p round 12: scripted walker stuck, engaging detour"
+        );
+    }
     *input = LocalPlayerInput {
         move_dir,
-        jump: false,
+        jump,
         // Sim (x, y) horizontal look, matching the walk direction (full 3D
         // look vector with z=0, same convention `gather_input` uses).
         look: Vec3::new(move_dir.x, move_dir.y, 0.0),
     };
-    let pos = tf.translation;
     match state.start {
         None => state.start = Some(pos),
         Some(start) => {
@@ -533,5 +724,96 @@ mod tests {
         let move_bevy = flatten(Vec3::new(0.0, 0.0, -1.0));
         let move_dir = Vec2::new(move_bevy.x, -move_bevy.z);
         assert!((move_dir - Vec2::new(0.0, 1.0)).length() < 1e-5);
+    }
+
+    /// A quarter-turn rotates a heading 90° (right-hand rotation in the xz
+    /// plane, matching `Vec2::new(-d.y, d.x)`), and a full 4 steps returns to
+    /// the original heading.
+    #[test]
+    fn escalated_turn_rotates_by_quarter_turns() {
+        let base = Vec2::new(0.0, 1.0);
+        let one = escalated_turn(base, 1);
+        assert!((one - Vec2::new(-1.0, 0.0)).length() < 1e-5, "{one:?}");
+        let two = escalated_turn(base, 2);
+        assert!((two - Vec2::new(0.0, -1.0)).length() < 1e-5, "{two:?}");
+        let three = escalated_turn(base, 3);
+        assert!((three - Vec2::new(1.0, 0.0)).length() < 1e-5, "{three:?}");
+        // Step 4 cycles back to a 1-quarter-turn (never the identity/original
+        // heading — see the function's doc comment).
+        let four = escalated_turn(base, 4);
+        assert!(
+            (four - one).length() < 1e-5,
+            "cycles without ever returning to the original heading: {four:?}"
+        );
+    }
+
+    /// BL-82 EM-3.11p round 12 regression: while the walker keeps making
+    /// normal horizontal progress every check window, the commanded heading
+    /// is returned UNCHANGED (no detour ever engages) — every existing
+    /// straight-walk smoke run must be unaffected in the normal case.
+    #[test]
+    fn no_detour_while_moving_normally() {
+        let mut detector = SmokeStuckDetour::default();
+        let base_dir = Vec2::new(0.0, 1.0);
+        let mut pos = Vec3::ZERO;
+        let mut now = 0.0;
+        for _ in 0..5 {
+            now += STUCK_CHECK_INTERVAL_S;
+            pos.z -= 5.0; // well beyond STUCK_DISTANCE_M every window
+            let dir = stuck_detour_move_dir(now, pos, base_dir, &mut detector);
+            assert_eq!(dir, base_dir, "must not detour while moving freely");
+        }
+        assert!(detector.detour.is_none());
+        assert_eq!(detector.consecutive_detours, 0);
+    }
+
+    /// BL-82 EM-3.11p round 12 regression: a walker that stops making
+    /// progress (e.g. snagged on a tree) gets diverted to a different
+    /// heading instead of silently standing still for the rest of the run —
+    /// this is the fix for Matías's "camina un par de pasos y enseguida te
+    /// trabás con el árbol" methodology complaint.
+    #[test]
+    fn stuck_walker_gets_a_detour() {
+        let mut detector = SmokeStuckDetour::default();
+        let base_dir = Vec2::new(0.0, 1.0);
+        let stuck_pos = Vec3::new(10.0, 0.0, 10.0); // never moves
+        // First sample seeds the baseline (no decision made yet).
+        let mut now = 0.0;
+        let dir0 = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector);
+        assert_eq!(dir0, base_dir);
+        // Past the check interval with zero displacement: must detour.
+        now += STUCK_CHECK_INTERVAL_S;
+        let dir1 = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector);
+        assert_ne!(dir1, base_dir, "must divert once stuck is detected");
+        assert!(detector.detour.is_some());
+        assert_eq!(detector.consecutive_detours, 1);
+        // Immediately after, the SAME detour heading holds (still within
+        // DETOUR_DURATION_S), not re-evaluated every frame.
+        now += 0.1;
+        let dir2 = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector);
+        assert_eq!(dir2, dir1, "detour heading holds for its full duration");
+    }
+
+    /// BL-82 EM-3.11p round 12: if the walker is STILL stuck after a detour
+    /// expires, the next detour escalates to a different heading rather than
+    /// repeating the same (possibly still-blocked) turn forever.
+    #[test]
+    fn repeated_stuck_escalates_the_turn() {
+        let mut detector = SmokeStuckDetour::default();
+        let base_dir = Vec2::new(0.0, 1.0);
+        let stuck_pos = Vec3::new(1.0, 0.0, 1.0);
+        let mut now = 0.0;
+        let _ = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector); // seed
+        now += STUCK_CHECK_INTERVAL_S;
+        let first_detour = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector);
+        assert_eq!(detector.consecutive_detours, 1);
+        // Let the first detour fully expire, still stuck at the same spot.
+        now += DETOUR_DURATION_S + STUCK_CHECK_INTERVAL_S;
+        let second_detour = stuck_detour_move_dir(now, stuck_pos, base_dir, &mut detector);
+        assert_eq!(detector.consecutive_detours, 2);
+        assert_ne!(
+            second_detour, first_detour,
+            "escalation must try a different heading, not repeat the same blocked one"
+        );
     }
 }

@@ -83,8 +83,19 @@
 //!   already do for the listen-server's own spectator fallback path.
 //!
 //! Isolation law: logic crates never depend on this crate or on Bevy; the
-//! bridge only calls the sim's public API. This crate is the ONLY legal `specs`
-//! consumer under `bevy/` — the client stays pure.
+//! bridge only calls the sim's public API. This crate and
+//! `xindeler-server-app::login` (BL-82 EM-4.2c) are the two legal `specs`
+//! consumers under `bevy/` — the client stays pure. `login` is a sanctioned
+//! exception (phase-4 plan §1.2: the replicon login handshake lives in the
+//! server-app shell and touches the sim's `ecs()` directly to create the
+//! login-session entity and set `Presence`/`PresenceKind`, calling the SAME
+//! public entry points — `LoginProvider::verify`/`login_with_ip`,
+//! `CharacterLoader`, `StateExt` — the legacy path uses); it does not
+//! reimplement or bypass this crate's mirroring, so the "bridge is the only
+//! writer into the sim from Bevy" invariant this crate itself upholds is
+//! unaffected. See
+//! `docs/design/specs/2026-07-10-bl82-wave3-regression-fixes-design.md` Finding
+//! F for why this comment needed correcting.
 
 mod entity_factory;
 pub use entity_factory::{apply_pending_entity_template_spawns, spawn_from_spawning_rules};
@@ -211,6 +222,50 @@ pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
 /// when an entity disappears.
 #[derive(Resource, Default, Debug)]
 pub struct SimRegionCache(pub HashMap<specs::Entity, RegionKey>);
+
+/// EM-4.10 Finding C: reused scratch buffers for [`mirror_sim_entities`],
+/// matching [`SimLoadoutCache`]/[`SimRegionCache`]'s "one resource, cleared
+/// not reallocated" pattern. The mirror loop used to allocate fresh `seen`/
+/// `updates` `Vec`s (and a fresh `seen_set` `HashSet`) every tick, sized to
+/// the mirrored-entity count — an explicit `TODO(EM-4.2d)` acknowledged this
+/// was "fine at test-NPC scale", but Wave-3's batch-spawning
+/// `spawn_from_spawning_rules` (`entity_factory.rs`) invalidates that
+/// assumption: a burst of several dozen NPCs spawning at once now pays this
+/// allocation cost every single `FixedUpdate` tick, compounding with the
+/// Finding-A/B fixes' remaining cost inside a catch-up burst. `.clear()`ed
+/// at the top of each tick instead of freshly allocated; behavior identical.
+#[derive(Resource, Default)]
+struct MirrorScratch {
+    /// Sim entities visible this tick (see [`mirror_sim_entities`]).
+    seen: Vec<specs::Entity>,
+    /// (sim_entity, components) collected before issuing commands (see
+    /// [`mirror_sim_entities`]).
+    #[allow(clippy::type_complexity)]
+    updates: Vec<(
+        specs::Entity,
+        NetPos,
+        NetOri,
+        NetVel,
+        NetBody,
+        Option<NetHealth>,
+        Option<NetLoadout>,
+        Option<NetUid>,
+        RegionKey,
+    )>,
+    /// `seen` collapsed into a set for the stale-mirror sweep (see
+    /// [`mirror_sim_entities`]).
+    seen_set: std::collections::HashSet<specs::Entity>,
+}
+
+/// EM-4.10 Finding C: reused scratch buffer for [`recompute_aurora_overlay`],
+/// mirroring [`MirrorScratch`]'s reasoning — `tick_aurora_overlay` used to
+/// build a fresh `HashSet<u64>` every tick to compute the live-NPC set
+/// before pruning `AuroraOverlay`.
+#[derive(Resource, Default)]
+struct AuroraScratch {
+    /// This tick's live NPC uids (see [`recompute_aurora_overlay`]).
+    live: std::collections::HashSet<u64>,
+}
 
 /// Advances the embedded sim by one tick using the schedule's `dt`, then
 /// drains the sim's frontend events and errors into `tracing`.
@@ -852,6 +907,10 @@ impl Plugin for SimEntityMirrorPlugin {
             .init_resource::<TestNpcState>()
             .init_resource::<AiExecutionMode>()
             .init_resource::<AuroraOverlay>()
+            // EM-4.10 Finding C: reused per-tick scratch buffers — see
+            // `MirrorScratch`/`AuroraScratch`'s own doc comments.
+            .init_resource::<MirrorScratch>()
+            .init_resource::<AuroraScratch>()
             .add_systems(
                 FixedUpdate,
                 (spawn_test_npcs, mirror_sim_entities, tick_aurora_overlay)
@@ -861,39 +920,48 @@ impl Plugin for SimEntityMirrorPlugin {
                     .after(ensure_default_dimension)
                     .run_if(in_state(ClientState::Disconnected)),
             )
-            // EM-4.6 (T47.8): `Update`, NOT `FixedUpdate` — this system must
-            // run in the SAME schedule as, and strictly BEFORE,
+            // EM-4.6 (T47.8) / EM-4.10 Finding B: `FixedUpdate`, matching
+            // `DimensionsPlugin`'s own chain — this system must run in the
+            // SAME schedule as, and strictly BEFORE,
             // `xindeler_dimensions::teardown::teardown_completed_dimensions`
-            // (added by `DimensionsPlugin` in `Update`; see that plugin's own
-            // doc comment for its full chain). Referencing that function
-            // directly for `.before(..)` is legal regardless of plugin
-            // add-order — Bevy resolves ordering constraints at schedule-
-            // build time, after every system in the schedule is registered,
-            // the same cross-crate pattern `ensure_default_dimension`/
-            // `mirror_sim_entities` already established for `.after(tick_sim)`.
+            // (added by `DimensionsPlugin` in `FixedUpdate`; see that
+            // plugin's own doc comment for its full chain, including WHY the
+            // whole thing moved off `Update`: sim-bookkeeping systems have no
+            // reason to run at render cadence, and doing so multiplied their
+            // cost — this system's own O(dimension count × mirrored
+            // entities) scan included — by up to ~5x, a direct contributor
+            // to the 2026-07-10 FPS-oscillation regression). Referencing
+            // that function directly for `.before(..)` is legal regardless
+            // of plugin add-order — Bevy resolves ordering constraints at
+            // schedule-build time, after every system in the schedule is
+            // registered, the same cross-crate pattern
+            // `ensure_default_dimension`/`mirror_sim_entities` already
+            // established for `.after(tick_sim)`.
             //
             // EM-4.6 bevy-migration-reviewer follow-up (BLOCKER fix): the
             // `.before(teardown_completed_dimensions)` edge alone left this
             // system's ordering relative to `handle_drain_requests`/
             // `predictive_gc_system` UNCONSTRAINED — both can synchronously
-            // flip a dimension straight to `Teardown` within the SAME frame
+            // flip a dimension straight to `Teardown` within the SAME tick
             // (`DimensionRegistry::begin_draining`'s "zero occupants ->
             // immediate Teardown" rule). Only reading `Res<DimensionRegistry>`
             // (vs. their `ResMut`) meant Bevy's scheduler was free to run this
-            // system BEFORE that same-frame transition happened, in which
+            // system BEFORE that same-tick transition happened, in which
             // case it would see the dimension as still `Active`, skip it —
             // and then `teardown_completed_dimensions` (downstream via the
             // dimensions-crate `.chain()`) would despawn the `DimensionRoot`
-            // cascade that same frame, destroying the `SimEntity`/
+            // cascade that same tick, destroying the `SimEntity`/
             // `DimensionId` tags this system needs before it ever got a
             // second chance to see `Teardown`. Result: the specs entity would
             // NEVER be deleted through `delete_entity_recorded` — a permanent
             // leak. Explicit `.after(..)` edges on BOTH transition sources
             // close the race, mirroring the exact "make the edge structural"
             // fix already applied above for `ensure_default_dimension`/
-            // `mirror_sim_entities`.
+            // `mirror_sim_entities`. This same-tick race guarantee is
+            // preserved verbatim across the `Update` -> `FixedUpdate` move —
+            // only the schedule changed, none of the ordering edges did.
             .add_systems(
-                Update,
+                FixedUpdate,
                 delete_specs_entities_for_torn_down_dimensions
                     .after(xindeler_dimensions::spinup::handle_drain_requests)
                     .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
@@ -1456,6 +1524,9 @@ fn mirror_sim_entities(
     // actually changed, since replicon's `VisibilityFilter` re-evaluates
     // every connected client on every insert/replace.
     mut region_cache: bevy::ecs::system::ResMut<SimRegionCache>,
+    // EM-4.10 Finding C: reused scratch buffers — see `MirrorScratch`'s doc
+    // comment. `.clear()`ed below instead of freshly allocated every tick.
+    mut scratch: bevy::ecs::system::ResMut<MirrorScratch>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
@@ -1488,36 +1559,34 @@ fn mirror_sim_entities(
     // rather than being silently dropped (additive-only requirement).
     let uids = ecs.read_storage::<Uid>();
 
-    // TODO(EM-4.2d): this mirror loop allocates `seen`/`updates`/`seen_set`
-    // fresh every tick over all visible entities, and net_health below issues a
-    // per-tick `remove::<NetHealth>()` for healthless entities (replicon no-ops
-    // it, harmless). Both are fine at test-NPC scale; when interest management
-    // reshapes this loop, hoist the buffers into a reused resource and guard the
-    // removal. Reviewer minors 1+2, deliberately deferred (non-blocking).
+    // EM-4.2d (superseded by EM-4.10 Finding C below): this mirror loop used
+    // to allocate `seen`/`updates`/`seen_set` fresh every tick over all
+    // visible entities — fine at test-NPC scale, but Wave-3's batch-spawning
+    // invalidated that assumption (see `MirrorScratch`'s doc comment for the
+    // full reasoning). `net_health`'s per-tick `remove::<NetHealth>()` for
+    // healthless entities remains (replicon no-ops it, harmless) — not part
+    // of this allocation fix.
     //
     // EM-4.2d update: interest management landed WITHOUT reshaping this loop
-    // (the TODO above still stands at test-NPC scale) — `RegionKey` is simply
-    // one more per-entity field computed alongside the others below, deduped
-    // through `region_cache` exactly like `NetLoadout`'s own dedup, so it does
-    // NOT re-insert (and thus does not force a replicon visibility
-    // re-evaluation) on every tick, only when an entity actually crosses into
-    // a new region.
-    // Snapshot of which sim entities are visible THIS tick + their net comps.
-    let mut seen: Vec<specs::Entity> = Vec::new();
-    // Collect (sim_entity, components) first so we can borrow-check-cleanly
-    // issue commands after dropping the specs storages.
-    #[allow(clippy::type_complexity)]
-    let mut updates: Vec<(
-        specs::Entity,
-        NetPos,
-        NetOri,
-        NetVel,
-        NetBody,
-        Option<NetHealth>,
-        Option<NetLoadout>,
-        Option<NetUid>,
-        RegionKey,
-    )> = Vec::new();
+    // — `RegionKey` is simply one more per-entity field computed alongside
+    // the others below, deduped through `region_cache` exactly like
+    // `NetLoadout`'s own dedup, so it does NOT re-insert (and thus does not
+    // force a replicon visibility re-evaluation) on every tick, only when an
+    // entity actually crosses into a new region.
+    //
+    // EM-4.10 Finding C: reuse `scratch`'s buffers instead of allocating
+    // fresh ones — `.clear()` keeps the already-grown capacity, so this
+    // becomes a cheap truncation instead of an allocation once the buffers
+    // have warmed up to the steady-state mirrored-entity count. A single
+    // reborrow (`&mut *scratch`) up front lets the rest of this function
+    // freely take disjoint borrows of `scratch`'s fields (`seen`/`updates`/
+    // `seen_set`) as plain struct-field borrows, rather than fighting the
+    // borrow checker through `ResMut`'s `DerefMut` on every access.
+    let scratch = &mut *scratch;
+    scratch.seen.clear();
+    scratch.updates.clear();
+    let seen = &mut scratch.seen;
+    let updates = &mut scratch.updates;
 
     // `maybe()` makes these MaybeJoin members, so this is a `LendJoin` (lending
     // iterator: `while let Some(..) = it.next()`), not a plain `for`. We copy
@@ -1647,7 +1716,7 @@ fn mirror_sim_entities(
         net_loadout,
         net_uid,
         region_key,
-    ) in updates
+    ) in updates.drain(..)
     {
         let is_local_player = player_sim_entity == Some(sim_entity);
         // EM-3.8d: (re-)insert the loadout ONLY when it changed since we last
@@ -1769,13 +1838,17 @@ fn mirror_sim_entities(
         region_cache.0.insert(sim_entity, region_key);
     }
 
-    // Despawn mirrors whose sim entity is gone / no longer visible this tick.
-    let seen_set: std::collections::HashSet<specs::Entity> = seen.into_iter().collect();
+    // Despawn mirrors whose sim entity is gone / no longer visible this
+    // tick. EM-4.10 Finding C: reuse `scratch.seen_set` (cleared, then
+    // repopulated by draining `seen`) instead of allocating a fresh
+    // `HashSet` every tick.
+    scratch.seen_set.clear();
+    scratch.seen_set.extend(seen.drain(..));
     let stale: Vec<specs::Entity> = mirror
         .0
         .keys()
         .copied()
-        .filter(|e| !seen_set.contains(e))
+        .filter(|e| !scratch.seen_set.contains(e))
         .collect();
     for sim_entity in stale {
         if let Some(bevy_entity) = mirror.0.remove(&sim_entity) {
@@ -1802,8 +1875,10 @@ fn mirror_sim_entities(
 /// BL-82 EM-4.6 (T47.8): the SIM-side half of dimension teardown. Before a
 /// torn-down dimension's `DimensionRoot` cascade-despawns its Bevy mirror
 /// entities (`xindeler_dimensions::teardown::teardown_completed_dimensions`,
-/// ordered `.after(this system)` in the SAME `Update` schedule — see
-/// [`SimEntityMirrorPlugin`]'s own wiring), this system removes the
+/// ordered `.after(this system)` in the SAME `FixedUpdate` schedule — EM-4.10
+/// Finding B moved this off `Update` alongside the rest of the dimension-
+/// lifecycle chain; see [`SimEntityMirrorPlugin`]'s own wiring), this system
+/// removes the
 /// CORRESPONDING specs entities from the sim through its own normal delete
 /// path (`server::state_ext::StateExt::delete_entity_recorded` — the exact
 /// call `server::cmd`'s admin commands and `Server::disconnect_all_clients_
@@ -1893,19 +1968,29 @@ fn delete_specs_entities_for_torn_down_dimensions(
 /// decides WHETHER an entry exists and, for a brand-new entry, that it
 /// starts at the documented neutral default. No position/stats/behavior
 /// history is read here or anywhere in this task.
+///
+/// ## EM-4.10 Finding C: `scratch` is a reused buffer, not owned locally
+/// This used to collect `live_npc_uids` into a fresh `HashSet` every call;
+/// the system wrapper ([`tick_aurora_overlay`]) now passes in
+/// [`AuroraScratch`]'s reused set instead (`.clear()`ed here, not
+/// reallocated), matching [`MirrorScratch`]'s pattern. Still pure/unit-
+/// testable — a test just passes its own scratch `HashSet` (see the
+/// `tests` module below), which costs nothing at test scale.
 fn recompute_aurora_overlay(
     mode: AiExecutionMode,
     overlay: &mut AuroraOverlay,
     live_npc_uids: impl Iterator<Item = u64>,
+    scratch: &mut std::collections::HashSet<u64>,
 ) {
     if mode == AiExecutionMode::Offline {
         overlay.0.clear();
         return;
     }
 
-    let live: std::collections::HashSet<u64> = live_npc_uids.collect();
-    overlay.0.retain(|uid, _| live.contains(uid));
-    for uid in live {
+    scratch.clear();
+    scratch.extend(live_npc_uids);
+    overlay.0.retain(|uid, _| scratch.contains(uid));
+    for &uid in scratch.iter() {
         overlay.0.entry(uid).or_default();
     }
 }
@@ -1927,8 +2012,16 @@ fn tick_aurora_overlay(
     mode: Res<AiExecutionMode>,
     mut overlay: bevy::ecs::system::ResMut<AuroraOverlay>,
     npcs: bevy::ecs::system::Query<&NetUid, bevy::ecs::query::Without<NetLocalPlayer>>,
+    // EM-4.10 Finding C: reused scratch set — see `AuroraScratch`'s doc
+    // comment.
+    mut scratch: bevy::ecs::system::ResMut<AuroraScratch>,
 ) {
-    recompute_aurora_overlay(*mode, &mut overlay, npcs.iter().map(|uid| uid.0));
+    recompute_aurora_overlay(
+        *mode,
+        &mut overlay,
+        npcs.iter().map(|uid| uid.0),
+        &mut scratch.live,
+    );
 }
 
 /// Boots a throwaway singleplayer-style server rooted at `data_dir` for
@@ -2104,36 +2197,39 @@ mod tests {
             "an unregistered dimension (not wrapped yet) must not admit new entrants"
         );
 
+        // EM-4.10 Finding D: a NON-default id from here on —
+        // `DimensionRegistry::begin_draining` now rejects
+        // `DimensionId::DEFAULT` outright (see that method's own doc
+        // comment), so it can no longer reach `Draining`/`Teardown` at all.
+        // `mirror_admits_new_entity` is a pure function of `DimensionState`'s
+        // lifecycle and doesn't care which id it belongs to, so this swap
+        // preserves the test's exact intent.
+        let id = DimensionId(1);
         let mut registry = DimensionRegistry::default();
         let root = bevy::ecs::entity::Entity::from_raw_u32(1).unwrap();
-        registry
-            .insert_spinning_up(DimensionId::DEFAULT, root, 0)
-            .unwrap();
-        assert_eq!(
-            registry.lifecycle(DimensionId::DEFAULT),
-            Some(DimensionLifecycle::Spinup)
-        );
+        registry.insert_spinning_up(id, root, 0).unwrap();
+        assert_eq!(registry.lifecycle(id), Some(DimensionLifecycle::Spinup));
         assert!(
-            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            !mirror_admits_new_entity(registry.get(id)),
             "Spinup must not admit new entrants"
         );
 
         let (world, index) = server::World::empty();
         registry
-            .complete_spinup(DimensionId::DEFAULT, std::sync::Arc::new(world), index)
+            .complete_spinup(id, std::sync::Arc::new(world), index)
             .unwrap();
         assert!(
-            mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            mirror_admits_new_entity(registry.get(id)),
             "Active must admit new entrants"
         );
 
-        registry.begin_draining(DimensionId::DEFAULT).unwrap();
+        registry.begin_draining(id).unwrap();
         // No occupants were ever added in this test, so this dimension went
         // straight Draining -> Teardown (see `DimensionRegistry::
         // begin_draining`'s doc comment) — either way, neither state admits
         // a new entrant, which is exactly what this test is proving.
         assert!(
-            !mirror_admits_new_entity(registry.get(DimensionId::DEFAULT)),
+            !mirror_admits_new_entity(registry.get(id)),
             "neither Draining nor Teardown may admit a new entrant"
         );
     }
@@ -2396,10 +2492,12 @@ mod tests {
     #[test]
     fn aurora_overlay_stays_empty_while_offline() {
         let mut overlay = AuroraOverlay::default();
+        let mut scratch = std::collections::HashSet::new();
         recompute_aurora_overlay(
             AiExecutionMode::Offline,
             &mut overlay,
             [1, 2, 3].into_iter(),
+            &mut scratch,
         );
         assert!(
             overlay.0.is_empty(),
@@ -2415,7 +2513,8 @@ mod tests {
     fn aurora_overlay_populates_neutral_defaults_outside_offline() {
         for mode in [AiExecutionMode::LocalOnly, AiExecutionMode::Full] {
             let mut overlay = AuroraOverlay::default();
-            recompute_aurora_overlay(mode, &mut overlay, [10, 20].into_iter());
+            let mut scratch = std::collections::HashSet::new();
+            recompute_aurora_overlay(mode, &mut overlay, [10, 20].into_iter(), &mut scratch);
 
             assert_eq!(
                 overlay.0.len(),
@@ -2449,7 +2548,13 @@ mod tests {
     #[test]
     fn aurora_overlay_never_overwrites_an_existing_entry() {
         let mut overlay = AuroraOverlay::default();
-        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+        let mut scratch = std::collections::HashSet::new();
+        recompute_aurora_overlay(
+            AiExecutionMode::LocalOnly,
+            &mut overlay,
+            [7].into_iter(),
+            &mut scratch,
+        );
 
         // Simulate a future BL-83 write.
         let mut seeded = AuroraNpcState::default();
@@ -2459,7 +2564,12 @@ mod tests {
         overlay.0.insert(7, seeded.clone());
 
         // Recompute again with the SAME live set — must not reset entry 7.
-        recompute_aurora_overlay(AiExecutionMode::LocalOnly, &mut overlay, [7].into_iter());
+        recompute_aurora_overlay(
+            AiExecutionMode::LocalOnly,
+            &mut overlay,
+            [7].into_iter(),
+            &mut scratch,
+        );
         assert_eq!(overlay.0.get(&7), Some(&seeded));
     }
 
@@ -2469,11 +2579,22 @@ mod tests {
     #[test]
     fn aurora_overlay_prunes_npcs_no_longer_live() {
         let mut overlay = AuroraOverlay::default();
-        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        let mut scratch = std::collections::HashSet::new();
+        recompute_aurora_overlay(
+            AiExecutionMode::Full,
+            &mut overlay,
+            [1, 2].into_iter(),
+            &mut scratch,
+        );
         assert_eq!(overlay.0.len(), 2);
 
         // NPC 2 is gone this tick.
-        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1].into_iter());
+        recompute_aurora_overlay(
+            AiExecutionMode::Full,
+            &mut overlay,
+            [1].into_iter(),
+            &mut scratch,
+        );
         assert_eq!(overlay.0.len(), 1);
         assert!(overlay.0.contains_key(&1));
         assert!(!overlay.0.contains_key(&2));
@@ -2485,10 +2606,21 @@ mod tests {
     #[test]
     fn aurora_overlay_clears_on_toggle_back_to_offline() {
         let mut overlay = AuroraOverlay::default();
-        recompute_aurora_overlay(AiExecutionMode::Full, &mut overlay, [1, 2].into_iter());
+        let mut scratch = std::collections::HashSet::new();
+        recompute_aurora_overlay(
+            AiExecutionMode::Full,
+            &mut overlay,
+            [1, 2].into_iter(),
+            &mut scratch,
+        );
         assert_eq!(overlay.0.len(), 2);
 
-        recompute_aurora_overlay(AiExecutionMode::Offline, &mut overlay, [1, 2].into_iter());
+        recompute_aurora_overlay(
+            AiExecutionMode::Offline,
+            &mut overlay,
+            [1, 2].into_iter(),
+            &mut scratch,
+        );
         assert!(overlay.0.is_empty());
     }
 
@@ -2503,6 +2635,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(AiExecutionMode::Offline)
             .init_resource::<AuroraOverlay>()
+            .init_resource::<AuroraScratch>()
             .add_systems(Update, tick_aurora_overlay);
 
         app.world_mut().spawn(NetUid(100));
@@ -2809,7 +2942,7 @@ mod tests {
     #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
     fn entity_template_factory_spawns_a_real_agro_npc_and_mirrors_it() {
         use xindeler_oracle_host::entity_template::{
-            ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats, spawn_entity_template,
+            EntityTemplate, EntityTemplateStats, spawn_entity_template,
         };
 
         const MAX_TICKS: u32 = 4000;
@@ -2894,19 +3027,16 @@ mod tests {
             ..EntityTemplate::default()
         };
 
-        let registry = ComponentSpawnRegistry::with_builtins();
         {
             let mut commands = server_app.world_mut().commands();
             spawn_entity_template(
                 &mut commands,
-                &registry,
                 &aggro_template,
                 [centre.x, centre.y, alt + 3.0],
                 xindeler_protocol::DimensionId::DEFAULT,
             );
             spawn_entity_template(
                 &mut commands,
-                &registry,
                 &malformed_behavior_template,
                 [centre.x + 5.0, centre.y, alt + 3.0],
                 xindeler_protocol::DimensionId::DEFAULT,
@@ -3032,9 +3162,9 @@ mod tests {
     }
 
     /// BL-82 EM-4.7 acceptance (task board's literal bar, `tasks/
-    /// 45-engine-migration-tasks.md`: "Ravenloft example spawns 15 clamped
+    /// 45-engine-migration-tasks.md`: "Mist-Bound example spawns 15 clamped
     /// minions with stalker AI in a test dimension"): a `DmEvent` shaped
-    /// like a Ravenloft-style ORACLE event (`spawning_rules` drawing from
+    /// like a Mist-Bound-style ORACLE event (`spawning_rules` drawing from
     /// the shipped `sentinel_owl` template — an already-authored "stalk"
     /// sample, see `assets/xindeler/entity_templates/
     /// sentinel_owl.entity_template.ron`) spawns exactly 15 real sim NPCs,
@@ -3054,16 +3184,16 @@ mod tests {
     /// ceiling is 200 — so this test does not pretend it is one).
     #[test]
     #[ignore = "boots a real world: needs assets + LFS; run locally with XINDELER_ASSETS"]
-    fn ravenloft_spawning_rules_spawn_fifteen_clamped_stalker_minions_in_a_test_dimension() {
+    fn mist_bound_spawning_rules_spawn_fifteen_clamped_stalker_minions_in_a_test_dimension() {
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
         use xindeler_oracle_host::{
             DmEvent, SpawningRules,
-            entity_template::{ComponentSpawnRegistry, EntityTemplate, EntityTemplateStats},
+            entity_template::{EntityTemplate, EntityTemplateStats},
         };
 
         const EXPECTED_MINIONS: usize = 15;
-        const MINION_NAME: &str = "Ravenloft Sentinel";
+        const MINION_NAME: &str = "Mist-Bound Sentinel";
         // Must match `event.spawning_rules.spawn_radius` below — kept as its
         // own named constant so the terrain-readiness preamble can size its
         // wait against the SAME radius the scatter itself uses.
@@ -3143,7 +3273,7 @@ mod tests {
             (centre, alt)
         };
 
-        // The "Ravenloft example": a DmEvent whose spawning_rules directive
+        // The "Mist-Bound example": a DmEvent whose spawning_rules directive
         // names the shipped `sentinel_owl` template, a uniform "stalk"
         // override (every minion stalks regardless of the template's own
         // default), and a deliberately hostile spawn_count.
@@ -3185,13 +3315,11 @@ mod tests {
             ai_behavior_override: "flee".to_owned(),
         });
 
-        let registry = ComponentSpawnRegistry::with_builtins();
         let mut rng = ChaCha8Rng::seed_from_u64(0xBADD_C0DE);
         {
             let mut commands = server_app.world_mut().commands();
             spawn_from_spawning_rules(
                 &mut commands,
-                &registry,
                 &templates,
                 &event.spawning_rules,
                 [centre.x, centre.y, alt + 3.0],
@@ -3241,7 +3369,7 @@ mod tests {
         assert_eq!(
             minions.len(),
             EXPECTED_MINIONS,
-            "the Ravenloft example's spawning_rules must spawn exactly {EXPECTED_MINIONS} real \
+            "the Mist-Bound example's spawning_rules must spawn exactly {EXPECTED_MINIONS} real \
              sim NPCs, no more, no fewer"
         );
 
@@ -3509,8 +3637,12 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins.build());
         app.add_plugins(SimBridgePlugin);
+        // EM-4.10 Finding B: `FixedUpdate`, matching the production wiring
+        // (`SimEntityMirrorPlugin::build`) and `DimensionsPlugin`'s own
+        // chain, which this system orders itself against below — both must
+        // live in the SAME schedule for `.after`/`.before` to mean anything.
         app.add_systems(
-            Update,
+            FixedUpdate,
             delete_specs_entities_for_torn_down_dimensions
                 .after(xindeler_dimensions::spinup::handle_drain_requests)
                 .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
@@ -3613,23 +3745,27 @@ mod tests {
 
     /// Regression test for the bevy-migration-reviewer's BLOCKER finding on
     /// the first version of this system: it must not lose a mirrored specs
-    /// entity when a dimension flips `Active -> Teardown` in the SAME frame
-    /// [`delete_specs_entities_for_torn_down_dimensions`] runs in.
+    /// entity when a dimension flips `Active -> Teardown` in the SAME tick
+    /// [`delete_specs_entities_for_torn_down_dimensions`] runs in. (Function
+    /// name kept as "frame" for git-history continuity; EM-4.10 Finding B
+    /// moved the whole chain from `Update`/render-frame cadence to
+    /// `FixedUpdate`/sim-tick cadence — the race this test proves is now a
+    /// same-TICK race, not a same-frame one, but it's the identical race.)
     ///
     /// Unlike [`tearing_down_a_dimension_deletes_its_mirrored_specs_entity`]
     /// above (which drives the transition directly via
     /// `DimensionRegistry::begin_draining`, entirely OUTSIDE any
-    /// `app.update()`, so it never actually exercises same-frame scheduling
+    /// `app.update()`, so it never actually exercises same-tick scheduling
     /// order), this test sends a REAL [`xindeler_dimensions::DrainDimension`]
     /// message and lets [`xindeler_dimensions::spinup::handle_drain_requests`]
     /// perform the `Active -> Teardown` flip (immediate, since the dimension
     /// has zero REGISTRY-tracked occupants) inside the very same
-    /// `app.update()` this deletion system also runs in — the exact race
+    /// `FixedUpdate` tick this deletion system also runs in — the exact race
     /// window the reviewer identified: without an explicit `.after(..)` edge
     /// on both `handle_drain_requests` and `predictive_gc_system`, Bevy was
     /// free to schedule this system BEFORE the flip happened, see the
     /// dimension as still `Active`, skip it, and then lose the mirror tags
-    /// forever to `teardown_completed_dimensions`'s same-frame cascade
+    /// forever to `teardown_completed_dimensions`'s same-tick cascade
     /// despawn — permanently leaking the specs entity.
     #[test]
     #[ignore = "boots a real world: needs assets; run locally with VELOREN_ASSETS=\"$(pwd)/assets\""]
@@ -3643,11 +3779,14 @@ mod tests {
         app.add_plugins(MinimalPlugins.build());
         // `SimBridgePlugin` brings in `DimensionsPlugin` (guarded add), which
         // is what actually registers `handle_drain_requests`/
-        // `predictive_gc_system`/`teardown_completed_dimensions` in `Update`
-        // — the real production wiring, not a hand-picked subset.
+        // `predictive_gc_system`/`teardown_completed_dimensions` in
+        // `FixedUpdate` (EM-4.10 Finding B) — the real production wiring,
+        // not a hand-picked subset.
         app.add_plugins(SimBridgePlugin);
+        // EM-4.10 Finding B: `FixedUpdate`, matching production — must be
+        // the SAME schedule as the systems ordered against below.
         app.add_systems(
-            Update,
+            FixedUpdate,
             delete_specs_entities_for_torn_down_dimensions
                 .after(xindeler_dimensions::spinup::handle_drain_requests)
                 .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
@@ -3720,8 +3859,9 @@ mod tests {
 
         // The real admin-command message, not a direct registry call — this
         // is what makes the flip happen INSIDE `handle_drain_requests`, in
-        // the same `Update` schedule run as `delete_specs_entities_for_torn_
-        // down_dimensions`, exercising the actual race window.
+        // the same `FixedUpdate` schedule run as
+        // `delete_specs_entities_for_torn_down_dimensions`, exercising the
+        // actual race window.
         app.world_mut()
             .write_message(xindeler_dimensions::DrainDimension(DimensionId(2)));
 

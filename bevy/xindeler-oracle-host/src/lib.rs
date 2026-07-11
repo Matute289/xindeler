@@ -4,8 +4,8 @@
 //! BL-82 Bevy migration — skeleton crate (EM-0.7); [`atmosphere`] (EM-2.4),
 //! [`ai_gateway`] (EM-4.2e, a config/metrics-only seam for BL-83/BL-85 that
 //! makes zero real AI calls itself), [`dm_event`] (EM-4.3/4.4), and
-//! [`entity_template`] (EM-4.7, the generic entity factory schema + registry
-//! — `xindeler-sim-bridge::entity_factory` holds the other half that
+//! [`entity_template`] (EM-4.7, the generic entity factory schema —
+//! `xindeler-sim-bridge::entity_factory` holds the other half that
 //! actually spawns into the sim) are the first real systems. Remaining
 //! systems land per `docs/design/tasks/45-engine-migration-tasks.md` /
 //! `docs/design/tasks/47-bl82-phase4-remaining-tasks.md`. Isolation law:
@@ -34,10 +34,9 @@ pub use crate::{
         ORACLE_SOURCE, SpawningRules, default_events_dir, register_oracle_source,
     },
     entity_template::{
-        AgentPreset, ComponentSpawnRegistry, EntityTemplate, EntityTemplateLoader,
-        EntityTemplatePlugin, EntityTemplateStats, PendingAiBehavior, PendingBody,
-        PendingEntityTemplateSpawn, PendingFaction, PendingLoot, PendingStats, SpawnClosure,
-        spawn_entity_template,
+        AgentPreset, EntityTemplate, EntityTemplateLoader, EntityTemplatePlugin,
+        EntityTemplateStats, PendingAiBehavior, PendingBody, PendingEntityTemplateSpawn,
+        PendingFaction, PendingLoot, PendingStats, spawn_entity_template,
     },
 };
 

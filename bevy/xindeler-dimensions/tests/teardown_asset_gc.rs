@@ -18,7 +18,7 @@
 //! non-`#[ignore]`d test — no real assets/procgen needed, `DimensionState`
 //! is built the same direct-API way `registry.rs`'s own unit tests use.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bevy::{
     MinimalPlugins,
@@ -27,6 +27,7 @@ use bevy::{
     ecs::component::Component,
     mesh::{Mesh, PrimitiveTopology},
     prelude::*,
+    time::{Fixed, TimeUpdateStrategy},
 };
 use xindeler_dimensions::{DimensionId, DimensionRegistry, DimensionRoot, DimensionsPlugin};
 
@@ -51,6 +52,15 @@ fn dimension_teardown_frees_mesh_assets_back_to_baseline() {
         .add_plugins(AssetPlugin::default())
         .init_asset::<Mesh>()
         .add_plugins(DimensionsPlugin);
+    // EM-4.10 Finding B: `teardown_completed_dimensions` now lives in
+    // `FixedUpdate`, not `Update` — the tight no-sleep `app.update()` loop
+    // below needs a deterministic fixed step (rather than depending on
+    // `Time::<Fixed>`'s real-time accumulator) to reliably run the chain
+    // every call, matching this test's original assumption.
+    app.insert_resource(Time::<Fixed>::from_hz(64.0));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 64.0,
+    )));
 
     // Baseline: nothing loaded yet.
     assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);

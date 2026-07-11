@@ -93,6 +93,9 @@ pub enum DimensionError {
     NotFound(DimensionId),
     /// A dimension already exists under this id.
     AlreadyExists(DimensionId),
+    /// [`DimensionId::DEFAULT`] can never be drained (EM-4.10 Finding D) —
+    /// see [`DimensionRegistry::begin_draining`]'s doc comment.
+    CannotDrainDefault,
     /// The dimension exists but is not `Active`, so it rejects a new
     /// entrant.
     NotAcceptingEntrants(DimensionId, DimensionLifecycle),
@@ -108,6 +111,9 @@ impl fmt::Display for DimensionError {
         match self {
             Self::NotFound(id) => write!(f, "dimension {id:?} does not exist"),
             Self::AlreadyExists(id) => write!(f, "dimension {id:?} already exists"),
+            Self::CannotDrainDefault => {
+                write!(f, "DimensionId::DEFAULT can never be drained")
+            },
             Self::NotAcceptingEntrants(id, lifecycle) => {
                 write!(
                     f,
@@ -223,7 +229,21 @@ impl DimensionRegistry {
     /// caller/test can observe it precisely — mirrors
     /// [`Self::remove_occupant`]'s own return value for the "did this call
     /// just tear the dimension down" question.
+    ///
+    /// ## EM-4.10 Finding D: `DimensionId::DEFAULT` is rejected up front
+    /// The always-present default dimension has no occupant bookkeeping
+    /// today (nothing in this codebase calls `try_add_occupant` for it in
+    /// every boot path — see `mirror_sim_entities`), so at boot, BEFORE any
+    /// mirror registers, its occupant set is empty — which used to make this
+    /// function immediately flip it to `Teardown`. `teardown.rs` then
+    /// refuses to actually despawn `DEFAULT` and logs an `error!`, leaving it
+    /// stuck in `Teardown` forever — a dead-but-reachable path. Rejecting
+    /// `DEFAULT` here, at the source, closes it rather than relying on that
+    /// downstream refusal.
     pub fn begin_draining(&mut self, id: DimensionId) -> Result<bool, DimensionError> {
+        if id == DimensionId::DEFAULT {
+            return Err(DimensionError::CannotDrainDefault);
+        }
         let state = self
             .dimensions
             .get_mut(&id)
@@ -670,6 +690,43 @@ mod tests {
                 DimensionLifecycle::Spinup,
                 DimensionLifecycle::Active
             ))
+        );
+    }
+
+    /// EM-4.10 Finding D: `begin_draining` must reject `DimensionId::DEFAULT`
+    /// at its OWN entry point (a typed error), not merely rely on
+    /// `handle_drain_requests` guarding the message path — a direct caller
+    /// (a test, a future admin tool, anything bypassing the message bus)
+    /// must not be able to flip the always-on default dimension toward
+    /// `Teardown` and get it stuck there forever (`teardown.rs` refuses to
+    /// actually despawn `DEFAULT`, logs an error, and never undoes the
+    /// lifecycle flip).
+    #[test]
+    fn begin_draining_rejects_the_default_dimension_even_with_zero_occupants() {
+        let mut registry = DimensionRegistry::default();
+        let root = dummy_entity(0);
+        registry
+            .insert_spinning_up(DimensionId::DEFAULT, root, 0)
+            .unwrap();
+        let (world, index) = World::empty();
+        registry
+            .complete_spinup(DimensionId::DEFAULT, Arc::new(world), index)
+            .unwrap();
+        // Zero occupants — exactly the boot-time state that used to make
+        // this immediately (and wrongly) tear DEFAULT down.
+        assert_eq!(
+            registry.get(DimensionId::DEFAULT).unwrap().occupant_count(),
+            0
+        );
+
+        assert_eq!(
+            registry.begin_draining(DimensionId::DEFAULT),
+            Err(DimensionError::CannotDrainDefault)
+        );
+        assert_eq!(
+            registry.lifecycle(DimensionId::DEFAULT),
+            Some(DimensionLifecycle::Active),
+            "DEFAULT must stay Active — never even reach Draining, let alone get stuck in Teardown"
         );
     }
 

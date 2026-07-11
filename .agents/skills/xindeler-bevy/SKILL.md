@@ -51,6 +51,31 @@ no egui in the shipped client.
 4. Bridge systems are read-mostly; writes into the sim go through its public APIs/events only.
 5. Directory names stay upstream-verbatim; only Cargo package names rebrand (Mapper §B).
 
+## Reference: compare against `xindeler-old` before fixing bugs or designing new features
+
+The legacy pre-Bevy client (same game, mature Veloren-derived engine, years of production
+hardening) is cloned locally at `/Users/mgrinberg/Workspace/RustroverProjects/xindeler-old`
+(public repo `Matute289/xindeler-old`; clone with `GIT_LFS_SKIP_SMUDGE=1` to skip binary assets —
+only source is needed for comparison). **Standing instruction (Matías, 2026-07-11):** before
+investigating a gameplay/rendering bug, or designing a new feature, in the Bevy port, check how the
+old engine solves the equivalent problem. Most of `common*`/`world`/`rtsim`/`network*`/`server`/
+`client` is SHARED, upstream-merged, unmigrated code between the two repos — verify with a diff
+before assuming a difference exists, it's often byte-identical. A real behavioral difference
+usually means the Bevy **port** (not shared game logic) diverged, dropped, or under-implemented
+something the old engine already had working — not a new bug in game logic itself.
+
+First real exercise: `docs/design/specs/2026-07-11-xindeler-old-comparison-research.md` traced the
+FPS-oscillation bug, a jump-landing bug, and part of a diagonal-movement stutter all to ONE
+architectural gap (old = frame-rate client-side prediction + a smoothed `Clock` dt; new =
+fixed-30Hz-tick-then-mirror-and-interpolate), while ruling out collision/physics divergence
+entirely (confirmed identical code) — a comparison-first approach found the real cause in one pass
+after 6 rounds of guessing hadn't.
+
+**Don't port 1:1** — the whole point of the migration is BETTER visuals/detail than the old bespoke
+Veloren renderer could afford (PBR/TAA/volumetric fog, higher-fidelity meshing). Use `xindeler-old`
+to understand WHAT problem the old engine solved and HOW (the algorithm/data shape/architecture),
+then implement the Bevy-native equivalent with Bevy's own idioms — not a literal transliteration.
+
 ## Bevy 0.19 facts & gotchas (verified 2026-07)
 
 - **0.19 (2026-06-19), wgpu 29.** Breaking vs 0.18: render graph → **ECS schedules** (custom passes

@@ -22,6 +22,14 @@
 //!    child, so Bevy reports zero motion for that one teleport frame instead of
 //!    the true, extreme jump — see [`interpolate_entities`]'s doc comment for
 //!    the TAA-ghosting bug this fixes ("detached ghost hand" report).
+//!    **EM-3.11r:** the local player's OWN mirrored entity (tagged
+//!    [`NetLocalPlayer`]) eases at a much higher, distinct rate
+//!    ([`LOCAL_PLAYER_POS_LERP_RATE`]) than every remote entity's
+//!    [`POS_LERP_RATE`] — its `NetPos` comes from this same process's own
+//!    embedded sim tick (no real network jitter to hide), and the shared 10/s
+//!    rate was measurably lagging it up to 0.80 m behind its own already-
+//!    landed height after a jump, reading as "still airborne" (see that
+//!    constant's doc comment for the full jump/landing investigation).
 //!
 //! ## Purity
 //! This module is 100% Bevy + `xindeler-protocol` — NO `specs`, no server
@@ -29,15 +37,89 @@
 //! stays clean. Compiled only under the `listen-server` feature.
 
 use bevy::{pbr::PreviousGlobalTransform, prelude::*};
-use xindeler_protocol::{NetBody, NetOri, NetPos, NetVel};
+use xindeler_protocol::{NetBody, NetLocalPlayer, NetOri, NetPos, NetVel};
 
 /// Per-frame exponential-lerp rate for position (voxygen
 /// `POS_LERP_RATE_FACTOR`). `lerp(cur, target, RATE·dt)` each frame → a smooth
 /// critically-ish-damped ease that reaches the target quickly at 60+ fps but
-/// tolerates sparse net updates.
+/// tolerates sparse net updates. Applies to every REMOTE mirrored entity
+/// (NPCs, other players once real multiplayer lands) — tuned to hide real
+/// network jitter/packet loss, same as voxygen's original.
 const POS_LERP_RATE: f32 = 10.0;
 /// Orientation slerp rate (voxygen `base_ori_interp` default, non-object).
 const ORI_LERP_RATE: f32 = 10.0;
+/// Position lerp rate for the LOCAL player's own mirrored entity specifically
+/// (BL-82 EM-3.11r fix). In the `--listen-server` architecture the local
+/// player's `NetPos` is NOT a real network sample — it comes from THIS SAME
+/// process's own embedded sim tick over loopback, so there is no real jitter
+/// or packet loss to smooth away, only the 30 Hz `FixedUpdate` step size vs.
+/// a much higher `Update` render rate.
+///
+/// This was verified with a real, velocity-gated A/B, not just a plausible
+/// story: `XINDELER_SMOKE_JUMP_SPAM=1` (a scripted, deterministic repeated
+/// jump-press/release driver) + `XINDELER_LANDING_PERF_LOG=1`
+/// (`log_local_player_landing_gap`, which tracks the MINIMUM `|NetVel.y|`
+/// seen during each render/sim vertical-gap episode — this is what
+/// distinguishes a REAL "still floating after actually landing" defect from
+/// the harmless, intentional `VEL_LEAD` look-ahead that's expected while
+/// still genuinely airborne). At the old shared rate (10/s, reusing
+/// `POS_LERP_RATE`), 76 of 121 logged episodes in a 45s run had
+/// `min_abs_vel_y == 0.0` — i.e. the sim's own velocity had ALREADY settled
+/// to exactly zero (genuinely landed, not moving) while the render still sat
+/// up to 0.80 m above the true height for as long as 510 ms. That is a real,
+/// reproducible "the character hasn't touched down / jumped from mid-air"
+/// artifact, matching Matías's report exactly — and it is NOT a sim-side
+/// grounded-state bug: the jump gate itself never once allowed a jump to
+/// fire while `on_ground: None` (verified: 0 such cases in ~800+ logged
+/// jump-gate checks across the same class of run —
+/// `common/src/states/utils.rs::handle_jump`'s `XINDELER_JUMP_PERF_LOG`
+/// diagnostic). At this rate (60/s), the SAME test (91 episodes across a
+/// 45s run) produced ZERO episodes with `min_abs_vel_y == 0.0` — every
+/// remaining gap coincided with the sim's own velocity still being ≥ 5 m/s
+/// (i.e. genuinely still airborne, the expected/harmless `VEL_LEAD` case) —
+/// confirming the fix actually closes the defect rather than just making it
+/// harder to observe.
+///
+/// ## A real trade-off, checked rather than assumed away
+/// `step_pos`'s `t = (rate·dt).min(1.0)` SATURATES to a full per-frame snap
+/// (no easing at all that frame) whenever `dt ≥ 1/rate` — i.e. at render
+/// rates ≤ 60 fps with this constant, which `bevy-migration-reviewer`
+/// correctly flagged as potentially reintroducing visible per-tick
+/// quantization during ORDINARY (non-jumping) walking, not just fixing the
+/// landing case. Checked, not dismissed: a gentler `20/s` was tried with the
+/// SAME velocity-gated repro and still left 15 of 96 episodes with
+/// `min_abs_vel_y == 0.0` (one 430 ms / 0.30 m) — i.e. a materially gentler
+/// rate does NOT close the reported bug, so there is no "free" middle ground
+/// here. Also measured (temporarily, `XINDELER_TEMP_STEP_LOG`, since
+/// reverted) the local player's per-frame step size during a plain 20s
+/// straight walk at 60/s: median non-zero step ≈0.27 m recurring roughly
+/// every 3rd render frame (consistent with an effective 8-9 m/s walk speed
+/// sampled at 30 Hz), ~31% of frames showing zero delta in between. That
+/// confirms the reviewer's math: motion IS quantized to sim-tick granularity
+/// rather than continuously eased across the render's higher frame rate.
+///
+/// This is a genuine, disclosed trade-off, not a clear bug: prioritizing
+/// zero added lag (fixing the confirmed "floating after landing" report)
+/// over inter-tick smoothness for the ONE entity that's a zero-real-jitter,
+/// same-process source — closer in spirit to the old client's own frame-rate
+/// local prediction (which also only ever shows the CURRENT true position,
+/// see the trade-off note below) than to the jitter-hiding smoothing this
+/// same mechanism correctly provides for remote entities. Whether the
+/// resulting per-tick quantization reads as noticeably worse in a real human
+/// play session (vs. the previous, smoother-but-laggy motion) is a
+/// perceptual question an automated repro cannot fully settle — flagged for
+/// Matías's own eyeball on ordinary walking in his next session, same as
+/// several prior EM-3.11 rounds' visual fixes.
+///
+/// This narrows the specific "renders above an already-landed position"
+/// artifact but does not eliminate 30 Hz sampling lag in general — the
+/// architecturally complete fix (per a parallel `xindeler-old` comparison,
+/// `docs/design/specs/2026-07-11-xindeler-old-comparison-research.md`) is to
+/// predict the local player at frame rate (as the legacy voxygen client
+/// does) instead of interpolating a fixed-rate mirror of it; that would also
+/// remove the quantization trade-off above, not just the lag. That is a
+/// bigger architectural change tracked as a follow-up, not done here.
+const LOCAL_PLAYER_POS_LERP_RATE: f32 = 60.0;
 /// Dead-reckoning lead: aim the lerp at `pos + vel·VEL_LEAD` so a steadily
 /// moving entity doesn't render one net-sample behind its own motion (voxygen
 /// uses the same `+ vel.0 * 0.03`).
@@ -60,7 +142,15 @@ pub struct EntityViewPlugin;
 
 impl Plugin for EntityViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (add_presentation, interpolate_entities).chain());
+        app.add_systems(
+            Update,
+            (
+                add_presentation,
+                interpolate_entities,
+                log_local_player_landing_gap,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -186,16 +276,31 @@ fn interpolate_entities(
         &NetPos,
         &NetOri,
         Option<&NetVel>,
+        Option<&NetLocalPlayer>,
         &mut Interpolated,
         &mut Transform,
     )>,
     children_query: Query<&Children>,
 ) {
     let dt = time.delta_secs();
-    for (entity, pos, ori, vel, mut interp, mut transform) in &mut query {
+    for (entity, pos, ori, vel, local_player, mut interp, mut transform) in &mut query {
         let target = pos.0;
         let far = interp.pos.distance_squared(target) >= SNAP_DISTANCE * SNAP_DISTANCE;
-        interp.pos = step_pos(interp.pos, target, vel.map_or(Vec3::ZERO, |v| v.0), dt);
+        // BL-82 EM-3.11r: the local player's own `NetPos` has no real network
+        // jitter to smooth (see `LOCAL_PLAYER_POS_LERP_RATE`'s doc comment),
+        // so it eases at a much higher rate than remote mirrored entities.
+        let pos_lerp_rate = if local_player.is_some() {
+            LOCAL_PLAYER_POS_LERP_RATE
+        } else {
+            POS_LERP_RATE
+        };
+        interp.pos = step_pos(
+            interp.pos,
+            target,
+            vel.map_or(Vec3::ZERO, |v| v.0),
+            dt,
+            pos_lerp_rate,
+        );
         interp.ori = if far {
             // Teleport / first real sample: snap orientation too.
             ori.0
@@ -230,13 +335,88 @@ fn clear_previous_transform(
     }
 }
 
+/// Vertical (Bevy y) gap between the local player's authoritative [`NetPos`]
+/// and its eased [`Interpolated`] render position beyond which
+/// [`log_local_player_landing_gap`] considers the render "floating" relative
+/// to the sim's own ground truth.
+const LANDING_GAP_THRESHOLD: f32 = 0.15;
+
+/// BL-82 EM-3.11r diagnostic (Matías's "jump a lot and sometimes I don't reach
+/// the ground, looks like jumping from mid-air" report). The interpolation
+/// smoothing in [`interpolate_entities`] EASES the render toward the
+/// authoritative `NetPos` rather than snapping (by design, see the module
+/// docs) — during a fast jump/land cycle that lag can leave the rendered
+/// model visibly ABOVE the sim's true (already-grounded) height for a
+/// stretch of frames, which would look exactly like "still airborne" even
+/// though the sim itself already registered the landing. This logs the
+/// START and END of each such episode for the local player only (opt-in,
+/// `XINDELER_LANDING_PERF_LOG=1`, cached `Local` read — same pattern as
+/// `sprite_view.rs`'s `XINDELER_SPRITE_PERF_LOG`) so a real play session can
+/// confirm/refute the render-lag hypothesis instead of guessing at it: pair
+/// this with `XINDELER_JUMP_PERF_LOG=1` (`common/src/states/utils.rs::
+/// handle_jump`) to see whether a "jump gate denied" or a "jump fired while
+/// on_ground: None" ever coincides with a logged gap episode — the former
+/// would confirm this is purely visual, the latter would point back to a
+/// real sim-side grounded-state bug instead.
+fn log_local_player_landing_gap(
+    time: Res<Time>,
+    query: Query<(&NetPos, Option<&NetVel>, &Interpolated), With<NetLocalPlayer>>,
+    mut enabled: Local<Option<bool>>,
+    // (episode start time, peak gap so far, MINIMUM |vel.y| seen so far). The
+    // min-abs-velocity tracking disambiguates two very different mechanisms
+    // that both show up as "gap > threshold": (a) the deliberate `VEL_LEAD`
+    // dead-reckoning look-ahead (`step_pos`'s `target + vel·VEL_LEAD`), which
+    // is large ONLY while `vel.y` is large (i.e. genuinely airborne, still
+    // rising/falling fast) and is not a bug; vs. (b) real convergence lag —
+    // the render still sitting above the sim's height AFTER `vel.y` has
+    // already settled near zero (i.e. the sim itself says "landed, not
+    // moving") — which WOULD be the "looks like it hasn't touched down"
+    // artifact Matías described. If `min_abs_vel_y` at episode end is small,
+    // the gap was genuine post-landing lag; if it stayed large the whole
+    // episode, the gap was just the intentional lead term tracking a still-
+    // airborne, fast-moving sample.
+    mut episode_start: Local<Option<(f64, f32, f32)>>,
+) {
+    let enabled = *enabled
+        .get_or_insert_with(|| std::env::var("XINDELER_LANDING_PERF_LOG").is_ok_and(|v| v != "0"));
+    if !enabled {
+        return;
+    }
+    let Ok((pos, vel, interp)) = query.single() else {
+        return;
+    };
+    // Bevy y-up: positive gap = render sits ABOVE the sim's authoritative
+    // height (i.e. looks like it hasn't landed yet).
+    let gap = interp.pos.y - pos.0.y;
+    let abs_vel_y = vel.map_or(0.0, |v| v.0.y.abs());
+    let now = time.elapsed_secs_f64();
+    match (*episode_start, gap > LANDING_GAP_THRESHOLD) {
+        (None, true) => *episode_start = Some((now, gap, abs_vel_y)),
+        (Some((start, peak, min_vel)), true) => {
+            *episode_start = Some((start, peak.max(gap), min_vel.min(abs_vel_y)));
+        },
+        (Some((start, peak, min_vel)), false) => {
+            info!(
+                duration_ms = ((now - start) * 1000.0) as u64,
+                peak_gap = peak,
+                min_abs_vel_y = min_vel,
+                "BL-82 EM-3.11r local-player render/sim landing gap episode ended"
+            );
+            *episode_start = None;
+        },
+        (None, false) => {},
+    }
+}
+
 /// The pure interpolation step, factored out of [`interpolate_entities`] so it
 /// can be unit-tested without a GPU/App. Returns the new interpolated position.
 /// (System stays the single caller; keeping the math here documents + tests the
-/// EM-3.7 smoothing decision in isolation.)
-fn step_pos(current: Vec3, target: Vec3, vel: Vec3, dt: f32) -> Vec3 {
+/// EM-3.7 smoothing decision in isolation.) `rate` is the caller-selected
+/// per-frame lerp rate (BL-82 EM-3.11r: [`POS_LERP_RATE`] for remote entities,
+/// [`LOCAL_PLAYER_POS_LERP_RATE`] for the local player's own entity).
+fn step_pos(current: Vec3, target: Vec3, vel: Vec3, dt: f32, rate: f32) -> Vec3 {
     if current.distance_squared(target) < SNAP_DISTANCE * SNAP_DISTANCE {
-        let t = (POS_LERP_RATE * dt).min(1.0);
+        let t = (rate * dt).min(1.0);
         current.lerp(target + vel * VEL_LEAD, t)
     } else {
         target
@@ -254,7 +434,7 @@ mod tests {
     fn small_move_eases_not_snaps() {
         let cur = Vec3::new(0.0, 0.0, 0.0);
         let target = Vec3::new(1.0, 0.0, 0.0);
-        let next = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0);
+        let next = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0, POS_LERP_RATE);
         // POS_LERP_RATE/60 ≈ 0.167 → moves ~16% of the way, not 100%.
         assert!(next.x > 0.0 && next.x < target.x, "eased partway: {next:?}");
         assert!(next.x < 0.5, "must not snap to the target in one frame");
@@ -267,7 +447,7 @@ mod tests {
         let target = Vec3::new(5.0, 2.0, -3.0);
         let mut cur = Vec3::ZERO;
         for _ in 0..300 {
-            cur = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0);
+            cur = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0, POS_LERP_RATE);
         }
         assert!(cur.distance(target) < 0.01, "converged to target: {cur:?}");
     }
@@ -278,7 +458,7 @@ mod tests {
     fn far_jump_snaps() {
         let cur = Vec3::ZERO;
         let target = Vec3::new(200.0, 0.0, 0.0); // > SNAP_DISTANCE
-        let next = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0);
+        let next = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0, POS_LERP_RATE);
         assert_eq!(next, target, "far jumps snap");
     }
 
@@ -289,11 +469,51 @@ mod tests {
         let cur = Vec3::new(1.0, 0.0, 0.0);
         let target = Vec3::new(1.0, 0.0, 0.0);
         let vel = Vec3::new(10.0, 0.0, 0.0);
-        let with_vel = step_pos(cur, target, vel, 1.0 / 60.0);
-        let no_vel = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0);
+        let with_vel = step_pos(cur, target, vel, 1.0 / 60.0, POS_LERP_RATE);
+        let no_vel = step_pos(cur, target, Vec3::ZERO, 1.0 / 60.0, POS_LERP_RATE);
         assert!(
             with_vel.x > no_vel.x,
             "dead-reckoning must lead the raw sample"
+        );
+    }
+
+    /// BL-82 EM-3.11r regression: the local player's higher lerp rate closes
+    /// the SAME gap measurably faster than the remote-entity rate — the fix
+    /// for the "jump a lot, sometimes I don't reach the ground" report (a
+    /// real scripted repro found the rendered local player lagging up to
+    /// 0.80 m / 510 ms behind its own already-landed sim position using the
+    /// old shared 10/s rate; see `LOCAL_PLAYER_POS_LERP_RATE`'s doc comment).
+    #[test]
+    fn local_player_rate_converges_faster_than_remote_rate() {
+        let cur = Vec3::ZERO;
+        let target = Vec3::new(0.0, 1.0, 0.0); // a 1m vertical gap, e.g. a landing
+        let dt = 1.0 / 60.0;
+        let remote_after_one_frame = step_pos(cur, target, Vec3::ZERO, dt, POS_LERP_RATE);
+        let local_after_one_frame =
+            step_pos(cur, target, Vec3::ZERO, dt, LOCAL_PLAYER_POS_LERP_RATE);
+        assert!(
+            local_after_one_frame.y > remote_after_one_frame.y,
+            "local player rate must close a fresh gap faster: local={local_after_one_frame:?} \
+             remote={remote_after_one_frame:?}"
+        );
+
+        // After a realistic post-landing stretch of render frames (~100ms),
+        // the local player's rate must have converged FAR closer to the
+        // authoritative position than the remote rate would have.
+        let frames = (0.1 / dt) as u32;
+        let mut local = cur;
+        let mut remote = cur;
+        for _ in 0..frames {
+            local = step_pos(local, target, Vec3::ZERO, dt, LOCAL_PLAYER_POS_LERP_RATE);
+            remote = step_pos(remote, target, Vec3::ZERO, dt, POS_LERP_RATE);
+        }
+        assert!(
+            target.y - local.y < 0.05,
+            "local player must be within 5cm of the ground after ~100ms: {local:?}"
+        );
+        assert!(
+            target.y - remote.y > target.y - local.y,
+            "remote rate must still lag further behind than the local rate at the same instant"
         );
     }
 

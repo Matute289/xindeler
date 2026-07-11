@@ -10,7 +10,7 @@
 //! teardown, next task) falls out of the SAME machinery Bevy already ships,
 //! rather than a hand-rolled parent-tracking scheme.
 
-use bevy::prelude::*;
+use bevy::{ecs::entity::EntityHashSet, prelude::*};
 
 /// Identifies which dimension/instance a Bevy entity belongs to (migration
 /// spec §5.3). `DimensionId::DEFAULT` (`DimensionId(0)`) is the
@@ -43,9 +43,25 @@ pub struct DimensionRoot(pub Entity);
 /// it does NOT despawn members when the root despawns): despawning the root
 /// entity despawns every entity still holding a `DimensionRoot` pointing at
 /// it, exactly the mechanism EM-4.6 (next task) needs for teardown.
+///
+/// ## EM-4.10 Finding A: `EntityHashSet`, not the default `Vec<Entity>`
+/// Every mirrored sim entity (every NPC, wildlife body, the player — the
+/// entire live population) is tagged/untagged against the single, ever-
+/// growing [`DimensionId::DEFAULT`] root on every sighting/departure
+/// (`xindeler-sim-bridge`'s `mirror_sim_entities`). Bevy's default
+/// relationship-target backing is `Vec<Entity>`, whose
+/// `RelationshipSourceCollection::remove` is O(n) in the current member
+/// count (scan + shift) — a single frame that despawns several mirrors pays
+/// O(n·k) against the WHOLE live population, growing worse as the
+/// population grows (the exact "FPS oscillating wildly, worsening over the
+/// session" signature diagnosed 2026-07-10). `EntityHashSet` turns
+/// insert/remove into O(1) and is a first-class
+/// `RelationshipSourceCollection` impl Bevy ships for exactly this swap.
+/// Membership order is irrelevant here (nothing depends on iteration
+/// order), so a set is strictly better with no downside.
 #[derive(Component, Debug, Default)]
 #[relationship_target(relationship = DimensionRoot, linked_spawn)]
-pub struct DimensionMembers(Vec<Entity>);
+pub struct DimensionMembers(EntityHashSet);
 
 impl DimensionMembers {
     /// Iterates the entities currently tagged as members of this root.
@@ -94,5 +110,64 @@ mod tests {
             world.get_entity(member).is_err(),
             "member should have been cascade-despawned with its root"
         );
+    }
+
+    /// EM-4.10 Finding A: churn micro-test proving `EntityHashSet`-backed
+    /// `DimensionMembers` correctly maintains membership under a spawn/
+    /// despawn burst — the exact shape (many members tagged, then a chunk of
+    /// them removed in one go) that used to pay `Vec`'s O(n) remove cost per
+    /// despawned member, against the WHOLE remaining population, every time.
+    /// This test only asserts correctness (the O(1)-vs-O(n) complexity claim
+    /// isn't itself something a unit test can measure), but a member set
+    /// this large would have been the exact shape that made the old `Vec`
+    /// backing's cost visible.
+    #[test]
+    fn churn_despawning_half_the_members_leaves_the_other_half_correctly_tracked() {
+        let mut world = World::new();
+        let root = world.spawn(DimensionId(3)).id();
+
+        const MEMBER_COUNT: usize = 200;
+        let members: Vec<Entity> = (0..MEMBER_COUNT)
+            .map(|_| world.spawn((DimensionId(3), DimensionRoot(root))).id())
+            .collect();
+
+        assert_eq!(
+            world
+                .get::<DimensionMembers>(root)
+                .expect("root has the auto-maintained collection")
+                .len(),
+            MEMBER_COUNT
+        );
+
+        // Despawn every other member — a representative "several mirrors
+        // left view this frame" churn burst.
+        let (despawned, kept): (Vec<(usize, Entity)>, Vec<(usize, Entity)>) = members
+            .into_iter()
+            .enumerate()
+            .partition(|(i, _)| i % 2 == 0);
+        let despawned: Vec<Entity> = despawned.into_iter().map(|(_, e)| e).collect();
+        let kept: Vec<Entity> = kept.into_iter().map(|(_, e)| e).collect();
+
+        for entity in &despawned {
+            world.despawn(*entity);
+        }
+
+        let remaining = world
+            .get::<DimensionMembers>(root)
+            .expect("root still has members left");
+        assert_eq!(remaining.len(), kept.len());
+        assert!(!remaining.is_empty());
+        for entity in &kept {
+            assert!(
+                remaining.iter().any(|e| e == *entity),
+                "surviving member {entity:?} must still be tracked"
+            );
+        }
+        for entity in &despawned {
+            assert!(
+                !remaining.iter().any(|e| e == *entity),
+                "despawned member {entity:?} must no longer be tracked"
+            );
+        }
     }
 }

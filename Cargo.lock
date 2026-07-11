@@ -11880,6 +11880,8 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "rayon",
+ "ron",
+ "serde",
  "specs",
  "tempfile",
  "tracing",

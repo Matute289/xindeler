@@ -34,7 +34,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy::{MinimalPlugins, app::PluginGroup, ecs::entity::Entity, prelude::*};
+use bevy::{
+    MinimalPlugins,
+    app::PluginGroup,
+    ecs::entity::Entity,
+    prelude::*,
+    time::{Fixed, TimeUpdateStrategy},
+};
 use xindeler_dimensions::{
     DimensionId, DimensionRegistry, DimensionSpinupConfig, DimensionsPlugin, SpinupDimension,
     WorldGenThreadPool,
@@ -161,6 +167,20 @@ fn spinup_teardown_cycles_show_no_net_ram_growth() {
             .num_threads(2)
             .build()
             .unwrap(),
+    )));
+    // EM-4.10 Finding B: the dimension-lifecycle chain now lives in
+    // `FixedUpdate`, not `Update`. `run_one_cycle`'s tail loop (5 back-to-
+    // back `app.update()` calls with no pacing) used to rely on `Update`
+    // firing unconditionally every call; `FixedUpdate` instead depends on
+    // `Time::<Fixed>`'s real-time accumulator actually crossing a timestep,
+    // which a tight no-sleep loop cannot guarantee. Pin the fixed step so
+    // every `app.update()` call deterministically runs the chain exactly
+    // once, matching this test's original assumption (mirrors the same
+    // fix `xindeler-sim-bridge`'s own `FixedUpdate`-dependent tests already
+    // use).
+    app.insert_resource(Time::<Fixed>::from_hz(64.0));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / 64.0,
     )));
 
     // Warm-up cycle: lets one-time allocator/thread-pool/lazy-static

@@ -4,10 +4,11 @@
 //! into a REAL sim NPC, through the exact same public event bus
 //! (`NpcBuilder` + `CreateNpcEvent` + `State::emit_event_now`)
 //! [`crate::spawn_test_npcs`] already uses. Lives in THIS crate because it is
-//! "the ONLY legal `specs` consumer under `bevy/`" (this crate's own lib.rs
-//! module doc) — `xindeler-oracle-host` never embeds a `specs::World` itself
-//! (isolation-law rule 4: writes into the sim go through its public APIs
-//! only).
+//! one of the two sanctioned `specs` consumers under `bevy/` (this crate's
+//! own lib.rs module doc — the other is `xindeler-server-app::login`'s
+//! narrow, sanctioned exception, BL-82 EM-4.2c) — `xindeler-oracle-host`
+//! never embeds a `specs::World` itself (isolation-law rule 4: writes into
+//! the sim go through its public APIs only).
 //!
 //! Once [`apply_pending_entity_template_spawns`] requests the NPC, the
 //! EXISTING [`crate::mirror_sim_entities`] system mirrors it into
@@ -39,8 +40,8 @@
 //! pattern in this crate (e.g. [`crate::TestNpcState`]'s spawn latch).
 //!
 //! ## Not yet wired into a production `App` (tests-only today, by design)
-//! Neither `EntityTemplatePlugin`/`ComponentSpawnRegistry`
-//! (`xindeler-oracle-host`) nor [`spawn_from_spawning_rules`] has a real
+//! Neither `EntityTemplatePlugin` (`xindeler-oracle-host`) nor
+//! [`spawn_from_spawning_rules`] has a real
 //! caller yet — no system reads `AssetEvent<DmEvent>`/`Assets<EntityTemplate>`
 //! to trigger a spawn from an actually-ingested file; today they're only
 //! exercised directly (by tests, or a future in-process caller). This
@@ -70,9 +71,8 @@ use rand::RngExt;
 use xindeler_oracle_host::{
     dm_event::SpawningRules,
     entity_template::{
-        AgentPreset, ComponentSpawnRegistry, EntityTemplate, PendingAiBehavior, PendingBody,
-        PendingEntityTemplateSpawn, PendingFaction, PendingLoot, PendingStats,
-        spawn_entity_template,
+        AgentPreset, EntityTemplate, PendingAiBehavior, PendingBody, PendingEntityTemplateSpawn,
+        PendingFaction, PendingLoot, PendingStats, spawn_entity_template,
     },
 };
 use xindeler_protocol::DimensionId;
@@ -80,7 +80,7 @@ use xindeler_protocol::DimensionId;
 use crate::SimServer;
 
 /// Turns a (already-sanitized) `SpawningRules` — e.g. a `DmEvent`'s
-/// `spawning_rules` field, the Ravenloft-example schema's monster-population
+/// `spawning_rules` field, the Mist-Bound-example schema's monster-population
 /// directive (migration spec §5.1/§5.5) — into up to `spawn_count`
 /// individual factory-spawn requests, each going through the exact same
 /// [`spawn_entity_template`] staging-entity path a single template spawn
@@ -128,7 +128,6 @@ use crate::SimServer;
 /// are.
 pub fn spawn_from_spawning_rules(
     commands: &mut Commands,
-    registry: &ComponentSpawnRegistry,
     templates: &HashMap<String, EntityTemplate>,
     rules: &SpawningRules,
     origin: [f32; 3],
@@ -164,9 +163,7 @@ pub fn spawn_from_spawning_rules(
             origin[1] + angle.sin() * dist,
             origin[2],
         ];
-        spawned.push(spawn_entity_template(
-            commands, registry, &resolved, pos, dimension,
-        ));
+        spawned.push(spawn_entity_template(commands, &resolved, pos, dimension));
     }
     spawned
 }
