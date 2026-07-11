@@ -218,6 +218,38 @@ pub struct NetUid(pub u64);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetLocalPlayer;
 
+/// Frame-rate-predicted transform of the LOCAL player (BL-82 EM-4.11).
+///
+/// The listen-server bridge already embeds a full, correct, shared-code
+/// client-side predictor — the `xindeler-client-core::Client` inside
+/// `xindeler-sim-bridge::player` — the SAME predictor old (pre-Bevy) voxygen
+/// used. This component carries that predictor's own per-`Update` (frame-rate)
+/// output: `xindeler_sim_bridge::player::mirror_local_player_prediction`
+/// writes it every frame from `EmbeddedPlayer::position()`/`velocity()`/
+/// `orientation()` (Bevy axes, converted the same way the mirror converts the
+/// rest of the sim state), and the render (`xindeler-client::entity_view`)
+/// drives the local player's `Transform` from it DIRECTLY (a snap, not an
+/// ease) instead of interpolating the authoritative, 30 Hz-sampled
+/// [`NetPos`]/[`NetOri`]/[`NetVel`] the way every remote entity still does.
+///
+/// **NOT replicated.** It never crosses a socket — it is produced and
+/// consumed inside the SAME process (the listen-server bridge writes it, the
+/// listen-server's own client-side plugins read it), so registering it with
+/// `.replicate::<>()` would be both wrong (replicon would try to serialize
+/// player-local prediction state to remote clients, which never asked for it
+/// and have no use for it — a real remote player is server-authoritative like
+/// any other mirrored entity) and pointless (nothing on the wire needs it).
+/// [`NetPos`]/[`NetOri`]/[`NetVel`] stay exactly as they are — the
+/// reconciliation truth, the remote-entity render source, and the diagnostic
+/// baseline — this component only ADDS a second, frame-rate-fresh source for
+/// the ONE entity that has one.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct PredictedLocalTransform {
+    pub pos: Vec3,
+    pub ori: Quat,
+    pub vel: Vec3,
+}
+
 /// Client → server input sample (v0 placeholder shape).
 ///
 /// Sent as a replicon *client message*; it surfaces on the server wrapped in
@@ -331,22 +363,30 @@ pub struct TerrainAnchor {
     pub wpos: [f32; 3],
 }
 
-/// Server → client: the coarse far-terrain heightmap (EM-3.10b), one
-/// downsampled altitude sample per [`Self::chunk_stride`]² chunks. Sent ONCE at
-/// boot — like [`TerrainAnchor`] — since the far terrain never changes during a
-/// session, so there is no per-tick replication cost.
+/// Server → client: the coarse far-terrain grid (EM-3.10b height, BL-82
+/// EM-3.11 real colour), one downsampled sample per [`Self::chunk_stride`]²
+/// chunks. Sent ONCE at boot — like [`TerrainAnchor`] — since the far terrain
+/// never changes during a session, so there is no per-tick replication cost.
 ///
 /// ## Source + downsampling
-/// The embedded `client::Client`'s `world_data().lod_alt` already packs one
-/// sample per CHUNK (not per block), but a default Veloren world is
-/// 1024×1024 chunks — far too many quads for a "coarse" far-mesh. The
-/// server-side bridge (`xindeler-sim-bridge`) therefore downsamples it (simple
-/// stride-pick, capped grid dimension) and decodes each sample to a plain
-/// world-space altitude (metres, sim z-up) via the public `WorldData::alt_at`
-/// BEFORE sending, so the client does zero Veloren-specific unpacking — it
-/// just reads floats.
+/// The embedded `client::Client`'s `world_data()` already packs one height
+/// (`lod_alt`) and one colour (`lod_base`) sample per CHUNK (not per block),
+/// but a default Veloren world is 1024×1024 chunks — far too many quads for a
+/// "coarse" far-mesh. The server-side bridge (`xindeler-sim-bridge`) therefore
+/// downsamples both layers together (simple stride-pick, capped grid
+/// dimension, same `(i, j)` index for every layer) and decodes each sample via
+/// the public `WorldData::alt_at`/`col_at` BEFORE sending, so the client does
+/// zero Veloren-specific unpacking — it just reads floats and bytes.
+///
+/// ## Layering (spec §3.2)
+/// Each layer is its own separately-compressed blob rather than one
+/// struct-of-arrays, so a phase can ship its layer without touching the
+/// others' decode paths: [`Self::horizon`] is reserved for the BL-82 EM-3.11
+/// Phase-B horizon-occlusion layer and stays an empty `Vec` (⇒
+/// [`Self::decode_horizon`] returns `None`, "layer absent") until that phase
+/// populates it.
 #[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct NetLodAlt {
+pub struct NetFarTerrain {
     /// Downsampled grid width/height, in samples (row-major storage below).
     pub grid_size: [u32; 2],
     /// How many original chunk-grid cells one downsampled sample covers, on
@@ -355,39 +395,98 @@ pub struct NetLodAlt {
     pub chunk_stride: u32,
     /// lz4-compressed bincode of the row-major `Vec<f32>` altitude samples
     /// (world-space metres). Row-major: `heights[y * grid_size[0] + x]`,
-    /// matching `common::grid::Grid`'s convention.
-    pub bytes: Vec<u8>,
+    /// matching `common::grid::Grid`'s convention. Decode with
+    /// [`Self::decode_heights`].
+    pub heights: Vec<u8>,
+    /// lz4-compressed bincode of the row-major `Vec<[u8; 3]>` RGB colour
+    /// samples (decoded server-side from `lod_base`'s packed RGBA — alpha is
+    /// unused, see `client::WorldData::col_at`), index-aligned with
+    /// [`Self::heights`]. Decode with [`Self::decode_colors`].
+    pub colors: Vec<u8>,
+    /// Reserved for the BL-82 EM-3.11 Phase-B `lod_horizon` layer (two packed
+    /// west/east `(angle, occluder-height)` records per sample). Empty until
+    /// Phase B ships it — [`Self::decode_horizon`] treats an empty blob as
+    /// "layer absent" (`None`), not a decode error.
+    pub horizon: Vec<u8>,
 }
 
-impl NetLodAlt {
+impl NetFarTerrain {
     /// Serializes (bincode `legacy()`) + compresses (lz4, same scheme as
-    /// [`CompressedChunk`]) a downsampled altitude grid.
+    /// [`CompressedChunk`]) a downsampled height + colour grid. `horizon` is
+    /// left empty (Phase A does not send it yet).
     #[must_use]
-    pub fn encode(grid_size: [u32; 2], chunk_stride: u32, heights: &[f32]) -> Self {
-        let raw = bincode::serde::encode_to_vec(heights, bincode::config::legacy())
+    pub fn encode(
+        grid_size: [u32; 2],
+        chunk_stride: u32,
+        heights: &[f32],
+        colors: &[[u8; 3]],
+    ) -> Self {
+        Self {
+            grid_size,
+            chunk_stride,
+            heights: Self::compress(heights),
+            colors: Self::compress(colors),
+            horizon: Vec::new(),
+        }
+    }
+
+    /// Serializes + compresses a slice with the shared lz4+bincode scheme
+    /// used by every layer blob in this message (and [`CompressedChunk`]).
+    fn compress<T: Serialize>(items: &[T]) -> Vec<u8> {
+        let raw = bincode::serde::encode_to_vec(items, bincode::config::legacy())
             .expect("bincode serialization can only fail if a byte limit is set");
         let mut bytes = Vec::with_capacity(raw.len() / 4 + 16);
         let mut table = lz_fear::raw::U32Table::default();
         lz_fear::raw::compress2(&raw, 0, &mut table, &mut bytes)
             .expect("lz4 compression into a Vec<u8> is infallible");
-        Self {
-            grid_size,
-            chunk_stride,
-            bytes,
-        }
+        bytes
     }
 
-    /// Decompresses + deserializes the payload. `None` = corrupt payload or a
-    /// length mismatch against [`Self::grid_size`] (defensive; the local
+    /// Decompresses + deserializes a layer blob. `None` for an empty blob
+    /// (the "layer absent" contract, e.g. an unshipped [`Self::horizon`]) or a
+    /// corrupt payload; callers additionally length-check against
+    /// [`Self::grid_size`].
+    fn decompress<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Option<Vec<T>> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut raw = Vec::with_capacity(bytes.len() * 2);
+        lz_fear::raw::decompress_raw(bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+        bincode::serde::decode_from_slice(&raw, bincode::config::legacy())
+            .ok()
+            .map(|(items, _)| items)
+    }
+
+    /// Number of samples [`Self::grid_size`] declares — every layer's decoded
+    /// length must match this exactly.
+    fn expected_len(&self) -> usize { self.grid_size[0] as usize * self.grid_size[1] as usize }
+
+    /// Decompresses + deserializes the height layer. `None` = corrupt payload
+    /// or a length mismatch against [`Self::grid_size`] (defensive; the local
     /// loopback can't corrupt).
     #[must_use]
-    pub fn decode(&self) -> Option<Vec<f32>> {
-        let mut raw = Vec::with_capacity(self.bytes.len() * 2);
-        lz_fear::raw::decompress_raw(&self.bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
-        let (heights, _): (Vec<f32>, _) =
-            bincode::serde::decode_from_slice(&raw, bincode::config::legacy()).ok()?;
-        let expected = self.grid_size[0] as usize * self.grid_size[1] as usize;
-        (heights.len() == expected).then_some(heights)
+    pub fn decode_heights(&self) -> Option<Vec<f32>> {
+        let heights: Vec<f32> = Self::decompress(&self.heights)?;
+        (heights.len() == self.expected_len()).then_some(heights)
+    }
+
+    /// Decompresses + deserializes the colour layer, index-aligned with
+    /// [`Self::decode_heights`]. `None` = corrupt payload or a length
+    /// mismatch.
+    #[must_use]
+    pub fn decode_colors(&self) -> Option<Vec<[u8; 3]>> {
+        let colors: Vec<[u8; 3]> = Self::decompress(&self.colors)?;
+        (colors.len() == self.expected_len()).then_some(colors)
+    }
+
+    /// Decompresses + deserializes the (BL-82 EM-3.11 Phase-B) horizon layer.
+    /// `None` for an empty blob (layer not yet shipped) as well as a corrupt
+    /// payload or a length mismatch — callers cannot distinguish "absent"
+    /// from "corrupt" and should treat both as "no horizon data available".
+    #[must_use]
+    pub fn decode_horizon(&self) -> Option<Vec<[u8; 4]>> {
+        let horizon: Vec<[u8; 4]> = Self::decompress(&self.horizon)?;
+        (horizon.len() == self.expected_len()).then_some(horizon)
     }
 }
 
@@ -504,20 +603,22 @@ impl Plugin for XindelerProtocolPlugin {
             .make_message_independent::<RemoveChunk>();
         app.add_server_message::<TerrainAnchor>(XindelerChannel::Events.delivery())
             .make_message_independent::<TerrainAnchor>();
-        // EM-3.10b: the far-terrain heightmap, sent once (same ONE-SHOT
-        // TIMING as TerrainAnchor — decoupled from entity replication) but
-        // on the `Terrain` channel, NOT `Events` (review should-fix #3): its
-        // payload is up to ~64 KB compressed (128×128 f32 samples), size-
-        // class-comparable to `CompressedChunk` above, not a small discrete
-        // event. `Events` is Ordered/reliable — a multi-KB blob there would
-        // head-of-line-block chat/connect/disconnect messages behind it,
-        // exactly what `Terrain` (Unordered/reliable) exists to avoid.
-        app.add_server_message::<NetLodAlt>(XindelerChannel::Terrain.delivery())
-            .make_message_independent::<NetLodAlt>();
+        // EM-3.10b (+ BL-82 EM-3.11 Phase A real colour): the far-terrain
+        // height+colour grid, sent once (same ONE-SHOT TIMING as
+        // TerrainAnchor — decoupled from entity replication) but on the
+        // `Terrain` channel, NOT `Events` (review should-fix #3): its payload
+        // is up to ~112 KB compressed (128×128 f32 heights + [u8;3] colours),
+        // size-class-comparable to `CompressedChunk` above, not a small
+        // discrete event. `Events` is Ordered/reliable — a multi-KB blob
+        // there would head-of-line-block chat/connect/disconnect messages
+        // behind it, exactly what `Terrain` (Unordered/reliable) exists to
+        // avoid.
+        app.add_server_message::<NetFarTerrain>(XindelerChannel::Terrain.delivery())
+            .make_message_independent::<NetFarTerrain>();
 
         // BL-82 EM-4.2c: the login/session handshake reply. Carries no
-        // entity references (like TerrainAnchor/NetLodAlt above), so it must
-        // not be queued behind entity replication either.
+        // entity references (like TerrainAnchor/NetFarTerrain above), so it
+        // must not be queued behind entity replication either.
         app.add_server_message::<LoginResult>(XindelerChannel::Events.delivery())
             .make_message_independent::<LoginResult>();
         // BL-82 EM-4.8: the narrative on-enter-message toast
@@ -842,41 +943,61 @@ mod tests {
         assert_eq!(decoded.get(VVec3::new(3, 4, 5)).ok(), Some(&block));
     }
 
-    /// EM-3.10b: a downsampled altitude grid survives `encode` → `decode`
-    /// byte-for-byte (row-major, matching [`NetLodAlt::grid_size`]).
+    /// EM-3.10b (+ BL-82 EM-3.11 Phase A): a downsampled altitude+colour grid
+    /// survives `encode` → `decode_heights`/`decode_colors` byte-for-byte
+    /// (row-major, matching [`NetFarTerrain::grid_size`]); the unshipped
+    /// [`NetFarTerrain::horizon`] layer decodes as `None` (absent, not
+    /// corrupt).
     #[test]
-    fn net_lod_alt_round_trips() {
+    fn net_far_terrain_round_trips() {
         let heights: Vec<f32> = (0..12).map(|i| i as f32 * 1.5).collect();
-        let encoded = NetLodAlt::encode([4, 3], 8, &heights);
+        let colors: Vec<[u8; 3]> = (0..12).map(|i| [i as u8, i as u8 * 2, 255]).collect();
+        let encoded = NetFarTerrain::encode([4, 3], 8, &heights, &colors);
         assert_eq!(encoded.grid_size, [4, 3]);
         assert_eq!(encoded.chunk_stride, 8);
-        assert!(!encoded.bytes.is_empty());
+        assert!(!encoded.heights.is_empty());
+        assert!(!encoded.colors.is_empty());
+        assert!(
+            encoded.horizon.is_empty(),
+            "Phase A never populates the horizon layer"
+        );
 
-        let decoded = encoded.decode().expect("round-trips");
-        assert_eq!(decoded, heights);
+        assert_eq!(encoded.decode_heights().expect("round-trips"), heights);
+        assert_eq!(encoded.decode_colors().expect("round-trips"), colors);
+        assert_eq!(
+            encoded.decode_horizon(),
+            None,
+            "an empty horizon blob decodes as 'layer absent'"
+        );
     }
 
     /// A payload whose decoded length doesn't match `grid_size` is rejected
     /// rather than silently misinterpreted (defensive against a future bug in
-    /// the sender).
+    /// the sender) — checked independently for both the height and colour
+    /// layers, since each is its own compressed blob.
     #[test]
-    fn net_lod_alt_rejects_length_mismatch() {
+    fn net_far_terrain_rejects_length_mismatch() {
         let heights: Vec<f32> = vec![1.0, 2.0, 3.0];
-        // `encode` doesn't validate its own input — 3 elements into a
-        // declared 2×2=4 grid — so `decode` must catch the mismatch instead.
-        let encoded = NetLodAlt::encode([2, 2], 4, &heights);
-        assert_eq!(encoded.decode(), None);
+        let colors: Vec<[u8; 3]> = vec![[1, 2, 3]];
+        // `encode` doesn't validate its own input — 3 heights / 1 colour into
+        // a declared 2×2=4 grid — so `decode_*` must catch the mismatch
+        // instead.
+        let encoded = NetFarTerrain::encode([2, 2], 4, &heights, &colors);
+        assert_eq!(encoded.decode_heights(), None);
+        assert_eq!(encoded.decode_colors(), None);
     }
 
-    /// `NetLodAlt` replicates server → client over the loopback exactly like
-    /// [`TerrainAnchor`] (a plain one-shot server message).
+    /// `NetFarTerrain` replicates server → client over the loopback exactly
+    /// like [`TerrainAnchor`] (a plain one-shot server message), carrying both
+    /// the height and colour layers together.
     #[test]
-    fn net_lod_alt_replicates() {
+    fn net_far_terrain_replicates() {
         use bevy_replicon::prelude::{SendTargets, ToClients};
 
         let mut app = new_app();
         let heights = vec![10.0, 20.0, 30.0, 40.0];
-        let payload = NetLodAlt::encode([2, 2], 16, &heights);
+        let colors: Vec<[u8; 3]> = vec![[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let payload = NetFarTerrain::encode([2, 2], 16, &heights, &colors);
         app.world_mut().write_message(ToClients {
             targets: SendTargets::All,
             message: payload.clone(),
@@ -885,7 +1006,7 @@ mod tests {
 
         let received: Vec<_> = app
             .world_mut()
-            .resource_mut::<Messages<NetLodAlt>>()
+            .resource_mut::<Messages<NetFarTerrain>>()
             .drain()
             .collect();
         assert_eq!(received, vec![payload]);
