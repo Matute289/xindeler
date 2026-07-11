@@ -288,7 +288,7 @@ use bevy::{
         schedule::{
             IntoScheduleConfigs, SystemCondition, SystemSet, common_conditions::resource_exists,
         },
-        system::{Commands, Res, ResMut},
+        system::{Commands, Local, Res, ResMut},
     },
     math::Vec3,
     mesh::{Indices, Mesh as BevyMesh, Mesh3d, PrimitiveTopology},
@@ -674,6 +674,144 @@ const PLACEHOLDER_HAZE_BLEND: f32 = 0.5;
 #[derive(Resource, Clone, Copy)]
 pub struct PlaceholderHazeTint(pub Color);
 
+/// BL-82 EM-3.11 round 17 — host-installed, OPTIONAL per-chunk colour hint
+/// for the placeholder box (module docs' round-17 section). Typically wired
+/// from the SAME real per-cell terrain-colour grid
+/// [`crate`]-external hosts already use to colour the far mesh (round 11's
+/// Phase A fix, `xindeler_client::far_terrain`) — the far mesh proved that
+/// "use the real colour" beats "retune the synthetic/neutral colour's blend
+/// fraction a bit more" for this exact class of "flat patch reads as
+/// obviously fake" problem, and this resource lets the near pipeline's
+/// placeholder reuse that same real data instead of the shared neutral
+/// [`PLACEHOLDER_BASE_COLOR`], WITHOUT this crate ever depending on
+/// `xindeler-client`/atmosphere/far-terrain types (same "generic host hook"
+/// shape as [`ChunkVolumeProvider`]/[`PlaceholderHazeTint`]). Returns
+/// `(colour, expected_surface_z)` for a chunk key that the host CAN place —
+/// [`spawn_chunk_mesh_tasks`] only trusts the colour when BOTH (a) the
+/// placeholder's own `z_hi` (its box's top, from the SAME volume range the
+/// real mesh will use) sits close to `expected_surface_z` (see
+/// [`SURFACE_HINT_TOLERANCE`]) AND (b) the live viewer isn't currently well
+/// BELOW that same surface (see [`PlaceholderViewerHeight`] — a
+/// `bevy-migration-reviewer` finding on the first version of this guard: (a)
+/// alone only tests "is this column's height unusual relative to a coarse
+/// neighbour sample," which does NOT reliably detect the ORIGINAL EM-3.11h
+/// bug scenario — an ordinary Veloren-style cave tunnel carved under
+/// otherwise-normal terrain leaves the column's own recorded surface height
+/// completely ordinary, so (a) alone would happily trust a bright outdoor
+/// colour while the camera stands inside a dark cave void looking at the
+/// box's own inner faces). Absent entirely (no host installed one, or the
+/// host has no data for this key — e.g. outside its downsampled grid) falls
+/// back to today's [`PLACEHOLDER_BASE_COLOR`] + [`PLACEHOLDER_HAZE_BLEND`]
+/// path, unchanged.
+#[derive(Resource, Clone)]
+pub struct PlaceholderColorHint(Arc<dyn Fn(ChunkKey) -> Option<(Color, f32)> + Send + Sync>);
+
+impl PlaceholderColorHint {
+    pub fn new(f: impl Fn(ChunkKey) -> Option<(Color, f32)> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    #[must_use]
+    fn get(&self, key: ChunkKey) -> Option<(Color, f32)> { (self.0)(key) }
+}
+
+/// Host-installed, OPTIONAL current viewer position (chunk key + world
+/// height, Bevy y-up — same convention [`chunk_transform`] documents), kept
+/// live every frame by the host (typically the primary camera's
+/// `GlobalTransform` — `xindeler_client::far_terrain::
+/// sync_placeholder_viewer_height`). Generic on purpose (no `Camera3d`/
+/// render-graph coupling in this crate, same "host supplies the value, this
+/// crate just reads it" shape as [`PlaceholderHazeTint`]):
+/// [`spawn_chunk_mesh_tasks`] uses it to reject a [`PlaceholderColorHint`]
+/// whose surface check passes but where the viewer is plausibly INSIDE/UNDER
+/// *that specific chunk* (round-17 module docs on [`PlaceholderColorHint`])
+/// rather than standing on/near an ordinary outdoor surface.
+///
+/// ## Why this carries a chunk key, not just a height (round-17 follow-up)
+/// A `bevy-migration-reviewer` pass on the height-only first version of this
+/// guard caught a real regression: comparing the viewer's height against
+/// EVERY hinted placeholder's `z_hi`, with no positional scoping, rejects a
+/// perfectly ordinary hillside chunk several chunks away from a camera
+/// standing in a valley — the "camera is below THIS box's surface" check is
+/// only meaningful for the box the camera is actually AT or near; it says
+/// nothing about a distant, unrelated column's cave-vs-surface status. The
+/// veto below is therefore scoped to chunks within
+/// [`VIEWER_PROXIMITY_CHUNKS`] of `chunk_key`: distant hinted placeholders
+/// are governed by the surface-height check alone (as they were before this
+/// follow-up), and only a placeholder AT or immediately around the viewer's
+/// own position can be vetoed by height.
+///
+/// Absent entirely (no host installed one, e.g. the synthetic voxel-demo)
+/// degrades honestly: this check is simply skipped, leaving
+/// [`SURFACE_HINT_TOLERANCE`] as the sole guard, exactly as before this
+/// addition.
+#[derive(Resource, Clone, Copy)]
+pub struct PlaceholderViewerHeight {
+    /// The viewer's own chunk-grid coordinate (same convention as
+    /// [`ChunkKey`]) — scopes the height veto to nearby chunks only.
+    pub chunk_key: ChunkKey,
+    /// The viewer's world height (Bevy y-up).
+    pub height: f32,
+}
+
+/// How many chunks away from [`PlaceholderViewerHeight::chunk_key`] the
+/// height veto still applies (round-17 follow-up doc comment above). Small
+/// and deliberate: this only needs to cover "the box the camera is standing
+/// in or right next to," not the whole streaming frontier — a placeholder
+/// more than this many chunks from the viewer is governed by the
+/// surface-height check alone, same as this round's first version intended
+/// for every chunk before the reviewer caught the scoping gap.
+const VIEWER_PROXIMITY_CHUNKS: i32 = 2;
+
+/// How close (world metres) a placeholder's own `z_hi` must sit to
+/// [`PlaceholderColorHint`]'s `expected_surface_z` before its real colour is
+/// trusted (round-17 module docs). Generous on purpose: the hint's source
+/// data is itself coarse (round 11's far-terrain grid samples one cell per
+/// `chunk_stride` chunks, so `expected_surface_z` is, at best, an average
+/// over a multi-chunk neighbourhood, not this exact column) — this tolerance
+/// only needs to separate "obviously an outdoor/frontier chunk" from
+/// "obviously an underground/cave void", not to pinpoint exact terrain
+/// height. `TerrainChunk`'s typical above-ground relief is well under this
+/// figure; a genuine cave interior sits tens to hundreds of metres BELOW the
+/// recorded surface sample, comfortably outside it. ALSO reused as the
+/// [`PlaceholderViewerHeight`] margin (same "coarse, not exact" tolerance
+/// applies to both checks).
+const SURFACE_HINT_TOLERANCE: f32 = 48.0;
+
+/// BL-82 EM-3.11 round 17 — small, DISTANCE-INDEPENDENT atmospheric assist
+/// blended into a [`PlaceholderColorHint`]-sourced placeholder colour, mixed
+/// via the SAME live [`PlaceholderHazeTint`] the neutral-colour path already
+/// reads. Deliberately much smaller than [`PLACEHOLDER_HAZE_BLEND`] (0.5):
+/// that constant exists to pull a colour with NO relationship to the actual
+/// scene toward something plausible; a hint colour is already the chunk's
+/// REAL sampled terrain colour, so (mirroring `xindeler_client::far_terrain
+/// ::FAR_HAZE_BLEND`'s identical "colour is real now, this is just a light
+/// distance cue" role for the sibling far-mesh fix) it only needs a light
+/// finishing touch, not a correction.
+const PLACEHOLDER_HINT_HAZE_BLEND: f32 = 0.12;
+
+/// Builds a one-off (NOT shared/cached — round-17 module docs: each hinted
+/// placeholder has its own real colour, so there is nothing to share) unlit
+/// placeholder material from a [`PlaceholderColorHint`] sample, blending in
+/// the live [`PlaceholderHazeTint`] if one is installed (same small role
+/// `FAR_HAZE_BLEND` plays for the far mesh's own real colour, in the host
+/// crate). Same
+/// `unlit`/`cull_mode`/`fog_enabled` guarantees as [`placeholder_material`] —
+/// only `base_color`'s SOURCE differs.
+fn placeholder_material_from_hint(hint: Color, tint: Option<Color>) -> StandardMaterial {
+    let base_color = match tint {
+        Some(tint) => hint.mix(&tint, PLACEHOLDER_HINT_HAZE_BLEND),
+        None => hint,
+    };
+    StandardMaterial {
+        base_color,
+        unlit: true,
+        cull_mode: None,
+        fog_enabled: false,
+        ..Default::default()
+    }
+}
+
 /// EM-3.11i — a neutral rock-grey, genuinely `unlit`. See the module docs'
 /// EM-3.11i section for the full story: the original EM-3.11h material was
 /// a normally-lit `StandardMaterial`, which a real gameplay capture proved
@@ -886,7 +1024,44 @@ impl Plugin for ChunkMeshPipelinePlugin {
             // common case once the atmosphere settles. The function itself
             // already avoids the real cost (an unconditional write every
             // frame) by peeking before writing.
-            .add_systems(Update, sync_placeholder_haze);
+            .add_systems(Update, sync_placeholder_haze)
+            // BL-82 EM-3.11 round 17: opt-in, permanent, zero-cost-when-unset
+            // diagnostic (same convention as `XINDELER_SPRITE_PERF_LOG`/
+            // `XINDELER_FAR_MESH_PERF_LOG`) — see [`log_placeholder_count`].
+            .add_systems(Update, log_placeholder_count);
+    }
+}
+
+/// BL-82 EM-3.11 round 17 (`XINDELER_PLACEHOLDER_COUNT_LOG=1`): logs the
+/// current number of SIMULTANEOUSLY up [`PlaceholderChunkMesh`] entries
+/// whenever it changes. Investigating Matías's "franja beige... del fin del
+/// mapa" report (a continuous STRIP, not an isolated plate, at the streaming
+/// frontier while exploring fresh terrain): rounds 14-16 all measured and
+/// tuned this same shared placeholder material against the ONE-BOX-AT-A-TIME
+/// case, but `spawn_chunk_mesh_tasks`'s own module docs already note "a burst
+/// of newly-streamed chunks... can genuinely have several placeholders up
+/// simultaneously" (`terrain_stream.rs` marks a new arrival's full 3×3
+/// neighbourhood dirty every time) — this diagnostic turns that structural
+/// possibility into a real measured number instead of a guess.
+fn log_placeholder_count(
+    index: Res<ChunkMeshIndex>,
+    mut last: Local<usize>,
+    mut enabled: Local<Option<bool>>,
+) {
+    let enabled = *enabled.get_or_insert_with(|| {
+        std::env::var("XINDELER_PLACEHOLDER_COUNT_LOG").is_ok_and(|v| v != "0")
+    });
+    if !enabled {
+        return;
+    }
+    let count = index.0.values().filter(|e| e.is_placeholder).count();
+    if count != *last {
+        tracing::info!(
+            count,
+            previous = *last,
+            "EM-3.11 round 17: simultaneous placeholder chunk count changed"
+        );
+        *last = count;
     }
 }
 
@@ -934,6 +1109,9 @@ fn spawn_chunk_mesh_tasks(
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut placeholder_materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut placeholder_assets: ResMut<PlaceholderAssets>,
+    color_hint: Option<Res<PlaceholderColorHint>>,
+    haze_tint: Option<Res<PlaceholderHazeTint>>,
+    viewer_height: Option<Res<PlaceholderViewerHeight>>,
 ) {
     if queue.is_empty() {
         return;
@@ -995,15 +1173,55 @@ fn spawn_chunk_mesh_tasks(
                 .mesh
                 .get_or_insert_with(|| meshes.add(placeholder_box_mesh()))
                 .clone();
-            let material = placeholder_assets
-                .material
-                .get_or_insert_with(|| materials.add(placeholder_material()))
-                .clone();
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "world z bounds ≪ 2^24, same contract as chunk_transform"
             )]
             let (z_lo, z_hi) = (volume.range.min.z as f32, volume.range.max.z as f32);
+            // BL-82 EM-3.11 round 17: prefer a real per-chunk colour hint
+            // over the shared neutral material, but ONLY when BOTH (a) the
+            // hint's own `expected_surface_z` says this column's height is
+            // plausibly ordinary (not a coarse-grid mismatch) AND (b), for a
+            // chunk NEAR the viewer's own position only, the live viewer
+            // isn't well below this chunk's own surface (module docs on
+            // `PlaceholderColorHint`/`PlaceholderViewerHeight` — (a) alone
+            // does NOT reliably detect "camera standing inside an ordinary
+            // cave under otherwise-normal terrain," the ORIGINAL EM-3.11h bug
+            // scenario, since an ordinary cave leaves the column's recorded
+            // surface height looking completely normal; (b) checks the
+            // actual failure condition directly instead of inferring it from
+            // neighbourhood height variance — but ONLY near the viewer, per
+            // `PlaceholderViewerHeight`'s own doc comment: a distant hillside
+            // chunk must not be vetoed just because the viewer happens to
+            // stand in a valley far below it). Missing `PlaceholderViewerHeight`,
+            // or a hinted chunk outside `VIEWER_PROXIMITY_CHUNKS`, degrades
+            // honestly to "check (a) only", exactly this guard's pre-(b)
+            // behaviour.
+            let hinted = color_hint
+                .as_ref()
+                .and_then(|hint| hint.get(key))
+                .filter(|(_, expected_surface_z)| {
+                    (z_hi - expected_surface_z).abs() <= SURFACE_HINT_TOLERANCE
+                })
+                .filter(|_| {
+                    viewer_height.as_ref().is_none_or(|viewer| {
+                        let near_viewer = (key.x - viewer.chunk_key.x).abs()
+                            <= VIEWER_PROXIMITY_CHUNKS
+                            && (key.y - viewer.chunk_key.y).abs() <= VIEWER_PROXIMITY_CHUNKS;
+                        !near_viewer || viewer.height >= z_hi - SURFACE_HINT_TOLERANCE
+                    })
+                });
+            let material = if let Some((hint_color, _)) = hinted {
+                materials.add(placeholder_material_from_hint(
+                    hint_color,
+                    haze_tint.as_ref().map(|t| t.0),
+                ))
+            } else {
+                placeholder_assets
+                    .material
+                    .get_or_insert_with(|| materials.add(placeholder_material()))
+                    .clone()
+            };
             let entity = commands
                 .spawn((
                     Mesh3d(mesh),
