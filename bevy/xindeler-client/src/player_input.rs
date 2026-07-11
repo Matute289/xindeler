@@ -53,6 +53,20 @@ const CAMERA_TOGGLE_KEY: KeyCode = KeyCode::KeyF;
 const CAM_BACK: f32 = 9.0;
 const CAM_LOOK_UP: f32 = 1.0;
 
+/// BL-82 EM-4.11 follow-up ("slope-descent camera flicker"): per-frame
+/// exponential-lerp rate for the camera's OWN follow-focus, decoupled from the
+/// player entity's rendered position. `1.0 / THIRD_PERSON_INTERP_TIME` from the
+/// old engine's camera (`/xindeler-old/voxygen/src/scene/camera.rs`,
+/// `THIRD_PERSON_INTERP_TIME = 0.1`) — see [`smoothed_focus`]'s doc comment for
+/// the full root-cause story this constant closes.
+const CAMERA_FOCUS_LERP_RATE: f32 = 10.0;
+
+/// Beyond this jump (metres) the camera focus SNAPS instead of easing —
+/// teleports, the very first frame following a given player, and re-entering
+/// third-person after free-flying elsewhere. Matches
+/// `entity_view::SNAP_DISTANCE`.
+const CAMERA_FOCUS_SNAP_DISTANCE: f32 = 64.0;
+
 /// Whether the camera is currently following the player (vs. free fly-cam).
 #[derive(Resource)]
 pub struct ThirdPersonActive(pub bool);
@@ -173,13 +187,49 @@ fn gather_input(
 /// sit behind + above the player (yaw from the fly-cam look integration) and
 /// look at its head. When following is off (fly-cam mode) or no player entity
 /// is present yet, leaves the fly-cam alone.
+///
+/// ## BL-82 EM-4.11 follow-up — slope-descent camera flicker (root-caused,
+/// fixed here)
+/// Matías reported a flicker specifically "cuando avanza y hay un desnivel y
+/// baja" (when advancing and there's an elevation drop, going down). Root
+/// cause: EM-4.11 (PR #59) made the LOCAL player's rendered position (and this
+/// camera, which followed it) a direct per-frame SNAP to
+/// [`PredictedLocalTransform`] — correctly removing the 30 Hz motion
+/// quantization, but on the (correct) assumption that the prediction is
+/// "already smooth, frame-rate, zero-jitter" data with "nothing left to ease"
+/// (`entity_view.rs` doc comment). That assumption holds horizontally, but
+/// NOT vertically: the shared, unchanged `common/systems/src/phys` collision
+/// code resolves ground contact per tick, and walking down a sloped/stepped
+/// voxel surface produces small, genuine per-tick vertical noise (brief
+/// ground/airborne toggling as the contact point steps down) — now ticking at
+/// frame rate (100+ Hz) instead of the old 30 Hz, so there are MORE of these
+/// small vertical corrections per second than before, all rendered completely
+/// unfiltered.
+///
+/// The reference implementation already solves exactly this: old voxygen's
+/// camera (`/xindeler-old/voxygen/src/scene/camera.rs::Camera::update`) NEVER
+/// renders the raw entity position — it maintains its own `focus`/`tgt_focus`
+/// and always lerps toward the target at a fixed `interp_time` (0.1 s for
+/// `ThirdPerson`), decoupled from however jittery the underlying tracked
+/// position is; `scene/mod.rs`'s first-person comment states the same
+/// principle explicitly for its x/y-vs-z split ("z is controlled by camera
+/// interpolation... because this produces visually smooth results in a larger
+/// variety of cases"). [`smoothed_focus`] ports that same idea: the CAMERA
+/// keeps its own eased focus point, entirely separate from the player
+/// entity's own rendered `Transform` (which stays a direct snap, per EM-4.11 —
+/// this fix does not touch or regress that quantization fix at all, since the
+/// player's own mesh is a different consumer of the same
+/// `PredictedLocalTransform`/`Interpolated` data).
 fn third_person_camera(
     mode: Res<ThirdPersonActive>,
+    time: Res<Time>,
     // The player's interpolated presentation transform (smooth) — the same one
     // the entity_view drives; falling back to NetLocalPlayer's Transform if the
     // interpolation buffer isn't attached yet.
     player: Query<(&Transform, Option<&Interpolated>), (With<NetLocalPlayer>, Without<FlyCam>)>,
     mut cameras: Query<(&mut Transform, &FlyCam), Without<NetLocalPlayer>>,
+    mut focus: Local<Option<Vec3>>,
+    mut perf_log: Local<Option<bool>>,
 ) {
     if !mode.0 {
         return;
@@ -188,6 +238,25 @@ fn third_person_camera(
         return; // no player entity mirrored yet — keep the spectator fly-cam
     };
     let player_pos = interp.map_or(player_tf.translation, |i| i.pos);
+    let focus_pos = smoothed_focus(&mut focus, player_pos, mode.is_changed(), time.delta_secs());
+
+    // BL-82 EM-4.11 follow-up (slope-descent camera flicker) — opt-in
+    // diagnostic proving the smoothing actually engages live: logs the RAW
+    // per-frame target vs the eased focus so a live session can confirm the
+    // raw signal is the noisy one (reversals/hops while walking down a
+    // slope) and the eased one damps it. Same "permanent, opt-in, gated by an
+    // env var read once" convention as `XINDELER_FAR_MESH_PERF_LOG`
+    // elsewhere in this crate (the EM-3.11r `XINDELER_LANDING_PERF_LOG` this
+    // used to be worded against has since been retired, per EM-4.11).
+    if *perf_log.get_or_insert_with(|| {
+        std::env::var("XINDELER_CAMERA_FOCUS_PERF_LOG").is_ok_and(|v| v != "0")
+    }) {
+        debug!(
+            raw_y = player_pos.y,
+            eased_y = focus_pos.y,
+            "EM-4.11 follow-up: third-person camera focus (raw target vs eased)"
+        );
+    }
 
     for (mut cam_tf, fly) in &mut cameras {
         // Full spherical orbit from BOTH yaw AND pitch (EM-3.11 smoke fix —
@@ -200,10 +269,38 @@ fn third_person_camera(
         // swings the fly-cam's own look direction — no separate vertical
         // constant needed.
         let forward = Quat::from_euler(EulerRot::YXZ, fly.yaw, fly.pitch, 0.0) * Vec3::NEG_Z;
-        let look_at = player_pos + Vec3::Y * CAM_LOOK_UP;
+        let look_at = focus_pos + Vec3::Y * CAM_LOOK_UP;
         let eye = look_at - forward * CAM_BACK;
         *cam_tf = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
     }
+}
+
+/// The camera's own follow-focus smoothing (BL-82 EM-4.11 follow-up — see
+/// [`third_person_camera`]'s doc comment for the full root-cause writeup).
+/// Eases `focus` toward `target` at [`CAMERA_FOCUS_LERP_RATE`], SNAPPING
+/// instead when: this is the very first frame following any player (`focus`
+/// is `None`), the mode just switched on (`mode_just_activated` — avoids a
+/// visible glide-in from wherever the free fly-cam last was), or the target
+/// jumped more than [`CAMERA_FOCUS_SNAP_DISTANCE`] (teleports). Factored out
+/// of the system so the smoothing itself is unit-testable without a
+/// live App/ECS.
+fn smoothed_focus(
+    focus: &mut Option<Vec3>,
+    target: Vec3,
+    mode_just_activated: bool,
+    dt: f32,
+) -> Vec3 {
+    let snap_far = focus.is_some_and(|f| {
+        f.distance_squared(target) >= CAMERA_FOCUS_SNAP_DISTANCE * CAMERA_FOCUS_SNAP_DISTANCE
+    });
+    let next = match *focus {
+        Some(f) if !mode_just_activated && !snap_far => {
+            f.lerp(target, (CAMERA_FOCUS_LERP_RATE * dt).min(1.0))
+        },
+        _ => target,
+    };
+    *focus = Some(next);
+    next
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +911,81 @@ mod tests {
         assert_ne!(
             second_detour, first_detour,
             "escalation must try a different heading, not repeat the same blocked one"
+        );
+    }
+
+    /// BL-82 EM-4.11 follow-up (slope-descent camera flicker): the very FIRST
+    /// call for a given `focus` (still `None`) snaps directly to `target` —
+    /// no glide-in from an arbitrary default, matching the "first frame
+    /// following any player" case in [`third_person_camera`]'s doc comment.
+    #[test]
+    fn smoothed_focus_first_call_snaps() {
+        let mut focus = None;
+        let target = Vec3::new(3.0, 5.0, -2.0);
+        let got = smoothed_focus(&mut focus, target, false, 1.0 / 60.0);
+        assert_eq!(got, target);
+        assert_eq!(focus, Some(target));
+    }
+
+    /// A small per-frame target delta (e.g. the per-tick vertical noise from
+    /// walking down a sloped/stepped voxel surface — the reported bug) is
+    /// EASED, not snapped: the new focus moves only partway toward the
+    /// target, damping the noise instead of rendering it 1:1 — the core fix.
+    #[test]
+    fn smoothed_focus_small_delta_eases_not_snaps() {
+        let mut focus = Some(Vec3::new(0.0, 10.0, 0.0));
+        let target = Vec3::new(0.0, 9.8, 0.0); // 0.2 m vertical step (a plausible single-tick voxel-step delta)
+        let got = smoothed_focus(&mut focus, target, false, 1.0 / 60.0);
+        // rate/60 = 10/60 ≈ 0.167 → moves ~16.7% of the way, not all of it.
+        assert!(
+            got.y < 10.0 && got.y > target.y,
+            "must ease partway, not snap: {got:?}"
+        );
+        let expected_t = (CAMERA_FOCUS_LERP_RATE / 60.0).min(1.0);
+        let expected_y = 10.0 + (target.y - 10.0) * expected_t;
+        assert!((got.y - expected_y).abs() < 1e-4, "got {got:?}");
+    }
+
+    /// A large jump (teleport) SNAPS immediately rather than gliding across
+    /// the map over several frames.
+    #[test]
+    fn smoothed_focus_teleport_snaps() {
+        let mut focus = Some(Vec3::ZERO);
+        let target = Vec3::new(500.0, 0.0, 0.0);
+        let got = smoothed_focus(&mut focus, target, false, 1.0 / 60.0);
+        assert_eq!(got, target, "a teleport-sized jump must snap, not ease");
+    }
+
+    /// Re-activating third-person mode (toggling `F` back on after
+    /// free-flying elsewhere) snaps the focus to the player immediately —
+    /// the camera must not glide in from wherever the fly-cam last was.
+    #[test]
+    fn smoothed_focus_mode_reactivation_snaps() {
+        let mut focus = Some(Vec3::new(1000.0, 50.0, 1000.0)); // stale, from free-fly
+        let target = Vec3::new(0.0, 10.0, 0.0);
+        let got = smoothed_focus(&mut focus, target, true, 1.0 / 60.0);
+        assert_eq!(got, target, "mode reactivation must snap, not glide in");
+    }
+
+    /// Repeated small eases converge to a steady target over a handful of
+    /// frames (not instantly, not never) — confirms the lerp is a genuine
+    /// convergent low-pass filter, not a permanent offset.
+    #[test]
+    fn smoothed_focus_converges_to_a_steady_target() {
+        let mut focus = Some(Vec3::ZERO);
+        let target = Vec3::new(0.0, 5.0, 0.0);
+        let mut last = 0.0;
+        for _ in 0..120 {
+            let got = smoothed_focus(&mut focus, target, false, 1.0 / 60.0);
+            assert!(
+                got.y >= last,
+                "must move monotonically toward a steady target"
+            );
+            last = got.y;
+        }
+        assert!(
+            (last - target.y).abs() < 0.05,
+            "should have converged close to the target after 2s: {last}"
         );
     }
 }
