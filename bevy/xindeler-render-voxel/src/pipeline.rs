@@ -115,6 +115,47 @@
 //! fixed here at the material level, independent of how large or long that
 //! backlog ever gets.
 //!
+//! ## BL-82 EM-3.11 (round 14) — "background disappears for 1-2 frames"
+//! (`record11.mov`): the placeholder was invisible, not the terrain
+//! Matías reported the distant tree/mountain background periodically
+//! vanishing entirely for 1-2 frames, then popping back — described as
+//! things "flickering before they finish generating." Root-caused with an
+//! offscreen frozen-camera capture harness (mirroring the EM-3.11q
+//! methodology: fixed camera, no player movement, so any change between
+//! consecutive frames is a genuine content pop, not camera/retile motion):
+//! a mountain silhouette (rendered by `xindeler-client::far_terrain`'s
+//! coarse mesh, confirmed NOT the cause after exhaustive testing — its
+//! despawn+respawn retile swap is genuinely atomic, verified across 30+
+//! retiles both by ECS-level entity-presence logging and by frame-by-frame
+//! visual capture) was abruptly PARTIALLY OCCLUDED by a flat, pale
+//! rectangle for over a dozen consecutive frames, then the real chunk mesh
+//! (with real trees) popped in and the mountain silhouette was fully
+//! visible again. That rectangle is exactly this module's
+//! [`PlaceholderChunkMesh`] box — working as designed (EM-3.11h/i) — but at the
+//! render-distance band where new chunks stream in, `bevy_pbr`'s `DistanceFog`
+//! is already ~90-99% opaque (BL-82 EM-3.11 Phase B's own tuning target for
+//! that exact radius). Fog application is gated ONLY by `fog_enabled` (which
+//! defaults `true`), NEVER by `unlit` (`bevy_pbr`'s `pbr.wgsl`:
+//! `main_pass_post_lighting_processing` runs after the unlit/lit branch, not
+//! inside it — confirmed by reading the shader), so the placeholder's "neutral
+//! rock-grey" (chosen in EM-3.11i to read as an obvious placeholder under any
+//! LIGHTING condition) washes out toward the pale fog/sky colour at typical
+//! viewing distance anyway, flattening it into something visually
+//! indistinguishable from "empty sky" rather than "an obviously crude
+//! placeholder box" — exactly the reported symptom, and exactly why it reads as
+//! the BACKGROUND vanishing rather than a foreground object appearing: the box
+//! is farthest, so it is the most fogged, so it is the first thing fog erases.
+//! (The already-tracked, still-open EM-3.11c/d/e/p mesh-throughput/stutter
+//! question governs HOW LONG a placeholder stays up, not WHETHER it is visible
+//! while it's up — that duration question is explicitly out of scope here, same
+//! boundary EM-3.11i already drew.) Fix: [`placeholder_material`] now sets
+//! `fog_enabled: false` (a first-class `StandardMaterial` field precisely
+//! for this: `bevy_pbr::pbr_material`'s
+//! `STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT`, checked before fog is applied in
+//! `main_pass_post_lighting_processing`) — one line, no effect on
+//! timing/throughput/geometry, keeps the placeholder reading as "something is
+//! loading here" at every distance instead of dissolving into the horizon.
+//!
 //! Instrumentation: `tracing` spans around each mesh task
 //! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
 //! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
@@ -494,11 +535,30 @@ fn placeholder_box_mesh() -> BevyMesh {
 /// them — the guarantee EM-3.11h was meant to provide in the first place.
 /// `perceptual_roughness`/`reflectance` are dropped: both are lit-material
 /// knobs with no effect once `unlit` is set.
+///
+/// ## BL-82 EM-3.11 round 14 — `fog_enabled: false`
+/// See the module docs' round-14 section for the full investigation. At the
+/// render-distance band where a never-before-meshed chunk typically appears
+/// (near `chunk_render_distance`), `DistanceFog` is already ~90-99% opaque,
+/// and fog application is gated ONLY by `fog_enabled` (default `true`),
+/// NEVER by `unlit`
+/// (`bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing`
+/// runs after, not inside, the unlit/lit branch) — so the "obviously a
+/// placeholder" rock-grey chosen above washed out toward the pale fog/sky
+/// colour anyway, reading as empty sky rather than a crude stand-in and
+/// reproducing exactly as "the background disappeared for a couple of
+/// frames." `fog_enabled` is a first-class `StandardMaterial` field for
+/// precisely this case; setting it `false` here has NO effect on the
+/// placeholder's timing, size, or the underlying mesh-generation throughput
+/// (a separate, already-tracked, still-open question — EM-3.11c/d/e/p) — it
+/// only keeps the box visually legible as a placeholder at every distance
+/// instead of dissolving into the horizon.
 fn placeholder_material() -> StandardMaterial {
     StandardMaterial {
         base_color: Color::srgb(0.35, 0.33, 0.30),
         unlit: true,
         cull_mode: None,
+        fog_enabled: false,
         ..Default::default()
     }
 }
