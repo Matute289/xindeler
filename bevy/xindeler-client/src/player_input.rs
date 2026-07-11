@@ -27,12 +27,15 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
+use common::{terrain::Block, vol::ReadVol};
+use vek::Vec3 as VVec3;
 use xindeler_app::GameplaySet;
 use xindeler_protocol::{LocalPlayerInput, NetLocalPlayer};
 
 use crate::{
     camera::{FlyCam, FlyCamMovementEnabled, FlyCamSet},
     entity_view::Interpolated,
+    terrain_stream::SharedTerrain,
 };
 
 /// Key that toggles between third-person follow and the free fly-cam (debug).
@@ -48,10 +51,33 @@ const CAMERA_TOGGLE_KEY: KeyCode = KeyCode::KeyF;
 /// and lighting: the world-centre singleplayer spawn sits in a large shadowed
 /// voxel formation, so the ~1 m capsule reads faintly against it. Crisp framing
 /// arrives with the real figure models (EM-3.8) and the tunable, terrain-aware
-/// in-game camera (EM-5.11). TODO(EM-5.11): eye-to-player raycast so the camera
-/// never clips into or hides behind terrain.
+/// in-game camera. DONE (BL-82 EM-3.12): the stale `TODO(EM-5.11)` that used to
+/// sit here ("eye-to-player raycast so the camera never clips into or hides
+/// behind terrain") is now closed by [`collide_boom`] + [`smoothed_boom`] — see
+/// their doc comments and `docs/design/specs/2026-07-11-bl82-camera-collision-
+/// design.md`. (`EM-5.11` itself was reassigned to "Input rebinding" upstream
+/// of this fix — that reference was already stale before this landed.)
 const CAM_BACK: f32 = 9.0;
 const CAM_LOOK_UP: f32 = 1.0;
+
+/// BL-82 EM-3.12 — camera-collision spring-arm geometry (code consts, not
+/// game-balance content — matches this file's `CAM_BACK`/`CAM_LOOK_UP`
+/// convention; see the design doc §6 for the reasoning behind each value).
+///
+/// Subtracted from a hit's raw distance so the near clip plane clears the
+/// solid surface instead of sitting flush on it (tune in smoke). `pub(crate)`
+/// so `terrain_stream.rs`'s real-embedded-world integration test can assert
+/// against the exact same constant rather than a duplicated literal.
+pub(crate) const CAM_NEAR_PAD: f32 = 0.2;
+/// The boom must never collapse fully onto the pivot (would put the eye
+/// inside the character mesh) — a small floor, not the old engine's much
+/// larger zoom-out minimum, since the reported bug wants the camera to come
+/// right in under the floor/wall.
+const CAM_MIN_DIST: f32 = 0.5;
+/// DDA step budget for the boom ray. A `CAM_BACK`-length (9 m) boom crosses
+/// at most ~9 voxel boundaries; 64 is ample explicit headroom (`ReadVol::
+/// ray`'s own default of 100 would also do).
+const CAM_RAY_MAX_ITER: usize = 64;
 
 /// BL-82 EM-4.11 follow-up ("slope-descent camera flicker"): per-frame
 /// exponential-lerp rate for the camera's OWN follow-focus, decoupled from the
@@ -228,8 +254,11 @@ fn third_person_camera(
     // interpolation buffer isn't attached yet.
     player: Query<(&Transform, Option<&Interpolated>), (With<NetLocalPlayer>, Without<FlyCam>)>,
     mut cameras: Query<(&mut Transform, &FlyCam), Without<NetLocalPlayer>>,
+    terrain: Res<SharedTerrain>,
     mut focus: Local<Option<Vec3>>,
+    mut cam_dist: Local<Option<f32>>,
     mut perf_log: Local<Option<bool>>,
+    mut collision_enabled: Local<Option<bool>>,
 ) {
     if !mode.0 {
         return;
@@ -238,6 +267,10 @@ fn third_person_camera(
         return; // no player entity mirrored yet — keep the spectator fly-cam
     };
     let player_pos = interp.map_or(player_tf.translation, |i| i.pos);
+    // Snapshot the PRE-update eased focus so we can detect, right after the
+    // call, whether `smoothed_focus` itself just snapped (a teleport/mode
+    // reactivation) — see the boom-snap comment below.
+    let prev_eased_focus = *focus;
     let focus_pos = smoothed_focus(&mut focus, player_pos, mode.is_changed(), time.delta_secs());
 
     // BL-82 EM-4.11 follow-up (slope-descent camera flicker) — opt-in
@@ -258,6 +291,34 @@ fn third_person_camera(
         );
     }
 
+    // BL-82 EM-3.12 kill-switch: `XINDELER_CAMERA_COLLISION=0` disables the
+    // spring-arm clamp entirely (today's pre-fix fixed-`CAM_BACK` behaviour),
+    // so Matías can A/B live. Default ON (unset/anything-but-`0`) — the
+    // INVERSE of this file's other opt-in debug flags
+    // (`XINDELER_CAMERA_FOCUS_PERF_LOG`, `XINDELER_SMOKE_ROTATE`, which
+    // default OFF): those gate optional diagnostics/scripting, this gates a
+    // shipped bug fix, so unset must mean "fix enabled", not "fix disabled".
+    // See [`camera_collision_enabled_from_env`]'s doc comment for a review
+    // finding this exact default direction caught.
+    let collision_enabled = *collision_enabled.get_or_insert_with(|| {
+        camera_collision_enabled_from_env(std::env::var("XINDELER_CAMERA_COLLISION"))
+    });
+
+    // BL-82 EM-3.12: the boom's own snap conditions mirror `smoothed_focus`'s
+    // exactly (first frame / mode reactivation / focus teleport), so the two
+    // smoothers stay in lock step — a teleport or re-entering third-person
+    // never leaves a stale boom length glide-fighting a freshly-snapped
+    // focus. `focus_teleported` re-derives `smoothed_focus`'s own internal
+    // `snap_far` test from the OUTSIDE (comparing the focus before vs. after
+    // this frame's call) without touching that function at all: when it
+    // snaps, `focus_pos` jumps straight to `target`, so the pre/post delta
+    // IS the same distance `smoothed_focus` itself just compared against
+    // `CAMERA_FOCUS_SNAP_DISTANCE`.
+    let focus_teleported = prev_eased_focus.is_some_and(|f| {
+        f.distance_squared(focus_pos) >= CAMERA_FOCUS_SNAP_DISTANCE * CAMERA_FOCUS_SNAP_DISTANCE
+    });
+    let snap_boom = cam_dist.is_none() || mode.is_changed() || focus_teleported;
+
     for (mut cam_tf, fly) in &mut cameras {
         // Full spherical orbit from BOTH yaw AND pitch (EM-3.11 smoke fix —
         // this previously only read `fly.yaw`, so vertical mouse motion did
@@ -270,7 +331,21 @@ fn third_person_camera(
         // constant needed.
         let forward = Quat::from_euler(EulerRot::YXZ, fly.yaw, fly.pitch, 0.0) * Vec3::NEG_Z;
         let look_at = focus_pos + Vec3::Y * CAM_LOOK_UP;
-        let eye = look_at - forward * CAM_BACK;
+        // BL-82 EM-3.12: the collision clamp is the FINAL step producing the
+        // eye, layered AFTER the (untouched) eased focus above — see the
+        // design doc §5. Cast from the eased `look_at` toward the desired
+        // eye (`-forward`, sim/z-up), against the client's OWN streamed
+        // terrain snapshot (`SharedTerrain::boom_cast`; missing chunks pass
+        // through, matching the reference engine).
+        let dist = if collision_enabled {
+            let pivot_sim = to_vek(bevy_to_sim(look_at));
+            let dir_sim = to_vek(bevy_to_sim(-forward));
+            let clamped = terrain.boom_cast(pivot_sim, dir_sim, CAM_BACK);
+            smoothed_boom(&mut cam_dist, clamped, snap_boom, time.delta_secs())
+        } else {
+            CAM_BACK
+        };
+        let eye = look_at - forward * dist;
         *cam_tf = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
     }
 }
@@ -301,6 +376,92 @@ fn smoothed_focus(
     };
     *focus = Some(next);
     next
+}
+
+/// BL-82 EM-3.12 — the third-person camera's spring-arm collision clamp
+/// (design doc §6). Casts the SAME voxel DDA ray the physics uses
+/// (`common/systems/src/phys/collision.rs:548`) from `pivot_sim` toward the
+/// desired eye (`pivot_sim + dir_sim * desired`, sim/z-up coords), stopping at
+/// the first solid block. On a hit, the boom is clamped to just short of the
+/// hit surface (never below [`CAM_MIN_DIST`], never past `desired`); with no
+/// hit — including an unloaded/out-of-bounds cell along the ray, via
+/// `.ignore_error()` — the full `desired` distance is returned (no clip).
+///
+/// Generic over the volume (any `V: ReadVol<Vox = Block>`) so unit tests can
+/// pass a hand-built `VolGrid2d` instead of the client's live terrain
+/// snapshot; production call sites are [`crate::terrain_stream`]'s streamed
+/// `VolGrid2d<TerrainChunk>` (via `SharedTerrain::boom_cast`).
+pub(crate) fn collide_boom<V: ReadVol<Vox = Block>>(
+    vol: &V,
+    pivot_sim: VVec3<f32>,
+    dir_sim: VVec3<f32>,
+    desired: f32,
+) -> f32 {
+    let to = pivot_sim + dir_sim * desired;
+    match vol
+        .ray(pivot_sim, to)
+        .until(|b: &Block| b.is_solid())
+        .ignore_error()
+        .max_iter(CAM_RAY_MAX_ITER)
+        .cast()
+    {
+        (d, Ok(Some(_))) => (d - CAM_NEAR_PAD).clamp(CAM_MIN_DIST, desired),
+        _ => desired,
+    }
+}
+
+/// BL-82 EM-3.12 — the boom's own snap-in/ease-out smoothing, a separate,
+/// small state machine from [`smoothed_focus`] (design doc §5: the two ease
+/// ORTHOGONAL quantities — the pivot vs. the radial arm length from it — and
+/// must not fight each other). Mirrors old voxygen's `Camera::update`/
+/// `compute_dependents` split: collision pull-in is always INSTANT (never
+/// lerp into a wall — a wall that's already closer than the current boom
+/// snaps straight to it), while growing back out toward `clamped` (which
+/// equals `desired`/`CAM_BACK` once the obstruction clears) EASES at
+/// [`CAMERA_FOCUS_LERP_RATE`] (the ported `THIRD_PERSON_INTERP_TIME`).
+///
+/// `snap` forces a direct set instead of easing even when growing outward —
+/// the same first-frame / mode-reactivation / focus-teleport conditions
+/// [`smoothed_focus`] snaps on (call sites keep the two in lock step so
+/// re-entering third-person or a teleport never leaves a stale boom length
+/// glide-fighting a freshly-snapped focus).
+fn smoothed_boom(cam_dist: &mut Option<f32>, clamped: f32, snap: bool, dt: f32) -> f32 {
+    let next = match *cam_dist {
+        Some(d) if !snap => {
+            if clamped < d {
+                clamped // snap IN instantly — never lerp into a wall
+            } else {
+                d + (clamped - d) * (CAMERA_FOCUS_LERP_RATE * dt).min(1.0) // ease OUT
+            }
+        },
+        _ => clamped, // first frame / snap conditions
+    };
+    *cam_dist = Some(next);
+    next
+}
+
+/// BL-82 EM-3.12 — the `XINDELER_CAMERA_COLLISION` kill-switch's env-var →
+/// bool mapping, pulled out to a pure fn (rather than inlined at the call
+/// site) so its DEFAULT DIRECTION is pinned by a fast unit test. This is a
+/// kill-switch (default ON, opt OUT via `=0`), the inverse of this file's
+/// other debug flags (`XINDELER_CAMERA_FOCUS_PERF_LOG`, `XINDELER_SMOKE_
+/// ROTATE`, default OFF, opt IN via any non-`"0"` value).
+///
+/// ## A real bug this exact test shape caught in review
+/// An earlier version of this function read
+/// `raw.is_ok_and(|v| v != "0")` — copy-pasted from this file's OPT-IN flags.
+/// `Result::is_ok_and` returns `false` on `Err`, so with the env var UNSET
+/// (`Err(NotPresent)`, the case for every player who never sets it) that
+/// expression evaluated to `false` — silently defaulting the fix OFF for
+/// everyone, exactly backwards from the doc comment's own claimed "default
+/// ON" behaviour. Caught by `bevy-migration-reviewer`, not by the smoke
+/// screenshots (both manual smoke runs happened to always pass the var
+/// explicitly, `=0` or `=1`, so the broken UNSET default was never
+/// exercised). Correct logic: negate the WHOLE check — unset or any
+/// unrecognised value means "keep the fix on"; only an explicit `"0"` turns
+/// it off.
+fn camera_collision_enabled_from_env(raw: Result<String, std::env::VarError>) -> bool {
+    !raw.is_ok_and(|v| v == "0")
 }
 
 // ---------------------------------------------------------------------------
@@ -797,9 +958,67 @@ fn smoke_water_cam(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Smoke camera-collision repro (scaffolding — smoke-screenshot only, BL-82
+// EM-3.12)
+// ---------------------------------------------------------------------------
+
+/// SCAFFOLDING for the BL-82 EM-3.12 visual smoke: reproduces Matías's exact
+/// reported framing ("miro al personaje desde abajo, la cámara ... traspasa
+/// el piso") headlessly, by forcing the fly-cam's pitch steeply UP every
+/// frame instead of relying on real mouse input the harness can't inject.
+/// Added ONLY under `--listen-server --smoke-screenshot` +
+/// `XINDELER_SMOKE_CAMERA_COLLISION=1`, and — unlike the other `Smoke*Cam`
+/// plugins — deliberately does NOT set the camera `Transform` itself: it only
+/// nudges [`FlyCam::pitch`], so the NEXT frame's [`third_person_camera`]
+/// computes `forward`/`eye` (and, when the `XINDELER_CAMERA_COLLISION`
+/// kill-switch is on, casts+clamps the boom) from this forced angle exactly
+/// like a real player's mouse-look would — it does not bypass the collision
+/// clamp, which is the entire point of the capture. Mutually exclusive with
+/// `SmokeFigureCamPlugin`/`SmokeSpriteCamPlugin`/`SmokeWaterCamPlugin` (see
+/// `main.rs`'s registration): those override the `Transform` directly after
+/// `third_person_camera` runs and would otherwise clobber this framing.
+pub struct SmokeCameraCollisionPlugin;
+
+/// Steep upward pitch (radians) forced onto the fly-cam. With this sign
+/// convention (`camera.rs`'s mouse-look: pitching up increases `pitch`, and
+/// `Quat::from_euler(YXZ, yaw, pitch, 0) * NEG_Z` then carries a positive-Y
+/// (upward) component), `third_person_camera`'s `eye = look_at - forward *
+/// dist` puts the eye BELOW `look_at` — i.e. the camera ends up under the
+/// player looking up, the exact reported framing. Kept a little short of the
+/// hard ±π/2-ish pitch clamp (`camera.rs`) so the forced value survives
+/// clamping unchanged.
+const SMOKE_LOOK_UP_PITCH: f32 = 1.3;
+
+impl Plugin for SmokeCameraCollisionPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            smoke_force_look_up_from_below
+                .after(third_person_camera)
+                .in_set(GameplaySet),
+        );
+    }
+}
+
+/// Forces [`SMOKE_LOOK_UP_PITCH`] onto every fly-cam every frame. See
+/// [`SmokeCameraCollisionPlugin`]'s doc comment for why this only touches
+/// `FlyCam::pitch`, not the camera `Transform`.
+fn smoke_force_look_up_from_below(mut cameras: Query<&mut FlyCam>) {
+    for mut fly in &mut cameras {
+        fly.pitch = SMOKE_LOOK_UP_PITCH;
+    }
+}
+
 /// Bevy y-up → sim z-up direction: inverse of the converter `(x,y,z)→(x,z,−y)`,
 /// i.e. bevy `(x, y, z)` → sim `(x, −z, y)`.
 fn bevy_to_sim(v: Vec3) -> Vec3 { Vec3::new(v.x, -v.z, v.y) }
+
+/// Bevy `Vec3` (already holding sim-axis values, post-[`bevy_to_sim`]) → the
+/// `vek::Vec3<f32>` `common`'s `ReadVol::ray`/[`collide_boom`] require. A
+/// plain component copy — [`bevy_to_sim`] already did the axis permutation;
+/// this only changes the Rust type the same three floats are carried in.
+fn to_vek(v: Vec3) -> VVec3<f32> { VVec3::new(v.x, v.y, v.z) }
 
 #[cfg(test)]
 mod tests {
@@ -813,6 +1032,17 @@ mod tests {
         let bevy = Vec3::new(sim.x, sim.z, -sim.y);
         let round = bevy_to_sim(bevy);
         assert!((round - sim).length() < 1e-5, "round-trip: {round:?}");
+    }
+
+    /// BL-82 EM-3.12 regression: Bevy "up" maps to sim +z (sim is z-up) — this
+    /// pins the DIRECTION semantics [`collide_boom`]'s "downward"/"upward"
+    /// reasoning (and the [`SmokeCameraCollisionPlugin`] doc comment) depend
+    /// on, as a fast unit test independent of the slow, `#[ignore]`d
+    /// real-world integration test.
+    #[test]
+    fn bevy_up_maps_to_sim_up() {
+        let sim = bevy_to_sim(Vec3::Y);
+        assert!((sim - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5, "{sim:?}");
     }
 
     /// A Bevy heading due −z (yaw 0 forward) maps to sim +y (north).
@@ -987,5 +1217,179 @@ mod tests {
             (last - target.y).abs() < 0.05,
             "should have converged close to the target after 2s: {last}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-3.12 — collide_boom (hand-built VolGrid2d, no App/GPU)
+    // -----------------------------------------------------------------------
+
+    use common::{
+        terrain::{BlockKind, MapSizeLg, TerrainChunk, TerrainChunkMeta},
+        vol::{RectRasterableVol, WriteVol},
+        volumes::vol_grid_2d::VolGrid2d,
+    };
+    use vek::{Rgb, Vec2 as VVec2};
+
+    /// Builds a single-chunk `VolGrid2d<TerrainChunk>` (mirrors
+    /// `terrain_stream.rs`'s test `solid_chunk`/`TerrainStore::new` shape)
+    /// with one solid `Rock` slab spanning the whole chunk footprint from
+    /// `solid_from_z` (inclusive) up `SLAB_HEIGHT` blocks, everything else
+    /// air. `None` (`solid_from_z = None`) inserts no chunk at all, so a cast
+    /// through it exercises the unloaded/`NoSuchChunk` → `.ignore_error()`
+    /// pass-through path.
+    const SLAB_HEIGHT: i32 = 8;
+
+    fn grid_with_solid_slab(solid_from_z: Option<i32>) -> VolGrid2d<TerrainChunk> {
+        let map_size_lg = MapSizeLg::new(VVec2::new(6, 6)).expect("valid map size");
+        let default = std::sync::Arc::new(TerrainChunk::new(
+            0,
+            Block::empty(),
+            Block::empty(),
+            TerrainChunkMeta::void(),
+        ));
+        let mut grid = VolGrid2d::new(map_size_lg, default).expect("chunk size is a power of two");
+        if let Some(solid_from_z) = solid_from_z {
+            let mut chunk =
+                TerrainChunk::new(0, Block::empty(), Block::empty(), TerrainChunkMeta::void());
+            let edge = TerrainChunk::RECT_SIZE.x as i32;
+            for lx in 0..edge {
+                for ly in 0..edge {
+                    for z in solid_from_z..(solid_from_z + SLAB_HEIGHT) {
+                        chunk
+                            .set(
+                                VVec3::new(lx, ly, z),
+                                Block::new(BlockKind::Rock, Rgb::new(120, 120, 120)),
+                            )
+                            .expect("in-bounds write");
+                    }
+                }
+            }
+            grid.insert(VVec2::new(0, 0), std::sync::Arc::new(chunk));
+        }
+        grid
+    }
+
+    /// A vertical cast (pivot at z=0, straight up) into a solid slab starting
+    /// at z=4 hits at distance 4 (unit voxels, DDA steps land exactly on
+    /// integer boundaries) — returns `4 - CAM_NEAR_PAD`.
+    #[test]
+    fn collide_boom_hits_wall_at_expected_distance() {
+        let grid = grid_with_solid_slab(Some(4));
+        let pivot = VVec3::new(16.0, 16.0, 0.0);
+        let dir = VVec3::new(0.0, 0.0, 1.0);
+        let got = collide_boom(&grid, pivot, dir, 9.0);
+        assert!((got - (4.0 - CAM_NEAR_PAD)).abs() < 1e-3, "got {got}");
+    }
+
+    /// No solid block within `desired` (the slab starts far above the cast
+    /// range) → the full `desired` distance, unclamped.
+    #[test]
+    fn collide_boom_clear_air_returns_desired() {
+        let grid = grid_with_solid_slab(Some(100));
+        let pivot = VVec3::new(16.0, 16.0, 0.0);
+        let dir = VVec3::new(0.0, 0.0, 1.0);
+        let got = collide_boom(&grid, pivot, dir, 9.0);
+        assert_eq!(got, 9.0);
+    }
+
+    /// A solid block starting immediately at the pivot clamps to
+    /// `CAM_MIN_DIST`, never below it (never collapses the boom onto the
+    /// pivot/character).
+    #[test]
+    fn collide_boom_clamps_to_min_dist() {
+        let grid = grid_with_solid_slab(Some(0));
+        let pivot = VVec3::new(16.0, 16.0, 0.0);
+        let dir = VVec3::new(0.0, 0.0, 1.0);
+        let got = collide_boom(&grid, pivot, dir, 9.0);
+        assert_eq!(got, CAM_MIN_DIST);
+    }
+
+    /// A ray through a chunk that was never inserted (within map bounds, but
+    /// no chunk stored — the real "not-yet-streamed" case) errors
+    /// `NoSuchChunk` at every step; `.ignore_error()` treats that as
+    /// pass-through, so the camera never clips on unstreamed terrain.
+    #[test]
+    fn collide_boom_unloaded_chunk_passes_through() {
+        let grid = grid_with_solid_slab(None);
+        let pivot = VVec3::new(16.0, 16.0, 0.0);
+        let dir = VVec3::new(0.0, 0.0, 1.0);
+        let got = collide_boom(&grid, pivot, dir, 9.0);
+        assert_eq!(got, 9.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-3.12 — smoothed_boom (mirrors the smoothed_focus_* test shape)
+    // -----------------------------------------------------------------------
+
+    /// The very first call (`cam_dist` still `None`) sets directly — no
+    /// glide-in from an arbitrary default.
+    #[test]
+    fn smoothed_boom_first_call_sets_directly() {
+        let mut cam_dist = None;
+        let got = smoothed_boom(&mut cam_dist, 4.0, false, 1.0 / 60.0);
+        assert_eq!(got, 4.0);
+        assert_eq!(cam_dist, Some(4.0));
+    }
+
+    /// Collision pull-in is INSTANT: when the clamped distance is closer than
+    /// the current boom, the next value snaps straight to it, never eases.
+    #[test]
+    fn smoothed_boom_snaps_in_on_a_closer_hit() {
+        let mut cam_dist = Some(9.0);
+        let got = smoothed_boom(&mut cam_dist, 3.0, false, 1.0 / 60.0);
+        assert_eq!(got, 3.0, "must snap in instantly, never lerp into a wall");
+    }
+
+    /// Growing back out toward a farther (clear) distance EASES — the new
+    /// value moves only partway, not immediately to the target.
+    #[test]
+    fn smoothed_boom_eases_out_when_clearing() {
+        let mut cam_dist = Some(3.0);
+        let got = smoothed_boom(&mut cam_dist, 9.0, false, 1.0 / 60.0);
+        let expected_t = (CAMERA_FOCUS_LERP_RATE / 60.0).min(1.0);
+        let expected = 3.0 + (9.0 - 3.0) * expected_t;
+        assert!(
+            got > 3.0 && got < 9.0,
+            "must ease partway out, not snap: {got}"
+        );
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "got {got}, expected {expected}"
+        );
+    }
+
+    /// `snap = true` (first frame / mode reactivation / focus teleport) sets
+    /// directly even when growing OUTWARD — no glide-in artifact.
+    #[test]
+    fn smoothed_boom_snap_flag_forces_direct_set_even_when_growing() {
+        let mut cam_dist = Some(1.0);
+        let got = smoothed_boom(&mut cam_dist, 9.0, true, 1.0 / 60.0);
+        assert_eq!(got, 9.0, "snap=true must set directly, not ease");
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-3.12 — camera_collision_enabled_from_env kill-switch default
+    // (regression test for the inverted-default bug bevy-migration-reviewer
+    // caught: see the function's own doc comment for the full story)
+    // -----------------------------------------------------------------------
+
+    /// The env var UNSET (`Err(NotPresent)`, every player who never touches
+    /// it) must default the fix ON — the whole point of a kill-switch vs. an
+    /// opt-in debug flag.
+    #[test]
+    fn camera_collision_defaults_enabled_when_env_unset() {
+        assert!(camera_collision_enabled_from_env(Err(
+            std::env::VarError::NotPresent
+        )));
+    }
+
+    /// Only an explicit `"0"` disables it; any other value (including
+    /// nonsense) leaves it on.
+    #[test]
+    fn camera_collision_disabled_only_by_explicit_zero() {
+        assert!(!camera_collision_enabled_from_env(Ok("0".to_owned())));
+        assert!(camera_collision_enabled_from_env(Ok("1".to_owned())));
+        assert!(camera_collision_enabled_from_env(Ok("bogus".to_owned())));
+        assert!(camera_collision_enabled_from_env(Ok(String::new())));
     }
 }

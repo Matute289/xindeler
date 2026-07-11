@@ -111,11 +111,73 @@ impl TerrainStore {
             max_z,
         ))
     }
+
+    /// BL-82 EM-3.12: cast the third-person camera's collision boom ray
+    /// against this store's OWN terrain snapshot. Assembles the SAME
+    /// `VolGrid2d` [`Self::volume_for`] builds for the mesher (the pivot's
+    /// chunk ± 1 xy neighbours — ample for a `CAM_BACK`-length boom since
+    /// chunks are `RECT_SIZE` wide), then delegates the actual ray math to
+    /// [`crate::player_input::collide_boom`] so the clamp/pad/min logic lives
+    /// in exactly one place (also unit-tested there against a hand-built
+    /// grid). If the pivot's own chunk isn't streamed yet, the ray passes
+    /// straight through (`desired`, no clip) — never clamps on missing data,
+    /// matching the reference engine's `.ignore_error()` behaviour.
+    ///
+    /// ## Known v1 cost (reviewed, accepted, follow-up noted — not fixed here)
+    /// Unlike its ONLY other caller (the async mesh pipeline, which calls
+    /// `volume_for` per DIRTY chunk, infrequently, off the render thread),
+    /// this runs on the MAIN THREAD EVERY RENDERED FRAME. Reusing
+    /// `volume_for` means every call allocates a fresh `VolGrid2d`
+    /// (a `HashMap` + up to 9 `Arc::clone`s) just to run one short ray
+    /// through it. Both `bevy-migration-reviewer` and `rust-perf-reviewer`
+    /// confirmed this is cheap in absolute terms (small map, a handful of
+    /// `Arc` clones, no deep copies — nowhere near a 16 ms frame budget) and
+    /// is NOT a merge blocker, but flagged it as worth a follow-up: index
+    /// `self.chunks` directly for the 1-2 chunks a `CAM_BACK`-length ray can
+    /// actually touch instead of materializing an owned `VolGrid2d` snapshot
+    /// just to discard it after one cast.
+    #[cfg(feature = "listen-server")]
+    fn boom_cast(&self, pivot_sim: VVec3<f32>, dir_sim: VVec3<f32>, desired: f32) -> f32 {
+        let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(
+            pivot_sim.x.floor() as i32,
+            pivot_sim.y.floor() as i32,
+        ));
+        match self.volume_for(key) {
+            Some(vol) => crate::player_input::collide_boom(&*vol.grid, pivot_sim, dir_sim, desired),
+            None => desired,
+        }
+    }
 }
 
-/// Handle shared with the provider closure.
+/// Handle shared with the provider closure. `pub(crate)` (BL-82 EM-3.12): the
+/// third-person camera (`crate::player_input`) needs a `Res<SharedTerrain>`
+/// to cast its collision boom against the SAME streamed snapshot the mesher
+/// reads — see [`SharedTerrain::boom_cast`]. The inner `TerrainStore` stays
+/// private; only this newtype (and its methods) are crate-visible.
 #[derive(Resource, Clone)]
-struct SharedTerrain(Arc<RwLock<TerrainStore>>);
+pub(crate) struct SharedTerrain(Arc<RwLock<TerrainStore>>);
+
+/// BL-82 EM-3.12 (listen-server only: the third-person camera that consumes
+/// this doesn't exist under a pure `net-client` build).
+#[cfg(feature = "listen-server")]
+impl SharedTerrain {
+    /// Cast a camera boom ray (sim/z-up world coords) against this store's
+    /// terrain snapshot, returning the collision-limited distance. Takes the
+    /// read lock only for the duration of this call (a handful of voxel
+    /// `get`s — microseconds); the mesher's own lock usage elsewhere is
+    /// unaffected. See [`TerrainStore::boom_cast`] for the volume assembly.
+    pub(crate) fn boom_cast(
+        &self,
+        pivot_sim: VVec3<f32>,
+        dir_sim: VVec3<f32>,
+        desired: f32,
+    ) -> f32 {
+        let Ok(store) = self.0.read() else {
+            return desired; // poisoned lock: fail open (no clip) rather than panic
+        };
+        store.boom_cast(pivot_sim, dir_sim, desired)
+    }
+}
 
 /// Where the spectator camera should look — the anchor world position, mapped
 /// into Bevy space. Set once the first [`TerrainAnchor`] arrives; consumed by
@@ -914,6 +976,207 @@ mod tests {
             "the selective rule must eliminate this synthetic model's direction-dependent \
              asymmetry entirely (both directions never re-mark a neighbour that hasn't \
              independently streamed in)"
+        );
+    }
+
+    /// BL-82 EM-3.12 — real-embedded-world integration test. Boots the REAL
+    /// Veloren sim (the exact recipe `xindeler-sim-bridge`'s own
+    /// `streams_real_chunks_to_local_client` test uses), streams its terrain
+    /// through the SAME `TerrainStreamPlugin` this crate ships in production
+    /// (loopback `CompressedChunk`s via replicon, decoded into a real
+    /// `SharedTerrain`), then casts a downward camera boom against that real
+    /// snapshot. This proves the client-side `VolGrid2d` cast genuinely hits
+    /// REAL generated terrain end-to-end — the guard the design doc calls
+    /// for against the sim/z-up axis convention (a wrong "which way is down"
+    /// would clamp against the wrong geometry, or find nothing at all).
+    ///
+    /// Boots a real world (assets + LFS map blobs) — `#[ignore]`d like its
+    /// sim-bridge counterpart; run locally with `VELOREN_ASSETS` set, e.g.:
+    /// `VELOREN_ASSETS="$(pwd)/assets" cargo test -p xindeler-client
+    /// --features listen-server boom_cast_clamps_against_real_generated_terrain
+    /// -- --ignored`.
+    #[cfg(feature = "listen-server")]
+    #[test]
+    #[ignore = "boots a real world: needs assets + LFS; run locally with VELOREN_ASSETS"]
+    fn boom_cast_clamps_against_real_generated_terrain() {
+        use std::time::Duration;
+
+        use bevy::{
+            state::app::StatesPlugin,
+            time::{Fixed, TimeUpdateStrategy},
+        };
+        use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
+        use xindeler_protocol::XindelerProtocolPlugin;
+        use xindeler_sim_bridge::{
+            SIM_TICK_HZ, SimBridgePlugin, SimTerrainStreamPlugin, boot_test_server,
+        };
+
+        const MAX_TICKS: u32 = 8000;
+        // Comfortably clears real terrain height variance/voxel-step slop —
+        // this is a real generated world, not a hand-built grid, so the
+        // tolerance is looser than the pure-function unit tests above.
+        const TOLERANCE: f32 = 2.0;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<bevy::mesh::Mesh>()
+            // Replicate on every update (default FixedPostUpdate may not run
+            // in a manually-stepped app) — same as the sim-bridge test.
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((XindelerProtocolPlugin, SimBridgePlugin, SimTerrainStreamPlugin))
+            .add_plugins(ChunkMeshPipelinePlugin)
+            .add_plugins(TerrainStreamPlugin)
+            .insert_resource(ChunkLayerMap::default())
+            .insert_resource(ChunkMaterials {
+                terrain: Handle::default(),
+                fluid: Handle::default(),
+            });
+        // Pin FixedUpdate to run exactly once per `app.update()`.
+        app.insert_resource(Time::<Fixed>::from_hz(SIM_TICK_HZ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / SIM_TICK_HZ,
+        )));
+        app.insert_non_send(sim);
+        app.finish();
+        app.update(); // Startup: install_provider.
+
+        // First wait for the anchor broadcast (arrives quickly — as soon as
+        // the sim can read a spawn altitude, independent of the persister's
+        // full view-distance streaming), THEN keep ticking until the
+        // anchor's OWN chunk key specifically has streamed in (the
+        // persister's queue is not guaranteed centre-first, so waiting on a
+        // generic "N chunks streamed" count could keep missing the exact
+        // column this test needs).
+        let mut anchor: Option<TerrainCameraAnchor> = None;
+        let mut anchor_key: Option<[i32; 2]> = None;
+        for tick in 0..MAX_TICKS {
+            app.update();
+            if anchor.is_none()
+                && let Some(a) = app.world().get_resource::<TerrainCameraAnchor>()
+            {
+                anchor = Some(*a);
+                // Undo the converter (Veloren (x, y, z) -> Bevy (x, z, -y))
+                // to get back the anchor's sim-space horizontal position.
+                let anchor_sim_xy = VVec2::new(a.bevy_pos.x, -a.bevy_pos.z);
+                let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(
+                    anchor_sim_xy.x.floor() as i32,
+                    anchor_sim_xy.y.floor() as i32,
+                ));
+                anchor_key = Some([key.x, key.y]);
+                eprintln!("anchor arrived at tick {tick}: sim_xy={anchor_sim_xy:?} key={key:?}");
+            }
+            if let Some(key) = anchor_key {
+                let has_center = app
+                    .world()
+                    .resource::<SharedTerrain>()
+                    .0
+                    .read()
+                    .expect("lock")
+                    .chunks
+                    .contains_key(&key);
+                if has_center {
+                    eprintln!("anchor's own chunk {key:?} streamed by tick {tick}");
+                    break;
+                }
+            }
+        }
+        let anchor = anchor.expect("terrain anchor must have arrived");
+        let anchor_key = anchor_key.expect("anchor key must have been computed");
+
+        // Undo the converter (Veloren (x, y, z) -> Bevy (x, z, -y)) to get
+        // back the anchor's sim-space horizontal position.
+        let anchor_sim_xy = VVec2::new(anchor.bevy_pos.x, -anchor.bevy_pos.z);
+
+        // Find the REAL highest solid block in the anchor's own chunk column
+        // by scanning the actual streamed data directly — independent of
+        // `boom_cast`/`collide_boom`, so this is a genuine cross-check, not
+        // a tautology.
+        let ground_top_z = {
+            let store = app
+                .world()
+                .resource::<SharedTerrain>()
+                .0
+                .read()
+                .expect("lock");
+            let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(
+                anchor_sim_xy.x.floor() as i32,
+                anchor_sim_xy.y.floor() as i32,
+            ));
+            assert_eq!(
+                [key.x, key.y],
+                anchor_key,
+                "recomputed key must match the one waited on"
+            );
+            let chunk = store
+                .chunks
+                .get(&[key.x, key.y])
+                .expect("the anchor's own chunk must be streamed by now (waited on above)");
+            let edge = CHUNK_EDGE as i32;
+            let local = VVec2::new(
+                anchor_sim_xy.x.floor() as i32 - key.x * edge,
+                anchor_sim_xy.y.floor() as i32 - key.y * edge,
+            );
+            (chunk.get_min_z()..chunk.get_max_z())
+                .rev()
+                .find(|&z| {
+                    chunk
+                        .get(VVec3::new(local.x, local.y, z))
+                        .is_ok_and(|b: &Block| b.is_solid())
+                })
+                .expect("the anchor's column must have some solid ground under it")
+        };
+
+        // Cast a downward boom from above the real ground surface. `AIR_GAP`
+        // is deliberately modest (well under `CAM_RAY_MAX_ITER`'s reach) —
+        // see the note below on why a LARGE gap is the wrong choice for a
+        // perfectly-axis-aligned probe ray specifically.
+        //
+        // ## A real property of the shared DDA (`common/src/ray.rs`), not a
+        // ## bug in this feature
+        // A ray whose direction is EXACTLY axis-aligned (here, straight down:
+        // `dir = (0, 0, -1)`) starting from a position whose coordinate along
+        // that axis is itself an exact integer lands EXACTLY back on an
+        // integer after every step, which makes `Ray::cast`'s per-step
+        // "distance to the next voxel boundary" collapse to the `PLANCK`
+        // floor every OTHER iteration (alternating a ~0 step with a ~1.0
+        // step) — roughly HALVING the effective distance covered per
+        // `max_iter` budget versus a generic, non-axis-aligned ray. Real
+        // camera rays (continuous yaw/pitch floats) essentially never hit
+        // this exactly, and `CAM_BACK` (9 m) is comfortably inside
+        // `CAM_RAY_MAX_ITER`'s reach even at this halved worst-case rate —
+        // but a synthetic, perfectly-vertical integration probe over a large
+        // gap easily runs the budget out. Keeping `AIR_GAP` modest here
+        // avoids exercising that (real, pre-existing, out-of-scope-for-this-
+        // feature) DDA property while still genuinely proving the real-world
+        // cast/clamp pipeline end-to-end.
+        const AIR_GAP: f32 = 12.0;
+        let pivot = VVec3::new(
+            anchor_sim_xy.x,
+            anchor_sim_xy.y,
+            ground_top_z as f32 + 1.0 + AIR_GAP,
+        );
+        let down = VVec3::new(0.0, 0.0, -1.0);
+        let terrain = app.world().resource::<SharedTerrain>();
+
+        let hit_dist = terrain.boom_cast(pivot, down, AIR_GAP + 10.0);
+        let expected = AIR_GAP - crate::player_input::CAM_NEAR_PAD;
+        assert!(
+            (hit_dist - expected).abs() < TOLERANCE,
+            "downward boom should clamp near the real ground surface: got {hit_dist}, expected ≈ \
+             {expected}"
+        );
+
+        // A short boom that never reaches the ground returns the FULL
+        // desired distance — open air, no clip.
+        let clear = terrain.boom_cast(pivot, down, 5.0);
+        assert_eq!(
+            clear, 5.0,
+            "a boom cast well short of the real ground must return the full desired distance"
         );
     }
 }

@@ -258,19 +258,35 @@ fn main() -> AppExit {
             #[cfg(feature = "listen-server")]
             if listen_server {
                 app.add_plugins(player_input::SmokeAutoMovePlugin);
-                // EM-3.8: frame a real `.vox` NPC figure in the capture (the
-                // spawn pillar occludes the player — EM-3.7b caveat).
-                app.add_plugins(player_input::SmokeFigureCamPlugin);
-                // EM-3.9: once sprites build, override the framing to the
-                // densest vegetation patch on open lit terrain (the figure sits
-                // in the dark spawn interior). Runs after the figure cam.
-                app.add_plugins(player_input::SmokeSpriteCamPlugin);
-                // EM-3.9b: if a fluid (water) chunk meshed anywhere in the
-                // streamed window, override once more to frame it — shows the
-                // animated water shader. No-ops (keeps sprite/figure framing)
-                // when the world seed has no nearby water. Runs after the
-                // sprite cam.
-                app.add_plugins(player_input::SmokeWaterCamPlugin);
+                // BL-82 EM-3.12: dedicated framing for the camera-collision
+                // bug repro (Matías's "miro al personaje desde abajo" report
+                // — looking up at the character from below, camera passing
+                // through the floor). Opt-in (`XINDELER_SMOKE_CAMERA_
+                // COLLISION=1`) and mutually exclusive with the figure/
+                // sprite/water framing below: all of those override the
+                // camera `Transform` directly AFTER `third_person_camera`
+                // too, so whichever group runs would otherwise clobber the
+                // other's shot.
+                let camera_collision_smoke =
+                    std::env::var("XINDELER_SMOKE_CAMERA_COLLISION").is_ok_and(|v| v != "0");
+                if camera_collision_smoke {
+                    app.add_plugins(player_input::SmokeCameraCollisionPlugin);
+                } else {
+                    // EM-3.8: frame a real `.vox` NPC figure in the capture
+                    // (the spawn pillar occludes the player — EM-3.7b caveat).
+                    app.add_plugins(player_input::SmokeFigureCamPlugin);
+                    // EM-3.9: once sprites build, override the framing to the
+                    // densest vegetation patch on open lit terrain (the figure
+                    // sits in the dark spawn interior). Runs after the figure
+                    // cam.
+                    app.add_plugins(player_input::SmokeSpriteCamPlugin);
+                    // EM-3.9b: if a fluid (water) chunk meshed anywhere in the
+                    // streamed window, override once more to frame it — shows
+                    // the animated water shader. No-ops (keeps sprite/figure
+                    // framing) when the world seed has no nearby water. Runs
+                    // after the sprite cam.
+                    app.add_plugins(player_input::SmokeWaterCamPlugin);
+                }
             }
         },
         Some(smoke::SmokeMode::Atmosphere(out_dir)) => {

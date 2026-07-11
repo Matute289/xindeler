@@ -11623,6 +11623,7 @@ dependencies = [
  "bevy_replicon",
  "dot_vox",
  "ron",
+ "tempfile",
  "vek",
  "xindeler-app",
  "xindeler-common",
