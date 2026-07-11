@@ -157,6 +157,13 @@ fn main() -> AppExit {
         Err(_) => SimServerConfig::default().replicon_addr,
     };
 
+    // BL-82 EM-4.9: resolved ONCE, then handed to BOTH
+    // `register_oracle_source` (below) and `SimServerConfig.events_dir` (so
+    // `xindeler_sim_bridge::oracle::retire_dm_events`'s later filesystem poll
+    // always agrees with where the `oracle://` source is actually rooted —
+    // see `SimServerConfig::events_dir`'s own doc comment).
+    let events_dir = xindeler_oracle_host::default_events_dir();
+
     let mut app = App::new();
     app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(SIM_TICK_INTERVAL)));
 
@@ -166,10 +173,7 @@ fn main() -> AppExit {
     // adding AssetPlugin... registered sources are built at that point and
     // not after"). `ServerOraclePlugin` (added inside `SimServerPlugin`,
     // AFTER `AssetPlugin`) is the other half of the two-phase sequence.
-    xindeler_oracle_host::register_oracle_source(
-        &mut app,
-        &xindeler_oracle_host::default_events_dir(),
-    );
+    xindeler_oracle_host::register_oracle_source(&mut app, &events_dir);
 
     app
         // BL-82 EM-4.10 T48.6: headless-safe (`bevy_asset` pulls in no
@@ -188,6 +192,7 @@ fn main() -> AppExit {
                 ai_gateway,
                 replicon_addr,
                 debug_dimension_commands,
+                events_dir,
             },
         })
         .run()

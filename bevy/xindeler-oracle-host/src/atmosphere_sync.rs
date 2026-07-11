@@ -79,6 +79,12 @@ impl DimensionAtmospheres {
         self.0.insert(dimension, profile);
     }
 
+    /// Drops `dimension`'s entry (BL-82 EM-4.9 follow-up, bevy-migration-
+    /// reviewer MINOR finding): called once a dimension tears down, so this
+    /// table doesn't grow by one stale entry per retired event for the life
+    /// of the server process. A no-op if `dimension` had no entry.
+    pub fn remove(&mut self, dimension: DimensionId) { self.0.remove(&dimension); }
+
     /// The registered profile for `dimension`, if any.
     #[must_use]
     pub fn get(&self, dimension: DimensionId) -> Option<&AtmosphereProfile> {
@@ -152,10 +158,10 @@ impl Plugin for AtmosphereSyncMessagePlugin {
 }
 
 /// Server-only: [`DimensionAtmospheres`] together with
-/// [`send_atmosphere_on_dimension_change`], plus [`AtmosphereSyncMessagePlugin`]
-/// if not already added (defensive — `xindeler-server-app` is expected to be
-/// the only caller). Never add this on the client — only
-/// [`AtmosphereSyncMessagePlugin`] belongs there (see
+/// [`send_atmosphere_on_dimension_change`], plus
+/// [`AtmosphereSyncMessagePlugin`] if not already added (defensive —
+/// `xindeler-server-app` is expected to be the only caller). Never add this on
+/// the client — only [`AtmosphereSyncMessagePlugin`] belongs there (see
 /// `xindeler-client::atmosphere`'s receiver-side registration).
 pub struct ServerAtmosphereSyncPlugin;
 

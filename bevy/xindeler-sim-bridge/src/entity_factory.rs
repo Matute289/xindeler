@@ -114,16 +114,47 @@ use crate::SimServer;
 /// [`crate::SimEntityDimension`], defaulting to [`DimensionId::DEFAULT`] when
 /// the queue is empty (unchanged v1 behavior for ordinary NPC/test spawns).
 ///
-/// ## Known, documented limitation
+/// ## Known, documented limitation (bevy-migration-reviewer follow-up: the
+/// real risk surface is broader than the original framing)
 /// This is a best-effort correlation, not a guaranteed one: if some OTHER
-/// Agent-bearing entity (e.g. `spawn_test_npcs`'s wandering ring, disabled by
-/// default) happens to be discovered by the mirror in the exact same tick a
+/// Agent-bearing entity is discovered by the mirror in the exact same tick a
 /// factory batch materializes, one queue entry could be consumed by the
-/// wrong entity. Acceptable for v1 (a single controlled ORACLE encounter at a
-/// time); a fully robust fix needs the sim itself to carry dimension
-/// identity on the entity at creation time, which would touch the `common`/
-/// `server` logic crates (upstream-merge-sensitive, out of this shell-only
-/// task's scope) — tracked as a follow-up, not attempted here.
+/// wrong entity. The original version of this doc comment named only
+/// `spawn_test_npcs`'s wandering ring (a one-shot, dev-only, disabled-by-
+/// default latch) — that undersold the real exposure: `server/src/sys/
+/// terrain.rs`'s wildlife-spawning system is a REAL, ALWAYS-ON per-tick
+/// `specs::System` that continuously creates Agent-bearing wildlife as
+/// chunks stream in during ordinary gameplay (not a rare dev-tool edge case
+/// — the normal spawn path on any populated live server), and rtsim/pet/
+/// summon spawns are further Agent-bearing sources. Any tick where the queue
+/// still has a pending entry (the whole multi-tick window between
+/// `apply_pending_entity_template_spawns` queuing a batch and
+/// `mirror_sim_entities` discovering every corresponding sim NPC) is also a
+/// tick where ordinary wildlife could be discovered first and steal the
+/// wrong slot. Real players are still NEVER at risk (server-side `Agent` is
+/// attached only by `server/src/pet.rs`, `server/src/cmd.rs`, `server/src/
+/// sys/terrain.rs`, and `server/src/rtsim/tick.rs` — none on the login
+/// path), so a misattribution can only ever mistag one NPC/minion for
+/// another, never a player. Acceptable for v1 (one controlled ORACLE
+/// encounter at a time, and this codebase's own dev/test usage keeps
+/// `spawn_test_npcs` off by default); a fully robust fix needs the sim
+/// itself to carry dimension identity on the entity at creation time, which
+/// would touch the `common`/`server` logic crates (upstream-merge-sensitive,
+/// out of this shell-only task's scope) — tracked as a follow-up.
+///
+/// ## A second, related limitation: same-tick multi-event interleaving
+/// (ecs-design-reviewer follow-up) If TWO different `DmEvent`s are both
+/// resolving their `spawn_event_minions` batch in the SAME tick, each
+/// event's entries land in this ONE shared queue in whatever order
+/// `xindeler-sim-bridge::oracle::spawn_event_minions` processes the two
+/// `OracleEventRegistry` entries — `mirror_sim_entities` then consumes them
+/// strictly FIFO as it discovers new Agent-bearing entities, which is only
+/// correct if specs' `Join` iteration order and Bevy's deferred `Commands`
+/// application both preserve enqueue order (true absent intervening
+/// deletions — the same assumption the single-event case above already
+/// relies on). Out of scope to eliminate for v1 (one canonical event at a
+/// time is this task's own scope call), but worth naming explicitly rather
+/// than leaving an implicit multi-event assumption undocumented.
 #[derive(Resource, Debug, Default)]
 pub struct PendingDimensionAttribution(pub VecDeque<DimensionId>);
 

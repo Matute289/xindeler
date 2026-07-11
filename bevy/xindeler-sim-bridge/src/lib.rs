@@ -1008,10 +1008,26 @@ impl Plugin for SimEntityMirrorPlugin {
             // the teardown-completion pass reads the resulting lifecycle),
             // and explicitly before that sibling system too so a same-tick
             // Draining -> Teardown this system causes is visible to it.
+            //
+            // EM-4.9 follow-up (ecs-design-reviewer minor finding): ALSO
+            // explicit `.after(predictive_gc_system)` and
+            // `.after(mirror_sim_entities)` — both are OTHER writers of the
+            // same `DimensionRegistry` occupant sets (predictive_gc reads
+            // occupancy heuristically; `mirror_sim_entities`'s own stale-
+            // mirror sweep calls `remove_occupant` for entities that
+            // naturally disappeared this tick), and this codebase's own
+            // EM-4.6 precedent (see `delete_specs_entities_for_torn_down_
+            // dimensions`'s doc comment above) treats "two systems mutating
+            // the same resource with no declared edge between them" as worth
+            // closing explicitly even when — as here — the consequence of
+            // leaving it implicit would only be a possible one-tick delay
+            // reaching `Teardown`, not a leak or double-despawn.
             .add_systems(
                 FixedUpdate,
                 release_dimension_occupants_on_drain_request
                     .after(xindeler_dimensions::spinup::handle_drain_requests)
+                    .after(xindeler_dimensions::predictive_gc::predictive_gc_system)
+                    .after(mirror_sim_entities)
                     .before(delete_specs_entities_for_torn_down_dimensions),
             );
     }

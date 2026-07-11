@@ -233,7 +233,23 @@ pub mod bounds {
     /// before actually spawning).
     pub const SPAWN_COUNT: (f32, f32) = (0.0, 200.0);
     /// `SpawningRules::spawn_radius`, blocks.
-    pub const SPAWN_RADIUS: (f32, f32) = (0.0, 2000.0);
+    ///
+    /// BL-82 EM-4.9 follow-up (game-architecture-reviewer finding): this
+    /// ceiling MUST stay comfortably under half the world size EVERY event
+    /// dimension actually spins up with today
+    /// (`xindeler_sim_bridge::oracle::event_gen_opts`'s fixed `x_lg: 5, y_lg:
+    /// 5` — 32 chunks/axis × 32 blocks/chunk = 1024 blocks/axis, i.e. a
+    /// ±512-block half-extent from the dimension's centre). A
+    /// schema-legal-but-too-large `spawn_radius` would request scatter chunks
+    /// OUTSIDE that generated range; `spawn_event_minions`'s terrain-
+    /// readiness gate then waits forever for chunks that will never exist,
+    /// silently never spawning the event's minions. An earlier draft of this
+    /// bound (2000.0) predated that fixed event-`GenOpts` decision and was
+    /// never revisited against it — 400.0 leaves a real margin (< 512) while
+    /// still comfortably covering the shipped Mist-Bound example's 40.0.
+    /// Revisit together if `event_gen_opts` ever becomes configurable
+    /// per-event (tracked as a v2 follow-up, not attempted here).
+    pub const SPAWN_RADIUS: (f32, f32) = (0.0, 400.0);
     /// Ceiling on any free-form string field (`biome_profile`, narrative
     /// text, entity template ids, ...) — a defensive floor against an
     /// unboundedly large hostile value, not a game-design number.

@@ -238,8 +238,12 @@ impl Plugin for SimServerPlugin {
         // spinup + factory spawn + narrative hook + chronicle rumor). See
         // `oracle.rs`'s own module doc comment for the full producer chain;
         // `main.rs` already called `register_oracle_source` BEFORE
-        // `AssetPlugin` (the other half of the two-phase ordering contract).
-        app.add_plugins(ServerOraclePlugin);
+        // `AssetPlugin` (the other half of the two-phase ordering contract) —
+        // `events_dir` is threaded through from that SAME resolved value (see
+        // `SimServerConfig::events_dir`'s own doc comment for why).
+        app.add_plugins(ServerOraclePlugin {
+            events_dir: self.config.events_dir.clone(),
+        });
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,

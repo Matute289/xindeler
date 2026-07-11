@@ -74,7 +74,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use xindeler_dimensions::{
     DimensionActivated, DimensionId, DimensionLifecycle, DimensionRegistry, DimensionSpinupConfig,
-    DrainDimension, SpinupDimension,
+    DimensionTornDown, DrainDimension, SpinupDimension,
 };
 use xindeler_oracle_host::{
     ChroniclePlugin, DimensionAtmospheres, DmEvent, DmEventPlugin, EntityTemplate,
@@ -94,14 +94,17 @@ const EVENT_BASE_SEED: u32 = 0;
 
 /// The world-gen SHAPE a `DmEvent`-triggered dimension spins up with —
 /// `DmEvent` itself doesn't carry a `GenOpts` (spec: EM-4.9 must decide how
-/// one picks one). `x_lg`/`y_lg` = 5 (32 chunks/axis, matching
-/// `DimensionSpinupConfig::default()`'s own dev/test-fast choice) comfortably
-/// holds even the DmEvent schema's own `spawn_radius` clamp ceiling (200 m,
-/// `xindeler_oracle_host::dm_event::bounds::SPAWN_RADIUS`) with room to
-/// spare, while staying fast enough to spin up within the drill's own
-/// polling deadlines. Named explicitly here (not silently inherited from the
-/// default) so retuning it for a real production event doesn't also affect
-/// the unrelated debug-command spinup path.
+/// one picks one). `x_lg`/`y_lg` = 5 (32 chunks/axis × 32 blocks/chunk = 1024
+/// blocks/axis, i.e. a ±512-block half-extent from the dimension's centre —
+/// matching `DimensionSpinupConfig::default()`'s own dev/test-fast choice)
+/// comfortably holds the DmEvent schema's own `spawn_radius` clamp ceiling
+/// (`xindeler_oracle_host::dm_event::bounds::SPAWN_RADIUS`, tightened to
+/// 400.0 specifically so it stays inside this world size — see that
+/// constant's own doc comment for the coupling this creates: the two must be
+/// revisited together), while staying fast enough to spin up within the
+/// drill's own polling deadlines. Named explicitly here (not silently
+/// inherited from the default) so retuning it for a real production event
+/// doesn't also affect the unrelated debug-command spinup path.
 fn event_gen_opts() -> server::GenOpts {
     server::GenOpts {
         x_lg: 5,
@@ -121,6 +124,22 @@ fn entity_template_asset_path(id: &str) -> String {
 
 /// Monotone allocator for fresh event-dimension ids. Starts at 1 —
 /// `DimensionId::DEFAULT` (`0`) is never allocated by this producer.
+///
+/// ## Operational footgun (bevy-migration-reviewer MINOR finding, not fixed
+/// here — a doc note only)
+/// This allocator and `xindeler-server-app::dimensions`'s
+/// `XINDELER_DEBUG_SPINUP_DIMENSION` debug/admin trigger (an operator-
+/// supplied, arbitrary `u64`) both write into the SAME `DimensionRegistry`
+/// namespace with no reserved-range separation. Running the debug command
+/// with an id THIS allocator also happens to pick (e.g.
+/// `XINDELER_DEBUG_SPINUP_DIMENSION=1` on a server that has also ingested
+/// its first `DmEvent`) collides — handled gracefully today
+/// (`DimensionRegistry::insert_spinning_up` rejects an already-registered id
+/// rather than corrupting state, so this is not a safety issue), just a
+/// confusing "why did my debug spinup silently fail" operational trap. Not
+/// worth a real reservation scheme for the ONE-canonical-event v1 scope this
+/// task covers; revisit if/when a second real ORACLE event or a wider debug-
+/// tooling surface makes the collision likely rather than theoretical.
 #[derive(Resource, Debug, Clone, Copy)]
 struct NextDimensionId(u64);
 
@@ -358,30 +377,90 @@ fn spawn_event_minions(
     }
 }
 
-/// `AssetEvent::Removed` → mark the event retired and drain its dimension
-/// (BL-82 EM-4.9, T51.2's "on Removed" step).
+/// Polls whether each tracked, not-yet-retired event's underlying FILE still
+/// exists on disk, and drains its dimension the moment it doesn't (BL-82
+/// EM-4.9, T51.2's "on Removed" step).
+///
+/// ## Why this polls the filesystem, NOT `AssetEvent::Removed`
+/// An earlier version of this system read `AssetEvent::Removed` — the
+/// natural-looking signal, and what the task's own design doc describes. It
+/// does not work: verified empirically (the E2E drill's first run) against
+/// `bevy_asset` 0.19's own `AssetServer::handle_internal_asset_events`
+/// (`bevy_asset::server`) that a filesystem `AssetSourceEvent::RemovedAsset`
+/// ONLY calls `reload_parent_folders` — it never reloads (or unloads) the
+/// removed path's own asset. `AssetEvent::Removed` is fired ONLY when an
+/// asset's last strong `Handle` is dropped (ref-count reaches zero), which
+/// never happens here: [`WellKnownEventHandles`] deliberately holds a
+/// permanent handle (see its own doc comment for why) specifically so the
+/// watcher can observe a LATER re-write of the same well-known path — so the
+/// asset itself is NEVER unloaded by deleting the file underneath it; it just
+/// silently keeps its last-successfully-loaded content, with the reload
+/// attempt failing (a logged `bevy_asset::server` "Path not found" error,
+/// harmless noise, not a panic). So retirement can only be observed the same
+/// way a human dropping the file DID it: by checking whether the file is
+/// still there.
 fn retire_dm_events(
-    mut events: MessageReader<AssetEvent<DmEvent>>,
+    events_dir: Res<OracleEventsDir>,
+    well_known_paths: Res<WellKnownEventFilenames>,
     mut registry_state: ResMut<OracleEventRegistry>,
     mut drain_writer: MessageWriter<DrainDimension>,
 ) {
-    for event in events.read() {
-        let AssetEvent::Removed { id } = event else {
+    // Collect the ids to retire first (rather than mutating while iterating
+    // `registry_state.0` — we need `&mut registry_state` below to REMOVE the
+    // entry, which a live `.iter_mut()` borrow would conflict with).
+    let to_retire: Vec<AssetId<DmEvent>> = registry_state
+        .0
+        .iter()
+        .filter(|(asset_id, active_event)| {
+            !active_event.retired
+                && well_known_paths
+                    .0
+                    .get(*asset_id)
+                    .is_some_and(|filename| !events_dir.0.join(filename).exists())
+        })
+        .map(|(asset_id, _)| *asset_id)
+        .collect();
+
+    for asset_id in to_retire {
+        // BL-82 EM-4.9 follow-up (bevy-migration-reviewer MAJOR finding):
+        // REMOVE the entry entirely, not just flag it `retired`.
+        // `WellKnownEventHandles` holds the SAME asset id's `Handle` for the
+        // App's whole lifetime (see its own doc comment for why), so a
+        // later re-write of this well-known path reloads into the SAME
+        // `AssetId` — `ingest_dm_events`'s own dedup check
+        // (`registry_state.0.contains_key(id)`) would otherwise silently
+        // refuse to re-ingest it FOREVER after the first retire, with no
+        // warning anywhere. Removing here is what lets a human (or a test)
+        // drop the SAME canonical event file again after retiring it once.
+        let Some(active_event) = registry_state.0.remove(&asset_id) else {
             continue;
         };
-        let Some(active_event) = registry_state.0.get_mut(id) else {
-            continue;
-        };
-        if active_event.retired {
-            continue;
-        }
-        active_event.retired = true;
-        let dimension = active_event.dimension;
-        drain_writer.write(DrainDimension(dimension));
+        drain_writer.write(DrainDimension(active_event.dimension));
         info!(
-            dimension = dimension.0,
-            "mist-bound: retiring dimension {}", dimension.0
+            dimension = active_event.dimension.0,
+            "mist-bound: retiring dimension {}", active_event.dimension.0
         );
+    }
+}
+
+/// Drops a torn-down dimension's entries from [`DimensionAtmospheres`] and
+/// [`NarrativeHooks`] (BL-82 EM-4.9 follow-up, bevy-migration-reviewer MINOR
+/// finding #4): without this, both tables would grow by one stale entry per
+/// retired event for the life of the server process — [`retire_dm_events`]
+/// removing its OWN [`OracleEventRegistry`] entry bounds THAT table, but
+/// these two side tables are populated independently (by [`ingest_dm_events`])
+/// and need their own cleanup on the same `DimensionTornDown` edge every
+/// other per-dimension observer in this codebase already reacts to (see
+/// `xindeler-server-app::dimensions::DimensionMetrics`'s own
+/// `teardowns_total` counter for the same message).
+fn cleanup_dimension_side_tables_on_teardown(
+    mut torn_down: MessageReader<DimensionTornDown>,
+    mut atmospheres: ResMut<DimensionAtmospheres>,
+    mut hooks: ResMut<NarrativeHooks>,
+) {
+    for event in torn_down.read() {
+        atmospheres.remove(event.id);
+        hooks.unregister(event.id);
     }
 }
 
@@ -390,8 +469,24 @@ fn retire_dm_events(
 /// "scan the whole oracle:// directory for any file" watcher is a nicer v2
 /// (out of this task's scope, which is specifically the ONE Mist-Bound
 /// example) — see [`request_well_known_events`]'s doc comment for why even
-/// this single well-known path needs an explicit pre-request.
-const WELL_KNOWN_EVENT_PATHS: &[&str] = &["oracle://mist_bound.dmevent.ron"];
+/// this single well-known path needs an explicit pre-request. Bare filenames
+/// (not `oracle://`-prefixed) — [`request_well_known_events`] builds the
+/// asset-server load path, [`retire_dm_events`] builds the on-disk path;
+/// both derive from this ONE list so they can never drift apart.
+const WELL_KNOWN_EVENT_FILENAMES: &[&str] = &["mist_bound.dmevent.ron"];
+
+/// The directory `oracle://` is rooted at (BL-82 EM-4.9) — resolved
+/// independently here via the SAME `xindeler_oracle_host::default_events_dir`
+/// call `xindeler-server-app::main` already used for
+/// `register_oracle_source` (both read the identical
+/// `XINDELER_ORACLE_EVENTS_DIR` env var, so the two calls always agree; a
+/// constructor field would need threading this plugin's insertion point
+/// through `main.rs`, for no benefit over the already-pure, already-public
+/// helper function). [`retire_dm_events`] uses this to check a well-known
+/// event's file existence directly — see that function's own doc comment for
+/// why polling the filesystem, not an `AssetEvent`, is required.
+#[derive(Resource, Debug, Clone)]
+struct OracleEventsDir(std::path::PathBuf);
 
 /// Holds the [`Handle`]s [`request_well_known_events`] requests, alive for
 /// the App's whole lifetime — without a surviving strong handle,
@@ -401,8 +496,15 @@ const WELL_KNOWN_EVENT_PATHS: &[&str] = &["oracle://mist_bound.dmevent.ron"];
 #[derive(Resource, Default)]
 struct WellKnownEventHandles(Vec<Handle<DmEvent>>);
 
-/// Requests every [`WELL_KNOWN_EVENT_PATHS`] entry at `Startup`, whether or
-/// not the file exists yet.
+/// `AssetId<DmEvent> -> filename` for every handle
+/// [`request_well_known_events`] requested — lets [`retire_dm_events`] map a
+/// registered `DmEvent` asset back to the on-disk filename it must poll for
+/// existence.
+#[derive(Resource, Default)]
+struct WellKnownEventFilenames(HashMap<AssetId<DmEvent>, &'static str>);
+
+/// Requests every [`WELL_KNOWN_EVENT_FILENAMES`] entry at `Startup`, whether
+/// or not the file exists yet.
 ///
 /// ## Why this is required, not just a nicety
 /// `bevy_asset`'s file watcher ONLY reloads paths that already have an
@@ -422,9 +524,12 @@ struct WellKnownEventHandles(Vec<Handle<DmEvent>>);
 fn request_well_known_events(
     asset_server: Res<AssetServer>,
     mut handles: ResMut<WellKnownEventHandles>,
+    mut filenames: ResMut<WellKnownEventFilenames>,
 ) {
-    for path in WELL_KNOWN_EVENT_PATHS {
-        handles.0.push(asset_server.load(*path));
+    for filename in WELL_KNOWN_EVENT_FILENAMES {
+        let handle: Handle<DmEvent> = asset_server.load(format!("oracle://{filename}"));
+        filenames.0.insert(handle.id(), filename);
+        handles.0.push(handle);
     }
 }
 
@@ -432,11 +537,29 @@ fn request_well_known_events(
 /// EM-4.9, T51.1). Add AFTER `AssetPlugin` (this plugin's
 /// `DmEventPlugin`/`EntityTemplatePlugin` need `AssetServer` to already
 /// exist) and after `xindeler_oracle_host::register_oracle_source` has been
-/// called (BEFORE `AssetPlugin` — see that function's own two-phase ordering
-/// doc comment; `xindeler-server-app::main` owns that call). Never added to
-/// `xindeler-client` — only a server-side host is meant to ever register
-/// [`DmEventPlugin`].
-pub struct ServerOraclePlugin;
+/// called with the SAME `events_dir` (BEFORE `AssetPlugin` — see that
+/// function's own two-phase ordering doc comment; `xindeler-server-app::main`
+/// owns that call and threads its one resolved `events_dir` value through to
+/// both). Never added to `xindeler-client` — only a server-side host is meant
+/// to ever register [`DmEventPlugin`].
+pub struct ServerOraclePlugin {
+    /// The `oracle://` watch directory — MUST be the exact same path handed
+    /// to `xindeler_oracle_host::register_oracle_source`, or
+    /// [`retire_dm_events`]'s filesystem poll will check the wrong
+    /// directory. Defaults to `xindeler_oracle_host::default_events_dir()`
+    /// (which itself honors `XINDELER_ORACLE_EVENTS_DIR`) for any caller that
+    /// doesn't need to override it (e.g. an in-process test that also calls
+    /// `register_oracle_source` with the default).
+    pub events_dir: std::path::PathBuf,
+}
+
+impl Default for ServerOraclePlugin {
+    fn default() -> Self {
+        Self {
+            events_dir: xindeler_oracle_host::default_events_dir(),
+        }
+    }
+}
 
 impl Plugin for ServerOraclePlugin {
     fn build(&self, app: &mut App) {
@@ -445,6 +568,8 @@ impl Plugin for ServerOraclePlugin {
         app.init_resource::<OracleEventRegistry>();
         app.init_resource::<EntityTemplateHandles>();
         app.init_resource::<WellKnownEventHandles>();
+        app.init_resource::<WellKnownEventFilenames>();
+        app.insert_resource(OracleEventsDir(self.events_dir.clone()));
         app.add_systems(bevy::app::Startup, request_well_known_events);
 
         app.add_systems(
@@ -460,6 +585,11 @@ impl Plugin for ServerOraclePlugin {
             spawn_event_minions
                 .after(xindeler_dimensions::spinup::poll_spinup_tasks)
                 .before(crate::apply_pending_entity_template_spawns),
+        );
+        app.add_systems(
+            FixedUpdate,
+            cleanup_dimension_side_tables_on_teardown
+                .after(xindeler_dimensions::teardown::teardown_completed_dimensions),
         );
     }
 }
@@ -532,7 +662,14 @@ mod tests {
         app.add_plugins(DimensionsPlugin);
         app.add_plugins(xindeler_protocol::HudToastPlugin);
         app.add_plugins(xindeler_oracle_host::ServerAtmosphereSyncPlugin);
-        app.add_plugins(ServerOraclePlugin);
+        // `events_dir` MUST match the `oracle_root` `register_oracle_source`
+        // above was given, or `retire_dm_events`'s filesystem poll checks the
+        // wrong directory (see `ServerOraclePlugin::events_dir`'s own doc
+        // comment) — not exercised by THIS test (it never retires), but
+        // wrong-by-default would be a silent trap for a future test that does.
+        app.add_plugins(ServerOraclePlugin {
+            events_dir: oracle_root.clone(),
+        });
         app.finish();
         app.update();
 
