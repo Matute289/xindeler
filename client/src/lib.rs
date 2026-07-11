@@ -204,6 +204,14 @@ impl WorldData {
                 + self.min_chunk_alt(),
         )
     }
+
+    /// The coarse LOD surface colour at chunk `cpos` (packed RGBA in
+    /// `lod_base`; alpha currently unused). Mirrors `alt_at`'s pure-decode
+    /// role.
+    pub fn col_at(&self, cpos: Vec2<i32>) -> Option<Rgb<u8>> {
+        let [r, g, b, _a] = self.lod_base.get(cpos)?.to_le_bytes();
+        Some(Rgb::new(r, g, b))
+    }
 }
 
 pub struct SiteMarker {

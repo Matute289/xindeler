@@ -34,7 +34,10 @@ use common::{
 // vek only for the terrain grid keys/coords; `Vec3` here is Bevy's (prelude).
 use vek::{Vec2 as VVec2, Vec3 as VVec3};
 use xindeler_protocol::{CompressedChunk, RemoveChunk, TerrainAnchor};
-use xindeler_render_voxel::pipeline::{ChunkKey, ChunkMeshQueue, ChunkVolume, ChunkVolumeProvider};
+use xindeler_render_voxel::pipeline::{
+    ChunkKey, ChunkMeshIndex, ChunkMeshPipelineSet, ChunkMeshQueue, ChunkVolume,
+    ChunkVolumeProvider,
+};
 
 use crate::camera::FlyCam;
 
@@ -157,7 +160,23 @@ impl Plugin for TerrainStreamPlugin {
                 Update,
                 (
                     receive_anchor,
-                    receive_chunks,
+                    // BL-82 EM-4.11 Phase D (ecs-design-reviewer follow-up):
+                    // `receive_chunks` reads `Res<ChunkMeshIndex>` (see its
+                    // doc comment / `dirty_keys_for_arrival`) to decide which
+                    // neighbours are already meshed, and `ChunkMeshIndex` is
+                    // written by the pipeline's `spawn_chunk_mesh_tasks`/
+                    // `apply_chunk_meshes` (both `.in_set(ChunkMeshPipelineSet)`,
+                    // `pipeline.rs`) — a cross-plugin conflicting-resource-access
+                    // pair with no prior explicit edge. Making it structural
+                    // (rather than relying on Bevy's implicit ambiguity
+                    // tie-break) also fixes the latency in the right direction:
+                    // running BEFORE the pipeline set means a brand-new
+                    // arrival's OWN key gets queued in time to be picked up by
+                    // `spawn_chunk_mesh_tasks` the SAME frame, while neighbour
+                    // decisions read `ChunkMeshIndex` as of the end of the
+                    // PREVIOUS frame — safe per the "one-frame-bounded
+                    // staleness, not lost-forever" trace in this PR's review.
+                    receive_chunks.before(ChunkMeshPipelineSet),
                     receive_removes,
                     place_camera_on_anchor,
                 ),
@@ -187,12 +206,15 @@ fn install_provider(mut commands: Commands, shared: Res<SharedTerrain>) {
     }));
 }
 
-/// Decodes incoming chunks into the store and marks them (and their meshed
-/// neighbours) dirty so the pipeline (re)meshes with correct borders.
+/// Decodes incoming chunks into the store and marks them (and any GENUINELY
+/// affected already-meshed neighbours) dirty so the pipeline (re)meshes with
+/// correct borders. See [`dirty_keys_for_arrival`]'s docs (BL-82 EM-4.11
+/// Phase D) for why only already-meshed neighbours are re-marked.
 fn receive_chunks(
     mut chunks: MessageReader<CompressedChunk>,
     shared: Res<SharedTerrain>,
     mut queue: ResMut<ChunkMeshQueue>,
+    mesh_index: Res<ChunkMeshIndex>,
     mut first: ResMut<FirstChunkReceived>,
     mut tree_anchor: Option<ResMut<SmokeTreeAnchor>>,
     camera_anchor: Option<Res<TerrainCameraAnchor>>,
@@ -228,12 +250,16 @@ fn receive_chunks(
         info!(keys = ?touched, "first terrain chunk(s) received over the network");
     }
     for key in &touched {
-        // A new/changed chunk affects its neighbours' shared-border meshing
-        // too, so mark the whole 3×3 neighbourhood dirty (`ChunkMeshQueue`
-        // dedupes an already-queued key, so re-marking `key` itself here is
-        // harmless — see [`neighbourhood_3x3`]'s docs for why this exact
-        // footprint matters for BL-82 EM-3.11n's diagonal-streaming finding).
-        for nk in neighbourhood_3x3(*key) {
+        // BL-82 EM-4.11 Phase D: only mark a neighbour dirty if it is
+        // ALREADY meshed (its border may have just changed) — see
+        // [`dirty_keys_for_arrival`]'s docs for the full reasoning and
+        // [`neighbourhood_3x3`]'s docs for why the footprint mattered for
+        // EM-3.11n's diagonal-streaming finding in the first place.
+        // `ChunkMeshQueue` also dedupes an already-queued key, so re-marking
+        // `key` itself here is harmless.
+        for nk in dirty_keys_for_arrival(*key, |nk| {
+            mesh_index.get(VVec2::new(nk[0], nk[1])).is_some()
+        }) {
             queue.mark_dirty(VVec2::new(nk[0], nk[1]));
         }
     }
@@ -337,10 +363,12 @@ fn receive_removes(
 }
 
 /// The 3×3 neighbourhood of `key` — itself plus its 8 neighbours — as a fixed
-/// 9-element array. Shared by [`receive_chunks`] (marks the WHOLE 3×3 dirty:
-/// a new/changed chunk affects its neighbours' shared-border meshing too) and
-/// [`receive_removes`] (marks just the 8 neighbours, skipping the removed
-/// key itself).
+/// 9-element array. Used by [`receive_removes`] (marks just the 8
+/// neighbours, skipping the removed key itself — a chunk unloading always
+/// genuinely opens up its surviving neighbours' shared border, so that path
+/// is unconditional) and by [`dirty_keys_for_arrival`] (the arrival path,
+/// which — since BL-82 EM-4.11 Phase D — filters this footprint down to only
+/// the genuinely-affected neighbours; see its docs).
 ///
 /// ## BL-82 EM-3.11n: why this exact footprint matters for the
 /// ## diagonal-movement "choppier" report
@@ -355,15 +383,18 @@ fn receive_removes(
 /// chunks (i.e. the same real distance travelled, since the server streams
 /// one new chunk per grid-line crossing regardless of direction), a diagonal
 /// streaming frontier churns through ~1.6× as many distinct chunks as a
-/// straight one (see the `diagonal_streaming_touches_more_distinct_chunks_*`
-/// test below for the exact numbers). More distinct chunks marked dirty means
-/// more async re-mesh tasks competing for the same fixed-size
-/// `ChunkUploadBudget` (`pipeline.rs`) and `AsyncComputeTaskPool` capacity —
-/// this doesn't by itself prove a frame-time regression (meshing is off the
-/// main thread and uploads are budget-capped regardless of backlog size), but
-/// it is a real, structural, direction-dependent difference in streaming load
-/// worth ruling in/out empirically alongside the `--smoke-perf-run` live A/B
-/// harness (`crate::smoke`).
+/// straight one, IF every arrival unconditionally marks its whole 3×3 (see
+/// the `diagonal_streaming_touches_more_distinct_chunks_*` test below for the
+/// exact counts of that OLD, now-superseded behaviour). More distinct chunks
+/// marked dirty means more async re-mesh tasks competing for the same
+/// fixed-size `ChunkUploadBudget` (`pipeline.rs`) and `AsyncComputeTaskPool`
+/// capacity — this doesn't by itself prove a frame-time regression (meshing
+/// is off the main thread and uploads are budget-capped regardless of
+/// backlog size), but it was a real, structural, direction-dependent
+/// difference in streaming load, addressed by
+/// [`dirty_keys_for_arrival`] (BL-82 EM-4.11 Phase D) and verified
+/// empirically alongside the `--smoke-perf-run` live A/B harness
+/// (`crate::smoke`).
 fn neighbourhood_3x3(key: [i32; 2]) -> [[i32; 2]; 9] {
     let mut out = [[0; 2]; 9];
     let mut i = 0;
@@ -371,6 +402,48 @@ fn neighbourhood_3x3(key: [i32; 2]) -> [[i32; 2]; 9] {
         for dx in -1..=1 {
             out[i] = [key[0] + dx, key[1] + dy];
             i += 1;
+        }
+    }
+    out
+}
+
+/// BL-82 EM-4.11 Phase D — the keys to mark dirty for ONE newly-arrived
+/// chunk at `key`: the chunk itself, always (it needs its own first/updated
+/// mesh), plus each of its 8 neighbours ONLY IF `is_meshed` reports that
+/// neighbour already has geometry (a real mesh OR the EM-3.11h synchronous
+/// placeholder — either way it has an entry in `ChunkMeshIndex`, so its
+/// current border may be stale/wrong now that `key`'s real data exists).
+///
+/// ## Why skipping a not-yet-meshed neighbour is safe
+/// `receive_chunks` used to unconditionally mark the WHOLE 3×3 neighbourhood
+/// dirty on every arrival (see [`neighbourhood_3x3`]'s docs — this is
+/// EM-3.11n's root cause for the diagonal-vs-straight asymmetry: a diagonal
+/// frontier's 3×3 windows overlap less, so more NEW, not-yet-existing
+/// neighbour keys got redundantly marked per arrival). A neighbour that has
+/// never streamed in at all yet gets NO benefit from being marked here: the
+/// `ChunkVolumeProvider::fetch` this queue entry eventually drives reads the
+/// CURRENT store contents (`TerrainStore::volume_for`), so once that
+/// neighbour genuinely arrives and meshes for the first time, it picks up
+/// `key`'s real data automatically — there is no stale state to correct,
+/// because there was never a mesh to begin with. Marking it here is pure
+/// churn: an extra `ChunkMeshQueue` entry (deduped, so cheap, but still an
+/// extra queue slot / potential extra `AsyncComputeTaskPool` fetch if it
+/// happens to get popped before its own real arrival lands).
+///
+/// A neighbour that IS already meshed, by contrast, has real geometry whose
+/// border facing `key` was generated against whatever was there before
+/// (often the grid's void default) — `key`'s arrival can genuinely change
+/// that border, so it must be re-marked. This function is deliberately a
+/// pure, `Res`-free helper (takes `is_meshed` as a closure) so it can be
+/// exercised directly by a unit test without spinning up an ECS `App`.
+fn dirty_keys_for_arrival(
+    key: [i32; 2],
+    mut is_meshed: impl FnMut([i32; 2]) -> bool,
+) -> Vec<[i32; 2]> {
+    let mut out = vec![key];
+    for nk in neighbourhood_3x3(key) {
+        if nk != key && is_meshed(nk) {
+            out.push(nk);
         }
     }
     out
@@ -587,6 +660,91 @@ mod tests {
         );
     }
 
+    /// BL-82 EM-4.11 Phase D — real-schedule (not just pure-function) proof
+    /// that the selective-marking fix's TWO cases both hold true end-to-end,
+    /// across REAL frames (not one batch): an ALREADY-meshed neighbour of a
+    /// later arrival gets genuinely re-meshed (a fresh entity, via the
+    /// existing atomic despawn-old+spawn-new swap), while a neighbour that
+    /// has never streamed in stays un-indexed (never spawned at all) rather
+    /// than being redundantly queued.
+    #[test]
+    fn later_arrival_remeshes_an_already_meshed_neighbour_but_skips_an_unstreamed_one() {
+        let mut app = test_app();
+
+        // Frame batch 1: mesh a full 3×3 around the origin (as in
+        // `streamed_chunk_meshes_then_removes`) and let it fully settle.
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let key = [dx, dy];
+                app.world_mut()
+                    .write_message(CompressedChunk::encode(key, &solid_chunk(4)));
+            }
+        }
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            (-1..=1).all(|dx| {
+                (-1..=1).all(|dy| idx.get(VVec2::new(dx, dy)).is_some()) && stats.in_flight == 0
+            })
+        });
+
+        // [1, 0] and [1, 1] are ALREADY-meshed neighbours the next arrival
+        // will touch; record their current entity so a later re-mesh (a
+        // fresh entity, per the atomic swap) is observable. [2, -1] is a
+        // neighbour of the next arrival too, but has NEVER streamed in — it
+        // must stay un-indexed both before and after.
+        let entity_before_1_0 = app
+            .world()
+            .resource::<ChunkMeshIndex>()
+            .get(VVec2::new(1, 0))
+            .and_then(|e| e.terrain)
+            .expect("[1,0] meshed in batch 1");
+        let entity_before_1_1 = app
+            .world()
+            .resource::<ChunkMeshIndex>()
+            .get(VVec2::new(1, 1))
+            .and_then(|e| e.terrain)
+            .expect("[1,1] meshed in batch 1");
+        assert!(
+            app.world()
+                .resource::<ChunkMeshIndex>()
+                .get(VVec2::new(2, -1))
+                .is_none(),
+            "[2,-1] must not be indexed before it has ever streamed in"
+        );
+
+        // Frame batch 2 (later frames, not the same batch): a genuinely NEW
+        // arrival at [2, 0], neighbouring [1,-1]/[1,0]/[1,1] (already meshed)
+        // and [2,-1]/[2,1]/[3,-1]/[3,0]/[3,1] (never streamed).
+        app.world_mut()
+            .write_message(CompressedChunk::encode([2, 0], &solid_chunk(4)));
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            idx.get(VVec2::new(2, 0)).is_some() && stats.in_flight == 0
+        });
+        // The already-meshed neighbours must have been re-marked dirty and
+        // genuinely re-meshed by the new arrival — settle a few more frames
+        // so their re-mesh (queued alongside [2,0]'s own first mesh) has
+        // time to complete too.
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            stats.in_flight == 0
+                && idx.get(VVec2::new(1, 0)).and_then(|e| e.terrain) != Some(entity_before_1_0)
+                && idx.get(VVec2::new(1, 1)).and_then(|e| e.terrain) != Some(entity_before_1_1)
+        });
+
+        assert!(
+            app.world()
+                .resource::<ChunkMeshIndex>()
+                .get(VVec2::new(2, -1))
+                .is_none(),
+            "[2,-1] must STILL be un-indexed: it never streamed in, so the selective rule must \
+             never have queued it just because it's a neighbour of [2,0]"
+        );
+    }
+
     /// A `TerrainAnchor` becomes a `TerrainCameraAnchor` resource (Veloren
     /// z-up → Bevy y-up mapping).
     #[test]
@@ -605,21 +763,28 @@ mod tests {
         assert_eq!(anchor.bevy_pos, Vec3::new(100.0, 50.0, -200.0));
     }
 
-    /// BL-82 EM-3.11n regression test — see [`neighbourhood_3x3`]'s doc
-    /// comment for the full reasoning. Deterministic, no GPU/timing involved:
-    /// for the SAME number `N` of newly-streamed chunk keys (i.e. the same
-    /// real distance travelled, since the server streams one new chunk per
-    /// grid-line crossing regardless of direction), a diagonal streaming
-    /// frontier (`(0,0),(1,1),(2,2),…`) touches (dirty-marks) strictly MORE
-    /// distinct chunk keys than a straight one (`(0,0),(1,0),(2,0),…`)
-    /// because consecutive diagonal arrivals' 3×3 neighbourhoods overlap by
-    /// only 2×2=4 cells vs. the straight case's 2×3=6 cells.
+    /// BL-82 EM-3.11n regression test, kept as the HISTORICAL baseline — see
+    /// [`neighbourhood_3x3`]'s doc comment for the full reasoning. This
+    /// documents the OLD, now-superseded behaviour (`receive_chunks`
+    /// unconditionally marking every arrival's whole 3×3 neighbourhood,
+    /// regardless of whether a neighbour was ever meshed): deterministic, no
+    /// GPU/timing involved, for the SAME number `N` of newly-streamed chunk
+    /// keys a diagonal streaming frontier (`(0,0),(1,1),(2,2),…`) touches
+    /// strictly MORE distinct chunk keys than a straight one
+    /// (`(0,0),(1,0),(2,0),…`) because consecutive diagonal arrivals' 3×3
+    /// neighbourhoods overlap by only 2×2=4 cells vs. the straight case's
+    /// 2×3=6 cells. `neighbourhood_3x3` itself is unchanged (still used
+    /// as-is by `receive_removes` and internally by
+    /// [`dirty_keys_for_arrival`]), so this property still holds for the raw
+    /// footprint — the fix below is about which of these cells actually get
+    /// marked on the ARRIVAL path.
     #[test]
-    fn diagonal_streaming_touches_more_distinct_chunks_than_straight() {
+    fn old_unconditional_marking_touches_more_distinct_chunks_diagonally() {
         use std::collections::HashSet;
 
         /// Total distinct chunk keys touched (dirty-marked) across an entire
-        /// streaming run — the union of every arrival's 3×3 neighbourhood.
+        /// streaming run under the OLD rule — the union of every arrival's
+        /// whole 3×3 neighbourhood, unconditionally.
         fn total_distinct_touches(keys: &[[i32; 2]]) -> usize {
             let mut all: HashSet<[i32; 2]> = HashSet::new();
             for key in keys {
@@ -641,11 +806,11 @@ mod tests {
         // just "still greater than".
         assert_eq!(
             straight_touches, 96,
-            "straight frontier distinct-touch count"
+            "straight frontier distinct-touch count (old, unconditional rule)"
         );
         assert_eq!(
             diagonal_touches, 154,
-            "diagonal frontier distinct-touch count"
+            "diagonal frontier distinct-touch count (old, unconditional rule)"
         );
         assert!(
             diagonal_touches > straight_touches,
@@ -654,12 +819,101 @@ mod tests {
         );
         // The ratio approaches 5/3 ≈ 1.667 as N grows; at N=30 it's already
         // past 1.5 — a real, structural ~60% more remesh churn for the same
-        // streamed distance.
+        // streamed distance under the OLD rule.
         let ratio = f64::from(diagonal_touches as u32) / f64::from(straight_touches as u32);
         assert!(
             ratio > 1.5,
             "expected the diagonal/straight distinct-touch ratio to approach ~1.667 (5/3 marginal \
              cells per arrival), got {ratio:.3}"
+        );
+    }
+
+    /// [`dirty_keys_for_arrival`] in isolation, no streaming run: an arriving
+    /// chunk always marks itself; an ALREADY-meshed neighbour is marked too;
+    /// a not-yet-meshed neighbour is skipped.
+    #[test]
+    fn dirty_keys_for_arrival_only_marks_already_meshed_neighbours() {
+        use std::collections::HashSet;
+
+        let meshed: HashSet<[i32; 2]> = [[1, 0], [0, 1]].into_iter().collect();
+        let mut out = dirty_keys_for_arrival([0, 0], |k| meshed.contains(&k));
+        out.sort_unstable();
+        // Self, plus only the two neighbours that are already meshed — the
+        // other 6 candidates in the 3×3 (including [1,1], [-1,-1], etc.) are
+        // skipped because they have no `ChunkMeshIndex` entry yet.
+        assert_eq!(out, vec![[0, 0], [0, 1], [1, 0]]);
+    }
+
+    /// BL-82 EM-4.11 Phase D regression test — the selective-marking fix.
+    /// Reuses EM-3.11n's exact synthetic model (a single new chunk streams
+    /// per grid-line crossing, matching the "server streams one new chunk
+    /// per crossing regardless of direction" framing above): under that
+    /// model's OWN information, a neighbour off the direct line of travel
+    /// (e.g. `(i,-1)` for the straight path, or `(i,i-1)` for the diagonal
+    /// path) never independently streams in, so it can NEVER be
+    /// already-meshed — [`dirty_keys_for_arrival`] can therefore never find
+    /// it eligible for a re-mark. That collapses BOTH directions to the
+    /// theoretical minimum (`N`, exactly one touch per arrival, zero
+    /// redundant neighbour dirtying), closing the EXACT asymmetry the
+    /// previous test measures (154 vs 96, ratio ~1.667) down to a dead heat
+    /// (`N` vs `N`, ratio 1.0) for this synthetic corridor.
+    ///
+    /// A single-cell-wide corridor is an idealization of a real player's
+    /// disc-shaped streaming radius (`chunk_render_distance`, default 7
+    /// chunks — `far_terrain.rs`/`lod.rs`): a real newly-arriving edge chunk
+    /// usually DOES have several already-meshed neighbours (the rest of the
+    /// already-streamed disc), and those remain genuinely, correctly
+    /// re-marked by the fix — that is not a regression, it is the fix
+    /// working as intended (a real border changed). So this unit test proves
+    /// the new rule is CORRECT and eliminates 100% of this specific
+    /// synthetic asymmetry, but the realistic, non-idealized magnitude of
+    /// the improvement is what `--smoke-perf-run`'s live straight-vs-diagonal
+    /// A/B (Phase D's actual acceptance instrument) measures.
+    #[test]
+    fn selective_marking_eliminates_the_synthetic_diagonal_asymmetry() {
+        use std::collections::HashSet;
+
+        /// Simulates an entire streaming run under the NEW selective rule:
+        /// at each arrival, `is_meshed` reflects every key touched by a
+        /// PRIOR arrival's `dirty_keys_for_arrival` call (self or a
+        /// genuinely-affected neighbour) — modelling that, given normal
+        /// movement speed, a chunk marked dirty on an earlier grid-line
+        /// crossing has long since been meshed (or at least placeholder-
+        /// indexed, `pipeline.rs`'s EM-3.11h note) by the time the NEXT
+        /// crossing happens.
+        fn total_distinct_touches_selective(keys: &[[i32; 2]]) -> usize {
+            let mut already_meshed: HashSet<[i32; 2]> = HashSet::new();
+            let mut touched: HashSet<[i32; 2]> = HashSet::new();
+            for key in keys {
+                let step = dirty_keys_for_arrival(*key, |k| already_meshed.contains(&k));
+                touched.extend(step.iter().copied());
+                already_meshed.extend(step);
+            }
+            touched.len()
+        }
+
+        const N: i32 = 30;
+        let straight: Vec<[i32; 2]> = (0..N).map(|i| [i, 0]).collect();
+        let diagonal: Vec<[i32; 2]> = (0..N).map(|i| [i, i]).collect();
+
+        let straight_touches = total_distinct_touches_selective(&straight);
+        let diagonal_touches = total_distinct_touches_selective(&diagonal);
+
+        assert_eq!(
+            straight_touches, N as usize,
+            "straight frontier distinct-touch count (new, selective rule): exactly one touch per \
+             arrival, no redundant neighbour dirtying"
+        );
+        assert_eq!(
+            diagonal_touches, N as usize,
+            "diagonal frontier distinct-touch count (new, selective rule): exactly one touch per \
+             arrival, no redundant neighbour dirtying"
+        );
+        assert_eq!(
+            straight_touches, diagonal_touches,
+            "the selective rule must eliminate this synthetic model's direction-dependent \
+             asymmetry entirely (both directions never re-mark a neighbour that hasn't \
+             independently streamed in)"
         );
     }
 }

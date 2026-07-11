@@ -47,16 +47,17 @@
 //!   (`XINDELER_OCCLUSION_CULLING=1` to try it): the sparse-occluder prediction
 //!   below held, so the HZB overhead isn't earning its keep on this scene yet.
 //! - **Far-mesh from the lod-alt heightmap**: landed in `xindeler-client::
-//!   far_terrain` (+ `xindeler-sim-bridge::send_lod_alt_once` /
-//!   `xindeler_protocol::NetLodAlt`) — a coarse, vertex-coloured mesh built
-//!   once from the server's downsampled `lod_alt` grid, filling the horizon
-//!   beyond [`CullingConfig::chunk_render_distance`] with a fixed cutout hole
-//!   around the boot anchor so it never overlaps the near terrain. A
-//!   camera-following (rather than anchor-fixed) hole is deferred to EM-3.10c,
-//!   once the player can roam far from the boot anchor (needs interest
-//!   management, EM-4.2d, first). Until then the previous sky + `DistanceFog`
-//!   fallback still covers the (today unreachable) case where no embedded
-//!   player exists to source the heightmap.
+//!   far_terrain` (+ `xindeler-sim-bridge::send_far_terrain_once` /
+//!   `xindeler_protocol::NetFarTerrain`) — a coarse, vertex-coloured mesh built
+//!   once from the server's downsampled `lod_alt` grid (real `lod_base` colour
+//!   as of BL-82 EM-3.11 Phase A), filling the horizon beyond
+//!   [`CullingConfig::chunk_render_distance`] with a fixed cutout hole around
+//!   the boot anchor so it never overlaps the near terrain. A camera-following
+//!   (rather than anchor-fixed) hole is deferred to EM-3.10c, once the player
+//!   can roam far from the boot anchor (needs interest management, EM-4.2d,
+//!   first). Until then the previous sky + `DistanceFog` fallback still covers
+//!   the (today unreachable) case where no embedded player exists to source the
+//!   heightmap.
 //!
 //! ## Purity
 //! 100% Bevy + the public `xindeler-render-voxel` chunk-mesh markers + this

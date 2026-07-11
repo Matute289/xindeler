@@ -516,6 +516,17 @@ mod tests {
                 ),
                 "stalk",
             ),
+            // BL-82 EM-4.9 (T51.4): the Mist-Bound drill's minion template —
+            // ships alongside the other three samples as further proof this
+            // schema needs zero Rust changes to author a new one.
+            (
+                "mist_bound_shade",
+                include_str!(
+                    "../../../assets/xindeler/entity_templates/mist_bound_shade.entity_template.\
+                     ron"
+                ),
+                "aggro",
+            ),
         ];
 
         for (id, text, expected_behavior) in fixtures {

@@ -93,6 +93,17 @@ pub struct SimServerConfig {
     /// overrides this from `XINDELER_DEBUG_SPINUP_DIMENSION`/
     /// `XINDELER_DEBUG_DRAIN_DIMENSION` when set.
     pub debug_dimension_commands: DebugDimensionCommands,
+    /// BL-82 EM-4.9: the `oracle://` watch directory — the SAME value
+    /// `main.rs` already resolved (via `xindeler_oracle_host::
+    /// default_events_dir`, honoring `XINDELER_ORACLE_EVENTS_DIR`) and
+    /// handed to `register_oracle_source` BEFORE `AssetPlugin`. Threaded
+    /// through here (rather than having `ServerOraclePlugin` re-resolve the
+    /// env var independently) so the two calls can never disagree — a
+    /// single source of truth `xindeler_sim_bridge::oracle::retire_dm_events`
+    /// polls directly for a well-known event's file-existence check (see
+    /// that function's own doc comment for why a filesystem poll, not an
+    /// `AssetEvent`, is required).
+    pub events_dir: PathBuf,
 }
 
 impl Default for SimServerConfig {
@@ -107,6 +118,7 @@ impl Default for SimServerConfig {
                 .parse()
                 .expect("DEFAULT_REPLICON_ADDR is a valid SocketAddr literal"),
             debug_dimension_commands: DebugDimensionCommands::default(),
+            events_dir: xindeler_oracle_host::default_events_dir(),
         }
     }
 }

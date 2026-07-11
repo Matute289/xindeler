@@ -152,12 +152,13 @@ impl EmbeddedPlayer {
     /// authoritative view for the render side is the replicated `NetPos`.
     pub fn position(&self) -> Option<vek::Vec3<f32>> { self.client.position() }
 
-    /// The world's coarse LOD data (`lod_alt`/`lod_horizon`/map images),
-    /// downloaded during the embedded `Client`'s initial handshake — populated
-    /// as soon as `Client::new` returns, i.e. available the moment an
-    /// [`EmbeddedPlayer`] exists (well before `is_in_game`). EM-3.10b: source
-    /// for the server → client far-terrain heightmap (`send_lod_alt_once` in
-    /// `lib.rs`, which broadcasts `xindeler_protocol::NetLodAlt`).
+    /// The world's coarse LOD data (`lod_base`/`lod_alt`/`lod_horizon`/map
+    /// images), downloaded during the embedded `Client`'s initial handshake —
+    /// populated as soon as `Client::new` returns, i.e. available the moment
+    /// an [`EmbeddedPlayer`] exists (well before `is_in_game`). EM-3.10b
+    /// (+ BL-82 EM-3.11 Phase A colour): source for the server → client
+    /// far-terrain grid (`send_far_terrain_once` in `lib.rs`, which
+    /// broadcasts `xindeler_protocol::NetFarTerrain`).
     pub fn world_data(&self) -> &WorldData { self.client.world_data() }
 
     fn character_jumping(&self) -> bool { self.jumping }

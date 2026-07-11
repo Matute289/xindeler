@@ -6,14 +6,19 @@
 //! makes zero real AI calls itself), [`dm_event`] (EM-4.3/4.4), and
 //! [`entity_template`] (EM-4.7, the generic entity factory schema —
 //! `xindeler-sim-bridge::entity_factory` holds the other half that
-//! actually spawns into the sim) are the first real systems. Remaining
-//! systems land per `docs/design/tasks/45-engine-migration-tasks.md` /
-//! `docs/design/tasks/47-bl82-phase4-remaining-tasks.md`. Isolation law:
-//! logic crates never depend on this crate or on Bevy. This crate stays
-//! render-free (headless-safe) — apply-to-render systems live in the client.
+//! actually spawns into the sim) are the first real systems.
+//! [`atmosphere_sync`] (EM-4.9, Phase D) is the newest: the per-dimension
+//! `SetClientAtmosphere` targeted message, the server→client half of the
+//! Mist-Bound drill's atmosphere-replication seam. Remaining systems land per
+//! `docs/design/tasks/45-engine-migration-tasks.md` /
+//! `docs/design/tasks/47-bl82-phase4-remaining-tasks.md` /
+//! `docs/design/tasks/51-bl82-em49-e2e-drill-tasks.md`. Isolation law: logic
+//! crates never depend on this crate or on Bevy. This crate stays render-free
+//! (headless-safe) — apply-to-render systems live in the client.
 
 pub mod ai_gateway;
 pub mod atmosphere;
+pub mod atmosphere_sync;
 pub mod chronicle;
 pub mod dm_event;
 pub mod entity_template;
@@ -27,6 +32,10 @@ pub use crate::{
     atmosphere::{
         AmbientSky, AtmosphereController, AtmosphereProfile, WeatherEffect,
         XindelerAtmospherePlugin,
+    },
+    atmosphere_sync::{
+        AtmosphereSyncMessagePlugin, DimensionAtmospheres, ServerAtmosphereSyncPlugin,
+        SetClientAtmosphere,
     },
     chronicle::{ChronicleLog, ChroniclePlugin},
     dm_event::{
