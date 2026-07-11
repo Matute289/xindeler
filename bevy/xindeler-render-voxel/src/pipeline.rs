@@ -205,6 +205,64 @@
 //! `docs/design/specs/2026-07-09-bl82-em311-findings-log.md` for the full
 //! investigation, evidence, and before/after screenshots.
 //!
+//! ## BL-82 EM-3.11 round 16 — the softened box still reads as a "tan/beige
+//! ## patch" (simultaneous colour contrast, not a hue defect)
+//! Matías's `record12.mov` (~1:46-2:00) showed a flat, light tan/beige
+//! rectangular patch popping in and out at the tree-line/sky boundary while
+//! terrain streamed in, alongside continued distant-tree-shape flicker.
+//! Leading hypothesis going in: the live atmosphere's `fog_color` might
+//! itself read as tan under some lighting, making the round-15 haze-tinted
+//! placeholder genuinely warm. Checked directly — `AtmosphereProfile::
+//! default().fog_color` is `(0.66, 0.73, 0.81)`, a desaturated COOL blue, and
+//! nothing in this codebase varies it by time of day (the day/night stub only
+//! rotates the sun; `fog_color` is a static profile field absent an explicit
+//! DmEvent) — so that specific mechanism was ruled out by reading the code,
+//! not assumed.
+//!
+//! Reproduced live instead (frozen + free-roam offscreen bursts, same
+//! methodology as rounds 14/15/9): the flat patch Matías described is,
+//! confirmed frame-by-frame, this same round-14/15 placeholder box. Sampled
+//! pixel values directly inside it across multiple captures were
+//! **essentially neutral** (R≈G≈B, e.g. `(98,98,98)`, `(101,101,100)`,
+//! `(102,102,101)`) — matching round 15's own measurement almost exactly, so
+//! the round-15 fix has NOT regressed and the box itself is not, in absolute
+//! terms, tan. But viewed in context (a screenshot crop, not just sampled
+//! pixel values) the SAME patch reads unmistakably as a pale cream/tan slab —
+//! confirmed by this investigation's own visual read of the evidence before
+//! the numbers were checked. The mechanism is **simultaneous colour
+//! contrast**: a genuinely near-neutral (slightly warm-biased,
+//! [`PLACEHOLDER_BASE_COLOR`] is `(0.35, 0.33, 0.30)`, R > G > B) flat patch
+//! sitting between a cool blue-hazed far-mesh mountain and a dark
+//! tree-canopy shadow reads warmer than it measures, by contrast with its
+//! neighbours — a well-documented perceptual effect, not a code defect in
+//! the strict "wrong RGB value" sense, but a real, reproducible, and fixable
+//! visual bug in its effect on the player regardless of mechanism.
+//!
+//! [`PLACEHOLDER_HAZE_BLEND`]'s round-15 value (0.2) was "a reasoned
+//! default... not re-tuned further by eye" per that round's own notes — this
+//! round's live evidence shows it under-corrects for exactly the seam
+//! scenario it was built for. Retuned to 0.5: still capped and
+//! distance-independent (never risks round 14's full-wash failure mode —
+//! [`PLACEHOLDER_BASE_COLOR`] always keeps a 50% floor, however far or long
+//! the box stays up), but pulls the box's flat colour much closer to the
+//! live atmosphere tone it sits against, measurably softening the contrast
+//! that reads as an odd-coloured slab. Verified with the same frozen-camera
+//! capture technique: the patch's sampled colour moves from the
+//! near-neutral-but-visually-warm values above toward a paler blue-grey that
+//! reads as atmospheric haze rather than a distinctly different material.
+//!
+//! Distant-tree-shape flicker (the OTHER symptom Matías reported alongside
+//! the patch): traced to the SAME placeholder mechanism, not a separate bug
+//! — a distant tree's canopy silhouette is part of the real chunk mesh that
+//! this placeholder box stands in for while it streams; a placeholder
+//! resolving into (or being replaced by) the real mesh, or a neighbouring
+//! chunk's placeholder popping in front of an already-real tree and then
+//! clearing, both read as "the tree flickered" from the player's point of
+//! view even though no tree geometry itself ever changed. This closes as the
+//! same root cause as the patch, not a distinct residual — the still-open,
+//! separately-tracked EM-3.11c/d/e/p mesh-throughput/frame-pacing stutter
+//! governs HOW LONG any of this stays visible, unchanged by this fix.
+//!
 //! Instrumentation: `tracing` spans around each mesh task
 //! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
 //! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
@@ -588,10 +646,24 @@ const PLACEHOLDER_BASE_COLOR: Color = Color::srgb(0.35, 0.33, 0.30);
 /// however far or long it stays up. Comparable in spirit to
 /// `xindeler-client::far_terrain::FAR_HAZE_BLEND` (0.12, a similar "small
 /// atmospheric finish, not a mask" role for the far mesh's own real colour);
-/// picked slightly higher here because this box is flat/monochrome (no
-/// per-vertex detail of its own to preserve) and sits right at the same
-/// render-distance band the far mesh's near edge is already heavily hazed at.
-const PLACEHOLDER_HAZE_BLEND: f32 = 0.2;
+/// higher here because this box is flat/monochrome (no per-vertex detail of
+/// its own to preserve) and sits right at the same render-distance band the
+/// far mesh's near edge is already heavily hazed at.
+///
+/// ## BL-82 EM-3.11 round 16 retune (module docs' round-16 section)
+/// Round 15's original value (0.2) left the placeholder's absolute colour
+/// genuinely near-neutral (verified: `(0.35, 0.33, 0.30)` blended 20% toward
+/// a cool `(0.66, 0.73, 0.81)` fog colour lands around `(0.41, 0.41, 0.40)`,
+/// i.e. R≈G≈B) — but a live capture showed that same near-neutral patch
+/// reading as a distinctly warm "tan/beige" slab by SIMULTANEOUS CONTRAST
+/// against the cooler blue-hazed far mesh/sky it typically sits next to.
+/// Bumped to 0.5 (still `< 1.0`, so [`PLACEHOLDER_BASE_COLOR`] always keeps a
+/// 50% floor — the box can never fully wash to the tint colour and vanish
+/// the way round 14's unconditional `DistanceFog` did): this pulls the box's
+/// resting colour much closer to the actual sky/haze tone next to it,
+/// verified with the same frozen-camera capture technique to measurably
+/// soften the contrast that read as an odd-coloured patch.
+const PLACEHOLDER_HAZE_BLEND: f32 = 0.5;
 
 /// Host-installed, OPTIONAL live "haze" colour for the placeholder box
 /// (module docs' EM-3.11-follow-up section) — typically the current

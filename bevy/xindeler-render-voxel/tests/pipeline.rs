@@ -871,3 +871,68 @@ fn placeholder_material_blends_toward_a_host_installed_haze_tint() {
         );
     }
 }
+
+/// BL-82 EM-3.11 round 16: a live frozen-camera capture (findings log) showed
+/// round 15's 0.2 blend left the placeholder's ABSOLUTE colour genuinely
+/// near-neutral (verified: sampled real pixels around `(98,98,98)`-
+/// `(103,103,101)`) yet reading as a distinctly warm "tan/beige" patch by
+/// SIMULTANEOUS CONTRAST against the cooler blue-hazed far mesh/sky it
+/// typically sits next to — a live before/after capture confirmed a stronger
+/// blend measurably softens this (the box's own sampled colour moved from
+/// R≈G≈B to a clearly blue-leaning B>G>R, matching the direction of its
+/// actual surroundings instead of standing out as the one neutral thing in a
+/// blue scene). This pins the blend at (or past) the midpoint — closer to
+/// the haze tint than to the plain base colour — so a future accidental
+/// revert back toward round 15's under-correcting 0.2 fails a test instead
+/// of silently reintroducing the tan/beige patch.
+#[test]
+fn placeholder_material_blend_leans_more_toward_the_haze_tint_than_round_15_did() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    // A cool, desaturated blue haze tint (matches `AtmosphereProfile::
+    // default().fog_color`, `(0.66, 0.73, 0.81)`) against a warm-leaning base
+    // — the exact real-world shape of the round-16 bug.
+    let tint = Color::srgb(0.66, 0.73, 0.81);
+    app.world_mut().insert_resource(PlaceholderHazeTint(tint));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    let base = Color::srgb(0.35, 0.33, 0.30).to_srgba();
+    let got = material.base_color.to_srgba();
+    let haze = tint.to_srgba();
+
+    for (b, h, g, channel) in [
+        (base.red, haze.red, got.red, "red"),
+        (base.green, haze.green, got.green, "green"),
+        (base.blue, haze.blue, got.blue, "blue"),
+    ] {
+        let dist_to_base = (g - b).abs();
+        let dist_to_haze = (g - h).abs();
+        assert!(
+            dist_to_haze <= dist_to_base + 1e-4,
+            "round 16: the {channel} channel must sit at or past the midpoint between base ({b}) \
+             and haze ({h}) — got {g}, which is closer to the plain base colour than to the haze \
+             tint (distance to base {dist_to_base} vs distance to haze {dist_to_haze}); round \
+             15's under-correcting 0.2 blend left an absolute near-neutral colour that still read \
+             as a warm tan/beige patch by simultaneous contrast against a cooler scene — see the \
+             findings log's round-16 section"
+        );
+    }
+}
