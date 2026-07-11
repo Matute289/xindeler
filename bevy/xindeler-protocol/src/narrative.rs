@@ -102,6 +102,12 @@ impl NarrativeHooks {
         self.0.get(&dimension).map(String::as_str)
     }
 
+    /// Drops `dimension`'s registered message (BL-82 EM-4.9 follow-up,
+    /// bevy-migration-reviewer MINOR finding): called once a dimension tears
+    /// down, so this table doesn't grow by one stale entry per retired event
+    /// for the life of the server process. A no-op if `dimension` had none.
+    pub fn unregister(&mut self, dimension: DimensionId) { self.0.remove(&dimension); }
+
     /// Whether any dimension currently has a registered on-enter message.
     #[must_use]
     pub fn is_empty(&self) -> bool { self.0.is_empty() }

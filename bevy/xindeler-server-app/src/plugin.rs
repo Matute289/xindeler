@@ -19,10 +19,11 @@ use tokio::sync::Notify;
 use xindeler_dimensions::{
     DimensionsPlugin, PredictiveGcConfigPlugin, teardown_completed_dimensions,
 };
-use xindeler_oracle_host::AiGatewayPlugin;
+use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
+    SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -222,14 +223,27 @@ impl Plugin for SimServerPlugin {
             // `FixedPostUpdate` replication pass.
             ClientInterestPlugin,
             // BL-82 EM-4.8: the `on_enter_message -> HudToast` narrative
-            // hook (`xindeler_protocol::narrative`). A permanent no-op today
-            // (`NarrativeHooks` starts empty and nothing in this shell
-            // registers an entry yet — no `DmEvent`-triggered dimension
-            // spinup exists, EM-4.9's job) but cheap and harmless to wire
-            // for real now, mirroring `AiGatewayPlugin`'s own "seam wired
-            // into the real shell before any real caller exists" posture.
+            // hook (`xindeler_protocol::narrative`). Was a permanent no-op
+            // before EM-4.9 (`NarrativeHooks` started empty and nothing in
+            // this shell registered an entry) — `ServerOraclePlugin` below
+            // is now the real caller.
             HudToastPlugin,
+            // BL-82 EM-4.9 (Phase D): the atmosphere-replication seam —
+            // `DimensionAtmospheres` + `SetClientAtmosphere` targeted
+            // message, populated by `ServerOraclePlugin`'s ingest producer.
+            ServerAtmosphereSyncPlugin,
         ));
+
+        // BL-82 EM-4.9: the ORACLE ingestion chain (DmEvent -> dimension
+        // spinup + factory spawn + narrative hook + chronicle rumor). See
+        // `oracle.rs`'s own module doc comment for the full producer chain;
+        // `main.rs` already called `register_oracle_source` BEFORE
+        // `AssetPlugin` (the other half of the two-phase ordering contract) —
+        // `events_dir` is threaded through from that SAME resolved value (see
+        // `SimServerConfig::events_dir`'s own doc comment for why).
+        app.add_plugins(ServerOraclePlugin {
+            events_dir: self.config.events_dir.clone(),
+        });
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,

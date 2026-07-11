@@ -15,7 +15,7 @@ use crate::{
     predictive_gc::{PredictiveGc, PredictiveGcTrackers, predictive_gc_system},
     registry::DimensionRegistry,
     spinup::{
-        DrainDimension, SpinupDimension, SpinupTasks, handle_drain_requests,
+        DimensionActivated, DrainDimension, SpinupDimension, SpinupTasks, handle_drain_requests,
         handle_spinup_requests, poll_spinup_tasks,
     },
     teardown::{DimensionTornDown, teardown_completed_dimensions},
@@ -77,6 +77,9 @@ impl Plugin for DimensionsPlugin {
             .add_message::<SpinupDimension>()
             .add_message::<DrainDimension>()
             .add_message::<DimensionTornDown>()
+            // BL-82 EM-4.9: the "Active edge" `DmEvent`-triggered producers
+            // consume (see `spinup::DimensionActivated`'s doc comment).
+            .add_message::<DimensionActivated>()
             .add_systems(
                 FixedUpdate,
                 (

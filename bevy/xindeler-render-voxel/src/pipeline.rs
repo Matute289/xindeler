@@ -137,7 +137,9 @@ use bevy::{
         component::Component,
         entity::Entity,
         resource::Resource,
-        schedule::{IntoScheduleConfigs, SystemCondition, common_conditions::resource_exists},
+        schedule::{
+            IntoScheduleConfigs, SystemCondition, SystemSet, common_conditions::resource_exists,
+        },
         system::{Commands, Local, Res, ResMut},
     },
     math::Vec3,
@@ -560,6 +562,18 @@ const SPAWN_BURST_FACTOR: u32 = 4;
 // this investigation could and couldn't establish given shared-machine
 // measurement noise.
 
+/// BL-82 EM-4.11 Phase D — system-ordering label for the pipeline's
+/// removals→spawn→apply chain, so a HOST crate (e.g. `xindeler-client`'s
+/// `receive_chunks`, which reads [`ChunkMeshIndex`] to decide which
+/// neighbours are genuinely affected by a new arrival) can order itself
+/// relative to this pipeline WITHOUT reaching into its private system
+/// functions (`process_chunk_removals`/`spawn_chunk_mesh_tasks`/
+/// `apply_chunk_meshes` are, and stay, private — this label is the only
+/// ordering handle exposed). Runs in `Update` (see
+/// [`ChunkMeshPipelinePlugin`]'s doc comment).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkMeshPipelineSet;
+
 /// Registers the queue/tasks/budget/stats resources and the pipeline
 /// systems (removals → spawn → apply). Spawn/apply idle until the host
 /// inserts a [`ChunkVolumeProvider`], a [`ChunkLayerMap`] and
@@ -583,7 +597,8 @@ impl Plugin for ChunkMeshPipelinePlugin {
                     ),
                     apply_chunk_meshes.run_if(resource_exists::<ChunkMaterials>),
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(ChunkMeshPipelineSet),
             );
     }
 }

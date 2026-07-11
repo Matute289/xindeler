@@ -37,8 +37,8 @@
 //!   representative per-entity payload size (bincode-encoded
 //!   `NetPos+NetOri+NetVel+NetHealth+NetBody`(+`NetLoadout` for humanoids), the
 //!   SAME `bincode::config::legacy()` scheme this crate's own
-//!   `CompressedChunk`/`NetLodAlt` already use). This test deliberately never
-//!   imports raw `bevy_quinnet`/`quinn` stats types directly — that would
+//!   `CompressedChunk`/`NetFarTerrain` already use). This test deliberately
+//!   never imports raw `bevy_quinnet`/`quinn` stats types directly — that would
 //!   violate the `xindeler-transport` isolation boundary T47.4 established ("a
 //!   `grep -r bevy_replicon_quinnet` outside its own impl module must return
 //!   nothing" — confirmed still true after this test). So the entity-COUNT side
@@ -483,7 +483,7 @@ fn interest_management_scoping_boundary_and_bandwidth() {
 
     // Representative per-entity payload size: bincode(legacy)-encode ONE
     // synthetic entity's replicated component set, the SAME scheme
-    // `xindeler_protocol::CompressedChunk::encode`/`NetLodAlt::encode`
+    // `xindeler_protocol::CompressedChunk::encode`/`NetFarTerrain::encode`
     // already use elsewhere in this codebase (see this test's own module doc
     // comment for why this is an ESTIMATE, not a raw wire capture).
     let sample_pos = NetPos(Vec3::new(CLUSTER_A_ANCHOR.x, 0.0, CLUSTER_A_ANCHOR.y));
