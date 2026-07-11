@@ -90,9 +90,14 @@ pub fn distance_fog_from(profile: &AtmosphereProfile) -> DistanceFog {
         // `1 - exp(-(d·density)²)` rises much more slowly near the camera
         // (quadratic in the exponent) and accelerates further out, so nearby
         // terrain/trees stay clear while the far-mesh horizon (the thing this
-        // fog exists to mask, EM-3.11b) is still fully hidden by ~200-250m.
-        // Same profile field (`fog_density`), same schema — just a curve swap
-        // + retuned constant (see `default.atmo.ron`'s comment for the numbers).
+        // fog exists to mask, EM-3.11b) is fully (≈99.9%) hidden by the far
+        // mesh's ~288m cutout-hole distance — EM-3.11 round 11 (2026-07-11)
+        // retuned the density constant so this is a near-total blend, not
+        // just a strong one (the EM-3.11f value left ~2.5% of the far mesh's
+        // raw colour visible even at steady state, reading as a hard-edged
+        // "beige horizon" strip). Same profile field (`fog_density`), same
+        // schema — just a retuned constant (see `default.atmo.ron`'s and
+        // `AtmosphereProfile::default()`'s comments for the numbers).
         falloff: FogFalloff::ExponentialSquared {
             density: profile.fog_density,
         },

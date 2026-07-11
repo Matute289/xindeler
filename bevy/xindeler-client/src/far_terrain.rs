@@ -53,10 +53,34 @@
 //! "flat-shaded, vertex-coloured low-poly terrain" (task-approved v1 scope),
 //! not the full PBR block-palette treatment the near terrain gets.
 //!
+//! ## EM-3.11 round 11: the "beige horizon" — masking wasn't strong enough
+//! Matías's `record8.mov` (a real free-roam session, taken AFTER the EM-4.10
+//! P0 frame-time hotfix) showed this mesh's own flat, undetailed colour as a
+//! visible strip at the horizon, in open areas especially. Root cause: the
+//! ONLY thing masking this mesh's raw colour is `DistanceFog`
+//! (`crate::atmosphere`), and the EM-3.11f density only reached ~97.5%
+//! opacity by this mesh's own nearest visible point (`hole_radius`, ~288m at
+//! the default render distance) — a small but, on real detailed-vs-flat
+//! contrast, clearly visible residual. `docs/design/specs/2026-07-11-
+//! xindeler-old-comparison-research.md` §2 traces the DEEPER gap versus the
+//! old client (which renders a full-world, `lod_base`-coloured LOD terrain
+//! all the way to the horizon, using fog only as a finishing touch on an
+//! already-complete world — not as the sole mask for a hard edge); porting
+//! that (`lod_base`/`lod_horizon` full-disc coverage) is a real follow-up
+//! task, not a hotfix. This round's fix works within the CURRENT
+//! hole-and-fog architecture and closes the reported symptom two ways: (1)
+//! `AtmosphereProfile::default()`'s fog-density retune (same round) reaches
+//! ~99.9% opacity at `hole_radius` instead of ~97.5%; (2) [`HAZE_BLEND`]
+//! mixes this mesh's own vertex colour toward the live fog colour, so even a
+//! transient exposure (a retile lagging a fast camera drift, or a lower-
+//! density weather profile) reads as haze, not "beige ground".
+//!
 //! ## Purity
 //! 100% Bevy + the protocol message + `terrain_stream::{CHUNK_EDGE,
-//! TerrainCameraAnchor}` + `lod::CullingConfig` — no specs. Compiled only
-//! under the `listen-server` feature.
+//! TerrainCameraAnchor}` + `lod::CullingConfig` + (EM-3.11 round 11)
+//! `xindeler-oracle-host`'s headless-safe `AtmosphereController`/
+//! `AtmosphereProfile` types (read-only, for [`HAZE_BLEND`]) — no specs.
+//! Compiled only under the `listen-server` feature.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -64,6 +88,7 @@ use bevy::{
     pbr::StandardMaterial,
     prelude::*,
 };
+use xindeler_oracle_host::{AtmosphereController, AtmosphereProfile};
 use xindeler_protocol::NetLodAlt;
 
 use crate::{
@@ -210,6 +235,7 @@ fn retile_far_mesh(
     data: Option<Res<FarTerrainData>>,
     mut state: Option<ResMut<FarMeshState>>,
     culling: Res<CullingConfig>,
+    atmosphere: Option<Res<AtmosphereController>>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -241,8 +267,24 @@ fn retile_far_mesh(
         .get_or_insert_with(|| std::env::var("XINDELER_FAR_MESH_PERF_LOG").is_ok_and(|v| v != "0"));
     let retile_start = std::time::Instant::now();
 
+    // BL-82 EM-3.11 round 11 ("beige horizon" — see [`height_tint`]'s doc
+    // comment): the mesh's own vertex colour is mixed toward the CURRENT
+    // atmosphere's live `fog_color` (falls back to the default profile's
+    // colour if no `AtmosphereController` exists, e.g. in a test app that
+    // doesn't wire `AtmospherePlugin`) so an exposed edge reads as haze, not
+    // "beige ground". Only re-baked on a re-tile (rare — see the doc comment
+    // above), not every frame a profile transition animates: acceptable,
+    // honestly-documented staleness, matching this system's existing
+    // "no per-frame cost" design goal (a weather change fully lands in the
+    // far mesh's colour the next time the camera drifts far enough to
+    // re-tile, not instantly).
+    let haze = Vec3::from_array(atmosphere.map_or_else(
+        || AtmosphereProfile::default().fog_color,
+        |a| a.current.fog_color,
+    ));
+
     let hole_radius = culling.chunk_render_distance + rebuild_slack;
-    let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius);
+    let mesh = far_mesh_from_heights(&data.0, hole_center, hole_radius, haze);
     let new_entity = mesh.map(|mesh| {
         commands
             .spawn((
@@ -333,35 +375,55 @@ fn averaged_corner(data: &DecodedLodAlt, i: u32, j: u32) -> f32 {
     if n == 0 { 0.0 } else { sum / n as f32 }
 }
 
+/// Fraction of [`height_tint`]'s own low/high palette blended toward the
+/// live atmosphere's `fog_color` before baking vertex colours (BL-82 EM-3.11
+/// round 11 — `docs/design/specs/2026-07-11-xindeler-old-comparison-
+/// research.md` §2). EM-3.11b already leaned on this exact idea for the low
+/// stop alone (softening a saturated forest green so it read as haze rather
+/// than "ground" against the fog it blends into); the fog-density retune in
+/// `AtmosphereProfile::default()`'s doc comment (same round) makes that
+/// blend all but invisible at steady state, but this is defense in depth —
+/// a transient exposure (a re-tile recentre lagging one frame behind a fast
+/// camera drift, or a future low-density weather profile) should still read
+/// as atmospheric haze, not a flat, undetailed "ground" colour, and this
+/// keeps that true regardless of how strong the fog itself currently is.
+/// Kept well under 1.0 so the mesh still shows SOME relief (the "impression
+/// the map continues" Matías asked for, not a single flat colour).
+const HAZE_BLEND: f32 = 0.35;
+
 /// Maps a colour to a coarse "distant terrain" tint by height fraction
 /// (0 = lowest sample in the grid, 1 = highest) — low ground reads greener,
-/// high ground reads paler/rockier. Cheap, data-free (no palette dependency),
-/// good enough to visually confirm relief without the near terrain's PBR
-/// block-palette treatment.
+/// high ground reads paler/rockier — then mixes [`HAZE_BLEND`] of that
+/// toward `haze` (the live atmosphere's fog colour; see [`HAZE_BLEND`]'s doc
+/// comment). Cheap, data-free (no palette dependency), good enough to
+/// visually confirm relief without the near terrain's PBR block-palette
+/// treatment.
 ///
 /// BL-82 EM-3.11b: lightened/desaturated from the original, quite saturated
 /// forest green (`(0.20, 0.35, 0.16)`) — the far mesh's own colour is what
 /// `DistanceFog` blends FROM, so a raw colour with high contrast against the
-/// fog (`atmosphere::AtmosphereProfile::default().fog_color`, a pale
-/// blue-grey haze) stayed visible as a distinct "wall" even at high fog
-/// blend factors; a softer, less saturated low tint minimises that residual
-/// contrast at the mesh's own near edge (still comfortably outside the
-/// near-terrain band per `HOLE_MARGIN_CHUNKS`) without touching per-quad
-/// colour variation (out of scope — this is still one flat 2-stop gradient).
-fn height_tint(t: f32) -> Color {
+/// fog stayed visible as a distinct "wall" even at high fog blend factors;
+/// a softer, less saturated low tint minimises that residual contrast at
+/// the mesh's own near edge (still comfortably outside the near-terrain
+/// band per `HOLE_MARGIN_CHUNKS`) without touching per-quad colour variation
+/// (out of scope — this is still one flat 2-stop gradient, now blended a
+/// third stop toward the live fog colour).
+fn height_tint(t: f32, haze: Vec3) -> Color {
     let t = t.clamp(0.0, 1.0);
     let low = Vec3::new(0.32, 0.42, 0.30);
     let high = Vec3::new(0.58, 0.57, 0.53);
-    let c = low.lerp(high, t);
+    let c = low.lerp(high, t).lerp(haze, HAZE_BLEND);
     Color::srgb(c.x, c.y, c.z)
 }
 
 /// Builds the far-terrain [`BevyMesh`], or `None` if every quad fell inside
-/// the cutout hole (nothing to draw).
+/// the cutout hole (nothing to draw). `haze` is the live atmosphere's
+/// `fog_color` (see [`HAZE_BLEND`]).
 fn far_mesh_from_heights(
     data: &DecodedLodAlt,
     hole_center: Vec2,
     hole_radius: f32,
+    haze: Vec3,
 ) -> Option<BevyMesh> {
     let cell = data.chunk_stride as f32 * CHUNK_EDGE;
     let (min_h, max_h) = data
@@ -421,7 +483,7 @@ fn far_mesh_from_heights(
                 positions.push(p.to_array());
                 normals.push(normal.to_array());
                 let t = (p.y - min_h) / span;
-                colors.push(height_tint(t).to_linear().to_f32_array());
+                colors.push(height_tint(t, haze).to_linear().to_f32_array());
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -537,14 +599,20 @@ mod tests {
         }
     }
 
+    /// Stand-in "live fog colour" for tests that don't care about the exact
+    /// haze value, just that `far_mesh_from_heights` accepts and threads one
+    /// through — matches the shipped default profile's `fog_color`.
+    const TEST_HAZE: Vec3 = Vec3::new(0.66, 0.73, 0.81);
+
     /// A flat grid, hole centred far away: every quad survives, and the mesh
     /// is a flat sheet at the grid's height (corner averaging of identical
     /// samples reproduces the same height, no NaNs from the `n == 0` guard).
     #[test]
     fn flat_grid_builds_a_flat_sheet() {
         let data = flat_grid(4, 4, 42.0, 8);
-        let mesh = far_mesh_from_heights(&data, Vec2::new(-1_000_000.0, -1_000_000.0), 1.0)
-            .expect("non-empty mesh");
+        let mesh =
+            far_mesh_from_heights(&data, Vec2::new(-1_000_000.0, -1_000_000.0), 1.0, TEST_HAZE)
+                .expect("non-empty mesh");
         let positions = mesh
             .attribute(BevyMesh::ATTRIBUTE_POSITION)
             .expect("positions")
@@ -570,7 +638,7 @@ mod tests {
     fn hole_covering_everything_yields_no_mesh() {
         let data = flat_grid(2, 2, 10.0, 8);
         // cell = 8 * 32 = 256; grid spans 512×512 around origin's quadrant.
-        let mesh = far_mesh_from_heights(&data, Vec2::new(256.0, -256.0), 10_000.0);
+        let mesh = far_mesh_from_heights(&data, Vec2::new(256.0, -256.0), 10_000.0, TEST_HAZE);
         assert!(mesh.is_none());
     }
 
@@ -584,7 +652,7 @@ mod tests {
         let data = flat_grid(3, 3, 0.0, 1); // cell = 32
         // Centre quad is (1,1): its centre sits at (1.5*32, -1.5*32) = (48,-48).
         let center_of_middle_quad = Vec2::new(48.0, -48.0);
-        let mesh = far_mesh_from_heights(&data, center_of_middle_quad, 20.0)
+        let mesh = far_mesh_from_heights(&data, center_of_middle_quad, 20.0, TEST_HAZE)
             .expect("corner quads still render");
         let positions = mesh
             .attribute(BevyMesh::ATTRIBUTE_POSITION)
@@ -634,5 +702,79 @@ mod tests {
         assert!((averaged_corner(&data, 0, 0) - 0.0).abs() < 1e-4);
         // Corner (2,0) (top-right of the grid) touches only cell (1,0) = 10.0.
         assert!((averaged_corner(&data, 2, 0) - 10.0).abs() < 1e-4);
+    }
+
+    /// BL-82 EM-3.11 round 11 ("beige horizon"): [`height_tint`] mixes
+    /// [`HAZE_BLEND`] of its own low/high palette toward `haze`. At `t=0`/
+    /// `t=1` this is a plain lerp toward `haze` by that exact fraction —
+    /// pinning the fraction here means a future accidental change to
+    /// `HAZE_BLEND` (or a typo'd `lerp` direction) is caught directly,
+    /// rather than only showing up as a fuzzy "looks a bit off" screenshot
+    /// diff.
+    #[test]
+    fn height_tint_blends_toward_haze_by_the_configured_fraction() {
+        // `height_tint` returns an sRGB `Color`; go through the SAME
+        // sRGB->linear conversion the production call site uses
+        // (`far_mesh_from_heights`'s `.to_linear()`) when computing the
+        // expected value too, so this compares like with like instead of
+        // (wrongly) lerping in linear space against an sRGB-space formula.
+        let expected = |c: Vec3| Color::srgb(c.x, c.y, c.z).to_linear().to_vec3();
+
+        let haze = Vec3::new(1.0, 1.0, 1.0);
+        let low = Vec3::new(0.32, 0.42, 0.30);
+        let expected_low = expected(low.lerp(haze, HAZE_BLEND));
+        let got_low = height_tint(0.0, haze).to_linear().to_vec3();
+        assert!(
+            (got_low - expected_low).length() < 1e-4,
+            "t=0 should be the low stop mixed {HAZE_BLEND} toward haze, got {got_low:?}"
+        );
+
+        let high = Vec3::new(0.58, 0.57, 0.53);
+        let expected_high = expected(high.lerp(haze, HAZE_BLEND));
+        let got_high = height_tint(1.0, haze).to_linear().to_vec3();
+        assert!(
+            (got_high - expected_high).length() < 1e-4,
+            "t=1 should be the high stop mixed {HAZE_BLEND} toward haze, got {got_high:?}"
+        );
+
+        // Blending a colour toward an IDENTICAL haze is a no-op regardless
+        // of the blend fraction — a degenerate case that would silently
+        // break if the lerp direction were ever inverted (e.g. `haze.lerp
+        // (base, HAZE_BLEND)` instead of `base.lerp(haze, HAZE_BLEND)`).
+        let midpoint = low.lerp(high, 0.5);
+        let got_noop = height_tint(0.5, midpoint).to_linear().to_vec3();
+        let expected_noop = expected(midpoint);
+        assert!(
+            (got_noop - expected_noop).length() < 1e-4,
+            "blending a colour toward an identical haze must be a no-op, got {got_noop:?}"
+        );
+    }
+
+    /// BL-82 EM-3.11 round 11 ("beige horizon"): the durable regression this
+    /// bug was missing — nothing previously checked that the shipped fog
+    /// density actually covers the far mesh's own nearest visible point.
+    /// Reproduces bevy_pbr's exact `FogFalloff::ExponentialSquared` opacity
+    /// formula (`1 - exp(-(distance·density)²)`, `bevy_pbr/src/render/
+    /// fog.wgsl`'s `exponential_squared_fog`) against the REAL production
+    /// constants (`AtmosphereProfile::default().fog_density`,
+    /// `CullingConfig::default().chunk_render_distance`, `HOLE_MARGIN_CHUNKS`,
+    /// `CHUNK_EDGE`) — not hand-copied numbers — so a future change to ANY of
+    /// them that breaks the "fog must already be ~fully opaque by the time
+    /// the far mesh can draw" invariant fails HERE, at compile/test time,
+    /// instead of showing up as a live beige strip again.
+    #[test]
+    fn default_fog_density_all_but_hides_the_far_mesh_at_its_hole_radius() {
+        let culling = CullingConfig::default();
+        let hole_radius = culling.chunk_render_distance + HOLE_MARGIN_CHUNKS * CHUNK_EDGE;
+        let density = AtmosphereProfile::default().fog_density;
+
+        let x = hole_radius * density;
+        let opacity = 1.0 - (-(x * x)).exp();
+        assert!(
+            opacity >= 0.999,
+            "fog must be ≥99.9% opaque at the far mesh's hole_radius ({hole_radius}m): got \
+             {opacity} (density {density}) — the far mesh's raw colour would show through as a \
+             visible 'beige horizon' strip otherwise"
+        );
     }
 }

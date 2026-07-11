@@ -140,15 +140,34 @@ impl Default for AtmosphereProfile {
             // give a genuinely clear near/mid field while still fully
             // opacifying by the far-mesh's ~288 m cutout-hole distance
             // (`far_terrain::HOLE_MARGIN_CHUNKS` + `lod::CullingConfig::
-            // chunk_render_distance` at the default 7-chunk render distance —
-            // see EM-3.11b's original writeup for why that distance matters:
-            // the far mesh must be ~97%+ fog-blended by the time its hole
-            // ever lets it draw, or its raw vertex colors read as a hard-edged
-            // "wall" instead of a haze). Density picked so `exp(-(d·density)²)`
-            // (fraction still CLEAR) ≈ 0.90 at 50 m (~10% haze — a mild sense
-            // of depth, not fog), ≈ 0.64 at 100 m, and ≈ 0.025 at 288 m
-            // (~97.5% fogged, same masking strength as the EM-3.11b tuning).
-            fog_density: 0.00667,
+            // chunk_render_distance` at the default 7-chunk render distance).
+            //
+            // BL-82 EM-3.11 round 11 (2026-07-11, "beige horizon" — Matías's
+            // `record8.mov`, confirmed still present after the EM-4.10 P0 FPS
+            // hotfix): the EM-3.11f value above only reached ~97.5% opacity
+            // AT the far mesh's own cutout-hole distance (288 m) — i.e. ~2.5%
+            // of the far mesh's raw, flat-shaded `height_tint` colour was
+            // STILL showing through even at steady state (no stutter/lag
+            // needed), which read as a hard-edged, undetailed "flat beige
+            // strip" against the real, textured near terrain right next to
+            // it (`docs/design/specs/2026-07-11-xindeler-old-comparison-
+            // research.md` §2 traces this to the far mesh relying solely on
+            // fog to mask an edge, unlike the old client's full-world LOD
+            // terrain — a structural gap that a real fix eventually closes,
+            // but the fog itself was ALSO simply not strong enough for the
+            // job it was assigned). Retuned so opacity is ≈99.9% (not 97.5%)
+            // by 288 m — imperceptible at any display bit depth — at the
+            // cost of a moderately (not drastically) hazier near/mid field:
+            // `exp(-(d·density)²)` (fraction still CLEAR) ≈ 0.81 at 50 m
+            // (~19% haze, was ~10%), ≈ 0.43 at 100 m (~56% haze, was ~36%),
+            // and ≈ 0.0015 at 288 m (~99.9% fogged, was ~97.5%). Also see
+            // `xindeler-client::far_terrain::HAZE_BLEND` (same round): the
+            // far mesh's own vertex colour is now additionally mixed toward
+            // this profile's live `fog_color`, so even a transient exposure
+            // (a `retile_far_mesh` recentre lagging a fast camera drift, or a
+            // future low-density weather profile) reads as haze, not "beige
+            // ground" — defense in depth, not a replacement for this retune.
+            fog_density: 0.00913,
             // Brighter, slightly less saturated than the original flat
             // gray-blue (EM-3.11b): the old (0.55, 0.65, 0.75) read
             // noticeably darker/flatter than the physically-based `Atmosphere`
