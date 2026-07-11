@@ -40,8 +40,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bevy::{
-    app::{App, FixedUpdate, Plugin},
-    ecs::{change_detection::NonSendMut, schedule::IntoScheduleConfigs, system::Res},
+    app::{App, Plugin, Update},
+    ecs::{
+        change_detection::{NonSend, NonSendMut},
+        entity::Entity,
+        query::With,
+        schedule::IntoScheduleConfigs,
+        system::{Commands, Query, Res},
+    },
+    math::Quat,
 };
 use client::{Client, ClientType, Event as ClientEvent, WorldData, addr::ConnectionArgs};
 use common::{
@@ -52,34 +59,54 @@ use common::{
     util::Dir,
 };
 use specs::WorldExt;
-use xindeler_protocol::LocalPlayerInput;
+use xindeler_protocol::{LocalPlayerInput, NetLocalPlayer, PredictedLocalTransform};
 
-use crate::{SimServer, tick_sim};
+use crate::SimServer;
 
-/// Registers the [`LocalPlayerInput`] resource and the [`tick_player`] system
-/// (runs after [`tick_sim`], main-thread non-send). Does NOT boot the embedded
-/// player itself — the listen-server shell inserts an [`EmbeddedPlayer`] via
-/// [`boot_embedded_player`] once the sim is up (booting the Client blocks on a
-/// loopback handshake, so the shell owns the timing, same as [`SimServer`]).
+/// Registers the [`LocalPlayerInput`] resource, the [`tick_player`] system, and
+/// [`mirror_local_player_prediction`] (main-thread non-send). Does NOT boot the
+/// embedded player itself — the listen-server shell inserts an
+/// [`EmbeddedPlayer`] via [`boot_embedded_player`] once the sim is up (booting
+/// the Client blocks on a loopback handshake, so the shell owns the timing,
+/// same as [`SimServer`]).
 ///
 /// Add AFTER [`crate::SimBridgePlugin`].
 pub struct PlayerBridgePlugin;
 
 impl Plugin for PlayerBridgePlugin {
     fn build(&self, app: &mut App) {
-        // EM-3.11b: FixedUpdate, matching `tick_sim`'s move — `tick_player`
-        // drives the embedded Client's `Clock` (`PLAYER_TPS` below), which
-        // already assumed a steady 30 Hz call rate; `Update` in the windowed
-        // listen-server path gave it 60–144 Hz instead. See `tick_sim`'s doc
-        // in `lib.rs` for the full story.
-        app.init_resource::<LocalPlayerInput>()
-            .add_systems(FixedUpdate, tick_player.after(tick_sim));
+        // BL-82 EM-4.11: `Update` (frame rate), NOT `FixedUpdate` — this
+        // SUPERSEDES EM-3.11b's "FixedUpdate, matching `tick_sim`'s move"
+        // rationale for THIS system. EM-3.11b was right that the
+        // AUTHORITATIVE SERVER (`crate::tick_sim`) must stay `FixedUpdate`
+        // (running its full heavy system graph at render rate was the
+        // EM-3.11b regression itself: 2-5x too much work). But `tick_player`
+        // is the LIGHT CLIENT PREDICTOR, not the server — old (pre-Bevy)
+        // voxygen ran exactly this predictor once per rendered frame, and
+        // EM-3.11b's blanket "match tick_sim's schedule" move dragged it
+        // along for no reason tied to ITS OWN cost. Ticking it at frame rate
+        // instead of 30 Hz is what closes the render-side tick-quantization/
+        // landing-lag bug family (see `xindeler_protocol::
+        // PredictedLocalTransform`'s doc comment and
+        // `docs/design/specs/2026-07-11-bl82-frame-rate-prediction-design.md`).
+        // `mirror_local_player_prediction` is chained directly after it (same
+        // schedule now, so a plain `.chain()` orders them — no cross-schedule
+        // `.after()` needed).
+        app.init_resource::<LocalPlayerInput>().add_systems(
+            Update,
+            (tick_player, mirror_local_player_prediction).chain(),
+        );
     }
 }
 
 /// Client + server tick rate for the embedded player (matches the sim's TPS and
-/// the smoke bot). The Client is ticked once per `FixedUpdate` step
-/// (EM-3.11b); its `Clock` provides the `dt` its own sync loop expects.
+/// the smoke bot) — used ONLY to seed [`boot_embedded_player`]'s temporary
+/// background-thread pacer (real 30 Hz pacing is correct there: that thread has
+/// nothing else to do while the loopback handshake completes). The
+/// `EmbeddedPlayer`'s own [`Clock`] no longer paces itself to this rate (BL-82
+/// EM-4.11: see [`boot_embedded_player`]'s doc for the `target_dt =
+/// Duration::ZERO` change) — it now ticks once per rendered `Update` frame
+/// instead.
 const PLAYER_TPS: f64 = crate::SIM_TICK_HZ;
 
 /// Username the embedded player registers with (auth is disabled on the
@@ -148,9 +175,39 @@ impl EmbeddedPlayer {
     pub fn is_failed(&self) -> bool { self.stage == PlayerStage::Failed }
 
     /// The player entity's current world position (sim axes, z-up), read from
-    /// the embedded Client. `None` before spawn. Test/dev helper — the
-    /// authoritative view for the render side is the replicated `NetPos`.
+    /// the embedded Client. `None` before spawn. BL-82 EM-4.11: this is now
+    /// the LOAD-BEARING source for the local player's rendered transform (via
+    /// [`crate::mirror_local_player_prediction`] →
+    /// `xindeler_protocol::PredictedLocalTransform`), not just a test/dev
+    /// helper — the replicated `NetPos` remains the reconciliation truth and
+    /// the source for every OTHER (remote) mirrored entity.
     pub fn position(&self) -> Option<vek::Vec3<f32>> { self.client.position() }
+
+    /// The player entity's current velocity (sim axes), read the same way as
+    /// [`Self::position`] — feeds the EM-4.11 frame-rate prediction mirror.
+    /// `None` before spawn or on the rare tick the entity somehow lacks a
+    /// `Vel` (defensive, mirrors `position()`'s own optionality).
+    pub fn velocity(&self) -> Option<vek::Vec3<f32>> {
+        self.client
+            .state()
+            .read_storage::<comp::Vel>()
+            .get(self.client.entity())
+            .map(|v| v.0)
+    }
+
+    /// The player entity's current orientation (sim axes, z-up quaternion),
+    /// read the same way as [`Self::position`]. `None` before spawn / if the
+    /// entity lacks an `Ori` this tick. Feeds the EM-4.11 frame-rate
+    /// prediction mirror, converted to Bevy axes the same way
+    /// `crate::mirror_sim_entities` converts every other mirrored entity's
+    /// orientation (`crate::sim_ori_to_bevy`).
+    pub fn orientation(&self) -> Option<vek::Quaternion<f32>> {
+        self.client
+            .state()
+            .read_storage::<comp::Ori>()
+            .get(self.client.entity())
+            .map(|o| o.to_quat())
+    }
 
     /// The world's coarse LOD data (`lod_alt`/`lod_horizon`/map images),
     /// downloaded during the embedded `Client`'s initial handshake — populated
@@ -279,7 +336,24 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
     Ok(EmbeddedPlayer {
         client,
         _runtime: runtime,
-        clock: Clock::new(Duration::from_secs_f64(1.0 / PLAYER_TPS)),
+        // BL-82 EM-4.11: `target_dt = Duration::ZERO`, NOT `1/PLAYER_TPS`.
+        // `tick_player` now runs once per rendered `Update` frame (Bevy owns
+        // frame pacing via present-mode/vsync), so this `Clock`'s own
+        // `spin_sleep` pacing (`Clock::tick`, `common/src/clock.rs`) must be a
+        // no-op — a zero `target_dt` makes `target_dt.checked_sub(busy_time)`
+        // return `None` on every call (busy_time is never negative), so
+        // `spin_sleep` never fires. This keeps every OTHER part of `Clock`'s
+        // per-tick behaviour (the `average_dt`/`NUDGE_RATE`/`MAX_GAME_DT`
+        // exponential-smoothing of the real per-frame `dt`) exactly as old
+        // voxygen used it: a dt-SMOOTHER, not a tick-rate LIMITER. (A real,
+        // if minor, trade-off: `Clock::new`/`set_target_dt` also seed
+        // `average_dt`/`average_busy` from `target_dt`, so seeding at `ZERO`
+        // means the very first ~20 post-spawn frames' smoothed dt ramps up
+        // from 0 rather than a realistic guess — self-corrects within well
+        // under a second and is bounded by the same reconciliation that
+        // already smooths every other correction, so not worth a bespoke
+        // seeding path for a one-time, sub-second startup transient.)
+        clock: Clock::new(Duration::ZERO),
         stage: PlayerStage::LoadingCharacterList,
         character_id: None,
         uid: None,
@@ -287,14 +361,33 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
     })
 }
 
-/// Advances the embedded player one fixed step: ticks its network/sync and
-/// walks the life-cycle state machine, applying [`LocalPlayerInput`] once in
-/// game.
+/// Advances the embedded player one step: ticks its network/sync and walks
+/// the life-cycle state machine, applying [`LocalPlayerInput`] once in game.
 ///
-/// Runs on the main thread (non-send) every `FixedUpdate` step (EM-3.11b),
-/// after [`crate::tick_sim`] so the sim has already processed the previous
-/// step's input. No-ops until the shell inserts an [`EmbeddedPlayer`]
-/// (listen-server only).
+/// ## BL-82 EM-4.11: `Update` (frame rate), not `FixedUpdate`
+/// This used to run in `FixedUpdate` alongside [`crate::tick_sim`] (EM-3.11b).
+/// That was right for the SERVER (`tick_sim`, the heavy authoritative system
+/// graph — running it at render rate was the EM-3.11b regression itself) but
+/// wrong for THIS system: it is the light CLIENT PREDICTOR — the SAME
+/// `xindeler-client-core::Client` old (pre-Bevy) voxygen ticked once per
+/// rendered frame. Now it runs in `Update`, so it advances every rendered
+/// frame instead of at most once per 30 Hz sim step. `player.clock.tick()`
+/// still computes a SMOOTHED `dt` (its `average_dt`/`NUDGE_RATE`/
+/// `MAX_GAME_DT` machinery, unchanged) from the real per-frame time — the
+/// `Clock`'s `target_dt` is `Duration::ZERO` now (see
+/// [`boot_embedded_player`]'s doc), so its internal `spin_sleep` pacing is a
+/// no-op: Bevy owns frame pacing (present-mode/vsync), the `Clock` here is
+/// purely a dt-smoother, exactly old voxygen's per-frame `clock.game_dt()`
+/// role, not a tick-rate limiter.
+///
+/// No-ops until the shell inserts an [`EmbeddedPlayer`] (listen-server only).
+/// `Server::tick` (`crate::tick_sim`) stays in `FixedUpdate` at 30 Hz,
+/// unchanged — this system reconciles against it over the loopback socket
+/// INSIDE `client.tick()` below (the Client's own built-in reconciliation),
+/// across frames, exactly as old singleplayer voxygen's background-thread
+/// server + per-frame client reconciled; no explicit `.after(tick_sim)`
+/// ordering is needed (or even meaningful — the two are different schedules
+/// now) for this to work correctly.
 pub fn tick_player(player: Option<NonSendMut<EmbeddedPlayer>>, input: Res<LocalPlayerInput>) {
     let Some(mut player) = player else { return };
     player.clock.tick();
@@ -337,6 +430,77 @@ pub fn tick_player(player: Option<NonSendMut<EmbeddedPlayer>>, input: Res<LocalP
     player.client.cleanup();
 
     advance_stage(&mut player, &events);
+}
+
+/// BL-82 EM-4.11: writes the local player's frame-rate-predicted transform
+/// onto its mirror entity every `Update` frame, `.after(tick_player)` (see
+/// [`PlayerBridgePlugin::build`]) so it reads the freshest prediction. The
+/// render (`xindeler-client::entity_view::interpolate_entities`) drives the
+/// local player's `Transform` straight from
+/// [`xindeler_protocol::PredictedLocalTransform`] (a snap, not an ease)
+/// instead of interpolating the authoritative, 30 Hz-sampled `NetPos` the way
+/// every remote entity still does — see that component's doc comment for the
+/// full rationale.
+///
+/// No-ops until BOTH an [`EmbeddedPlayer`] is in-game AND its mirror entity
+/// has already been tagged [`NetLocalPlayer`] by [`crate::mirror_sim_entities`]
+/// (a `FixedUpdate` system, so right after the very first spawn it may lag
+/// this `Update` system by up to one frame) — a pre-spawn/pre-mirror frame is
+/// simply skipped, self-healing the next frame, exactly like every other
+/// "wait for the sim to catch up" gate in this crate.
+pub fn mirror_local_player_prediction(
+    player: Option<NonSend<EmbeddedPlayer>>,
+    // BL-82 EM-4.11 (bevy-migration-reviewer follow-up): `Option<&mut
+    // PredictedLocalTransform>` so every frame AFTER the first mutates the
+    // component IN PLACE (a plain World write, no deferred-command/
+    // `ApplyDeferred` cost) — only the very first frame (component not yet
+    // present) falls back to `Commands::insert`. This system runs every
+    // rendered `Update` frame (up to 100-160+ Hz), so avoiding a
+    // `Commands`-flush on the steady-state path (which would otherwise be
+    // the ONLY reason `entity_view.rs`'s cross-plugin `.after()` ordering
+    // needs Bevy's auto-inserted `ApplyDeferred` sync point every single
+    // frame) is worth the small extra query complexity.
+    mut local_player: Query<(Entity, Option<&mut PredictedLocalTransform>), With<NetLocalPlayer>>,
+    mut commands: Commands,
+) {
+    let Some(player) = player else { return };
+    if !player.is_in_game() {
+        return;
+    }
+    let Some(pos) = player.position() else {
+        return;
+    };
+    let Ok((entity, existing)) = local_player.single_mut() else {
+        return;
+    };
+    let vel = player.velocity().unwrap_or_default();
+    let ori = player.orientation();
+    let predicted = predicted_local_transform(pos, vel, ori);
+    match existing {
+        Some(mut existing) => *existing = predicted,
+        None => {
+            commands.entity(entity).insert(predicted);
+        },
+    }
+}
+
+/// Sim-axis → Bevy-axis conversion for the EM-4.11 prediction mirror, factored
+/// out of [`mirror_local_player_prediction`] so it (and the entity-resolution
+/// logic around it) can be unit-tested without booting a real
+/// [`EmbeddedPlayer`] (which needs a live sim + loopback `Client` — heavy,
+/// `#[ignore]`d elsewhere in this file's tests). Uses the SAME
+/// `sim_pos_to_bevy`/`sim_ori_to_bevy` helpers `crate::mirror_sim_entities`
+/// converts every other mirrored entity's position/orientation with.
+fn predicted_local_transform(
+    pos: vek::Vec3<f32>,
+    vel: vek::Vec3<f32>,
+    ori: Option<vek::Quaternion<f32>>,
+) -> PredictedLocalTransform {
+    PredictedLocalTransform {
+        pos: crate::sim_pos_to_bevy(pos),
+        ori: ori.map_or(Quat::IDENTITY, crate::sim_ori_to_bevy),
+        vel: crate::sim_pos_to_bevy(vel),
+    }
 }
 
 /// Resolves the player's server `Uid` from its in-game entity, once. The
@@ -503,6 +667,24 @@ mod tests {
     use super::*;
     use crate::{SimBridgePlugin, SimEntityMirrorPlugin, boot_test_server};
 
+    /// BL-82 EM-4.11: `tick_player` now derives its `dt` from a REAL wall-clock
+    /// `Clock` (`target_dt = Duration::ZERO`, purely a dt-smoother — see
+    /// `boot_embedded_player`'s doc), not from Bevy's `Time` resource at all.
+    /// A test loop that calls `app.update()` back-to-back with no real elapsed
+    /// time between calls (as the pre-EM-4.11 `FixedUpdate` + `Time::<Fixed>`+
+    /// `TimeUpdateStrategy::ManualDuration` pinning made possible) would starve
+    /// `tick_player`'s smoothed `game_dt` toward ~0 — the SAME real-time-based
+    /// smoothing that makes production frame-rate prediction work correctly
+    /// requires a REAL per-frame interval in a test too. This sleeps a
+    /// realistic per-tick duration (matching the sim's own 30 Hz budget, the
+    /// same cadence the pre-EM-4.11 virtual-time pinning assumed) before each
+    /// `app.update()`, so `Clock`'s wall-clock EMA sees a sane, repeatable dt
+    /// instead of whatever the test loop's incidental CPU cost happens to be.
+    fn update_with_real_frame_time(app: &mut App) {
+        std::thread::sleep(Duration::from_secs_f64(1.0 / crate::SIM_TICK_HZ));
+        app.update();
+    }
+
     /// Pure axis-conversion check: forward keyboard intent (sim +y) survives
     /// [`controller_inputs_from`] with unit magnitude. No assets.
     #[test]
@@ -574,7 +756,7 @@ mod tests {
         let mut start: Option<vek::Vec3<f32>> = None;
         let mut end: Option<vek::Vec3<f32>> = None;
         for tick in 0..MAX_TICKS {
-            app.update();
+            update_with_real_frame_time(&mut app);
             let p = app.world().non_send::<EmbeddedPlayer>();
             if p.is_in_game()
                 && let Some(pos) = p.position()
@@ -679,7 +861,7 @@ mod tests {
         let mut in_game_at: Option<u32> = None;
         let mut settled: Option<vek::Vec3<f32>> = None;
         for tick in 0..MAX_SETTLE_TICKS {
-            app.update();
+            update_with_real_frame_time(&mut app);
             let p = app.world().non_send::<EmbeddedPlayer>();
             if p.is_in_game()
                 && let Some(pos) = p.position()
@@ -704,7 +886,7 @@ mod tests {
         });
         let mut max_z = start.z;
         for _ in 0..JUMP_HOLD_TICKS {
-            app.update();
+            update_with_real_frame_time(&mut app);
             if let Some(pos) = app.world().non_send::<EmbeddedPlayer>().position() {
                 max_z = max_z.max(pos.z);
             }
@@ -718,7 +900,7 @@ mod tests {
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         for _ in 0..POST_RELEASE_TICKS {
-            app.update();
+            update_with_real_frame_time(&mut app);
             if let Some(pos) = app.world().non_send::<EmbeddedPlayer>().position() {
                 max_z = max_z.max(pos.z);
             }
@@ -731,6 +913,98 @@ mod tests {
             start.z,
             max_z,
             max_z - start.z
+        );
+    }
+
+    /// BL-82 EM-4.11: [`predicted_local_transform`]'s sim→Bevy axis conversion
+    /// matches `crate::sim_pos_to_bevy`/`crate::sim_ori_to_bevy` exactly (the
+    /// SAME helpers `crate::mirror_sim_entities` uses for every other mirrored
+    /// entity): `(x, y, z) -> (x, z, -y)`. No assets, no boot.
+    #[test]
+    fn predicted_local_transform_converts_sim_axes_to_bevy() {
+        let sim_pos = vek::Vec3::new(10.0, 20.0, 5.0);
+        let sim_vel = vek::Vec3::new(1.0, 2.0, 0.0);
+
+        let predicted = predicted_local_transform(sim_pos, sim_vel, None);
+
+        assert_eq!(predicted.pos, bevy::math::Vec3::new(10.0, 5.0, -20.0));
+        assert_eq!(predicted.vel, bevy::math::Vec3::new(1.0, 0.0, -2.0));
+        assert_eq!(
+            predicted.ori,
+            Quat::IDENTITY,
+            "no orientation sample falls back to identity, same as position()'s None handling"
+        );
+    }
+
+    /// BL-82 EM-4.11 regression: given a mirror entity already tagged
+    /// [`NetLocalPlayer`], the write path [`mirror_local_player_prediction`]
+    /// uses (entity resolution via `Query<Entity, With<NetLocalPlayer>>` +
+    /// `Commands::insert`) lands a [`PredictedLocalTransform`] with the
+    /// correct axis-converted value on exactly that entity. Exercises the
+    /// SAME entity-resolution + insert call `mirror_local_player_prediction`
+    /// makes, without needing a real (heavy, network-booted) [`EmbeddedPlayer`]
+    /// to source the pose from — see that function's doc comment.
+    #[test]
+    fn writes_predicted_local_transform_onto_the_tagged_mirror_entity() {
+        use bevy::{MinimalPlugins, app::App};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let entity = app.world_mut().spawn(NetLocalPlayer).id();
+
+        // Mirrors `mirror_local_player_prediction`'s own first-frame-inserts/
+        // subsequent-frames-mutate-in-place split (BL-82 EM-4.11 perf
+        // follow-up), without needing a real `EmbeddedPlayer` — see that
+        // function's doc comment for why a stub is used here.
+        fn write_stub_prediction(
+            mut local_player: Query<
+                (Entity, Option<&mut PredictedLocalTransform>),
+                With<NetLocalPlayer>,
+            >,
+            mut commands: Commands,
+            mut sim_pos: bevy::ecs::system::Local<f32>,
+        ) {
+            let Ok((entity, existing)) = local_player.single_mut() else {
+                return;
+            };
+            // A different position each call, so the mutate-in-place test
+            // below can tell "inserted once" apart from "updated again".
+            *sim_pos += 1.0;
+            let stub = predicted_local_transform(
+                vek::Vec3::new(*sim_pos, 20.0, 5.0),
+                vek::Vec3::new(1.0, 2.0, 0.0),
+                None,
+            );
+            match existing {
+                Some(mut existing) => *existing = stub,
+                None => {
+                    commands.entity(entity).insert(stub);
+                },
+            }
+        }
+        app.add_systems(Update, write_stub_prediction);
+        app.update();
+
+        let first = app
+            .world()
+            .get::<PredictedLocalTransform>(entity)
+            .expect("PredictedLocalTransform must be written onto the NetLocalPlayer entity")
+            .pos;
+        assert_eq!(first, bevy::math::Vec3::new(1.0, 5.0, -20.0));
+
+        // A second frame must MUTATE the existing component in place (no
+        // re-`insert`, no stale value left over) — the in-place path.
+        app.update();
+        let second = app
+            .world()
+            .get::<PredictedLocalTransform>(entity)
+            .expect("PredictedLocalTransform must still be present")
+            .pos;
+        assert_eq!(
+            second,
+            bevy::math::Vec3::new(2.0, 5.0, -20.0),
+            "the second frame must update the SAME component in place, not leave the first \
+             frame's value behind"
         );
     }
 }

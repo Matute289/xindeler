@@ -218,6 +218,46 @@ pub struct NetUid(pub u64);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetLocalPlayer;
 
+/// Frame-rate-predicted transform of the LOCAL player (BL-82 EM-4.11).
+///
+/// The listen-server bridge already embeds a full, correct, shared-code
+/// client-side predictor — the `xindeler-client-core::Client` inside
+/// `xindeler-sim-bridge::player` — the SAME predictor old (pre-Bevy) voxygen
+/// used. This component carries that predictor's own per-`Update` (frame-rate)
+/// output: `xindeler_sim_bridge::player::mirror_local_player_prediction`
+/// writes it every frame from `EmbeddedPlayer::position()`/`velocity()`/
+/// `orientation()` (Bevy axes, converted the same way the mirror converts the
+/// rest of the sim state), and the render (`xindeler-client::entity_view`)
+/// drives the local player's `Transform` from it DIRECTLY (a snap, not an
+/// ease) instead of interpolating the authoritative, 30 Hz-sampled
+/// [`NetPos`]/[`NetOri`]/[`NetVel`] the way every remote entity still does.
+///
+/// **NOT replicated.** It never crosses a socket — it is produced and
+/// consumed inside the SAME process (the listen-server bridge writes it, the
+/// listen-server's own client-side plugins read it), so registering it with
+/// `.replicate::<>()` would be both wrong (replicon would try to serialize
+/// player-local prediction state to remote clients, which never asked for it
+/// and have no use for it — a real remote player is server-authoritative like
+/// any other mirrored entity) and pointless (nothing on the wire needs it).
+/// [`NetPos`]/[`NetOri`]/[`NetVel`] stay exactly as they are — the
+/// reconciliation truth, the remote-entity render source, and the diagnostic
+/// baseline — this component only ADDS a second, frame-rate-fresh source for
+/// the ONE entity that has one.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct PredictedLocalTransform {
+    pub pos: Vec3,
+    pub ori: Quat,
+    /// Forward-looking: no current reader (`xindeler-client::entity_view`'s
+    /// `interpolate_entities` only drives `Transform` from `pos`/`ori`; its
+    /// own `Interpolated` presentation buffer has no velocity field either).
+    /// Carried here anyway — mirroring every other mirrored entity's
+    /// [`NetVel`] — for a future consumer (camera lean/tilt, animation blend
+    /// weight, etc.) that wants the local player's own predicted velocity
+    /// without a second lookup; negligible cost (one axis-swap per frame) to
+    /// keep it current.
+    pub vel: Vec3,
+}
+
 /// Client → server input sample (v0 placeholder shape).
 ///
 /// Sent as a replicon *client message*; it surfaces on the server wrapped in
