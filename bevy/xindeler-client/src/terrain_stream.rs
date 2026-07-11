@@ -35,7 +35,8 @@ use common::{
 use vek::{Vec2 as VVec2, Vec3 as VVec3};
 use xindeler_protocol::{CompressedChunk, RemoveChunk, TerrainAnchor};
 use xindeler_render_voxel::pipeline::{
-    ChunkKey, ChunkMeshIndex, ChunkMeshQueue, ChunkVolume, ChunkVolumeProvider,
+    ChunkKey, ChunkMeshIndex, ChunkMeshPipelineSet, ChunkMeshQueue, ChunkVolume,
+    ChunkVolumeProvider,
 };
 
 use crate::camera::FlyCam;
@@ -159,7 +160,23 @@ impl Plugin for TerrainStreamPlugin {
                 Update,
                 (
                     receive_anchor,
-                    receive_chunks,
+                    // BL-82 EM-4.11 Phase D (ecs-design-reviewer follow-up):
+                    // `receive_chunks` reads `Res<ChunkMeshIndex>` (see its
+                    // doc comment / `dirty_keys_for_arrival`) to decide which
+                    // neighbours are already meshed, and `ChunkMeshIndex` is
+                    // written by the pipeline's `spawn_chunk_mesh_tasks`/
+                    // `apply_chunk_meshes` (both `.in_set(ChunkMeshPipelineSet)`,
+                    // `pipeline.rs`) — a cross-plugin conflicting-resource-access
+                    // pair with no prior explicit edge. Making it structural
+                    // (rather than relying on Bevy's implicit ambiguity
+                    // tie-break) also fixes the latency in the right direction:
+                    // running BEFORE the pipeline set means a brand-new
+                    // arrival's OWN key gets queued in time to be picked up by
+                    // `spawn_chunk_mesh_tasks` the SAME frame, while neighbour
+                    // decisions read `ChunkMeshIndex` as of the end of the
+                    // PREVIOUS frame — safe per the "one-frame-bounded
+                    // staleness, not lost-forever" trace in this PR's review.
+                    receive_chunks.before(ChunkMeshPipelineSet),
                     receive_removes,
                     place_camera_on_anchor,
                 ),
@@ -640,6 +657,91 @@ mod tests {
                 .get(VVec2::new(0, 0))
                 .is_none(),
             "a RemoveChunk must despawn the chunk's mesh entity"
+        );
+    }
+
+    /// BL-82 EM-4.11 Phase D — real-schedule (not just pure-function) proof
+    /// that the selective-marking fix's TWO cases both hold true end-to-end,
+    /// across REAL frames (not one batch): an ALREADY-meshed neighbour of a
+    /// later arrival gets genuinely re-meshed (a fresh entity, via the
+    /// existing atomic despawn-old+spawn-new swap), while a neighbour that
+    /// has never streamed in stays un-indexed (never spawned at all) rather
+    /// than being redundantly queued.
+    #[test]
+    fn later_arrival_remeshes_an_already_meshed_neighbour_but_skips_an_unstreamed_one() {
+        let mut app = test_app();
+
+        // Frame batch 1: mesh a full 3×3 around the origin (as in
+        // `streamed_chunk_meshes_then_removes`) and let it fully settle.
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let key = [dx, dy];
+                app.world_mut()
+                    .write_message(CompressedChunk::encode(key, &solid_chunk(4)));
+            }
+        }
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            (-1..=1).all(|dx| {
+                (-1..=1).all(|dy| idx.get(VVec2::new(dx, dy)).is_some()) && stats.in_flight == 0
+            })
+        });
+
+        // [1, 0] and [1, 1] are ALREADY-meshed neighbours the next arrival
+        // will touch; record their current entity so a later re-mesh (a
+        // fresh entity, per the atomic swap) is observable. [2, -1] is a
+        // neighbour of the next arrival too, but has NEVER streamed in — it
+        // must stay un-indexed both before and after.
+        let entity_before_1_0 = app
+            .world()
+            .resource::<ChunkMeshIndex>()
+            .get(VVec2::new(1, 0))
+            .and_then(|e| e.terrain)
+            .expect("[1,0] meshed in batch 1");
+        let entity_before_1_1 = app
+            .world()
+            .resource::<ChunkMeshIndex>()
+            .get(VVec2::new(1, 1))
+            .and_then(|e| e.terrain)
+            .expect("[1,1] meshed in batch 1");
+        assert!(
+            app.world()
+                .resource::<ChunkMeshIndex>()
+                .get(VVec2::new(2, -1))
+                .is_none(),
+            "[2,-1] must not be indexed before it has ever streamed in"
+        );
+
+        // Frame batch 2 (later frames, not the same batch): a genuinely NEW
+        // arrival at [2, 0], neighbouring [1,-1]/[1,0]/[1,1] (already meshed)
+        // and [2,-1]/[2,1]/[3,-1]/[3,0]/[3,1] (never streamed).
+        app.world_mut()
+            .write_message(CompressedChunk::encode([2, 0], &solid_chunk(4)));
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            idx.get(VVec2::new(2, 0)).is_some() && stats.in_flight == 0
+        });
+        // The already-meshed neighbours must have been re-marked dirty and
+        // genuinely re-meshed by the new arrival — settle a few more frames
+        // so their re-mesh (queued alongside [2,0]'s own first mesh) has
+        // time to complete too.
+        drain_until(&mut app, 500, |app| {
+            let idx = app.world().resource::<ChunkMeshIndex>();
+            let stats = app.world().resource::<ChunkUploadStats>();
+            stats.in_flight == 0
+                && idx.get(VVec2::new(1, 0)).and_then(|e| e.terrain) != Some(entity_before_1_0)
+                && idx.get(VVec2::new(1, 1)).and_then(|e| e.terrain) != Some(entity_before_1_1)
+        });
+
+        assert!(
+            app.world()
+                .resource::<ChunkMeshIndex>()
+                .get(VVec2::new(2, -1))
+                .is_none(),
+            "[2,-1] must STILL be un-indexed: it never streamed in, so the selective rule must \
+             never have queued it just because it's a neighbour of [2,0]"
         );
     }
 
