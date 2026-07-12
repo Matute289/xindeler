@@ -505,10 +505,10 @@ fn build_chunk_sprites(
     // headless test harness exercising ONLY this module's own lifecycle
     // (this file's `tests` module) never wires the terrain-mesh pipeline at
     // all. Absent entirely degrades honestly to "no terrain-readiness gate"
-    // (same convention as `PlaceholderColorHint`/`PlaceholderHazeTint` in
-    // `xindeler-render-voxel::pipeline` — an optional host hook, not a
-    // silent no-op that could hide a real production gap, since production
-    // always has it).
+    // (the same "optional host hook, not a silent no-op that could hide a
+    // real production gap" convention xindeler-render-voxel::pipeline uses
+    // for its other optional resources, since production always has this
+    // one).
     mesh_index: Option<Res<ChunkMeshIndex>>,
     mut perf_log: Local<Option<bool>>,
     mut decode_queue: Local<VecDeque<CompressedChunk>>,

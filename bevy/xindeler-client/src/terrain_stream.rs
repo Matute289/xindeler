@@ -139,12 +139,41 @@ impl TerrainStore {
     /// wasn't merged yet). [`ChunkStoreView`] replaces that with a zero-
     /// allocation borrow: each DDA step is one `HashMap` lookup into
     /// `self.chunks`, no construction, no clones.
+    ///
+    /// ## BL-82 EM-3.11 round 19 — gated on the chunk's REAL render mesh too
+    /// Matías reported colliding with something invisible ("me choqué contra
+    /// algo invisible, ya me había pasado") — a real gameplay capture showed
+    /// the camera slamming in close against a rock formation that was NOT on
+    /// screen a fraction of a second earlier. Root cause: this cast used to
+    /// read `self.chunks` directly, i.e. the client's raw DECODED voxel data,
+    /// which becomes available the instant a `CompressedChunk` arrives —
+    /// completely independent of whether [`xindeler_render_voxel::pipeline`]'s
+    /// async, budgeted mesh pipeline has actually built+uploaded a mesh for
+    /// that chunk yet (the same "physics/collision truth outran what's drawn"
+    /// family as the terrain-placeholder investigation this round closed —
+    /// see the pipeline module docs' round-19 section). A freshly-streamed
+    /// chunk can sit "solid to collision" but invisible for a genuinely
+    /// perceptible window (round 17's own measurement: placeholder episodes,
+    /// i.e. not-yet-real chunks, commonly lasted ~300+ ms), long enough for
+    /// the boom to clip against it before the player ever saw it appear.
+    /// [`ChunkMeshIndex::has_real_terrain_mesh`] is now checked in
+    /// [`ChunkStoreView::get`] alongside the streamed-or-not check already
+    /// there: a chunk whose data has arrived but whose real mesh hasn't
+    /// landed is treated exactly like "not yet streamed" (no clip), matching
+    /// what the player actually sees on screen.
     #[cfg(feature = "listen-server")]
-    fn boom_cast(&self, pivot_sim: VVec3<f32>, dir_sim: VVec3<f32>, desired: f32) -> f32 {
+    fn boom_cast(
+        &self,
+        pivot_sim: VVec3<f32>,
+        dir_sim: VVec3<f32>,
+        desired: f32,
+        mesh_index: &ChunkMeshIndex,
+    ) -> f32 {
         let view = ChunkStoreView {
             map_size_lg: self.map_size_lg,
             default: &self.default,
             chunks: &self.chunks,
+            mesh_index,
         };
         crate::player_input::collide_boom(&view, pivot_sim, dir_sim, desired)
     }
@@ -172,6 +201,11 @@ struct ChunkStoreView<'a> {
     map_size_lg: MapSizeLg,
     default: &'a Arc<TerrainChunk>,
     chunks: &'a HashMap<[i32; 2], Arc<TerrainChunk>>,
+    /// BL-82 EM-3.11 round 19 — see [`TerrainStore::boom_cast`]'s doc comment:
+    /// a chunk whose raw data has streamed in but whose real render mesh
+    /// hasn't landed yet must not clip the camera boom, or the player
+    /// collides with something they can't see on screen.
+    mesh_index: &'a ChunkMeshIndex,
 }
 
 /// Unit error for [`ChunkStoreView`]: `collide_boom`'s ray always finishes
@@ -192,13 +226,20 @@ impl ReadVol for ChunkStoreView<'_> {
     fn get(&self, pos: VVec3<i32>) -> Result<&Block, ChunkStoreViewError> {
         let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(pos.x, pos.y));
         let chunk = match self.chunks.get(&[key.x, key.y]) {
-            Some(chunk) => chunk,
+            // BL-82 EM-3.11 round 19: data has streamed in, but treat it as
+            // solid ONLY once its real render mesh is up too — see
+            // `TerrainStore::boom_cast`'s doc comment. A chunk that's
+            // streamed-but-not-yet-meshed falls through to the same "genuine
+            // miss" arm below (no clip), exactly like a chunk that hasn't
+            // streamed at all.
+            Some(chunk) if self.mesh_index.has_real_terrain_mesh(key) => chunk,
             // Counterintuitively (mirroring `VolGrid2d::get_key`), a key
             // outside the map's max bounds always resolves to the default
             // (void) chunk rather than an error — only an IN-BOUNDS but
-            // not-yet-streamed chunk is a genuine miss.
+            // not-yet-streamed (or streamed-but-not-yet-visually-real) chunk
+            // is a genuine miss.
             None if !self.map_size_lg.contains_chunk(key) => self.default,
-            None => return Err(ChunkStoreViewError),
+            Some(_) | None => return Err(ChunkStoreViewError),
         };
         let offs = VolGrid2d::<TerrainChunk>::chunk_offs(pos);
         Ok(chunk.get_unchecked(offs))
@@ -222,17 +263,18 @@ impl SharedTerrain {
     /// read lock only for the duration of this call (a handful of voxel
     /// `get`s — microseconds); the mesher's own lock usage elsewhere is
     /// unaffected. See [`TerrainStore::boom_cast`] for the (zero-allocation)
-    /// view assembly.
+    /// view assembly and the round-19 "invisible collision" fix.
     pub(crate) fn boom_cast(
         &self,
         pivot_sim: VVec3<f32>,
         dir_sim: VVec3<f32>,
         desired: f32,
+        mesh_index: &ChunkMeshIndex,
     ) -> f32 {
         let Ok(store) = self.0.read() else {
             return desired; // poisoned lock: fail open (no clip) rather than panic
         };
-        store.boom_cast(pivot_sim, dir_sim, desired)
+        store.boom_cast(pivot_sim, dir_sim, desired, mesh_index)
     }
 }
 
@@ -1041,18 +1083,42 @@ mod tests {
     // `boom_cast` path) mirrors `VolGrid2d::get`'s fallback semantics
     // -----------------------------------------------------------------------
 
-    /// Exercises `ChunkStoreView::get`'s three branches directly (present
-    /// chunk / out-of-map-bounds default / genuine in-bounds miss) — the same
-    /// three cases `VolGrid2d::get_key_arc` distinguishes
-    /// (`common/src/volumes/vol_grid_2d.rs`). The real-terrain integration
-    /// test below (`boom_cast_clamps_against_real_generated_terrain`) only
-    /// ever exercises the "present chunk" branch (the anchor's own already-
-    /// streamed chunk); this test guards the other two directly and cheaply
-    /// (no App/assets/sim needed) — reviewer-suggested coverage for the
-    /// zero-allocation view added in this follow-up (PR #64).
+    /// Exercises `ChunkStoreView::get`'s branches directly (present-and-real
+    /// chunk / present-but-not-yet-real chunk / out-of-map-bounds default /
+    /// genuine in-bounds miss) — the same fallback cases `VolGrid2d::
+    /// get_key_arc` distinguishes (`common/src/volumes/vol_grid_2d.rs`), plus
+    /// the BL-82 EM-3.11 round-19 "streamed but not yet visually real" case
+    /// this follow-up adds. The real-terrain integration test below
+    /// (`boom_cast_clamps_against_real_generated_terrain`) only ever
+    /// exercises the "present and real" branch (the anchor's own
+    /// already-fully-meshed chunk); this test guards the others directly and
+    /// cheaply — reviewer-suggested coverage for the zero-allocation view
+    /// added in the original follow-up (PR #64), extended for round 19's
+    /// "invisible collision" fix.
+    ///
+    /// The "present and real" case is proven against a GENUINE
+    /// `ChunkMeshIndex` produced by the real pipeline (not a hand-faked one —
+    /// `ChunkMeshIndex` deliberately has no public insert API, since its
+    /// whole contract is "only ever populated once a real mesh lands").
     #[cfg(feature = "listen-server")]
     #[test]
     fn chunk_store_view_mirrors_vol_grid_2d_fallback_semantics() {
+        // A real one-chunk pipeline run, purely to get a genuine
+        // `ChunkMeshIndex` saying key (0,0) has its real mesh up — decoupled
+        // from the hand-built `chunks` map below (this app's own internal
+        // terrain store is irrelevant here; only its `ChunkMeshIndex` state
+        // is borrowed).
+        let mut real_app = test_app();
+        real_app
+            .world_mut()
+            .write_message(CompressedChunk::encode([0, 0], &solid_chunk(5)));
+        drain_until(&mut real_app, 500, |app| {
+            app.world()
+                .resource::<ChunkMeshIndex>()
+                .has_real_terrain_mesh(VVec2::new(0, 0))
+        });
+        let real_mesh_index = real_app.world().resource::<ChunkMeshIndex>();
+
         let map_size_lg = MapSizeLg::new(VVec2::new(6, 6)).expect("valid map size");
         let default = Arc::new(TerrainChunk::new(
             0,
@@ -1062,17 +1128,25 @@ mod tests {
         ));
         let mut chunks = HashMap::new();
         chunks.insert([0, 0], Arc::new(solid_chunk(5)));
+        // (2, 0) streamed (raw data present) but never meshed — round 19's
+        // new case: must behave exactly like "not yet streamed", not "solid".
+        // A DIFFERENT key from (1, 0) below (which stays genuinely
+        // never-inserted) so the two distinct "miss" scenarios don't collide.
+        chunks.insert([2, 0], Arc::new(solid_chunk(5)));
+        let empty_mesh_index = ChunkMeshIndex::default();
+
         let view = ChunkStoreView {
             map_size_lg,
             default: &default,
             chunks: &chunks,
+            mesh_index: real_mesh_index,
         };
 
-        // Present chunk: reads the real solid block back.
+        // Present AND real chunk: reads the real solid block back.
         assert!(
             view.get(VVec3::new(1, 1, 2))
                 .is_ok_and(|b: &Block| b.is_solid()),
-            "a stored chunk's own solid block must read back solid"
+            "a stored chunk's own solid block must read back solid once its real mesh is up"
         );
 
         // Out-of-map-bounds key (map is 2^6 = 64 chunks per axis): falls back
@@ -1091,6 +1165,24 @@ mod tests {
             view.get(unstreamed_neighbour).is_err(),
             "an in-bounds chunk that was never inserted must be a genuine miss, not a default \
              fallback"
+        );
+
+        // BL-82 EM-3.11 round 19: present chunk DATA (key (2,0)) whose real
+        // mesh has NOT landed — using the EMPTY index this time — must also
+        // be a genuine miss (no clip), not solid. This is the exact
+        // "colliding with something invisible" bug this round fixes.
+        let streamed_but_unmeshed = ChunkStoreView {
+            map_size_lg,
+            default: &default,
+            chunks: &chunks,
+            mesh_index: &empty_mesh_index,
+        };
+        assert!(
+            streamed_but_unmeshed
+                .get(VVec3::new(2 * CHUNK + 1, 1, 2))
+                .is_err(),
+            "a chunk whose raw data streamed in but whose real mesh hasn't landed must NOT clip \
+             the boom — the player can't see it yet"
         );
     }
 
@@ -1194,8 +1286,17 @@ mod tests {
                     .expect("lock")
                     .chunks
                     .contains_key(&key);
-                if has_center {
-                    eprintln!("anchor's own chunk {key:?} streamed by tick {tick}");
+                // BL-82 EM-3.11 round 19: `boom_cast` now also requires the
+                // chunk's REAL render mesh, not just its raw streamed data
+                // (module docs on `TerrainStore::boom_cast`) — wait for both,
+                // or this test's later clamp assertion would spuriously see
+                // "not yet real" ⇒ no clip.
+                let has_real_mesh = app
+                    .world()
+                    .resource::<ChunkMeshIndex>()
+                    .has_real_terrain_mesh(VVec2::new(key[0], key[1]));
+                if has_center && has_real_mesh {
+                    eprintln!("anchor's own chunk {key:?} streamed AND meshed by tick {tick}");
                     break;
                 }
             }
@@ -1277,8 +1378,9 @@ mod tests {
         );
         let down = VVec3::new(0.0, 0.0, -1.0);
         let terrain = app.world().resource::<SharedTerrain>();
+        let mesh_index = app.world().resource::<ChunkMeshIndex>();
 
-        let hit_dist = terrain.boom_cast(pivot, down, AIR_GAP + 10.0);
+        let hit_dist = terrain.boom_cast(pivot, down, AIR_GAP + 10.0, mesh_index);
         let expected = AIR_GAP - crate::player_input::CAM_NEAR_PAD;
         assert!(
             (hit_dist - expected).abs() < TOLERANCE,
@@ -1288,7 +1390,7 @@ mod tests {
 
         // A short boom that never reaches the ground returns the FULL
         // desired distance — open air, no clip.
-        let clear = terrain.boom_cast(pivot, down, 5.0);
+        let clear = terrain.boom_cast(pivot, down, 5.0, mesh_index);
         assert_eq!(
             clear, 5.0,
             "a boom cast well short of the real ground must return the full desired distance"
