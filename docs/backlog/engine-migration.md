@@ -52,7 +52,7 @@ so an upgrade waits until the dep tree catches up.
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
 | **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10, 3.8d, 3.8e, 3.9b, 3.10b, 3.11-FH (P-A+P-B), 3.12 all done (PRs #7–#20, #26, #28–#30, #57, #60, #64): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling, a real full-horizon far-mesh (real colour + curvature bend + occlusion dissolve) + camera-collision spring-arm**. Open: EM-3.9c (sprite wind-sway v2, unstarted), EM-3.11-FH Phase C (streamed LOD objects, unstarted), EM-3.11 **[M]** (Matías in-game smoke) 🔵 18 rounds in, all merged — round 18 awaiting his live retest; EM-3.11p (diagonal stutter) not formally closed |
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress, essentially content-complete** — EM-4.1→4.12 all done (PRs #27, #33, #45, #46, #49, #52, #58, #59, #61, #65, #66): headless server shell, transport/login/interest-mgmt, dimension lifecycle+teardown+GC, entity factory, narrative hooks, AI-gateway/AURORA readiness seams, full E2E ORACLE event drill (EM-4.9) all real and passing. **Only open item: EM-4.2's full 24h soak run** (10-min soak-readiness sanity done; the multi-hour run itself not yet executed/reported) |
-| **5** | UI (bevy_ui + widget kit), audio & playable parity | ⚪ **design authored** (2026-07-11, Opus — spec/plan/tasks 56); **not blocked**, EM-5.1 + EM-5.2 start-ready; 16 epics (5.2→5.8 unbundled + 3 new); worksheet pending |
+| **5** | UI (bevy_ui + widget kit), audio & playable parity | ⚪ **design authored** (2026-07-11, Opus — spec/plan/tasks 56); **not blocked**, EM-5.1 + EM-5.2 start-ready; 16 epics (5.2→5.8 unbundled + 3 new); **worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total")** |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.7 + EM-7.9→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86) |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
@@ -162,7 +162,18 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 `specs/2026-07-11-bl82-phase5-ui-audio-parity-design.md` + `plans/…-plan.md` +
 `tasks/56-bl82-phase5-ui-audio-parity-tasks.md`. **Not blocked** — Phase 5 is the immediate next phase
 (Phase 3 gate met; Phase 4 content-complete bar the 24h soak). **EM-5.1 (UI foundation) + EM-5.2 (proof
-slice) are start-ready now**; a 7-fork worksheet (plan §Worksheet) gates only later scope.
+slice) are start-ready now**; the 7-fork worksheet is now **locked** (below).
+
+**Worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total", no lean cutover):** Matías
+returned the §Worksheet choosing the full-fidelity option on every fork (as with Phase 7's "maximalist"
+call). The old client is retired only under a **total-replacement scheme** — every secondary/advanced
+system (two-way trade, full 4-tab crafting, gamepad, full i18n, and the complete 252-file instrument/audio
+bank) ships **before** the EM-5.13 cutover; **nothing defers to post-cutover polish.** Answers: **Q1** UI =
+confirmed (our theme over `bevy_ui`+`bevy_ui_widgets`+`EditableText`, zero new UI deps); **Q2** audio =
+**direct Kira in our own `bevy/*` crate, NOT the `bevy_kira_audio` wrapper** (we own the Bevy glue —
+EM-5.10 is the largest epic, splits 5.10a–e); **Q3** = full server browser; **Q4** = full 4-tab crafting;
+**Q5** = gamepad in v1; **Q6** = full multi-language i18n + hot-swap; **Q7 (META)** = full parity in v1.
+EM-5.1 + EM-5.2 authorized to proceed in parallel.
 
 **Two facts shape the phase:** (1) **Feathers is editor-tooling-only / experimental** — Bevy's own docs
 say NOT to use it for game UI ("copy the code into your project"). So the locked `[Q4]=B` "bevy_ui +
@@ -184,17 +195,17 @@ accessibility/i18n-depth — cross-cutting). Audio/input/settings/parity keep th
 | EM-5.3 | **Skillbar / hotbar + cooldowns** — 10 slots + keybind labels + icons + cooldown sweeps + stance icons; drag-to-bind. *New mirror:* `NetAbilities`/`NetCooldowns` (none of it reaches the client today) | ⚪ |
 | EM-5.4 | **Chat** — log, input, channel tabs, command completion, mentions. *New:* `NetChatMsg` + client→server send | ⚪ |
 | EM-5.5 | **Map** — minimap (POIs/group) + full world map (sites/markers/zoom-pan). *New:* `NetMapData` | ⚪ |
-| EM-5.6 | **Inventory / bag / trade / loot** — paper-doll loadout, bag grid, tooltips, drag-drop slots, loot feed, overitem prompts, two-party trade. *New:* `NetInventory` (full) + `NetTrade` | ⚪ (trade scope = Q4/Q7) |
+| EM-5.6 | **Inventory / bag / trade / loot** — paper-doll loadout, bag grid, tooltips, drag-drop slots, loot feed, overitem prompts, **full two-party trade** (net via real replication end-to-end). *New:* `NetInventory` (full) + `NetTrade` | ⚪ (full trade, maximalist v1, worksheet 2026-07-11) |
 | EM-5.7 | **Diary / skill-trees** — stats + weapon trees + **class trees (data-driven, reuse BL-06)** + abilities tab + SP spend. *New:* `NetSkillSet` | ⚪ |
 | EM-5.8 | **Social / group / dialogue** — player list, party frames, invites; NPC quest/dialogue (v1-minimal, AURORA seam). *New:* `NetPlayerList`/`NetGroup`/`NetDialogue` | ⚪ |
-| EM-5.9 | **Main menu + connect flow** — menu, disclaimer, login (matches EM-4.2c handshake), connecting/loading, credits; **server-browser vs direct-connect = worksheet Q3** | ⚪ (Q3) |
-| EM-5.10 | **Audio** — Kira-based (backend = worksheet Q2); music (explore/combat) + SFX (event mappers over `common::Outcome`) + ambience + spatial + volumes. Frozen manifests reused. Bard instrument bank (252 files) deferred | ⚪ (Q2) |
-| EM-5.11 | **Input rebinding** — port `GameInput` (~90 actions) to a keymap `Res` + `settings.ron` `controls` section (delta-vs-default) + winit→Bevy migration note; **gamepad = worksheet Q5** | ⚪ (Q5) |
+| EM-5.9 | **Main menu + connect flow** — menu, disclaimer, login (matches EM-4.2c handshake), connecting/loading, credits; **full server browser** (async concurrent server-list query + ping/version validation), wired in v1 | ⚪ (full server browser, maximalist v1, worksheet 2026-07-11) |
+| EM-5.10 | **Audio** — **direct Kira integrated in our own `bevy/*` audio crate (NOT the `bevy_kira_audio` wrapper)** — we own all the Bevy-integration glue (asset loading, spatial↔transform, per-frame scheduling); the largest epic, **splits 5.10a–e**. Music (explore/combat) + SFX (event mappers over `common::Outcome`) + ambience + spatial + volumes; frozen manifests reused; **+ the full 252-file bard instrument bank (required for v1, no longer deferred)** | ⚪ (direct in-house Kira, full incl. instrument bank, maximalist v1, worksheet 2026-07-11) |
+| EM-5.11 | **Input rebinding** — port `GameInput` (~90 actions) to a keymap `Res` + `settings.ron` `controls` section (delta-vs-default) + winit→Bevy migration note; **+ full gamepad in v1** (gilrs/Bevy-gamepad, deadzones, axis inversion, modifier-chord combos) | ⚪ (gamepad in v1, maximalist v1, worksheet 2026-07-11) |
 | EM-5.12 | **Settings + esc menu** — pause menu + all tabs (interface, video/**exposes existing `GraphicsTier`**, sound, controls/rebind, gameplay, chat, language, networking, accessibility); extends `XindelerSettings::save()` | ⚪ |
-| EM-5.13 **[M]** | **Full parity play session → cutover decision** — Matías plays against the concrete parity checklist (spec §8); all `[core]` pass → retire legacy client (gate into Phase 6 / EM-6.4) | ⚪ terminal gate |
+| EM-5.13 **[M]** | **Full parity play session → cutover decision** — Matías plays against the concrete parity checklist (spec §8); **under Q7=A total-replacement, ALL items ([core] + [full]) must pass** → retire legacy client (gate into Phase 6 / EM-6.4); nothing trails into post-cutover polish | ⚪ terminal gate (total replacement, maximalist v1, worksheet 2026-07-11) |
 | EM-5.14 | **Character select + creation** *(new row — pre-game flow, was buried in the 5.2→5.8 bundle)* — char list + 3D preview + creation wizard (reuse the 2026-06-12 design: Body→Appearance→Class→Alignment→Background→Finish). *New:* `NetCharList` + creation submit | ⚪ |
-| EM-5.15 | **Crafting** *(new row — 2.4k LOC, unbundled)* — recipes/search/categories + ingredient slots + craft; **salvage/repair/modular = worksheet Q4**. *New:* `NetRecipes` (reuses `NetInventory`) | ⚪ (Q4) |
-| EM-5.16 | **Accessibility, UI scaling & i18n depth** *(new row — cross-cutting)* — subtitles (with 5.10), reduced-flashing, scaling, **full i18n coverage = worksheet Q6** | ⚪ (Q6) |
+| EM-5.15 | **Crafting** *(new row — 2.4k LOC, unbundled)* — recipes/search/categories + ingredient slots + craft **+ full salvage/repair/modular-weapon tabs** (net via real replication end-to-end). *New:* `NetRecipes` (reuses `NetInventory`) | ⚪ (full 4-tab, maximalist v1, worksheet 2026-07-11) |
+| EM-5.16 | **Accessibility, UI scaling & i18n depth** *(new row — cross-cutting)* — subtitles (with 5.10), reduced-flashing, scaling, **+ full multi-language i18n coverage** (Fluent `.ftl` reactive pipeline into the string renderer + hot-swap language switching) | ⚪ (full i18n, maximalist v1, worksheet 2026-07-11) |
 
 ## Phase 6 — Upstream-sync drills & hardening ⚪
 
