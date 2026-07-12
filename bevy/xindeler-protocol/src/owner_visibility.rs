@@ -51,7 +51,7 @@
 use bevy::ecs::{component::Component, entity::Entity};
 use bevy_replicon::prelude::VisibilityFilter;
 
-use crate::{NetIncomingTradeInvite, NetInventory, NetTrade};
+use crate::{NetAbilityPool, NetIncomingTradeInvite, NetInventory, NetSkillSet, NetTrade};
 
 /// Marks a connected client's OWN connection entity with the sim `Uid` it
 /// controls. Inserted once, at login, by whichever shell resolves a
@@ -73,10 +73,31 @@ pub struct NetOwnerOnly(pub u64);
 
 impl VisibilityFilter for NetOwnerOnly {
     type ClientComponent = ClientOwnedUid;
-    // Hide ONLY these three components when the check below fails — every
-    // OTHER replicated component on the same entity (NetPos/NetHealth/...)
-    // stays governed by its own (entity-level) filter, unaffected.
-    type Scope = (NetInventory, NetTrade, NetIncomingTradeInvite);
+    // Hide ONLY these components when the check below fails — every OTHER
+    // replicated component on the same entity (NetPos/NetHealth/...) stays
+    // governed by its own (entity-level) filter, unaffected.
+    //
+    // BL-82 EM-5.7 (bevy-migration-reviewer + ecs-design-reviewer blocker,
+    // fixed): `NetSkillSet`/`NetAbilityPool` were tagged with the
+    // `NetOwnerOnly` COMPONENT by `xindeler-sim-bridge::skillset` and their
+    // own doc comments claimed "self-scoped, same posture as `NetInventory`"
+    // — but `bevy_replicon`'s `VisibilityFilter::Scope` only hides the
+    // components literally NAMED in this tuple. Tagging alone did nothing;
+    // both types silently fell back to `RegionKey`'s entity-level (whole-
+    // entity, region-based) visibility, meaning every client that could see
+    // the entity at all received every player's full unlocked-skill map and
+    // qualifying-ability pool — a real cross-client privacy leak once a
+    // second genuine client exists (EM-4.2b). Adding both here is the fix;
+    // see `tests::skillset_and_ability_pool_are_owner_scoped_too` for a
+    // regression guard that exercises the real two-client filter, not just
+    // `is_visible` in isolation.
+    type Scope = (
+        NetInventory,
+        NetTrade,
+        NetIncomingTradeInvite,
+        NetSkillSet,
+        NetAbilityPool,
+    );
 
     fn is_visible(&self, _client: Entity, component: Option<&Self::ClientComponent>) -> bool {
         component.is_some_and(|owned| owned.0 == self.0)
@@ -96,5 +117,111 @@ mod tests {
         assert!(filter.is_visible(Entity::PLACEHOLDER, Some(&ClientOwnedUid(42))));
         assert!(!filter.is_visible(Entity::PLACEHOLDER, Some(&ClientOwnedUid(7))));
         assert!(!filter.is_visible(Entity::PLACEHOLDER, None));
+    }
+
+    /// BL-82 EM-5.7 regression guard (bevy-migration-reviewer +
+    /// ecs-design-reviewer blocker): exercises the REAL two-client
+    /// `VisibilityFilter::Scope` registration end to end — not just
+    /// `is_visible` in isolation, which is exactly what let the missing
+    /// `NetSkillSet`/`NetAbilityPool` entries in `Scope` slip through
+    /// undetected. Two connected clients see the SAME `Replicated` entity
+    /// (no `RegionKey` on it, so that filter doesn't gate it at all); one is
+    /// tagged the real owner, the other isn't. The owner must receive
+    /// `NetSkillSet`; the non-owner must receive the entity (its `NetUid`,
+    /// say) but NEVER `NetSkillSet` — proving `Scope` actually hides it, not
+    /// merely that `NetOwnerOnly`'s own `is_visible` logic is correct.
+    #[test]
+    fn skillset_is_owner_scoped_across_two_real_clients() {
+        use bevy::{
+            MinimalPlugins,
+            app::{App, PluginGroup, PostUpdate},
+        };
+        use bevy_replicon::{
+            RepliconPlugins,
+            prelude::{ConnectedClient, Replicated, ServerPlugin},
+            test_app::{ServerTestAppExt, TestClientEntity},
+        };
+
+        use crate::{XindelerProtocolPlugin, skillset::NetSkillSet};
+
+        fn new_app() -> App {
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                bevy::state::app::StatesPlugin,
+                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+                XindelerProtocolPlugin,
+            ))
+            .finish();
+            app
+        }
+
+        /// Finds a connected client's own server-side connection entity by
+        /// matching the `TestClientEntity` handshake resource `connect_client`
+        /// stashes on the CLIENT app — the entity carrying `ConnectedClient`
+        /// server-side is a genuine `Entity` shared between both apps in this
+        /// test harness (spawned once, referenced by both sides), so a direct
+        /// equality match is exact — no ordering/"newest" heuristic needed
+        /// (an earlier draft of this test assumed `Entity`'s `Ord` reflected
+        /// connection order across TWO independently-connecting clients,
+        /// which does not hold once `bevy_replicon`'s own internal handshake
+        /// entities are accounted for; this fixes that).
+        fn server_connection_entity(server_app: &mut App, client_app: &App) -> Entity {
+            let target = **client_app.world().resource::<TestClientEntity>();
+            server_app
+                .world_mut()
+                .query::<(Entity, &ConnectedClient)>()
+                .iter(server_app.world())
+                .map(|(e, _)| e)
+                .find(|&e| e == target)
+                .expect("the client's own connection entity exists server-side")
+        }
+
+        let mut server_app = new_app();
+        let mut owner_client = new_app();
+        let mut other_client = new_app();
+
+        server_app.connect_client(&mut owner_client);
+        let owner_entity = server_connection_entity(&mut server_app, &owner_client);
+        server_app
+            .world_mut()
+            .entity_mut(owner_entity)
+            .insert(ClientOwnedUid(42));
+
+        server_app.connect_client(&mut other_client);
+        let other_entity = server_connection_entity(&mut server_app, &other_client);
+        server_app
+            .world_mut()
+            .entity_mut(other_entity)
+            .insert(ClientOwnedUid(99));
+
+        let skillset = NetSkillSet {
+            groups: vec![],
+            skills: vec![],
+        };
+        server_app
+            .world_mut()
+            .spawn((Replicated, NetOwnerOnly(42), skillset));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut owner_client);
+        owner_client.update();
+        server_app.exchange_with_client(&mut other_client);
+        other_client.update();
+
+        let mut owner_query = owner_client.world_mut().query::<&NetSkillSet>();
+        assert_eq!(
+            owner_query.iter(owner_client.world()).count(),
+            1,
+            "the owning client must receive NetSkillSet"
+        );
+
+        let mut other_query = other_client.world_mut().query::<&NetSkillSet>();
+        assert_eq!(
+            other_query.iter(other_client.world()).count(),
+            0,
+            "a non-owning client must NEVER receive another player's NetSkillSet — this is \
+             exactly the leak the Scope-tuple fix closes"
+        );
     }
 }
