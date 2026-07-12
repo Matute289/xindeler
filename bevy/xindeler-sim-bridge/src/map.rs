@@ -34,14 +34,19 @@
 //!
 //! ## Why downsample independently of `NetFarTerrain`'s `LOD_ALT_MAX_DIM`
 //! `client::WorldData::map_image()` is ALREADY one pixel per world chunk (a
-//! default Veloren world is up to 1024×1024 chunks) — a full-resolution copy
-//! would be a needlessly large one-shot payload, exactly the concern
-//! `NetFarTerrain`'s own downsample already addresses for the height/colour
-//! layers. This is a SEPARATE cap ([`MAP_IMAGE_MAX_DIM`]) because the map
+//! default Veloren world is up to 1024×1024 chunks) — an UNCAPPED
+//! full-resolution copy would grow with world size forever, exactly the
+//! concern `NetFarTerrain`'s own downsample already addresses for the
+//! height/colour layers. This uses a SEPARATE cap
+//! ([`xindeler_protocol::map::MAP_IMAGE_MAX_DIM`]) because the map
 //! background is a different visual product (an already-shaded/coloured
 //! bitmap, not a raw height/colour grid the far-mesh shader recombines) with
 //! its own acceptable resolution trade-off — sharing `NetFarTerrain`'s
-//! constant would silently couple two independent concerns.
+//! constant would silently couple two independent concerns. That cap lives
+//! in `xindeler-protocol` (not here) because it must also stay correlated
+//! with the CLIENT-side minimap crop that consumes it — see its own doc
+//! comment for the BL-82 Phase 5 follow-up investigation ("pixelated/blurry
+//! minimap") that found the two were previously uncorrelated.
 
 use bevy::{
     app::{App, Plugin, Update},
@@ -53,14 +58,9 @@ use bevy::{
 };
 use bevy_replicon::prelude::{ClientState, SendTargets, ToClients};
 use common::{map::MarkerFlags, terrain::TerrainChunkSize, vol::RectVolSize};
-use xindeler_protocol::map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind};
+use xindeler_protocol::map::{MAP_IMAGE_MAX_DIM, NetMapData, NetMapMarker, NetMapPoi, NetPoiKind};
 
 use crate::EmbeddedPlayer;
-
-/// Downsample cap: at most this many samples per axis in the background
-/// image, regardless of world size — mirrors `crate::LOD_ALT_MAX_DIM`'s
-/// reasoning but is an independent constant (see module doc comment).
-const MAP_IMAGE_MAX_DIM: u32 = 256;
 
 /// One-shot latch for the EM-5.5 `NetMapData` broadcast.
 #[derive(Resource, Default)]
@@ -200,12 +200,35 @@ mod tests {
     }
 
     /// A world above the cap downsamples so neither output axis exceeds it.
+    /// Uses a world 4x the (now 1024) cap on each axis — [`MAP_IMAGE_MAX_DIM`]
+    /// itself grew (BL-82 Phase 5 follow-up, the "pixelated minimap" fix), so
+    /// this test's own input must stay ABOVE whatever the cap currently is
+    /// to keep exercising the downsample path, not just-at-the-cap identity.
     #[test]
     fn map_image_grid_dims_caps_large_worlds() {
-        let (stride, w, h) = map_image_grid_dims(1024, 1024);
+        let oversized = MAP_IMAGE_MAX_DIM * 4;
+        let (stride, w, h) = map_image_grid_dims(oversized, oversized);
         assert!(stride > 1);
         assert!(w <= MAP_IMAGE_MAX_DIM);
         assert!(h <= MAP_IMAGE_MAX_DIM);
+    }
+
+    /// The shipped default world (1024x1024 chunks,
+    /// `world::sim::MapSizeLg::new(10, 10)`) now samples at FULL resolution
+    /// (stride 1) against the new cap — this is the direct fix for the
+    /// "pixelated/blurry minimap" bug: at the OLD 256 cap this world
+    /// downsampled 4x, discarding real resolution the always-on minimap's
+    /// tight crop needed (see [`MAP_IMAGE_MAX_DIM`]'s own doc comment for the
+    /// full root-cause analysis).
+    #[test]
+    fn map_image_grid_dims_samples_the_shipped_default_world_at_full_resolution() {
+        let (stride, w, h) = map_image_grid_dims(1024, 1024);
+        assert_eq!(
+            stride, 1,
+            "the default 1024x1024 world must no longer downsample"
+        );
+        assert_eq!(w, 1024);
+        assert_eq!(h, 1024);
     }
 
     /// A degenerate zero-sized axis never divides by zero (mirrors

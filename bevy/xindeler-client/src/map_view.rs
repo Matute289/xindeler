@@ -59,6 +59,16 @@ const MINIMAP_PANEL_PX: f32 = 160.0;
 /// Fixed UV half-extent the minimap shows around the player (v1 has no zoom
 /// control on the minimap — a follow-up, matching EM-5.1's own precedent of
 /// deferring some interactive knobs).
+///
+/// This crops a `2 * MINIMAP_HALF_EXTENT` (~12%) slice of
+/// [`xindeler_protocol::map::NetMapData`]'s background image into
+/// [`MINIMAP_PANEL_PX`] on-screen pixels — see
+/// [`xindeler_protocol::map::MAP_IMAGE_MAX_DIM`]'s own doc comment for the
+/// BL-82 Phase 5 follow-up investigation that found this crop's resolution
+/// requirement and that constant were previously uncorrelated (the
+/// "pixelated/blurry minimap" bug: real under-resolution, not a sampler
+/// filtering bug). Changing either this extent or the panel size without
+/// re-checking that math risks reintroducing the same blockiness.
 const MINIMAP_HALF_EXTENT: f32 = 0.06;
 const ARROW_SIZE_PX: f32 = 18.0;
 const MARKER_DOT_PX: f32 = 8.0;
@@ -956,6 +966,31 @@ mod tests {
         let px = crop_to_pixel_rect(crop, [200, 400]);
         assert_eq!(px.min, Vec2::ZERO);
         assert_eq!(px.max, Vec2::new(100.0, 100.0));
+    }
+
+    /// Regression test for the "pixelated/blurry minimap" bug (BL-82 Phase 5
+    /// follow-up): the minimap's magnification factor (on-screen px per
+    /// SOURCE image px, for the shipped default 1024x1024-chunk world) must
+    /// stay reasonably close to 1:1 — a large factor means the crop is
+    /// stretching too few real source pixels across too many screen pixels,
+    /// which is exactly the under-resolution bug no amount of correct linear
+    /// filtering can hide (see `xindeler_protocol::map::MAP_IMAGE_MAX_DIM`'s
+    /// doc comment for the full root-cause analysis). Before the fix (a 256
+    /// cap against this same crop) this factor was ~5.2x; pins it under 2x
+    /// going forward so a future change to `MINIMAP_HALF_EXTENT`,
+    /// `MINIMAP_PANEL_PX`, or the shared resolution cap can't silently
+    /// reintroduce the blockiness without this test catching it.
+    #[test]
+    fn minimap_crop_stays_close_to_native_resolution_for_the_default_world() {
+        let source_px_in_crop =
+            (2.0 * MINIMAP_HALF_EXTENT) * xindeler_protocol::MAP_IMAGE_MAX_DIM as f32;
+        let magnification = MINIMAP_PANEL_PX / source_px_in_crop;
+        assert!(
+            magnification < 2.0,
+            "minimap magnification is {magnification:.2}x — the crop is showing too few real \
+             source pixels for the viewport size, which will look pixelated regardless of sampler \
+             filtering"
+        );
     }
 
     /// The heading contract [`heading_from_forward`]'s doc comment promises:

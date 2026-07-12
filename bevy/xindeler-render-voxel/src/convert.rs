@@ -98,6 +98,20 @@ pub const ATTRIBUTE_BLOCK_LAYER: MeshVertexAttribute =
 pub const ATTRIBUTE_RIVER_VELOCITY: MeshVertexAttribute =
     MeshVertexAttribute::new("RiverVelocity", 988_540_919, VertexFormat::Float32x2);
 
+/// Per-vertex wind-sway WEIGHT in `[0, kind_strength]` (EM-3.9c), baked once
+/// per sprite mesh in `sprite::sprite_model_to_bevy` from the vertex's own
+/// local height (0 at the block-floor base, rising toward the kind's own
+/// authored sway strength at the model's tallest vertex — rigid props like
+/// furniture/dungeon décor are baked to a flat `0.0`, statically disabling the
+/// whole sway branch in `sprite_wind.wgsl` for their vertices). Consumed by
+/// `SpriteWindMaterialExt`, which rotates BOTH the position and the normal by
+/// the SAME per-vertex angle derived from this weight — see that shader's doc
+/// comment for why (EM-3.9b's reverted attempt displaced position only,
+/// leaving the normal stale). Distinct id, never collides with the terrain/
+/// fluid attributes above.
+pub const ATTRIBUTE_SPRITE_SWAY: MeshVertexAttribute =
+    MeshVertexAttribute::new("SpriteSway", 988_540_920, VertexFormat::Float32);
+
 /// Veloren z-up → Bevy y-up (pure rotation: winding preserved).
 #[inline]
 fn to_bevy(v: Vec3<f32>) -> [f32; 3] { [v.x, v.z, -v.y] }

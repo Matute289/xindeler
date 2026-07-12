@@ -82,7 +82,9 @@ use bevy::{
 
 use crate::convert::{ATTRIBUTE_BLOCK_LAYER, ATTRIBUTE_VOXEL_AO};
 
+mod sprite_wind;
 mod water;
+pub use sprite_wind::{SpriteWindMaterial, SpriteWindMaterialExt};
 pub use water::{WaterMaterial, WaterMaterialExt};
 
 /// The full terrain material type, as stored in `Assets` / `MeshMaterial3d`.
@@ -172,15 +174,17 @@ impl MaterialExtension for VoxelMaterialExt {
     }
 }
 
-/// Registers the embedded WGSL + the `MaterialPlugin` for [`VoxelMaterial`]
-/// AND [`WaterMaterial`] (EM-3.9b — both feed the same async chunk pipeline,
-/// so they are registered together). Added by [`crate::VoxelRenderPlugin`].
+/// Registers the embedded WGSL + the `MaterialPlugin` for [`VoxelMaterial`],
+/// [`WaterMaterial`] (EM-3.9b) AND [`SpriteWindMaterial`] (EM-3.9c — all three
+/// feed client-owned spawning paths, so they are registered together). Added
+/// by [`crate::VoxelRenderPlugin`].
 pub(crate) struct VoxelMaterialPlugin;
 
 impl Plugin for VoxelMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "voxel.wgsl");
         app.add_plugins(MaterialPlugin::<VoxelMaterial>::default())
-            .add_plugins(water::WaterMaterialPlugin);
+            .add_plugins(water::WaterMaterialPlugin)
+            .add_plugins(sprite_wind::SpriteWindMaterialPlugin);
     }
 }

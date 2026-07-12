@@ -17,8 +17,10 @@
 //!   coloured `bevy::Mesh`es. Off by default (the default set is terrain-only);
 //!   the client opts in.
 //! - `figure` also carries EM-3.9 block [`sprite`]s (grass/flowers/props;
-//!   EM-3.9b widened the kind whitelist to the whole `Plant` category — a
-//!   wind-sway shader was attempted and reverted, see
+//!   EM-3.9b widened the kind whitelist to the whole `Plant` category and
+//!   attempted a wind-sway shader that broke sprite lighting and was reverted;
+//!   EM-3.9c ships a normal-consistent v2 ([`material::SpriteWindMaterial`])
+//!   plus a further `Furniture`/`Decor`/ `Lamp`/`Container` kind widening — see
 //!   `xindeler-client::sprite_view`'s module docs) — per-chunk instance
 //!   collection + `.vox` meshing (reusing the figure segment mesher). Fluids
 //!   (water) need no new TOP-LEVEL module: the terrain mesher already emits a
