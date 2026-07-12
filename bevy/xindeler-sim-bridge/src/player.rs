@@ -236,6 +236,12 @@ pub struct EmbeddedPlayer {
     /// [`max_player_tick_interval`]). `None` until the first dispatch ever
     /// runs, so the ceiling never blocks the initial tick.
     last_tick_wall: Option<Instant>,
+    /// Chat lines the embedded Client received THIS tick (BL-82 EM-5.4),
+    /// captured from `client.tick()`'s returned frontend events by
+    /// [`tick_player`] (the only place those events surface) and drained by
+    /// `xindeler-sim-bridge::chat::broadcast_embedded_chat` right after, so
+    /// this never grows unbounded even across the same-frame ordering.
+    pending_chat: Vec<comp::ChatMsg>,
 }
 
 /// Non-blocking life-cycle stages, advanced one per frame by [`tick_player`].
@@ -315,6 +321,65 @@ impl EmbeddedPlayer {
     fn character_jumping(&self) -> bool { self.jumping }
 
     fn set_character_jumping(&mut self, jumping: bool) { self.jumping = jumping; }
+
+    /// Takes every chat line captured this tick (BL-82 EM-5.4), leaving the
+    /// internal queue empty — called once per frame by
+    /// `xindeler-sim-bridge::chat::broadcast_embedded_chat`, right after
+    /// [`tick_player`] populates it (see [`Self::pending_chat`]'s doc).
+    pub(crate) fn drain_pending_chat(&mut self) -> Vec<comp::ChatMsg> {
+        std::mem::take(&mut self.pending_chat)
+    }
+
+    /// Applies a client → server chat/command send request (BL-82 EM-5.4) to
+    /// the embedded Client's REAL network connection — the send-side
+    /// counterpart to [`Self::drain_pending_chat`]. Exactly mirrors how
+    /// movement (`controller_inputs_from` → `client.tick`) and jump
+    /// (`client.handle_input`) already reach the sim: a genuine call through
+    /// `client::Client`'s own public API (`send_command`/`send_chat`), which
+    /// sends a real `ClientGeneral` message over the loopback socket to the
+    /// embedded `Server` — never a direct sim-state write (isolation law).
+    ///
+    /// A no-op before the embedded player reaches [`PlayerStage::InGame`]
+    /// (nothing sane to attribute the message to yet) and for an
+    /// empty/whitespace-only channel line — degrades clean, never panics.
+    pub(crate) fn send_chat_request(&mut self, request: &xindeler_protocol::ChatSendRequest) {
+        use xindeler_protocol::{ChatSendRequest, NetChatChannel};
+
+        if self.stage != PlayerStage::InGame {
+            return;
+        }
+
+        match request {
+            ChatSendRequest::Channel { channel, text } => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+                // Only the five channel-tab-sendable kinds resolve a command
+                // name (see `NetChatChannel::send_command_name`'s doc
+                // comment) — `Tell`/`Npc`/`System` are receive-only and this
+                // arm simply ignores them rather than sending garbage.
+                if let Some(name) = channel.send_command_name() {
+                    self.client
+                        .send_command(name.to_owned(), vec![text.to_owned()]);
+                }
+                debug_assert!(
+                    !matches!(
+                        channel,
+                        NetChatChannel::Tell | NetChatChannel::Npc | NetChatChannel::System
+                    ),
+                    "the chat UI must never construct a Channel request for a receive-only \
+                     channel: {channel:?}"
+                );
+            },
+            ChatSendRequest::Command { name, args } => {
+                if name.trim().is_empty() {
+                    return;
+                }
+                self.client.send_command(name.clone(), args.clone());
+            },
+        }
+    }
 }
 
 /// Connects a fresh embedded [`Client`] to the already-running embedded sim
@@ -454,6 +519,7 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
         uid: None,
         jumping: false,
         last_tick_wall: None,
+        pending_chat: Vec::new(),
     })
 }
 
@@ -652,6 +718,24 @@ pub(crate) fn tick_player(
     player.client.cleanup();
 
     advance_stage(&mut player, &events);
+    // BL-82 EM-5.4: stash any `Event::Chat` this tick's dispatch produced —
+    // `client.tick()`'s returned events are the ONLY place they surface, so
+    // this capture must live here; `xindeler-sim-bridge::chat::
+    // broadcast_embedded_chat` drains + broadcasts them right after (same
+    // `Update` frame, chained after this system).
+    collect_chat_events(&mut player, &events);
+}
+
+/// Appends every `ClientEvent::Chat` this frame's dispatch produced onto
+/// [`EmbeddedPlayer::pending_chat`] — a small, pure-ish helper factored out
+/// of [`tick_player`] so the capture step reads as one line there.
+fn collect_chat_events(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
+    player
+        .pending_chat
+        .extend(events.iter().filter_map(|event| match event {
+            ClientEvent::Chat(msg) => Some(msg.clone()),
+            _ => None,
+        }));
 }
 
 /// BL-82 EM-4.11: writes the local player's frame-rate-predicted transform
