@@ -12241,6 +12241,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
  "vek",
  "xindeler-client-core",
  "xindeler-common",

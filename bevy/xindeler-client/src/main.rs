@@ -23,6 +23,8 @@
 mod atmosphere;
 mod camera;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod chat;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod combat_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod controls_screen;

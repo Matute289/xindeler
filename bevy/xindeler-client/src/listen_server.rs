@@ -37,13 +37,13 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    CombatHudMirrorPlugin, LodAltStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    boot_embedded_player, boot_test_server,
+    ChatBridgePlugin, CombatHudMirrorPlugin, LodAltStreamPlugin, PlayerBridgePlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
     lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
@@ -197,6 +197,13 @@ impl Plugin for ListenServerPlugin {
         // support (same reason `AtmosphereSyncMessagePlugin` below is
         // already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+        // BL-82 EM-5.4: the chat bridge (broadcasts the embedded player's
+        // real chat traffic as `NetChatMsg` + applies `ChatSendRequest`
+        // sends back onto that same Client) — reads/writes `EmbeddedPlayer`
+        // (populated by `PlayerBridgePlugin` above), not `SimMirror`, so
+        // ordering relative to `SimEntityMirrorPlugin` doesn't matter here
+        // (see `xindeler_sim_bridge::chat`'s own module doc comment).
+        app.add_plugins(ChatBridgePlugin);
         // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
         // registration — see `xindeler_oracle_host::atmosphere_sync`'s
         // module doc comment for why this can't live in
@@ -235,6 +242,9 @@ impl Plugin for ListenServerPlugin {
         // gamepad). Reuses the widget kit `CombatHudViewPlugin` already
         // added (`XindelerUiPlugin`) — no new UI plugin registration needed.
         app.add_plugins(ControlsScreenPlugin);
+        // BL-82 EM-5.4: the chat panel (scrollback, channel tabs, input box)
+        // reading `NetChatMsg`/writing `ChatSendRequest`. Pure Bevy.
+        app.add_plugins(ChatViewPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");
