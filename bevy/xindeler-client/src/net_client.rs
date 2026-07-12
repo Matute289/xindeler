@@ -45,11 +45,11 @@ use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, map_view::MapViewPlugin,
-    palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -122,6 +122,24 @@ impl Plugin for NetClientPlugin {
             // (spec §3.2 "degrade clean"), same as the far-terrain mesh does
             // today.
             MapViewPlugin,
+            // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
+            // gamepad) — reuses `CombatHudViewPlugin`'s own `XindelerUiPlugin`
+            // registration, same as every other consumer plugin in this list.
+            ControlsScreenPlugin,
+            // BL-82 EM-5.4: the chat panel — verbatim reuse too. The
+            // RECEIVE-side code (NetChatMsg -> scrollback) is wire-shape
+            // correct over this real transport, but currently moot in
+            // practice: `xindeler-server-app` (the server this path
+            // connects to) has no chat bridge wired up at all yet — a
+            // disclosed gap, see `xindeler-sim-bridge::chat`'s own module
+            // doc comment and `docs/backlog/engine-migration.md`'s EM-5.4
+            // row. SENDING is ALSO a no-op until EM-4.2c's login lands a
+            // controllable session here (there is no
+            // `xindeler-sim-bridge`/embedded player on this path at all —
+            // see this module's own doc comment), so a typed line simply
+            // queues a `ChatSendRequest` nobody answers yet, degrading
+            // clean rather than panicking.
+            ChatViewPlugin,
         ));
     }
 }

@@ -91,3 +91,7 @@ image = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 ron = { workspace = true }
+# BL-82 EM-5.4 chat-bridge tests: builds a real `comp::Player` fixture
+# (`Player::new` takes a `Uuid`) to exercise `resolve_sender_alias`. Matches
+# `common`'s own pin; no default features needed for a plain `Uuid::nil()`.
+uuid = { version = "1.4.1", default-features = false }

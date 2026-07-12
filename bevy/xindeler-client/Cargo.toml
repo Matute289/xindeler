@@ -51,6 +51,10 @@ xindeler-oracle-host = { path = "../xindeler-oracle-host" }
 # BL-82 EM-5.1: the widget kit (panel/bar/button/tooltip/notification/theme/
 # i18n) the core combat HUD (EM-5.2, `combat_hud.rs`) builds on.
 xindeler-ui = { path = "../xindeler-ui" }
+# BL-82 EM-5.11: the keymap/gamepad input-MODEL crate (GameInput, KeyMap,
+# ActionState, the rebind-capture flow) `player_input.rs`/`camera.rs`/
+# `controls_screen.rs` consume.
+xindeler-input = { path = "../xindeler-input" }
 # EM-3.2..3.5: greedy mesher + bevy conversion + VoxelMaterialExt + block
 # palette (EM-3.4) + async chunk pipeline (EM-3.5).
 xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [

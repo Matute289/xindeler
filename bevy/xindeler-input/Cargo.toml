@@ -1,0 +1,35 @@
+[package]
+name = "xindeler-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
+# This crate is a pure input-model layer (keymap + gamepad bindings + the
+# resolved per-frame ActionState) — it needs `bevy_input`'s types (KeyCode/
+# MouseButton/GamepadButton/GamepadAxis/Gamepad/ButtonInput/Axis) and
+# `bevy_ecs`/`bevy_app` for the Resource/Plugin/system plumbing, both
+# unconditionally part of `bevy_internal` (not feature-gated), plus the
+# `serialize` feature so those input types derive Serde (needed for the
+# `settings.ron` `controls` section, EM-5.11 T56.12). No render/window/audio
+# features — this crate has no rendering concern, same posture as
+# `xindeler-app`. Real gamepad *backend* wiring (`bevy_gilrs`) is enabled by
+# whichever binary consumes this crate with default Bevy features (already
+# true of `xindeler-client`, part of its default `3d`/`ui` feature closure) —
+# nothing here needs to force it on itself.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "serialize",
+    "keyboard",
+    "mouse",
+    "gamepad",
+] }
+serde = { workspace = true }
+strum = { workspace = true }
+ron = { workspace = true }
+
+[dev-dependencies]

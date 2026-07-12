@@ -33,6 +33,11 @@ pub enum HudWindow {
     Chat,
     Crafting,
     Settings,
+    /// BL-82 EM-5.11 — the input-rebinding screen (`xindeler-client::
+    /// controls_screen`). Its own window ahead of EM-5.12 folding it in as a
+    /// tab of the full esc-menu settings window (§ that epic's task board
+    /// note) — this is a real, standalone entry point, not a stub.
+    Controls,
 }
 
 /// The current HUD window state. `Resource`, not per-entity — there is
