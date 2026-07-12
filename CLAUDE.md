@@ -39,7 +39,7 @@ VELOREN_ASSETS="$(pwd)/assets" cargo test -p xindeler-common
 
 # Lint (matches CI exactly)
 cargo clippy --all-targets --locked \
-  --features="bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,asset_tweak,bin,stat,cli" \
+  --features="bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,bin,stat,cli" \
   -- -D warnings
 
 # Format check
@@ -95,7 +95,6 @@ In dev builds, `voxygen-anim` and `server-agent` are compiled as `cdylib` crates
 ## Features of Note
 
 - `tracy` — Enables Tracy profiler integration across crates.
-- `asset_tweak` — Allows runtime asset value tweaking for balancing.
 - `simd` — Enables SIMD optimizations in server-cli.
 - `bin_*` — Various utility binaries (CSV export, graph generation, bot, asset migration).
 
