@@ -49,6 +49,47 @@ pub enum NetAuxiliaryAbility {
     Empty,
 }
 
+impl NetAuxiliaryAbility {
+    /// Packs this value into a plain `u64` (BL-82 EM-5.7): the diary's
+    /// Abilities tab (`xindeler_protocol::skillset::NetAbilityPool`) uses this
+    /// encoding to make each pool entry a valid `xindeler_ui::slot::
+    /// SlotAddress` for dragging onto the hotbar — `xindeler-client::hotbar`'s
+    /// drop handler unpacks it back via [`Self::from_slot_address_raw`] to
+    /// resolve which ability was dragged. Plain `u64` (not a dependency on
+    /// `xindeler_ui`) since that's the exact shape `SlotAddress` itself
+    /// wraps — this crate stays UI-toolkit-agnostic.
+    #[must_use]
+    pub fn to_slot_address_raw(self) -> u64 {
+        let (tag, idx): (u64, u64) = match self {
+            Self::MainWeapon(i) => (0, u64::from(i)),
+            Self::OffWeapon(i) => (1, u64::from(i)),
+            Self::Glider(i) => (2, u64::from(i)),
+            Self::Innate(i) => (3, u64::from(i)),
+            Self::Empty => (4, 0),
+        };
+        (tag << 32) | idx
+    }
+
+    /// The inverse of [`Self::to_slot_address_raw`]. An unrecognized tag
+    /// (never produced by the packer, but a defensive default all the same)
+    /// resolves to [`Self::Empty`] rather than panicking.
+    #[must_use]
+    pub fn from_slot_address_raw(raw: u64) -> Self {
+        let tag = raw >> 32;
+        // No `cast_possible_truncation` suppression needed: clippy's range
+        // analysis already proves `raw & 0xFFFF_FFFF` fits in `u32` from the
+        // mask alone.
+        let idx = (raw & 0xFFFF_FFFF) as u32;
+        match tag {
+            0 => Self::MainWeapon(idx),
+            1 => Self::OffWeapon(idx),
+            2 => Self::Glider(idx),
+            3 => Self::Innate(idx),
+            _ => Self::Empty,
+        }
+    }
+}
+
 /// One hotbar ("auxiliary ability") slot's projected content — see this
 /// module's own doc comment for why both fields exist.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -223,6 +264,30 @@ mod tests {
             .collect();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].message, request);
+    }
+
+    /// [`NetAuxiliaryAbility::to_slot_address_raw`]/[`NetAuxiliaryAbility::
+    /// from_slot_address_raw`] round-trip every variant, and two different
+    /// indices of the SAME variant never collide (the packing this module's
+    /// own doc comment promises the diary's Abilities-tab drag source relies
+    /// on).
+    #[test]
+    fn slot_address_packing_round_trips_every_variant_and_never_collides() {
+        let values = [
+            NetAuxiliaryAbility::MainWeapon(3),
+            NetAuxiliaryAbility::MainWeapon(7),
+            NetAuxiliaryAbility::OffWeapon(1),
+            NetAuxiliaryAbility::Glider(0),
+            NetAuxiliaryAbility::Innate(2),
+            NetAuxiliaryAbility::Innate(5),
+            NetAuxiliaryAbility::Empty,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for &aux in &values {
+            let raw = aux.to_slot_address_raw();
+            assert_eq!(NetAuxiliaryAbility::from_slot_address_raw(raw), aux);
+            assert!(seen.insert(raw), "packed address for {aux:?} collided");
+        }
     }
 
     /// A round-trip through RON keeps every `NetAuxiliaryAbility` variant

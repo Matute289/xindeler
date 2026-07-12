@@ -56,7 +56,9 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use xindeler_input::{GameInput, KeyMap};
-use xindeler_protocol::{LocalAssignHotbarSlot, NetAbilities, NetCooldowns, NetLocalPlayer};
+use xindeler_protocol::{
+    LocalAssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldowns, NetLocalPlayer,
+};
 use xindeler_ui::{
     slot::{SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
@@ -483,12 +485,21 @@ fn sync_cooldown_overlays(
     }
 }
 
-/// Drains [`SlotDropped`] and, for a drag ENTIRELY within the hotbar
-/// (`from`/`to` both [`HOTBAR_GROUP`]), swaps the two slots' bindings via
-/// TWO [`LocalAssignHotbarSlot`] messages — the module doc comment's "real
-/// drag-to-assign, today's scope" contract. A drop involving any other
-/// group (a future inventory/diary drag source) is silently ignored HERE —
-/// not mis-applied — until that screen's own handler exists.
+/// Drains [`SlotDropped`] and applies whichever of the two SOURCEs this
+/// screen currently supports:
+/// - a drag ENTIRELY within the hotbar (`from`/`to` both [`HOTBAR_GROUP`])
+///   swaps the two slots' bindings via TWO [`LocalAssignHotbarSlot`] messages —
+///   the module doc comment's original "real drag-to-assign" contract;
+/// - BL-82 EM-5.7: a drag FROM the diary's Abilities tab
+///   (`crate::diary::DIARY_ABILITY_GROUP`) INTO a hotbar slot binds that
+///   ability into the target slot via ONE [`LocalAssignHotbarSlot`] — the
+///   dragged ability is decoded straight from the [`SlotDropped::from_address`]
+///   (packed via `NetAuxiliaryAbility::to_slot_address_raw`, see that type's
+///   own doc comment), no `abilities` lookup needed for the source side.
+///
+/// A drop involving any OTHER group is silently ignored — not mis-applied —
+/// exactly the module doc comment's original posture, just narrowed to the
+/// groups that don't yet have a handler.
 fn handle_hotbar_drag_drop(
     mut drops: MessageReader<SlotDropped>,
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
@@ -498,7 +509,24 @@ fn handle_hotbar_drag_drop(
         return;
     };
     for drop in drops.read() {
-        if drop.from_group != HOTBAR_GROUP || drop.to_group != HOTBAR_GROUP {
+        if drop.to_group != HOTBAR_GROUP {
+            continue;
+        }
+
+        if drop.from_group == crate::diary::DIARY_ABILITY_GROUP {
+            let to_index = drop.to_address.raw() as usize;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "hotbar slot indices are a handful, never near u32::MAX"
+            )]
+            assign.write(LocalAssignHotbarSlot {
+                slot: to_index as u32,
+                ability: NetAuxiliaryAbility::from_slot_address_raw(drop.from_address.raw()),
+            });
+            continue;
+        }
+
+        if drop.from_group != HOTBAR_GROUP {
             continue;
         }
         let from_index = drop.from_address.raw() as usize;
@@ -532,7 +560,7 @@ fn handle_hotbar_drag_drop(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use xindeler_protocol::{NetAuxiliaryAbility, NetCooldownEntry, NetHotbarSlot};
+    use xindeler_protocol::{NetCooldownEntry, NetHotbarSlot};
 
     use super::*;
 
@@ -691,6 +719,44 @@ mod tests {
             slot: 0,
             ability: NetAuxiliaryAbility::Innate(2),
         }));
+    }
+
+    /// BL-82 EM-5.7 (T56.24): a drag FROM the diary's Abilities tab
+    /// (`crate::diary::DIARY_ABILITY_GROUP`) INTO a hotbar slot binds the
+    /// packed ability into that slot via ONE `LocalAssignHotbarSlot` — no
+    /// `abilities` lookup needed for the source side, the ability is decoded
+    /// straight from the dragged address.
+    #[test]
+    fn diary_ability_drag_binds_the_dragged_ability_into_the_target_slot() {
+        let mut app = new_app();
+        app.add_message::<SlotDropped>();
+        app.add_message::<LocalAssignHotbarSlot>();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default(), NetHotbarSlot::default()],
+        }));
+        let dragged = NetAuxiliaryAbility::Innate(3);
+        app.world_mut().write_message(SlotDropped {
+            from_group: crate::diary::DIARY_ABILITY_GROUP,
+            from_address: SlotAddress(dragged.to_slot_address_raw()),
+            to_group: HOTBAR_GROUP,
+            to_address: SlotAddress(1),
+        });
+
+        app.world_mut()
+            .run_system_once(handle_hotbar_drag_drop)
+            .expect("handler runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<LocalAssignHotbarSlot>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![LocalAssignHotbarSlot {
+            slot: 1,
+            ability: dragged,
+        }]);
     }
 
     /// A drop where either end is NOT in the hotbar group is ignored — no

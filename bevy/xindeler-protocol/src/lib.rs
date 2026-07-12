@@ -25,6 +25,7 @@ pub mod login;
 pub mod map;
 pub mod narrative;
 pub mod owner_visibility;
+pub mod skillset;
 pub mod social;
 pub mod trade;
 pub mod visibility;
@@ -57,6 +58,9 @@ pub use crate::{
     map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     owner_visibility::{ClientOwnedUid, NetOwnerOnly},
+    skillset::{
+        LocalUnlockSkillRequest, NetAbilityPool, NetSkillGroup, NetSkillSet, UnlockSkillRequest,
+    },
     social::{
         DialogueResponseRequest, GroupAction, GroupActionRequest, LocalDialogueResponse,
         LocalGroupAction, NetDialogue, NetGroupMember, NetGroupState, NetInviteKind,
@@ -724,7 +728,13 @@ impl Plugin for XindelerProtocolPlugin {
             // broadcast like the entity-visible comps above.
             .replicate::<NetInventory>()
             .replicate::<NetTrade>()
-            .replicate::<NetIncomingTradeInvite>();
+            .replicate::<NetIncomingTradeInvite>()
+            // BL-82 EM-5.7: the character diary / skill-tree mirror (spec
+            // §3.2/§6) — self-scoped via `NetOwnerOnly` (mirrors
+            // `NetInventory`'s own privacy posture: skillset unlock state is
+            // self-only HUD data, per spec §3.2's own example list).
+            .replicate::<NetSkillSet>()
+            .replicate::<NetAbilityPool>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
@@ -755,6 +765,13 @@ impl Plugin for XindelerProtocolPlugin {
         app.add_client_message::<TradeInviteRequest>(XindelerChannel::Events.delivery());
         app.add_client_message::<TradeInviteResponseRequest>(XindelerChannel::Events.delivery());
         app.add_client_message::<TradeActionRequest>(XindelerChannel::Events.delivery());
+        // BL-82 EM-5.7: spend a skill point — a discrete, infrequent
+        // gameplay-intent request, same Events-lane class as the requests
+        // just above.
+        app.add_client_message::<skillset::UnlockSkillRequest>(XindelerChannel::Events.delivery());
+        // The listen-server in-process counterpart (see `skillset`'s own doc
+        // comment) — never crosses a socket.
+        app.add_message::<skillset::LocalUnlockSkillRequest>();
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients

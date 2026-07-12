@@ -746,6 +746,19 @@ impl SkillSet {
     /// Checks if skill set contains a skill
     pub fn has_skill(&self, skill: Skill) -> bool { self.skills.contains_key(&skill) }
 
+    /// Returns every currently-unlocked skill and its level (BL-82 EM-5.7):
+    /// the Bevy diary's `NetSkillSet` mirror projects the full unlocked-skill
+    /// map onto the wire (the STATIC tree shape it renders against —
+    /// `SKILL_GROUP_DEFS`/`SKILL_PREREQUISITES` — is read directly from this
+    /// crate client-side, a `common`-linking Bevy client already does for
+    /// e.g. `BuffKind`; only the DYNAMIC per-player unlock state needs to
+    /// travel the wire). No existing accessor exposed the full map —
+    /// `has_skill`/`skill_level` only ever needed a single lookup before
+    /// this.
+    pub fn unlocked_skills(&self) -> impl Iterator<Item = (Skill, u16)> + '_ {
+        self.skills.iter().map(|(&skill, &level)| (skill, level))
+    }
+
     /// Returns the level of the skill
     pub fn skill_level(&self, skill: Skill) -> Result<u16, SkillError> {
         if let Some(level) = self.skills.get(&skill).copied() {

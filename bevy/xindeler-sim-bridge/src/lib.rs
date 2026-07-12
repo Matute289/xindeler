@@ -106,6 +106,16 @@ pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 mod hotbar;
 pub use hotbar::{HotbarMirrorPlugin, apply_local_hotbar_assignment, mirror_hotbar_state};
 
+// BL-82 EM-5.7: the character diary / skill-tree mirror + SP-spend
+// applicator (spec §3.2/§6). `skillset` (not `mod`-private): no other module
+// currently needs to reach in, but keeping it named consistently with
+// `inventory`/`trade` above costs nothing.
+mod skillset;
+pub use skillset::{
+    SkillSetMirrorCache, SkillSetMirrorPlugin, apply_local_skill_unlock_requests,
+    mirror_skillset_state,
+};
+
 mod entity_factory;
 pub use entity_factory::{
     NextSpawnCorrelationId, PendingDimensionAttribution, apply_pending_entity_template_spawns,
