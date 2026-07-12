@@ -454,6 +454,41 @@ fn spawn_event_minions(
 /// teardown`] back to `DEFAULT` while still standing inside a just-retired
 /// event's (not yet fully torn down) zone would otherwise be pulled straight
 /// back in on the very next tick.
+/// The PURE decision core of [`detect_player_dimension_entry`], factored out
+/// so the geometry/one-way-crossing/active-lifecycle logic is unit-testable
+/// without booting a real `SimServer` (BL-82 EM-4.9 follow-up,
+/// bevy-migration-reviewer MAJOR finding — mirrors `crate::
+/// recompute_aurora_overlay`'s own "pure function, thinly wrapped by a
+/// system" precedent). Returns the FIRST zone (in `zones`' iteration order)
+/// whose circle contains `pos`, provided:
+/// - `current` is `DimensionId::DEFAULT` (the one-way-crossing gate — see
+///   [`detect_player_dimension_entry`]'s own doc comment for why a player
+///   already inside a dimension is never re-evaluated here), and
+/// - `is_active(dimension)` holds (the zone's dimension must currently be
+///   `DimensionLifecycle::Active` — closes the "ejected back to DEFAULT,
+///   immediately re-pulled into a still-draining dimension" race that same doc
+///   comment describes).
+///
+/// `None` if no zone matches (or the one-way gate blocks the check
+/// entirely).
+fn find_entry_transfer(
+    pos: vek::Vec2<f32>,
+    current: DimensionId,
+    zones: &HashMap<DimensionId, TransferZone>,
+    is_active: impl Fn(DimensionId) -> bool,
+) -> Option<DimensionId> {
+    if current != DimensionId::DEFAULT {
+        return None; // one-way crossing
+    }
+    zones
+        .iter()
+        .find(|&(&dimension, zone)| {
+            is_active(dimension)
+                && (pos - zone.origin).magnitude_squared() <= zone.radius * zone.radius
+        })
+        .map(|(&dimension, _)| dimension)
+}
+
 fn detect_player_dimension_entry(
     sim: Option<NonSend<SimServer>>,
     registry: Res<DimensionRegistry>,
@@ -480,21 +515,11 @@ fn detect_player_dimension_entry(
             .get(&sim_entity)
             .copied()
             .unwrap_or(DimensionId::DEFAULT);
-        if current != DimensionId::DEFAULT {
-            continue; // one-way crossing — see this function's own doc comment
-        }
         let xy = vek::Vec2::new(pos.0.x, pos.0.y);
-        for (&dimension, zone) in &zones.0 {
-            if registry.lifecycle(dimension) != Some(DimensionLifecycle::Active) {
-                continue;
-            }
-            if (xy - zone.origin).magnitude_squared() <= zone.radius * zone.radius {
-                transfer_writer.write(TransferPlayerDimension {
-                    sim_entity,
-                    target: dimension,
-                });
-                break; // one transfer per player per tick is enough
-            }
+        if let Some(target) = find_entry_transfer(xy, current, &zones.0, |dimension| {
+            registry.lifecycle(dimension) == Some(DimensionLifecycle::Active)
+        }) {
+            transfer_writer.write(TransferPlayerDimension { sim_entity, target });
         }
     }
 }
@@ -844,6 +869,119 @@ mod tests {
     use xindeler_oracle_host::entity_template::PendingEntityTemplateSpawn;
 
     use super::*;
+
+    /// BL-82 EM-4.9 follow-up (bevy-migration-reviewer MAJOR finding): the
+    /// actual v1 proximity-trigger geometry, unit-tested via
+    /// [`find_entry_transfer`] — the pure core `detect_player_dimension_
+    /// entry` wraps. No sim/assets needed.
+    mod find_entry_transfer_tests {
+        use super::*;
+
+        fn zone(origin: (f32, f32), radius: f32) -> TransferZone {
+            TransferZone {
+                origin: vek::Vec2::new(origin.0, origin.1),
+                radius,
+            }
+        }
+
+        #[test]
+        fn a_default_resident_player_inside_an_active_zone_is_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((100.0, 100.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(110.0, 100.0), // 10 units from centre, well within radius 40
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true, // Active
+            );
+
+            assert_eq!(target, Some(DimensionId(1)));
+        }
+
+        #[test]
+        fn a_player_outside_the_zones_radius_is_not_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((100.0, 100.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(200.0, 100.0), // 100 units away, outside radius 40
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(target, None);
+        }
+
+        /// The circle boundary is INCLUSIVE (`<=`, not `<`), matching
+        /// `find_entry_transfer`'s own implementation.
+        #[test]
+        fn exactly_on_the_radius_boundary_counts_as_inside() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((0.0, 0.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(40.0, 0.0), // exactly `radius` away
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(target, Some(DimensionId(1)));
+        }
+
+        /// One-way crossing: a player already resident in a NON-default
+        /// dimension is never considered for (another) entry transfer, even
+        /// if physically standing inside a different zone.
+        #[test]
+        fn a_player_not_resident_in_default_is_never_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(2), zone((0.0, 0.0), 999_999.0)); // huge, would match anything
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId(1), // already inside a different dimension
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(
+                target, None,
+                "the one-way-crossing gate must block re-evaluation entirely"
+            );
+        }
+
+        /// A zone whose dimension is not currently `Active` (e.g. Draining
+        /// after the event was just retired) must never pull a player in —
+        /// closes the "ejected to DEFAULT, immediately re-pulled back in"
+        /// race this function's own doc comment describes.
+        #[test]
+        fn a_zone_whose_dimension_is_not_active_never_transfers() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((0.0, 0.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId::DEFAULT,
+                &zones,
+                |_| false, // not Active (Draining/Teardown/unknown)
+            );
+
+            assert_eq!(target, None);
+        }
+
+        #[test]
+        fn no_zones_at_all_yields_no_transfer() {
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId::DEFAULT,
+                &HashMap::new(),
+                |_| true,
+            );
+            assert_eq!(target, None);
+        }
+    }
 
     /// Style-B (T51.9-E2, the fast CI-runnable partial): boots a headless
     /// `App` with the REAL `ServerOraclePlugin` (no `SimServer`/real world —

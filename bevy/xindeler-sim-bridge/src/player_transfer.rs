@@ -207,7 +207,28 @@ pub fn apply_player_dimension_transfers(
                 "player-dimension-transfer target rejected the occupant (raced into Draining?); \
                  rolling back the occupancy decrement"
             );
-            let _ = registry.try_add_occupant(current, bevy_entity);
+            // BL-82 EM-4.9 follow-up (bevy-migration-reviewer MAJOR finding):
+            // the rollback itself can fail too (e.g. `current` ALSO started
+            // Draining this same tick) — if it does, `bevy_entity` stays
+            // tagged `current` (its `DimensionId`/`DimensionRoot` components
+            // are untouched, since we bail out before ever writing them) but
+            // is no longer counted as `current`'s occupant, silently risking
+            // a premature `Draining -> Teardown` auto-advance for a
+            // dimension that still has a live, tagged entity. Logged (not
+            // silently swallowed) so this dual-failure edge case is at least
+            // observable, even though there is no further recovery action to
+            // take here — the entity's tag is still consistent with
+            // `current`, only the registry's occupant COUNT would be wrong.
+            if let Err(rollback_err) = registry.try_add_occupant(current, bevy_entity) {
+                warn!(
+                    ?rollback_err,
+                    ?sim_entity,
+                    current = current.0,
+                    "player-dimension-transfer rollback ALSO failed; the entity remains tagged to \
+                     its original dimension but is no longer counted as one of its occupants — \
+                     that dimension's occupant count may now undercount by one"
+                );
+            }
             continue;
         }
 
