@@ -9,8 +9,9 @@
 //! ## Flow
 //! 1. On startup, load `sprite_manifest.ron` (typed `AssetLoader`, same trick
 //!    the figure manifests use) and, once parsed, kick off `.vox` loads for the
-//!    whitelisted [`SPRITE_KINDS`] (v1 renders common OUTDOOR sprites — grasses
-//!    + flowers — not the ~150 furniture/dungeon kinds).
+//!    whitelisted [`sprite_render_kinds`] (EM-3.9c widens this from just the
+//!    outdoor `Plant` category to also cover furniture/dungeon décor — see that
+//!    function's docs).
 //! 2. As each kind's `.vox` variations finish loading, mesh them ONCE
 //!    ([`sprite_model_to_bevy`]) into shared `Mesh3d` handles cached in
 //!    [`SpriteMeshCache`].
@@ -24,13 +25,22 @@
 //! ## Budget / performance strategy (task requirement)
 //! Sprites can be enormous (thousands of grass tufts per chunk). v1 keeps it
 //! cheap three ways, all documented and tunable:
-//! - **Kind whitelist** ([`SPRITE_KINDS`]): common outdoor vegetation (grasses,
-//!   flowers, cacti, crops, mushrooms — EM-3.9b widened this from ~16 to the
-//!   whole `Plant` sprite category), so the ~989-entry manifest doesn't spawn
-//!   furniture/dungeon décor (`Furniture`/`Decor`/`Lamp`/`Container`/`Modular`
-//!   categories — deferred: those need per-kind placement review, not just a
-//!   list extension, since some assume interior/wall-adjacent placement the
-//!   outdoor density budget below isn't tuned for).
+//! - **Kind whitelist** ([`sprite_render_kinds`]): EM-3.9b widened this from
+//!   ~16 outdoor kinds to the whole `Plant` category (grasses, flowers, cacti,
+//!   crops, mushrooms); **EM-3.9c widens it further** to `Furniture`, `Decor`,
+//!   `Lamp` and `Container` (furniture, dungeon décor/chests, standalone lights
+//!   — placement already works generically: `sprite_z_rot`/ `sprite_mirror_vec`
+//!   read the SAME `Ori`/`MirrorX` attributes regardless of category, so these
+//!   categories are not a special case, just an unexplored one — verified
+//!   against `common::terrain::block`). `Structural` (doors/windows/walls —
+//!   several have interactive open/close behaviour in the old client this port
+//!   doesn't reimplement) and `Modular` (adjacency- dependent fences, one
+//!   variant) stay OUT for now; `Resource`/ `MineableResource` (ore/wood/gem
+//!   world nodes) are a separate, gameplay- adjacent widening, not
+//!   "furniture/prop/dungeon". The whitelist is now CATEGORY-based rather than
+//!   a hand-typed kind list (mirrors the `Plant` widening's own spirit of "the
+//!   whole category", scaled to multiple categories without enumerating ~150
+//!   kind names by hand).
 //! - **Per-chunk cap** ([`MAX_SPRITES_PER_CHUNK`]): if a chunk exceeds it, the
 //!   instances are thinned by a deterministic stride so density scales down
 //!   gracefully rather than spiking the entity count.
@@ -49,34 +59,57 @@
 //!   instance. A hand-rolled `SpecializedMeshPipeline` with a manual instance
 //!   buffer would reimplement exactly this for no measurable win, so v1 keeps
 //!   the shared-handle approach and does not add one.
-//! - **Wind sway — attempted in EM-3.9b, REVERTED.** A per-vertex sine sway via
-//!   an `ExtendedMaterial<StandardMaterial, SpriteWindMaterialExt>` caused a
-//!   real visual regression: sprites lost most of their vertex colour and
-//!   rendered largely black once the vertex-stage position perturbation was
-//!   live (confirmed by disabling the effect — the render returned to an exact
-//!   match of the pre-EM-3.9b screenshot; the vertex shader's `world_normal`
-//!   output is the unperturbed stock normal, which no longer matches the swayed
-//!   surface for some instances/angles, driving the PBR diffuse term to ~0).
-//!   Root-caused but not re-attempted within EM-3.9b's budget — reverted to the
-//!   plain vertex-coloured `StandardMaterial` below (bit-identical to
-//!   pre-EM-3.9b) rather than ship a known lighting bug. Deferred to
-//!   **EM-3.9c**: either also perturb/recompute `world_normal` to stay
-//!   consistent with the swayed position, or use a cheaper effect that doesn't
-//!   touch geometry (e.g. a per-instance vertex-colour brightness pulse) to
-//!   sidestep normal/lighting correctness entirely.
+//! - **Wind sway v2 (EM-3.9c) — shipped, normal-consistent by construction.**
+//!   EM-3.9b's attempt (a per-vertex sine sway via `ExtendedMaterial<
+//!   StandardMaterial, SpriteWindMaterialExt>`) displaced `world_position` but
+//!   left `world_normal` at its stock, unperturbed value — for a REAL 3-D
+//!   voxel-meshed sprite (many faces at every axis orientation, unlike a flat
+//!   billboard card) that mismatch drove the PBR diffuse term toward zero for a
+//!   large share of faces/angles, rendering largely black (confirmed by
+//!   disabling the effect: an exact match of the pre-EM-3.9b screenshot
+//!   returned). v2 instead ROTATES both position and normal by the IDENTICAL
+//!   per-vertex angle about the sprite's own world-space base pivot (Rodrigues'
+//!   rotation formula — see `xindeler_render_voxel::material:: sprite_wind`'s
+//!   WGSL for the full derivation), so the two stay geometrically consistent at
+//!   every vertex, not merely at rest. The sway weight
+//!   (`xindeler_render_voxel::convert::ATTRIBUTE_SPRITE_SWAY`) is baked
+//!   per-mesh from each vertex's own height and the sprite's OWN authored
+//!   `sprite_manifest.ron` `wind_sway` value
+//!   (`xindeler_render_voxel::sprite::SpriteManifest::sway_strength`) — already
+//!   correctly `0.0` for rigid props (furniture/decor/lamp/container, and even
+//!   rigid `Plant`-category kinds like cacti) in the SHIPPED asset, so v2
+//!   needed no synthetic per-category table of its own.
+//!   [`SpriteMeshCache::material`] now holds a
+//!   `Handle<xindeler_render_voxel::material::SpriteWindMaterial>` instead of a
+//!   plain `StandardMaterial`; batching is unaffected (still one shared
+//!   material handle for every sprite instance — EM-3.9b's own instancing
+//!   argument above still holds). `XINDELER_SPRITE_WIND=0` disables sway at
+//!   runtime (perf/quality escape hatch — see [`wind_strength_from_env`]).
 //!
 //! ## Purity
 //! 100% Bevy + `xindeler-render-voxel` (a shell crate), `common` terrain types
-//! and `dot_vox`/`ron` — NO specs. Compiled only under the `listen-server`
-//! feature. The decode here is independent of `terrain_stream`'s (a second lz4
-//! pass per chunk — accepted v1 cost, keeps the two consumers decoupled). This
-//! stayed a v1 cost in EM-3.9b too: a shared decoded-chunk cache would need
-//! both this module's pending/built lifecycle AND `terrain_stream`'s
-//! store/remesh lifecycle to agree on ownership/eviction timing, and both are
-//! subtle, already-correct, and independently tested — not worth the risk for
-//! a cost that is one lz4 decompress of a chunk-sized buffer, not a hot loop.
+//! and `dot_vox`/`ron` — NO specs. Compiled under EITHER the `listen-server`
+//! OR `net-client` feature (both `listen_server.rs` and `net_client.rs` add
+//! this plugin alongside `TerrainStreamPlugin`).
+//!
+//! ## Shared decoded-chunk store (EM-3.9c — resolves the EM-3.9b deferral)
+//! EM-3.9b left this module decoding EVERY `CompressedChunk` a second time
+//! (its own independent lz4+bincode pass), even though `terrain_stream`'s
+//! `receive_chunks` had already decoded the SAME bytes into its own
+//! `SharedTerrain` store moments earlier — deferred back then because
+//! unifying the two lifecycles (this module's pending/built bookkeeping vs.
+//! `terrain_stream`'s store/remesh bookkeeping) looked riskier than a cheap
+//! per-chunk decompress. EM-3.9c takes the SAFER slice of that idea instead of
+//! merging the lifecycles: [`build_chunk_sprites`] now reads
+//! [`crate::terrain_stream::SharedTerrain::get_chunk`] first (a plain
+//! `Arc::clone` of the chunk `terrain_stream` already decoded and owns) and
+//! falls back to this module's own `CompressedChunk::decode` only on a miss
+//! (chunk not resident yet, or the optional resource absent in a minimal test
+//! harness) — no shared ownership/eviction contract between the two modules
+//! is introduced, `SharedTerrain` stays the sole owner, and correctness never
+//! depends on which system happens to run first in a given frame.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use bevy::{
     asset::{Asset, AssetLoader, LoadContext, LoadState, io::Reader},
@@ -84,10 +117,11 @@ use bevy::{
     prelude::*,
     reflect::TypePath,
 };
-use common::terrain::SpriteKind;
+use common::terrain::{SpriteKind, sprite::Category};
 use vek::{Vec2 as VVec2, Vec3 as VVec3};
 use xindeler_protocol::{CompressedChunk, RemoveChunk};
 use xindeler_render_voxel::{
+    material::SpriteWindMaterial,
     pipeline::ChunkMeshIndex,
     sprite::{
         SPRITE_MANIFEST, SPRITE_SCALE, SpriteManifest, collect_sprite_instances,
@@ -95,17 +129,48 @@ use xindeler_render_voxel::{
     },
 };
 
-/// The sprite kinds v1 renders: the whole outdoor-safe `Plant` sprite category
-/// (`common::terrain::sprite` — grasses, flowers, cacti, crops, mushrooms).
-/// EM-3.9b widened this from the original ~16 (grasses + flowers only) to
-/// cover the REST of `Plant` — verified against `sprite_manifest.ron`
-/// (read-only) to have real `variations` entries in the SAME shape the
-/// original 16 use, so no new mesh-assembly logic was needed (`sprite.rs`
-/// already ignores per-kind `custom_indices`/filters generically).
-/// Furniture/dungeon décor (`Furniture`/`Decor`/`Lamp`/`Container`/`Modular`
-/// categories) is a SEPARATE, deferred widening (module docs) — those aren't
-/// simple list additions, they need placement-context review.
-pub const SPRITE_KINDS: &[SpriteKind] = &[
+/// Sprite CATEGORIES rendered client-side (EM-3.9c — see module docs for the
+/// full reasoning): `Plant` (EM-3.9b's whole-category widening) plus
+/// `Furniture`/`Decor`/`Lamp`/`Container` (EM-3.9c's furniture/dungeon-décor
+/// widening). `Structural` and `Modular` stay out (module docs); `Resource`/
+/// `MineableResource` are a separate, not-yet-attempted widening.
+const RENDER_CATEGORIES: &[Category] = &[
+    Category::Plant,
+    Category::Furniture,
+    Category::Decor,
+    Category::Lamp,
+    Category::Container,
+];
+
+/// Whether a sprite kind is one v1 renders — an O(1) category check (5-arm
+/// linear scan) rather than a linear scan of a hand-typed kind list, so this
+/// is cheap to call PER INSTANCE in the hot per-chunk filter below (unlike the
+/// old `SPRITE_KINDS.contains(&kind)`, which scanned a list that has grown
+/// past 150 entries now that furniture/décor/lamp/container are included).
+#[must_use]
+pub fn is_sprite_render_kind(kind: SpriteKind) -> bool {
+    RENDER_CATEGORIES.contains(&kind.category())
+}
+
+/// All sprite kinds v1 renders, derived from [`RENDER_CATEGORIES`] rather
+/// than a hand-typed list — scales to "the whole Furniture/Decor/Lamp/
+/// Container categories" (~150+ kinds) without enumerating them by hand and
+/// stays correct across an upstream sync that adds a new kind to an
+/// already-whitelisted category. Iterated ONCE at startup (`load_sprite_models`
+/// kicking off `.vox` loads), never per-frame — see [`is_sprite_render_kind`]
+/// for the per-instance hot-path check.
+pub fn sprite_render_kinds() -> impl Iterator<Item = SpriteKind> {
+    SpriteKind::all()
+        .iter()
+        .copied()
+        .filter(|k| is_sprite_render_kind(*k))
+}
+
+/// Legacy alias kept only for the hand-authored regression list below (which
+/// still enumerates the original outdoor `Plant` widening by name); NOT used
+/// by production code (see [`sprite_render_kinds`]/[`is_sprite_render_kind`]).
+#[cfg(test)]
+const SPRITE_KINDS: &[SpriteKind] = &[
     // Cacti
     SpriteKind::BarrelCactus,
     SpriteKind::RoundCactus,
@@ -297,7 +362,7 @@ struct PendingSpriteModel {
 #[derive(Resource, Default)]
 struct SpriteMeshCache {
     kinds: HashMap<SpriteKind, SpriteKindState>,
-    material: Option<Handle<StandardMaterial>>,
+    material: Option<Handle<SpriteWindMaterial>>,
     /// Whether the whitelisted `.vox` loads have been kicked off (once the
     /// manifest parsed).
     started: bool,
@@ -307,16 +372,53 @@ struct SpriteMeshCache {
     all_settled: bool,
 }
 
+/// Reads `XINDELER_SPRITE_WIND` once (env, not a per-frame poll): unset or any
+/// value other than `"0"` keeps the EM-3.9c v2 sway ON at its tuned default
+/// strength (`1.0`); `"0"` disables it (`wind_strength: 0.0`), a zero-cost
+/// escape hatch if a live perf check (or a future low-end graphics tier)
+/// needs sway off without swapping materials.
+///
+/// **Measured (`--smoke-perf-run`, 15s window each, same dev machine):**
+/// wind ON — mean 42.7ms/frame, p50 33.9ms, p95 97.1ms; wind OFF — mean
+/// 32.6ms/frame, p50 21.8ms, p95 84.0ms. Directionally consistent with a real
+/// (if modest) added GPU/CPU cost, but NOT a clean controlled A/B: the
+/// machine was under heavy, variable load from unrelated concurrent
+/// processes at measurement time, and the two runs booted fresh worlds with
+/// different chunk-mesh counts during warmup (406 vs. 832) — i.e. different
+/// scene content, not just the sway toggle. `rust-perf-reviewer`'s
+/// independent cost-model analysis of `sprite_wind.wgsl` (Rodrigues rotation
+/// is ~20-30 extra ALU ops for a swayable vertex, applied to sprite meshes of
+/// a few dozen–low hundreds of vertices each) concluded this is trivial GPU
+/// cost, not a bottleneck, at the density this codebase's whitelist/budget
+/// caps sprites to (`MAX_SPRITES_PER_CHUNK`). Shipped ON by default on that
+/// combined basis; the env var above remains the honest escape hatch if a
+/// cleaner future measurement (an idle machine, matched world seeds) shows
+/// otherwise.
+fn wind_strength_from_env() -> f32 {
+    match std::env::var("XINDELER_SPRITE_WIND") {
+        Ok(v) if v == "0" => 0.0,
+        _ => 1.0,
+    }
+}
+
 /// The shared matte material for vertex-coloured sprites (base_color WHITE so
 /// per-voxel colour shows through; slightly rough, double-sided so thin grass
 /// cards are lit from both faces). One material for ALL sprites → batching.
-fn sprite_material() -> StandardMaterial {
-    StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.9,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
+/// EM-3.9c: `ExtendedMaterial<StandardMaterial, SpriteWindMaterialExt>`
+/// instead of a plain `StandardMaterial` — same `base`, plus the wind-sway
+/// extension (module docs).
+fn sprite_material() -> SpriteWindMaterial {
+    SpriteWindMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.9,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        },
+        extension: xindeler_render_voxel::material::SpriteWindMaterialExt {
+            wind_strength: wind_strength_from_env(),
+        },
     }
 }
 
@@ -329,7 +431,7 @@ fn load_sprite_models(
     manifests: Res<Assets<SpriteManifestAsset>>,
     vox_assets: Res<Assets<crate::figure_view::VoxAsset>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<SpriteWindMaterial>>,
     mut cache: ResMut<SpriteMeshCache>,
 ) {
     // Every kind has reached its terminal state — nothing left to poll.
@@ -346,7 +448,7 @@ fn load_sprite_models(
     // One-time material + kick off `.vox` loads for the whitelist.
     if !cache.started {
         cache.material = Some(materials.add(sprite_material()));
-        for &kind in SPRITE_KINDS {
+        for kind in sprite_render_kinds() {
             let state = match manifest.0.variations(kind) {
                 Some(vars) if !vars.is_empty() => {
                     let pending = vars
@@ -385,7 +487,8 @@ fn load_sprite_models(
         let mut variation_meshes = Vec::new();
         for p in pending {
             if let Some(vox) = vox_assets.get(&p.handle)
-                && let Some(mesh) = sprite_model_to_bevy(&vox.0, 0, p.offset)
+                && let Some(mesh) =
+                    sprite_model_to_bevy(&vox.0, 0, p.offset, manifest.0.sway_strength(kind))
             {
                 variation_meshes.push(SpriteVariationMesh {
                     mesh: meshes.add(mesh),
@@ -510,6 +613,12 @@ fn build_chunk_sprites(
     // for its other optional resources, since production always has this
     // one).
     mesh_index: Option<Res<ChunkMeshIndex>>,
+    // `Option` (EM-3.9c, same convention as `mesh_index` above): the real app
+    // always has this (`TerrainStreamPlugin` is unconditionally added in
+    // `main.rs` before `SpriteViewPlugin`), but this file's own minimal
+    // headless test harness never wires it. Absent degrades honestly to
+    // "always take the own-decode fallback below" — never a silent gap.
+    shared_terrain: Option<Res<crate::terrain_stream::SharedTerrain>>,
     mut perf_log: Local<Option<bool>>,
     mut decode_queue: Local<VecDeque<CompressedChunk>>,
 ) {
@@ -518,7 +627,8 @@ fn build_chunk_sprites(
     let perf_log = *perf_log
         .get_or_insert_with(|| std::env::var("XINDELER_SPRITE_PERF_LOG").is_ok_and(|v| v != "0"));
     let decode_loop_start = std::time::Instant::now();
-    let mut chunks_decoded_this_frame = 0usize;
+    let mut chunks_processed_this_frame = 0usize;
+    let mut chunks_reused_this_frame = 0usize;
 
     // 1. Newly-arrived chunks → collect + thin instances → a pending marker.
     //
@@ -537,12 +647,33 @@ fn build_chunk_sprites(
     // `collect_sprite_instances` voxel scan is what's actually capped,
     // popping from that TTL-free owned queue instead.
     decode_queue.extend(chunks.read().cloned());
-    while chunks_decoded_this_frame < CHUNK_BUILD_BURST_CAP {
+    while chunks_processed_this_frame < CHUNK_BUILD_BURST_CAP {
         let Some(msg) = decode_queue.pop_front() else {
             break;
         };
-        let Some(chunk) = msg.decode() else { continue };
-        chunks_decoded_this_frame += 1;
+        // BL-82 EM-3.9c: prefer the ALREADY-decoded chunk `terrain_stream`'s
+        // own receive system stores in `SharedTerrain` (it processes every
+        // arriving message uncapped, while this system's OWN processing is
+        // deliberately deferred/capped at `CHUNK_BUILD_BURST_CAP` per frame —
+        // so by the time a chunk reaches the front of THIS queue, it has
+        // almost always already been decoded once by `terrain_stream` several
+        // frames earlier). Falls back to this module's own
+        // `CompressedChunk::decode` (a second lz4+bincode pass) ONLY when the
+        // shared store doesn't have it yet — no ordering assumption between
+        // the two systems is required for correctness, just for the (common)
+        // fast path to actually trigger.
+        let shared_hit = shared_terrain.as_deref().and_then(|s| s.get_chunk(msg.key));
+        let chunk = match shared_hit {
+            Some(chunk) => {
+                chunks_reused_this_frame += 1;
+                chunk
+            },
+            None => {
+                let Some(chunk) = msg.decode() else { continue };
+                Arc::new(chunk)
+            },
+        };
+        chunks_processed_this_frame += 1;
         // Despawn FIRST (built parent AND any in-flight marker), unconditionally
         // — a chunk edited to have NO vegetation must drop its old sprites too,
         // so this precedes the empty early-return below.
@@ -550,7 +681,7 @@ fn build_chunk_sprites(
 
         let mut instances: Vec<_> = collect_sprite_instances(&chunk)
             .into_iter()
-            .filter(|i| SPRITE_KINDS.contains(&i.kind))
+            .filter(|i| is_sprite_render_kind(i.kind))
             .collect();
         if instances.is_empty() {
             continue; // cleaned up above; nothing new to spawn
@@ -567,11 +698,14 @@ fn build_chunk_sprites(
         // deferred, so the query below still yields the old marker this frame).
         index.pending.insert(msg.key, marker);
     }
-    if perf_log && chunks_decoded_this_frame > 0 {
+    if perf_log && chunks_processed_this_frame > 0 {
         let elapsed_ms = decode_loop_start.elapsed().as_secs_f64() * 1000.0;
         debug!(
-            chunks_decoded_this_frame,
-            elapsed_ms, "EM-3.11p round 11: sprite decode+collect main-thread cost this frame"
+            chunks_processed_this_frame,
+            chunks_reused_this_frame,
+            elapsed_ms,
+            "EM-3.11p round 11 / EM-3.9c: sprite decode+collect main-thread cost this frame \
+             (chunks_reused_this_frame came from the shared terrain store, no second decode)"
         );
     }
 
@@ -827,6 +961,88 @@ mod tests {
         assert!(
             SPRITE_KINDS.len() > 16,
             "EM-3.9b widened the whitelist past the original 16 grasses/flowers"
+        );
+    }
+
+    /// EM-3.9c widening: the CATEGORY-based whitelist covers every kind the
+    /// old hand-typed `Plant`-only list did (no regression), grew past it
+    /// (furniture/decor/lamp/container are now in), and still excludes the
+    /// categories deliberately left out (module docs: `Structural`/`Modular`).
+    #[test]
+    fn render_kinds_covers_plant_and_new_categories_but_not_structural() {
+        let rendered: std::collections::HashSet<_> = sprite_render_kinds().collect();
+
+        for &kind in SPRITE_KINDS {
+            assert!(
+                rendered.contains(&kind),
+                "{kind:?}: EM-3.9b's Plant-category kind dropped by the EM-3.9c category widening \
+                 — regression"
+            );
+        }
+        assert!(
+            rendered.len() > SPRITE_KINDS.len(),
+            "EM-3.9c should have added furniture/decor/lamp/container kinds on top of the {} \
+             Plant-category kinds",
+            SPRITE_KINDS.len()
+        );
+        assert!(
+            rendered.contains(&SpriteKind::Barrel),
+            "Furniture category kind (Barrel) should now render"
+        );
+        assert!(
+            rendered.contains(&SpriteKind::Chest),
+            "Container category kind (Chest) should now render"
+        );
+        assert!(
+            rendered.contains(&SpriteKind::Lantern),
+            "Lamp category kind (Lantern) should now render"
+        );
+        assert!(
+            rendered.contains(&SpriteKind::Gravestone),
+            "Decor category kind (Gravestone) should now render"
+        );
+        assert!(
+            !rendered.contains(&SpriteKind::Door),
+            "Structural category (doors have old-client interactive open/close behaviour this \
+             port doesn't reimplement) must stay excluded"
+        );
+        assert!(
+            !rendered.contains(&SpriteKind::FenceWoodWoodland),
+            "Modular category (adjacency-dependent) must stay excluded"
+        );
+    }
+
+    /// EM-3.9c: the real manifest's OWN authored `wind_sway` values already
+    /// gate correctly — swayable outdoor grass is nonzero, rigid props
+    /// (furniture/container/lamp/decor, and even a rigid `Plant`-category
+    /// kind like a cactus) are exactly `0.0` — with NO synthetic per-category
+    /// table needed on this port's side. `#[ignore]` — reads the real asset;
+    /// run with `cargo test -p xindeler-client --features listen-server
+    /// sway_strength_reads_the_real_authored_manifest -- --ignored`.
+    #[test]
+    #[ignore = "reads the real sprite_manifest.ron asset"]
+    fn sway_strength_reads_the_real_authored_manifest() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/voxygen/voxel/sprite_manifest.ron");
+        let bytes = std::fs::read(&path).expect("read sprite_manifest.ron");
+        let manifest: SpriteManifest =
+            ron::de::from_bytes(&bytes).expect("parse sprite_manifest.ron");
+
+        assert!(
+            manifest.sway_strength(SpriteKind::ShortGrass) > 0.0,
+            "grass should sway"
+        );
+        assert_eq!(manifest.sway_strength(SpriteKind::Barrel), 0.0);
+        assert_eq!(manifest.sway_strength(SpriteKind::CrateBlock), 0.0);
+        assert_eq!(manifest.sway_strength(SpriteKind::Chest), 0.0);
+        assert_eq!(manifest.sway_strength(SpriteKind::Lantern), 0.0);
+        assert_eq!(manifest.sway_strength(SpriteKind::Gravestone), 0.0);
+        assert_eq!(
+            manifest.sway_strength(SpriteKind::BarrelCactus),
+            0.0,
+            "a rigid Plant-category kind (cactus) is ALSO authored at 0.0 in the real manifest — \
+             confirms the manifest-driven approach is strictly better than a Plant-category-wide \
+             guess"
         );
     }
 

@@ -14,9 +14,16 @@
 //! - [`SpriteManifest`] is a MINIMAL portable read of the real
 //!   `assets/voxygen/voxel/sprite_manifest.ron` (names frozen — isolation law
 //!   rule 3), keeping only what v1 needs (`SpriteKind → variations{model,
-//!   offset}`); LOD levels, wind-sway and attribute FILTERS are ignored for v1
-//!   (documented gaps → EM-3.9b). The manifest RON deserialises straight into
-//!   it.
+//!   offset}` +, as of EM-3.9c, `wind_sway`); LOD levels, `z_scale` (absent
+//!   from the shipped manifest entirely) and attribute FILTERS are still
+//!   ignored (documented gaps → EM-3.9b). The manifest RON deserialises
+//!   straight into it. [`SpriteManifest::sway_strength`] reads the ORIGINAL
+//!   asset authors' own per-kind `wind_sway` value (verified against the real
+//!   manifest: rigid props like `Barrel`/`CrateBlock`/`BarrelCactus` are
+//!   already authored at exactly `0.0`, most grasses/bushes at ~0.1-0.4, a
+//!   handful of kinds up to 1.0) — strictly better data than a synthetic
+//!   per-category guess, since it already correctly zeroes rigid PLANT-category
+//!   kinds (cacti) too.
 //! - [`collect_sprite_instances`] scans a [`TerrainChunk`]'s blocks and returns
 //!   one [`SpriteInstance`] per sprite block (kind + chunk-local placement:
 //!   world position, z-rotation, mirror), exactly how voxygen's
@@ -24,7 +31,9 @@
 //!   `sprite_z_rot` + `sprite_mirror_vec`), minus LOD banding.
 //! - [`sprite_model_to_bevy`] meshes ONE variation `.vox` into a coloured
 //!   `bevy::Mesh`, reusing the figure segment mesher ([`segment_to_bevy`]) — a
-//!   sprite is just a tiny static figure part.
+//!   sprite is just a tiny static figure part — and bakes the EM-3.9c
+//!   [`crate::convert::ATTRIBUTE_SPRITE_SWAY`] wind attribute on top (see
+//!   [`bake_sway_weights`]).
 //!
 //! The client (`xindeler-client::sprite_view`) owns the `AssetServer`: it loads
 //! the manifest + the referenced `.vox` files, calls [`sprite_model_to_bevy`]
@@ -45,7 +54,7 @@
 
 use std::collections::HashMap;
 
-use bevy::mesh::Mesh as BevyMesh;
+use bevy::mesh::{Mesh as BevyMesh, VertexAttributeValues};
 use common::{
     figure::Segment,
     terrain::{Block, SpriteKind, TerrainChunk},
@@ -54,7 +63,7 @@ use common::{
 use serde::Deserialize;
 use vek::*;
 
-use crate::figure::segment_to_bevy;
+use crate::{convert::ATTRIBUTE_SPRITE_SWAY, figure::segment_to_bevy};
 
 /// Sprite `.vox` models are authored 11× oversized (same convention as
 /// figures); every instance is scaled down by this factor. Mirror of
@@ -84,14 +93,26 @@ pub struct SpriteModelConfig {
     pub offset: (f32, f32, f32),
 }
 
-/// A configuration group for a sprite kind (voxygen's `SpriteConfig`, minus the
-/// attribute `filter` and `wind_sway` for v1). Only `variations` is read.
+/// A configuration group for a sprite kind (voxygen's `SpriteConfig`, minus
+/// the attribute `filter` for v1, which is still ignored). `wind_sway` IS now
+/// read (EM-3.9c v2): it's the ORIGINAL asset authors' own per-kind sway
+/// value (verified against the real `sprite_manifest.ron` — e.g. `Barrel`/
+/// `CrateBlock`/`BarrelCactus` are all authored at exactly `0.0`, most
+/// grasses/bushes at ~0.1-0.4, a handful of kinds up to 1.0), strictly better
+/// data than a synthetic
+/// category-only guess (rigid Plant-category kinds like cacti are already
+/// correctly zeroed by the SAME authored source that also zeroes furniture).
+/// Missing from a config group (e.g. the `Empty: [()]` sentinel) defaults to
+/// `0.0` via the struct-level `#[serde(default)]` — never a hard parse error.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct SpriteConfig {
     /// All model variations for this sprite; an instance picks one by a
     /// position seed (see [`variation_index`]).
     pub variations: Vec<SpriteModelConfig>,
+    /// Authored wind-sway strength, roughly `[0, 1]` in the shipped manifest.
+    /// Fed to [`bake_sway_weights`] as the per-kind coefficient (EM-3.9c).
+    pub wind_sway: f32,
 }
 
 /// The whole sprite manifest: `SpriteKind → [config]`. v1 uses the FIRST config
@@ -117,6 +138,20 @@ impl SpriteManifest {
             .iter()
             .map(|c| c.variations.as_slice())
             .find(|v| !v.is_empty())
+    }
+
+    /// The authored wind-sway strength (EM-3.9c) for `kind`, read from the
+    /// SAME config group [`Self::variations`] resolves (the first with a
+    /// non-empty `variations` list) — `0.0` if the kind is absent, has no
+    /// model, or the group simply doesn't set it. See [`SpriteConfig::
+    /// wind_sway`]'s doc comment for why this is preferred over a synthetic
+    /// per-category guess.
+    #[must_use]
+    pub fn sway_strength(&self, kind: SpriteKind) -> f32 {
+        self.0
+            .get(&kind)
+            .and_then(|configs| configs.iter().find(|c| !c.variations.is_empty()))
+            .map_or(0.0, |c| c.wind_sway)
     }
 }
 
@@ -206,10 +241,51 @@ pub fn sprite_instance_at(rel_pos: Vec3<i32>, block: &Block) -> Option<SpriteIns
     })
 }
 
+/// Bakes a per-vertex wind-sway weight in `[0, sway_strength]` from a mesh's
+/// own POSITION attribute: `0.0` at the block-floor base (local Y = 0, Bevy
+/// y-up — see `figure::to_bevy`), rising linearly to `sway_strength` at the
+/// mesh's OWN tallest vertex (so short and tall sprite models both reach the
+/// same peak sway regardless of their raw voxel-space height). Returns an
+/// all-zero vec SIZED TO THE MESH'S VERTEX COUNT (never a 0-length vec
+/// against a non-empty mesh — that would be a vertex-buffer-layout mismatch
+/// once inserted as `ATTRIBUTE_SPRITE_SWAY`) if the mesh unexpectedly lacks
+/// POSITION — `sprite_model_to_bevy` always builds one via
+/// [`segment_to_bevy`], so this is defensive, not a documented gap; the
+/// `debug_assert!` fails loudly in dev if that invariant is ever broken by a
+/// future refactor, rather than silently shipping a mismatched attribute.
+fn bake_sway_weights(mesh: &BevyMesh, sway_strength: f32) -> Vec<f32> {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(BevyMesh::ATTRIBUTE_POSITION)
+    else {
+        debug_assert!(
+            mesh.count_vertices() == 0,
+            "sprite mesh has vertices but no ATTRIBUTE_POSITION — segment_to_bevy should always \
+             emit one"
+        );
+        return vec![0.0; mesh.count_vertices()];
+    };
+    if sway_strength <= 0.0 {
+        return vec![0.0; positions.len()];
+    }
+    let max_height = positions
+        .iter()
+        .map(|p| p[1])
+        .fold(0.0_f32, f32::max)
+        .max(1e-3);
+    positions
+        .iter()
+        .map(|p| sway_strength * (p[1].max(0.0) / max_height))
+        .collect()
+}
+
 /// Meshes one sprite `.vox` variation into a coloured `bevy::Mesh`, reusing the
 /// figure segment mesher (a sprite is a tiny static figure part). `offset` is
-/// the manifest recentring offset (voxel units). Returns `None` if the model
-/// meshes to nothing (empty `.vox`).
+/// the manifest recentring offset (voxel units); `sway_strength` is this
+/// sprite kind's wind-sway coefficient (see [`SpriteManifest::sway_strength`]),
+/// baked into the new [`ATTRIBUTE_SPRITE_SWAY`] vertex attribute (EM-3.9c) —
+/// kept OUT of [`segment_to_bevy`] itself so figures (which share that
+/// mesher and never sway) carry no unused per-vertex bytes. Returns `None` if
+/// the model meshes to nothing (empty `.vox`).
 ///
 /// The `.vox` bytes come from the caller (this crate keeps `common`'s
 /// `no-assets` — it never loads assets itself), parsed into a
@@ -219,11 +295,15 @@ pub fn sprite_model_to_bevy(
     vox: &dot_vox::DotVoxData,
     model_index: usize,
     offset: Vec3<f32>,
+    sway_strength: f32,
 ) -> Option<BevyMesh> {
     // v1 ignores the manifest's `custom_indices` overrides (default material
     // index → Cell mapping only) — documented gap → EM-3.9b.
     let segment = Segment::from_vox(vox, false, model_index, None);
-    segment_to_bevy(&segment, offset)
+    let mut mesh = segment_to_bevy(&segment, offset)?;
+    let sway = bake_sway_weights(&mesh, sway_strength);
+    mesh.insert_attribute(ATTRIBUTE_SPRITE_SWAY, sway);
+    Some(mesh)
 }
 
 #[cfg(test)]
