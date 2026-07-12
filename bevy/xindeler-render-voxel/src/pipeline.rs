@@ -34,328 +34,76 @@
 //!   within one frame nets out to a fresh chunk — last write wins here too).
 //! - Replacing a chunk despawns the old entities and spawns the new ones in the
 //!   SAME command batch, so there is no visible hole.
+//! - A key with NO entity at all (never marked, or marked but not yet meshed)
+//!   simply has nothing drawn at its footprint — see the round-19 section below
+//!   for why that is the correct, INTENDED behaviour, not a gap to be papered
+//!   over.
 //!
-//! ## BL-82 EM-3.11h fix: first-load placeholder (no more black frames)
-//! The "no visible hole" guarantee above only ever covered RE-meshing an
-//! already-spawned chunk (old entity stays up until the new one is ready).
-//! It said nothing about a chunk's FIRST ever mesh: between a fresh key
-//! being marked dirty and its `AsyncComputeTaskPool` task finishing +
-//! clearing the upload budget, that key had **no entity at all** — for
-//! however many frames the greedy mesher + the budget (default 2/`Update`)
-//! took. Bug report: BL-82 EM-3.11h, a real gameplay capture, showed ~2
-//! fully black frames (nothing drawn — no sky, no terrain, no character;
-//! only the UI overlay) while walking into a cave, immediately followed by
-//! the cave popping in fully rendered. Root cause, confirmed by reading
-//! `xindeler-client`'s `far_terrain.rs`: its far-mesh cutout hole is
-//! DELIBERATELY excluded within `chunk_render_distance` of the live camera
-//! (so the coarse LOD sheet never z-fights the block-accurate near terrain)
-//! — the near pipeline (this module) was trusted to always cover that
-//! band. It didn't, for a never-before-seen chunk: no near mesh (not ready
-//! yet) AND no far mesh (deliberately excluded) = the bare `ClearColor`,
-//! which reads as a hard black frame whenever the current atmosphere
-//! profile's sky colour is dark (dusk/night/cave shadow — exactly the
-//! reported moment).
+//! ## BL-82 EM-3.11 round 19 — the first-load placeholder box is GONE
+//! Rounds 14-18 (`docs/design/specs/2026-07-09-bl82-em311-findings-log.md`)
+//! spent five consecutive rounds retuning a synchronous "first-load
+//! placeholder" box (`PlaceholderChunkMesh`, introduced EM-3.11h to close a
+//! real ~2-frame black-screen bug) that stood in for a chunk's real mesh
+//! while it streamed in: unlit material (round 7), immune to `DistanceFog`
+//! (round 14), haze-tinted toward the live atmosphere (round 14 follow-up,
+//! retuned round 16), and finally a per-chunk REAL colour hint sourced from
+//! the far-terrain grid with a cave-safety veto (round 17, corrected round
+//! 18). Every round made the box look more correct in isolation, and every
+//! round left a residual visible artifact (Matías, round 19: "no se está
+//! arreglando... queda muy feo mientras se juega") — because the premise
+//! itself, not the tuning, was the defect: a flat, hard-edged, textureless
+//! box can never look like real, detailed terrain, no matter how well its
+//! flat colour is chosen, and a cluster of them (round 17 measured up to 16
+//! simultaneous) reads as a uniform "wall"/"strip" regardless.
 //!
-//! [`spawn_chunk_mesh_tasks`] now spawns a cheap, SYNCHRONOUS placeholder
-//! entity (a flat-shaded box spanning the chunk's footprint and z-range,
-//! `PlaceholderChunkMesh`, sharing a `TerrainChunkMesh` marker so it obeys
-//! the same distance culling as real chunks) the instant a never-before-
-//! indexed key starts its async task — so there is something solid to draw
-//! at that spot from frame 1, not after the mesh finishes. When the real
-//! mesh lands, [`apply_chunk_meshes`]'s existing despawn-old+spawn-new
-//! atomic swap replaces it exactly like any other re-mesh (zero special-
-//! casing needed there — a placeholder is just another `ChunkEntities`
-//! entry). Already-indexed keys (re-meshes of a chunk that already has real
-//! geometry, e.g. a border re-mesh when a neighbour streams in) are
-//! untouched — they keep relying on the pre-existing atomic swap, no
-//! placeholder ever inserted for them.
+//! Round 19 compared this port against two mature references instead of
+//! retuning a 6th knob:
+//! - **Minecraft** never renders a stand-in for an unloaded/not-yet-meshed
+//!   chunk. A chunk column simply does not exist in the renderable world until
+//!   it is generated AND meshed — the player only ever sees either (a)
+//!   render-distance fog/fade hiding the edge, tuned so generation stays ahead
+//!   of what becomes visible, or (b) genuine void/sky where a chunk will be.
+//!   Loaded-but-not-ready = invisible, never a fake solid object.
+//! - **`xindeler-old`** (the mature, pre-Bevy Veloren-derived client) has NO
+//!   placeholder-mesh concept at all, confirmed by reading its code, not
+//!   assumed: `voxygen/src/scene/terrain/mod.rs`'s `Terrain::chunks: HashMap<
+//!   _, TerrainChunkData>` holds only real GPU mesh data (no "stand-in" variant
+//!   exists); a chunk awaiting meshing lives in a SEPARATE `mesh_todo` map
+//!   holding only bookkeeping (no geometry); `insert_chunk` is only ever called
+//!   once a real mesh comes back from the mesh-worker thread; and the render
+//!   loop's own chunk iteration (`Spiral2d::new().filter_map(|rpos|
+//!   self.chunks.get(&pos)?)...filter_map(|chunk| chunk.opaque_model.as_ref()?
+//!   ...)`) yields `None` — draws NOTHING — for any position without a real
+//!   mesh yet. The gap this would otherwise leave is filled by a SEPARATE,
+//!   always-present coarse LOD terrain mesh (`voxygen/src/scene/lod.rs`) that
+//!   covers the world out to the horizon continuously, refined by real terrain
+//!   popping in on top of it as chunks mesh — never a void, never a synthetic
+//!   stand-in.
 //!
-//! ## BL-82 EM-3.11i follow-up: the placeholder could still read as a black
-//! ## hole (lighting, not throughput)
-//! A later real gameplay capture (Matías, walking cave-adjacent terrain at
-//! speed) showed the black-frame bug was gone but replaced by something
-//! Matías rated MORE visible: a solid, hard-edged, box-shaped dark region
-//! that grew over ~0.5-0.7s then popped away all at once. Two hypotheses
-//! were checked against the evidence instead of assumed:
+//! Both references agree: the RIGHT fix is to stop drawing a placeholder at
+//! all, not to keep improving one. [`spawn_chunk_mesh_tasks`] no longer
+//! spawns anything when a key is first marked dirty — it only starts the
+//! async mesh task. [`apply_chunk_meshes`] is now the ONLY place a chunk's
+//! entities are ever created, exactly mirroring `xindeler-old`'s
+//! `insert_chunk`: a key has zero entities from the moment it's marked dirty
+//! until its real mesh finishes and uploads, then it appears once, fully
+//! formed — never a box, never a partial/synthetic stand-in. This is a
+//! straightforward reversion of the whole EM-3.11h-through-18 mechanism
+//! (`PlaceholderChunkMesh`, its material/haze-tint/colour-hint/viewer-height
+//! machinery, and the `is_placeholder` bookkeeping this module used to carry)
+//! — see the findings log's round-19 entry for the full before/after
+//! evidence and how the resulting gap is covered (a paired fix outside this
+//! crate: `xindeler-client`'s camera-boom collision, which used to clip
+//! against a chunk's raw voxel data before its mesh existed — an unrelated
+//! but same-family "physics/collision outran rendering" bug the same
+//! investigation found and fixed).
 //!
-//! 1. **Throughput/backlog** — is mesh generation too slow to keep up with fast
-//!    movement, so several placeholders are up at once for an extended time?
-//!    Ruled out as the PRIMARY driver: `spawn_chunk_mesh_tasks`'s placeholder
-//!    spawn is synchronous and per-key, so it cannot itself be backlogged; a
-//!    burst of newly-streamed chunks (`terrain_stream.rs` marks a new key's
-//!    full 3×3 neighbourhood dirty every arrival) can genuinely have several
-//!    placeholders up simultaneously, and the ALREADY-DOCUMENTED, still-open
-//!    sim-tick stutter (EM-3.11c/d/e, `docs/backlog/engine-migration.md`)
-//!    stretches however many frames that takes into real wall-clock seconds
-//!    when frame time spikes to 30-200+ms — but the budget/pipeline mechanics
-//!    themselves are unchanged and not the thing that made the box read as
-//!    BLACK.
-//! 2. **Lighting** — a `StandardMaterial` is normally lit: with no direct light
-//!    reaching a fragment and no usable indirect/ambient term, its physically
-//!    correct output is exactly zero, regardless of `base_color`.
-//!    [`placeholder_transform`] scales the box to the chunk's FULL
-//!    footprint/height, so the reported walking-into-a-cave case routinely puts
-//!    the camera INSIDE the box, surrounded by its own inner faces
-//!    (intentionally rendered via `cull_mode: None`). A closed box viewed from
-//!    its interior self-shadows against the sun from nearly every direction and
-//!    starves whatever indirect/SSAO light would otherwise reach it — textbook
-//!    conditions for a lit surface to render fully black. Confirmed as the
-//!    primary cause: [`placeholder_material`] is now `unlit: true`, so its
-//!    fragment output is `base_color` unconditionally — no lighting term, no
-//!    self-shadow, no ambient/SSAO dependency, hence no path to black. It stays
-//!    a flat, obviously-crude mid-grey box under any scene condition (bright
-//!    noon through a pitch cave), which is what "there's a placeholder here"
-//!    was always supposed to look like.
-//!
-//! Net: the "growing region" perception is real and (per the evidence
-//! above) tracks the pre-existing, still-open perf issue rather than a new
-//! meshing-throughput bug introduced here — that part is a tuning/perf
-//! question for EM-3.11c/d/e, not this task. What made it look like a
-//! second black-frame bug — the box actually rendering as solid black — is
-//! fixed here at the material level, independent of how large or long that
-//! backlog ever gets.
-//!
-//! ## BL-82 EM-3.11 (round 14) — "background disappears for 1-2 frames"
-//! (`record11.mov`): the placeholder was invisible, not the terrain
-//! Matías reported the distant tree/mountain background periodically
-//! vanishing entirely for 1-2 frames, then popping back — described as
-//! things "flickering before they finish generating." Root-caused with an
-//! offscreen frozen-camera capture harness (mirroring the EM-3.11q
-//! methodology: fixed camera, no player movement, so any change between
-//! consecutive frames is a genuine content pop, not camera/retile motion):
-//! a mountain silhouette (rendered by `xindeler-client::far_terrain`'s
-//! coarse mesh, confirmed NOT the cause after exhaustive testing — its
-//! despawn+respawn retile swap is genuinely atomic, verified across 30+
-//! retiles both by ECS-level entity-presence logging and by frame-by-frame
-//! visual capture) was abruptly PARTIALLY OCCLUDED by a flat, pale
-//! rectangle for over a dozen consecutive frames, then the real chunk mesh
-//! (with real trees) popped in and the mountain silhouette was fully
-//! visible again. That rectangle is exactly this module's
-//! [`PlaceholderChunkMesh`] box — working as designed (EM-3.11h/i) — but at the
-//! render-distance band where new chunks stream in, `bevy_pbr`'s `DistanceFog`
-//! is already ~90-99% opaque (BL-82 EM-3.11 Phase B's own tuning target for
-//! that exact radius). Fog application is gated ONLY by `fog_enabled` (which
-//! defaults `true`), NEVER by `unlit` (`bevy_pbr`'s `pbr.wgsl`:
-//! `main_pass_post_lighting_processing` runs after the unlit/lit branch, not
-//! inside it — confirmed by reading the shader), so the placeholder's "neutral
-//! rock-grey" (chosen in EM-3.11i to read as an obvious placeholder under any
-//! LIGHTING condition) washes out toward the pale fog/sky colour at typical
-//! viewing distance anyway, flattening it into something visually
-//! indistinguishable from "empty sky" rather than "an obviously crude
-//! placeholder box" — exactly the reported symptom, and exactly why it reads as
-//! the BACKGROUND vanishing rather than a foreground object appearing: the box
-//! is farthest, so it is the most fogged, so it is the first thing fog erases.
-//! (The already-tracked, still-open EM-3.11c/d/e/p mesh-throughput/stutter
-//! question governs HOW LONG a placeholder stays up, not WHETHER it is visible
-//! while it's up — that duration question is explicitly out of scope here, same
-//! boundary EM-3.11i already drew.) Fix: [`placeholder_material`] now sets
-//! `fog_enabled: false` (a first-class `StandardMaterial` field precisely
-//! for this: `bevy_pbr::pbr_material`'s
-//! `STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT`, checked before fog is applied in
-//! `main_pass_post_lighting_processing`) — one line, no effect on
-//! timing/throughput/geometry, keeps the placeholder reading as "something is
-//! loading here" at every distance instead of dissolving into the horizon.
-//!
-//! ## BL-82 EM-3.11 follow-up (2026-07-11) — the placeholder/far-mesh seam
-//! A `bevy-migration-reviewer` MAJOR (explicitly flagged UNTESTED — a
-//! hypothesis, not a confirmed bug) worried that round 14's `fog_enabled:
-//! false` and `xindeler-client`'s far-mesh dissolve (PR #60,
-//! `far_terrain_material.rs`) — both landed the same session, never tested
-//! together — could trade "background disappears" for a NEW artifact: a
-//! flat, un-fogged placeholder popping visibly next to the heavily
-//! fog/haze-dissolved far mesh right at `chunk_render_distance`.
-//!
-//! Reproduced and confirmed with the same frozen-camera consecutive-frame
-//! technique round 14 used (`XINDELER_SMOKE_FAR_MESH_CAM=1` + a temporary
-//! per-frame burst capture): a solid, hard-edged, warm rock-grey box is
-//! plainly visible against the horizon for ~10+ consecutive captured frames
-//! (`burst_00201.png`–`burst_00210.png` of that run) before resolving into
-//! real meshed terrain — exactly the hypothesized artifact, real and
-//! visible, though categorically milder than round 14's bug (the box IS
-//! visible, just starkly flat next to its surroundings, rather than
-//! invisible). Root cause: near `chunk_render_distance`, real terrain and the
-//! far mesh's own near edge are BOTH already heavily blended toward the
-//! atmosphere's fog/sky colour (real terrain via `DistanceFog`, the far mesh
-//! via `DistanceFog` PLUS its own dissolve once beyond `bend_start` — see
-//! `far_terrain_material.wgsl`) — round 14 made the placeholder the ONE thing
-//! in that band immune to any such blending, so it now reads as a distinctly
-//! flat, saturated slab against an otherwise uniformly hazy scene.
-//!
-//! Fix: [`PlaceholderHazeTint`] — an OPTIONAL, host-installed resource
-//! carrying the live atmosphere colour to blend toward, and
-//! [`PLACEHOLDER_HAZE_BLEND`] — a capped, DISTANCE-INDEPENDENT blend factor
-//! (unlike `DistanceFog`, which ramps toward ~100% with distance — the exact
-//! mechanism round 14 had to disable because it erased the placeholder
-//! entirely). [`sync_placeholder_haze`] re-checks the shared placeholder
-//! material against the live tint every frame one is installed, but only
-//! WRITES when the target colour actually differs from what's applied
-//! (a `bevy-migration-reviewer` finding: `Assets::get_mut` unconditionally
-//! marks an asset modified regardless of whether the value changed, so a
-//! naive unconditional write would re-extract this material into the render
-//! world every frame forever, settled or not — see that function's own doc
-//! comment for why a `resource_changed`-style gate at the registration site,
-//! the seemingly obvious fix, is actually wrong instead: a placeholder can
-//! first appear long after the tint last changed). Absent a tint (e.g. the
-//! synthetic demo, which has no atmosphere), the placeholder stays
-//! [`PLACEHOLDER_BASE_COLOR`] verbatim — current, round-14 behaviour,
-//! unchanged. This softens the box toward its surroundings' general haze
-//! WITHOUT reintroducing per-fragment distance-fog (so it can never wash out
-//! completely the way round 14's bug did) and without touching timing, size,
-//! or throughput — see
-//! `docs/design/specs/2026-07-09-bl82-em311-findings-log.md` for the full
-//! investigation, evidence, and before/after screenshots.
-//!
-//! ## BL-82 EM-3.11 round 16 — the softened box still reads as a "tan/beige
-//! ## patch" (simultaneous colour contrast, not a hue defect)
-//! Matías's `record12.mov` (~1:46-2:00) showed a flat, light tan/beige
-//! rectangular patch popping in and out at the tree-line/sky boundary while
-//! terrain streamed in, alongside continued distant-tree-shape flicker.
-//! Leading hypothesis going in: the live atmosphere's `fog_color` might
-//! itself read as tan under some lighting, making the round-15 haze-tinted
-//! placeholder genuinely warm. Checked directly — `AtmosphereProfile::
-//! default().fog_color` is `(0.66, 0.73, 0.81)`, a desaturated COOL blue, and
-//! nothing in this codebase varies it by time of day (the day/night stub only
-//! rotates the sun; `fog_color` is a static profile field absent an explicit
-//! DmEvent) — so that specific mechanism was ruled out by reading the code,
-//! not assumed.
-//!
-//! Reproduced live instead (frozen + free-roam offscreen bursts, same
-//! methodology as rounds 14/15/9): the flat patch Matías described is,
-//! confirmed frame-by-frame, this same round-14/15 placeholder box. Sampled
-//! pixel values directly inside it across multiple captures were
-//! **essentially neutral** (R≈G≈B, e.g. `(98,98,98)`, `(101,101,100)`,
-//! `(102,102,101)`) — matching round 15's own measurement almost exactly, so
-//! the round-15 fix has NOT regressed and the box itself is not, in absolute
-//! terms, tan. But viewed in context (a screenshot crop, not just sampled
-//! pixel values) the SAME patch reads unmistakably as a pale cream/tan slab —
-//! confirmed by this investigation's own visual read of the evidence before
-//! the numbers were checked. The mechanism is **simultaneous colour
-//! contrast**: a genuinely near-neutral (slightly warm-biased,
-//! [`PLACEHOLDER_BASE_COLOR`] is `(0.35, 0.33, 0.30)`, R > G > B) flat patch
-//! sitting between a cool blue-hazed far-mesh mountain and a dark
-//! tree-canopy shadow reads warmer than it measures, by contrast with its
-//! neighbours — a well-documented perceptual effect, not a code defect in
-//! the strict "wrong RGB value" sense, but a real, reproducible, and fixable
-//! visual bug in its effect on the player regardless of mechanism.
-//!
-//! [`PLACEHOLDER_HAZE_BLEND`]'s round-15 value (0.2) was "a reasoned
-//! default... not re-tuned further by eye" per that round's own notes — this
-//! round's live evidence shows it under-corrects for exactly the seam
-//! scenario it was built for. Retuned to 0.5: still capped and
-//! distance-independent (never risks round 14's full-wash failure mode —
-//! [`PLACEHOLDER_BASE_COLOR`] always keeps a 50% floor, however far or long
-//! the box stays up), but pulls the box's flat colour much closer to the
-//! live atmosphere tone it sits against, measurably softening the contrast
-//! that reads as an odd-coloured slab. Verified with the same frozen-camera
-//! capture technique: the patch's sampled colour moves from the
-//! near-neutral-but-visually-warm values above toward a paler blue-grey that
-//! reads as atmospheric haze rather than a distinctly different material.
-//!
-//! Distant-tree-shape flicker (the OTHER symptom Matías reported alongside
-//! the patch): traced to the SAME placeholder mechanism, not a separate bug
-//! — a distant tree's canopy silhouette is part of the real chunk mesh that
-//! this placeholder box stands in for while it streams; a placeholder
-//! resolving into (or being replaced by) the real mesh, or a neighbouring
-//! chunk's placeholder popping in front of an already-real tree and then
-//! clearing, both read as "the tree flickered" from the player's point of
-//! view even though no tree geometry itself ever changed. This closes as the
-//! same root cause as the patch, not a distinct residual — the still-open,
-//! separately-tracked EM-3.11c/d/e/p mesh-throughput/frame-pacing stutter
-//! governs HOW LONG any of this stays visible, unchanged by this fix.
-//!
-//! Instrumentation: `tracing` spans around each mesh task
-//! (`chunk_mesh_task`) and each upload (`chunk_mesh_upload`), plus the
-//! [`ChunkUploadStats`] resource (uploads last frame / total / in-flight).
-//!
-//! The upload budget belongs in `GraphicsSettings` (EM-3.5 board note); that
-//! struct lives in `xindeler-app`, outside this task's crate set, so v1
-//! hosts insert [`ChunkUploadBudget`] directly — the settings hookup is a
-//! one-line follow-up there.
-//!
-//! ## BL-82 EM-3.11 round 18 — round 17's colour hint was rejecting ~99% of
-//! ## real chunks; fixed with a local-relief-aware surface check, not a 5th
-//! ## blend-constant retune
-//! Matías re-tested after round 17 (PR #71, merged) and reported
-//! (`record14.mov`): objects at the streaming frontier still flicker, and the
-//! light-brown "end of map" strip is still visible. Two distinct symptoms were
-//! confirmed live, not assumed:
-//! - An isolated tan/beige plate (round 14-16's class of bug) reappearing —
-//!   meaning round 17's colour hint was NOT actually being applied for that
-//!   chunk, falling back to the round-16 neutral/haze-blended path.
-//! - A large, hard-edged, flat neutral-grey mass that never blends with its
-//!   surroundings at all — same neutral-fallback path, just for a CLUSTER of
-//!   simultaneous placeholders (round 17's own "many placeholders share one
-//!   flat colour" scenario) rather than one isolated box.
-//!
-//! **Root cause, confirmed with live instrumentation (`XINDELER_PLACEHOLDER_
-//! HINT_LOG=1`, [`PlaceholderHintStats`]), not assumed:** ran `--listen-server
-//! --smoke-perf-run` with a scripted walker over a fresh world. Of 286 real
-//! placeholder colour-hint lookups, **282 (98.6%) were REJECTED by the
-//! round-17 surface check**, `(z_hi - expected_surface_z).abs() >
-//! SURFACE_HINT_TOLERANCE` — only 4 were ever trusted. Measured rejection
-//! deltas ranged 51.5–219.8m (median ~76m, mean ~89m), overwhelmingly in the
-//! 50–150m band. Root cause: [`PlaceholderColorHint`]'s `expected_surface_z`
-//! is a SINGLE coarse corner sample (`xindeler_client::far_terrain`'s grid,
-//! one sample per up to `chunk_stride` chunks — 256m at the default
-//! 1024-chunk world), while ordinary rolling/hilly terrain routinely varies
-//! by more than [`SURFACE_HINT_TOLERANCE`] (48m) across that same 256m
-//! footprint — round 17's own doc comment assumed a genuine cave interior
-//! sits "tens to hundreds of metres" below the recorded surface, comfortably
-//! outside 48m, but never checked whether ORDINARY surface relief also
-//! routinely exceeds 48m relative to one specific nearby corner. It does:
-//! `world`'s own cave generation (`world/src/layer/cave.rs`) only starts
-//! ramping "underground" 80m+ below the local surface (`AVG_LEVEL_DEPTH =
-//! 120`), which OVERLAPS the very range (51–150m) round 17's tolerance was
-//! rejecting as "plausibly a cave" — so a blind tolerance bump big enough to
-//! stop rejecting ordinary terrain would ALSO start re-admitting shallow
-//! caves, reintroducing the original EM-3.11h bug this guard exists to
-//! prevent. That ruled out "retune the constant again" (this round's own
-//! standing project rule against a 6th guess-and-retune of the same kind of
-//! knob) and pointed at the REAL defect: comparing a placeholder's precise
-//! `z_hi` against a single distant point sample is simply the wrong
-//! comparison, regardless of what threshold it uses.
-//!
-//! **Fix: compare against the LOCAL RANGE of nearby recorded surface heights,
-//! not one point.** [`PlaceholderColorHint`]'s closure now returns `(colour,
-//! min_height, max_height)` — the min/max recorded altitude across the
-//! target cell's own immediate 3×3 grid-cell neighbourhood (clamped to grid
-//! bounds), computed once in `xindeler_client::far_terrain::
-//! placeholder_color_hint_fn` from data it already holds (the same
-//! `DecodedFarTerrain::heights` the far mesh itself reads). The hint is
-//! trusted when the placeholder's `z_hi` falls within `[min_height -
-//! SURFACE_HINT_TOLERANCE, max_height + SURFACE_HINT_TOLERANCE]` — ordinary
-//! rolling terrain, where NEARBY samples already record the real relief,
-//! now passes on its own evidence instead of being compared to one
-//! unrelated corner; a genuine cave still fails, because a cave void does
-//! not show up in ANY nearby surface sample (the `lod_alt`/`lod_base` grid
-//! only ever records the true surface), so its `z_hi` sits far below every
-//! sample in the neighbourhood, not just one. [`SURFACE_HINT_TOLERANCE`]'s
-//! numeric value (48m) is UNCHANGED — this fix corrects WHAT it is compared
-//! against, not the number itself.
-//!
-//! **Foliage/tree flicker — traced to a genuinely SEPARATE root cause this
-//! round** (rounds 14-17 all folded it into the terrain-placeholder finding;
-//! this round's evidence says otherwise): `xindeler-client::sprite_view`'s
-//! vegetation-instance spawn is architecturally DECOUPLED from this crate's
-//! terrain-mesh pipeline — it reacts to its own `CompressedChunk` stream on
-//! its own timeline (module docs there), with no dependency on whether the
-//! parent chunk's REAL mesh (vs. this module's placeholder) is up. Comparing
-//! against `xindeler-old` (the mature pre-Bevy client) found it does NOT
-//! have this gap: its `mesh_worker` computes a chunk's opaque terrain AND
-//! its sprite instances in the SAME async task, applied to the SAME
-//! `TerrainChunkData` in ONE atomic swap
-//! (`voxygen/src/scene/terrain/mod.rs`) — sprites there are structurally
-//! incapable of appearing before their parent chunk's real terrain. This
-//! port's sprite pipeline never re-established that link, so a sprite
-//! (rendered with a normally-LIT `StandardMaterial`, unlike this module's
-//! deliberately `unlit` placeholder) can spawn floating over/inside the
-//! flat, dim placeholder box before the real terrain/lighting for that spot
-//! exists — reading as a solid black silhouette that "resolves" into real
-//! colour once the real mesh replaces the placeholder. Fixed on the sprite
-//! side (`sprite_view.rs`), by gating each pending chunk's sprite spawn on
-//! the NEW [`ChunkMeshIndex::has_real_terrain_mesh`] this round adds, not
-//! here — this module stays the host-agnostic mesh pipeline and never learns
-//! about sprites.
+//! [`ChunkMeshIndex::has_real_terrain_mesh`] keeps its exact name/signature
+//! (a host, e.g. `xindeler-client::sprite_view`'s EM-3.11 round-18 fix, still
+//! needs "does this chunk have its real mesh yet") but its answer now
+//! collapses to "is this key indexed at all" — an index entry can no longer
+//! ever be a placeholder, so the distinction it used to draw is moot, not
+//! removed.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -364,8 +112,7 @@ use std::{
 
 use bevy::{
     app::{App, Plugin, Update},
-    asset::{Assets, Handle, RenderAssetUsages},
-    color::{Color, Mix},
+    asset::Assets,
     ecs::{
         component::Component,
         entity::Entity,
@@ -373,11 +120,10 @@ use bevy::{
         schedule::{
             IntoScheduleConfigs, SystemCondition, SystemSet, common_conditions::resource_exists,
         },
-        system::{Commands, Local, Res, ResMut},
+        system::{Commands, Res, ResMut},
     },
-    math::Vec3,
-    mesh::{Indices, Mesh as BevyMesh, Mesh3d, PrimitiveTopology},
-    pbr::{MeshMaterial3d, StandardMaterial},
+    mesh::{Mesh as BevyMesh, Mesh3d},
+    pbr::MeshMaterial3d,
     tasks::{AsyncComputeTaskPool, Task, block_on},
     transform::components::Transform,
 };
@@ -555,19 +301,15 @@ struct MeshedChunk {
 struct ChunkMeshTasks(HashMap<ChunkKey, Task<MeshedChunk>>);
 
 /// Spawned entities per chunk key (so re-meshing replaces, not duplicates).
+/// BL-82 EM-3.11 round 19: a key is only ever present here once its REAL
+/// mesh has landed (see the module docs' round-19 section) — there is no
+/// longer a placeholder/interim state to distinguish.
 #[derive(Resource, Default)]
 pub struct ChunkMeshIndex(HashMap<ChunkKey, ChunkEntities>);
 
 pub struct ChunkEntities {
     pub terrain: Option<Entity>,
     pub fluid: Option<Entity>,
-    /// EM-3.11h: `true` while `terrain` is the synchronous first-load
-    /// placeholder box (see module docs), not the real greedy-meshed
-    /// geometry. Private — only this module ever needs to tell the
-    /// difference (the atomic despawn-old+spawn-new swap in
-    /// [`apply_chunk_meshes`] treats a placeholder exactly like any other
-    /// entry, on purpose).
-    is_placeholder: bool,
 }
 
 impl ChunkMeshIndex {
@@ -584,19 +326,18 @@ impl ChunkMeshIndex {
     /// re-mark all live chunks dirty (their per-vertex layers changed).
     pub fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ { self.0.keys().copied() }
 
-    /// BL-82 EM-3.11 round 18 — `true` only once `key` has its REAL,
-    /// greedy-meshed terrain (not the EM-3.11h synchronous first-load
-    /// [`PlaceholderChunkMesh`], and not merely "unmarked"/absent). A public
-    /// escape hatch for [`ChunkEntities::is_placeholder`] (which stays
-    /// private — module docs) so a HOST crate can gate its OWN
-    /// terrain-dependent content (e.g. `xindeler-client::sprite_view`'s
-    /// vegetation instances) on the same "is this chunk's real geometry up
-    /// yet" question this module already tracks internally, instead of
-    /// re-deriving it or reaching into private state.
+    /// `true` once `key` has its real, greedy-meshed terrain up. BL-82
+    /// EM-3.11 round 19: an index entry can no longer ever be a placeholder
+    /// (module docs), so this collapses to "is the key indexed at all" — kept
+    /// as a named method (not inlined at call sites) because two hosts
+    /// outside this crate depend on the QUESTION, not the implementation:
+    /// `xindeler-client::sprite_view`'s EM-3.11 round-18 fix gates vegetation
+    /// spawn on it, and `xindeler-client::terrain_stream`'s camera-boom
+    /// collision (round 19) gates solidity on it too (a chunk's raw voxel
+    /// data streams in before its mesh does — this is the same "is it
+    /// actually visible yet" signal both consumers need).
     #[must_use]
-    pub fn has_real_terrain_mesh(&self, key: ChunkKey) -> bool {
-        self.0.get(&key).is_some_and(|e| !e.is_placeholder)
-    }
+    pub fn has_real_terrain_mesh(&self, key: ChunkKey) -> bool { self.0.contains_key(&key) }
 }
 
 /// Upload instrumentation (complements the tracing spans).
@@ -622,15 +363,6 @@ pub struct FluidChunkMesh {
     pub key: ChunkKey,
 }
 
-/// Marker on the EM-3.11h synchronous first-load placeholder (see module
-/// docs): a coarse box standing in for a chunk's real mesh while its async
-/// task runs. Always co-spawned with a `TerrainChunkMesh` (so it obeys
-/// whatever chunk-distance culling band the host applies) — this is an
-/// additional tag for callers that need to tell it apart from real
-/// geometry (debugging, tests), not a replacement for that marker.
-#[derive(Component)]
-pub struct PlaceholderChunkMesh;
-
 /// Entity transform for a chunk mesh: the mesher emits xy relative to the
 /// chunk origin and ABSOLUTE z (see [`ChunkVolume::range`]), so the entity
 /// sits at the chunk origin mapped through the converter's z-up → y-up
@@ -642,487 +374,6 @@ pub fn chunk_transform(key: ChunkKey) -> Transform {
     let sz = TerrainChunk::RECT_SIZE.map(|e| e as i32);
     #[expect(clippy::cast_precision_loss, reason = "chunk coords ≪ 2^24")]
     Transform::from_xyz((key.x * sz.x) as f32, 0.0, -(key.y * sz.y) as f32)
-}
-
-/// EM-3.11h — first-load placeholder assets: every placeholder chunk reuses
-/// the SAME unit-box mesh (stretched to the chunk's footprint/height via its
-/// per-entity `Transform` scale, [`placeholder_transform`]) and the SAME
-/// material, so spawning one costs a component insert, not a fresh asset.
-///
-/// A [`Resource`] (not a [`bevy::ecs::system::Local`] to
-/// [`spawn_chunk_mesh_tasks`] as in EM-3.11h originally) as of the
-/// EM-3.11-follow-up seam-artifact fix (module docs): [`sync_placeholder_haze`]
-/// needs the same material handle to keep its colour live, so the handle can
-/// no longer be private per-system state. Behaviour is otherwise identical —
-/// still exactly one mesh/material pair for the process's whole lifetime,
-/// still created lazily on first use.
-#[derive(Resource, Default)]
-struct PlaceholderAssets {
-    mesh: Option<Handle<BevyMesh>>,
-    material: Option<Handle<StandardMaterial>>,
-}
-
-/// EM-3.11h — the placeholder's world transform: a unit box (built once by
-/// [`placeholder_box_mesh`]) scaled to the chunk's `32×32` footprint and
-/// `[z_lo, z_hi]` height range, positioned at the chunk's own origin (same
-/// xz convention as [`chunk_transform`] — Veloren `(32·kx, 32·ky)` → Bevy
-/// `(32·kx, −32·ky)`, box growing toward −z/+x/+y from there).
-fn placeholder_transform(key: ChunkKey, z_lo: f32, z_hi: f32) -> Transform {
-    let sz = TerrainChunk::RECT_SIZE.map(|e| e as f32);
-    let height = (z_hi - z_lo).max(1.0);
-    #[expect(clippy::cast_precision_loss, reason = "chunk coords ≪ 2^24")]
-    let origin = Vec3::new(key.x as f32 * sz.x, z_lo, -(key.y as f32 * sz.y) - sz.y);
-    Transform::from_translation(origin).with_scale(Vec3::new(sz.x, height, sz.y))
-}
-
-/// EM-3.11h — a flat-shaded, axis-aligned unit box (each face gets its own
-/// 4 duplicated vertices + normal). Reused for every placeholder via a
-/// non-uniform `Transform` scale ([`placeholder_transform`]) rather than
-/// rebuilt per chunk. Paired with [`placeholder_material`]'s `cull_mode:
-/// None` so a camera standing INSIDE a not-yet-meshed chunk (the exact
-/// "walked into a cave" case this fix targets) still sees the box's inner
-/// faces instead of nothing.
-fn placeholder_box_mesh() -> BevyMesh {
-    let corners = [
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 0.0, 0.0),
-        Vec3::new(1.0, 1.0, 0.0),
-        Vec3::new(0.0, 1.0, 0.0),
-        Vec3::new(0.0, 0.0, 1.0),
-        Vec3::new(1.0, 0.0, 1.0),
-        Vec3::new(1.0, 1.0, 1.0),
-        Vec3::new(0.0, 1.0, 1.0),
-    ];
-    // (corner indices wound for an outward-facing first triangle, outward
-    // normal) per face of the unit cube.
-    let faces: [([usize; 4], Vec3); 6] = [
-        ([0, 1, 2, 3], Vec3::new(0.0, 0.0, -1.0)), // -Z
-        ([5, 4, 7, 6], Vec3::new(0.0, 0.0, 1.0)),  // +Z
-        ([4, 0, 3, 7], Vec3::new(-1.0, 0.0, 0.0)), // -X
-        ([1, 5, 6, 2], Vec3::new(1.0, 0.0, 0.0)),  // +X
-        ([4, 5, 1, 0], Vec3::new(0.0, -1.0, 0.0)), // -Y
-        ([3, 2, 6, 7], Vec3::new(0.0, 1.0, 0.0)),  // +Y
-    ];
-
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(24);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(24);
-    let mut indices: Vec<u32> = Vec::with_capacity(36);
-    for (face_corners, normal) in faces {
-        let base = positions.len() as u32;
-        for corner_index in face_corners {
-            positions.push(corners[corner_index].to_array());
-            normals.push(normal.to_array());
-        }
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    let mut mesh = BevyMesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-/// The placeholder's neutral "obviously a placeholder" rock-grey, chosen in
-/// EM-3.11i to stay legible under any lighting condition. Pulled out as a
-/// named const (was inline in [`placeholder_material`]) so
-/// [`sync_placeholder_haze`] can blend FROM this exact value rather than
-/// duplicating the literal.
-const PLACEHOLDER_BASE_COLOR: Color = Color::srgb(0.35, 0.33, 0.30);
-
-/// Capped, distance-independent blend factor [`sync_placeholder_haze`] mixes
-/// [`PlaceholderHazeTint`] into the placeholder's `base_color` by (module
-/// docs' EM-3.11-follow-up section). Deliberately modest and NOT
-/// distance-scaled: round 14 already proved that letting fog ramp toward
-/// ~100% opacity with distance (`DistanceFog`) erases the placeholder
-/// entirely, which is exactly what `fog_enabled: false` exists to prevent.
-/// This is a fixed, one-time tint instead — enough to soften the box toward
-/// its surroundings' general haze (confirmed necessary by a live
-/// frozen-camera capture, module docs) without ever fully washing it out,
-/// however far or long it stays up. Comparable in spirit to
-/// `xindeler-client::far_terrain::FAR_HAZE_BLEND` (0.12, a similar "small
-/// atmospheric finish, not a mask" role for the far mesh's own real colour);
-/// higher here because this box is flat/monochrome (no per-vertex detail of
-/// its own to preserve) and sits right at the same render-distance band the
-/// far mesh's near edge is already heavily hazed at.
-///
-/// ## BL-82 EM-3.11 round 16 retune (module docs' round-16 section)
-/// Round 15's original value (0.2) left the placeholder's absolute colour
-/// genuinely near-neutral (verified: `(0.35, 0.33, 0.30)` blended 20% toward
-/// a cool `(0.66, 0.73, 0.81)` fog colour lands around `(0.41, 0.41, 0.40)`,
-/// i.e. R≈G≈B) — but a live capture showed that same near-neutral patch
-/// reading as a distinctly warm "tan/beige" slab by SIMULTANEOUS CONTRAST
-/// against the cooler blue-hazed far mesh/sky it typically sits next to.
-/// Bumped to 0.5 (still `< 1.0`, so [`PLACEHOLDER_BASE_COLOR`] always keeps a
-/// 50% floor — the box can never fully wash to the tint colour and vanish
-/// the way round 14's unconditional `DistanceFog` did): this pulls the box's
-/// resting colour much closer to the actual sky/haze tone next to it,
-/// verified with the same frozen-camera capture technique to measurably
-/// soften the contrast that read as an odd-coloured patch.
-const PLACEHOLDER_HAZE_BLEND: f32 = 0.5;
-
-/// Host-installed, OPTIONAL live "haze" colour for the placeholder box
-/// (module docs' EM-3.11-follow-up section) — typically the current
-/// atmosphere's fog colour. Absent entirely is a valid, honestly-degraded
-/// state (e.g. the synthetic voxel-demo, which has no atmosphere concept):
-/// the placeholder then stays [`PLACEHOLDER_BASE_COLOR`] verbatim, exactly
-/// EM-3.11i/round-14 behaviour, unchanged.
-#[derive(Resource, Clone, Copy)]
-pub struct PlaceholderHazeTint(pub Color);
-
-/// BL-82 EM-3.11 round 17 — host-installed, OPTIONAL per-chunk colour hint
-/// for the placeholder box (module docs' round-17 section). Typically wired
-/// from the SAME real per-cell terrain-colour grid
-/// [`crate`]-external hosts already use to colour the far mesh (round 11's
-/// Phase A fix, `xindeler_client::far_terrain`) — the far mesh proved that
-/// "use the real colour" beats "retune the synthetic/neutral colour's blend
-/// fraction a bit more" for this exact class of "flat patch reads as
-/// obviously fake" problem, and this resource lets the near pipeline's
-/// placeholder reuse that same real data instead of the shared neutral
-/// [`PLACEHOLDER_BASE_COLOR`], WITHOUT this crate ever depending on
-/// `xindeler-client`/atmosphere/far-terrain types (same "generic host hook"
-/// shape as [`ChunkVolumeProvider`]/[`PlaceholderHazeTint`]). Returns
-/// `(colour, min_height, max_height)` for a chunk key that the host CAN
-/// place — `min_height`/`max_height` are the recorded surface altitude
-/// across the hint's own LOCAL NEIGHBOURHOOD (round-18 module docs: NOT a
-/// single point sample any more — round 17 shipped with a single-point
-/// comparison and a live playtest found it rejected 98.6% of real chunks,
-/// because ordinary rolling terrain routinely varies by more than the
-/// tolerance across the hint grid's own coarse cell footprint).
-/// [`spawn_chunk_mesh_tasks`] only trusts the colour when BOTH (a) the
-/// placeholder's own `z_hi` (its box's top, from the SAME volume range the
-/// real mesh will use) falls within `[min_height - SURFACE_HINT_TOLERANCE,
-/// max_height + SURFACE_HINT_TOLERANCE]` (see [`SURFACE_HINT_TOLERANCE`])
-/// AND (b) the live viewer isn't currently well BELOW that same surface (see
-/// [`PlaceholderViewerHeight`] — a `bevy-migration-reviewer` finding on the
-/// first version of this guard: (a) alone only tests "is this column's
-/// height unusual relative to its neighbourhood," which does NOT reliably
-/// detect the ORIGINAL EM-3.11h bug scenario — an ordinary Veloren-style
-/// cave tunnel carved under otherwise-normal terrain leaves the column's own
-/// recorded surface height (and its neighbours') completely ordinary, so (a)
-/// alone would happily trust a bright outdoor colour while the camera stands
-/// inside a dark cave void looking at the box's own inner faces). Absent
-/// entirely (no host installed one, or the host has no data for this key —
-/// e.g. outside its downsampled grid) falls back to today's
-/// [`PLACEHOLDER_BASE_COLOR`] + [`PLACEHOLDER_HAZE_BLEND`] path, unchanged.
-#[derive(Resource, Clone)]
-pub struct PlaceholderColorHint(Arc<dyn Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync>);
-
-impl PlaceholderColorHint {
-    pub fn new(f: impl Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
-    }
-
-    #[must_use]
-    fn get(&self, key: ChunkKey) -> Option<(Color, f32, f32)> { (self.0)(key) }
-}
-
-/// Host-installed, OPTIONAL current viewer position (chunk key + world
-/// height, Bevy y-up — same convention [`chunk_transform`] documents), kept
-/// live every frame by the host (typically the primary camera's
-/// `GlobalTransform` — `xindeler_client::far_terrain::
-/// sync_placeholder_viewer_height`). Generic on purpose (no `Camera3d`/
-/// render-graph coupling in this crate, same "host supplies the value, this
-/// crate just reads it" shape as [`PlaceholderHazeTint`]):
-/// [`spawn_chunk_mesh_tasks`] uses it to reject a [`PlaceholderColorHint`]
-/// whose surface check passes but where the viewer is plausibly INSIDE/UNDER
-/// *that specific chunk* (round-17 module docs on [`PlaceholderColorHint`])
-/// rather than standing on/near an ordinary outdoor surface.
-///
-/// ## Why this carries a chunk key, not just a height (round-17 follow-up)
-/// A `bevy-migration-reviewer` pass on the height-only first version of this
-/// guard caught a real regression: comparing the viewer's height against
-/// EVERY hinted placeholder's `z_hi`, with no positional scoping, rejects a
-/// perfectly ordinary hillside chunk several chunks away from a camera
-/// standing in a valley — the "camera is below THIS box's surface" check is
-/// only meaningful for the box the camera is actually AT or near; it says
-/// nothing about a distant, unrelated column's cave-vs-surface status. The
-/// veto below is therefore scoped to chunks within
-/// [`VIEWER_PROXIMITY_CHUNKS`] of `chunk_key`: distant hinted placeholders
-/// are governed by the surface-height check alone (as they were before this
-/// follow-up), and only a placeholder AT or immediately around the viewer's
-/// own position can be vetoed by height.
-///
-/// Absent entirely (no host installed one, e.g. the synthetic voxel-demo)
-/// degrades honestly: this check is simply skipped, leaving
-/// [`SURFACE_HINT_TOLERANCE`] as the sole guard, exactly as before this
-/// addition.
-#[derive(Resource, Clone, Copy)]
-pub struct PlaceholderViewerHeight {
-    /// The viewer's own chunk-grid coordinate (same convention as
-    /// [`ChunkKey`]) — scopes the height veto to nearby chunks only.
-    pub chunk_key: ChunkKey,
-    /// The viewer's world height (Bevy y-up).
-    pub height: f32,
-}
-
-/// How many chunks away from [`PlaceholderViewerHeight::chunk_key`] the
-/// height veto still applies (round-17 follow-up doc comment above). Small
-/// and deliberate: this only needs to cover "the box the camera is standing
-/// in or right next to," not the whole streaming frontier — a placeholder
-/// more than this many chunks from the viewer is governed by the
-/// surface-height check alone, same as this round's first version intended
-/// for every chunk before the reviewer caught the scoping gap.
-const VIEWER_PROXIMITY_CHUNKS: i32 = 2;
-
-/// How far (world metres) a placeholder's own `z_hi` may sit beyond
-/// [`PlaceholderColorHint`]'s local `[min_height, max_height]` range before
-/// its real colour is trusted (round-17 module docs; range-based comparison
-/// added round 18 — see the module docs' round-18 section for why a
-/// single-point comparison at this same tolerance rejected 98.6% of real
-/// chunks in a live playtest). This tolerance only needs to separate
-/// "obviously an outdoor/frontier chunk" from "obviously an underground/cave
-/// void", not to pinpoint exact terrain height — `world`'s own cave
-/// generation (`world/src/layer/cave.rs`, `AVG_LEVEL_DEPTH = 120`) only
-/// starts ramping "underground" 80m+ below the local surface, comfortably
-/// outside a well-chosen margin BEYOND the neighbourhood's own recorded
-/// range (as opposed to beyond one arbitrary nearby point, which routinely
-/// undershoots ordinary relief — round-18 finding). ALSO reused as the
-/// [`PlaceholderViewerHeight`] margin (same "coarse, not exact" tolerance
-/// applies to both checks).
-const SURFACE_HINT_TOLERANCE: f32 = 48.0;
-
-/// BL-82 EM-3.11 round 18 diagnostic classification of one
-/// [`PlaceholderColorHint`] lookup — see [`resolve_placeholder_hint`]. `Copy`
-/// so a caller can both log and feed [`PlaceholderHintStats`] without
-/// re-deriving anything.
-#[derive(Debug, Clone, Copy)]
-enum HintOutcome {
-    /// No host-installed [`PlaceholderColorHint`], or the host has no data
-    /// for this key (outside its grid, or negative — round-17 module docs on
-    /// `placeholder_color_hint_fn`) — an honest "no hint", not a rejection.
-    NoHint,
-    /// A hint existed but the placeholder's own `z_hi` sat outside
-    /// `[min_height - SURFACE_HINT_TOLERANCE, max_height +
-    /// SURFACE_HINT_TOLERANCE]` (round-18 module docs — a LOCAL RANGE, not a
-    /// single point, as of this round). `delta` is the signed distance
-    /// (metres) from `z_hi` to the nearest end of that range (0 would never
-    /// reach this variant — it means "inside the range", i.e. trusted).
-    /// Before this round's fix, comparing against a single coarse corner
-    /// sample instead of the local range made this fire on ~98.6% of real
-    /// chunks in a live playtest (module docs).
-    RejectedSurface { delta: f32 },
-    /// The surface check passed, but the viewer-proximity cave-safety veto
-    /// (round 17's `PlaceholderViewerHeight`) rejected it: the live viewer is
-    /// near this chunk and sits `below_by` metres below `z_hi -
-    /// SURFACE_HINT_TOLERANCE`.
-    RejectedViewerBelow { below_by: f32 },
-    /// Trusted — the caller uses the hint's real colour.
-    Trusted,
-}
-
-/// BL-82 EM-3.11 round 18 — the round-17 hint-trust filter chain, pulled out
-/// of [`spawn_chunk_mesh_tasks`] into its own function so it can report WHY a
-/// hint was accepted or rejected (see [`HintOutcome`]), not just the final
-/// yes/no `spawn_chunk_mesh_tasks` needs to pick a material. Behaviour is
-/// byte-for-byte the same round-17 logic (module docs on
-/// [`PlaceholderColorHint`]/[`PlaceholderViewerHeight`]) — this refactor adds
-/// observability, it does not change what gets trusted.
-fn resolve_placeholder_hint(
-    key: ChunkKey,
-    z_hi: f32,
-    color_hint: Option<&PlaceholderColorHint>,
-    viewer_height: Option<&PlaceholderViewerHeight>,
-) -> (Option<Color>, HintOutcome) {
-    let Some((hint_color, min_height, max_height)) = color_hint.and_then(|hint| hint.get(key))
-    else {
-        return (None, HintOutcome::NoHint);
-    };
-    // BL-82 EM-3.11 round 18: trust when `z_hi` falls within the local
-    // neighbourhood's own recorded range (± tolerance), not when it merely
-    // sits close to ONE arbitrary nearby point (module docs' round-18
-    // section — the single-point version rejected 98.6% of real chunks in a
-    // live playtest). `delta` is the signed distance to the nearest bound,
-    // used only for diagnostics (`HintOutcome::RejectedSurface`).
-    let delta = if z_hi < min_height {
-        z_hi - min_height
-    } else if z_hi > max_height {
-        z_hi - max_height
-    } else {
-        0.0
-    };
-    if delta.abs() > SURFACE_HINT_TOLERANCE {
-        return (None, HintOutcome::RejectedSurface { delta });
-    }
-    if let Some(viewer) = viewer_height {
-        let near_viewer = (key.x - viewer.chunk_key.x).abs() <= VIEWER_PROXIMITY_CHUNKS
-            && (key.y - viewer.chunk_key.y).abs() <= VIEWER_PROXIMITY_CHUNKS;
-        if near_viewer {
-            let floor = z_hi - SURFACE_HINT_TOLERANCE;
-            if viewer.height < floor {
-                return (None, HintOutcome::RejectedViewerBelow {
-                    below_by: floor - viewer.height,
-                });
-            }
-        }
-    }
-    (Some(hint_color), HintOutcome::Trusted)
-}
-
-/// BL-82 EM-3.11 round 18 — aggregate counts of every
-/// [`resolve_placeholder_hint`] outcome since boot (mirrors
-/// [`ChunkUploadStats`]'s always-on, cheap-counter role). Lets a host (or a
-/// test) confirm HOW OFTEN each rejection reason fires without needing a
-/// live screenshot capture — this round's own investigation used exactly
-/// this (plus `XINDELER_PLACEHOLDER_HINT_LOG=1` for the per-event detail) to
-/// confirm `RejectedSurface`/`RejectedViewerBelow` fire far more than round
-/// 17 anticipated in real hilly/mountainous terrain (module docs' round-18
-/// section).
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct PlaceholderHintStats {
-    pub trusted: u64,
-    pub rejected_surface: u64,
-    pub rejected_viewer_below: u64,
-    pub no_hint: u64,
-}
-
-impl PlaceholderHintStats {
-    fn record(&mut self, outcome: HintOutcome) {
-        match outcome {
-            HintOutcome::NoHint => self.no_hint += 1,
-            HintOutcome::RejectedSurface { .. } => self.rejected_surface += 1,
-            HintOutcome::RejectedViewerBelow { .. } => self.rejected_viewer_below += 1,
-            HintOutcome::Trusted => self.trusted += 1,
-        }
-    }
-}
-
-/// BL-82 EM-3.11 round 17 — small, DISTANCE-INDEPENDENT atmospheric assist
-/// blended into a [`PlaceholderColorHint`]-sourced placeholder colour, mixed
-/// via the SAME live [`PlaceholderHazeTint`] the neutral-colour path already
-/// reads. Deliberately much smaller than [`PLACEHOLDER_HAZE_BLEND`] (0.5):
-/// that constant exists to pull a colour with NO relationship to the actual
-/// scene toward something plausible; a hint colour is already the chunk's
-/// REAL sampled terrain colour, so (mirroring `xindeler_client::far_terrain
-/// ::FAR_HAZE_BLEND`'s identical "colour is real now, this is just a light
-/// distance cue" role for the sibling far-mesh fix) it only needs a light
-/// finishing touch, not a correction.
-const PLACEHOLDER_HINT_HAZE_BLEND: f32 = 0.12;
-
-/// Builds a one-off (NOT shared/cached — round-17 module docs: each hinted
-/// placeholder has its own real colour, so there is nothing to share) unlit
-/// placeholder material from a [`PlaceholderColorHint`] sample, blending in
-/// the live [`PlaceholderHazeTint`] if one is installed (same small role
-/// `FAR_HAZE_BLEND` plays for the far mesh's own real colour, in the host
-/// crate). Same
-/// `unlit`/`cull_mode`/`fog_enabled` guarantees as [`placeholder_material`] —
-/// only `base_color`'s SOURCE differs.
-fn placeholder_material_from_hint(hint: Color, tint: Option<Color>) -> StandardMaterial {
-    let base_color = match tint {
-        Some(tint) => hint.mix(&tint, PLACEHOLDER_HINT_HAZE_BLEND),
-        None => hint,
-    };
-    StandardMaterial {
-        base_color,
-        unlit: true,
-        cull_mode: None,
-        fog_enabled: false,
-        ..Default::default()
-    }
-}
-
-/// EM-3.11i — a neutral rock-grey, genuinely `unlit`. See the module docs'
-/// EM-3.11i section for the full story: the original EM-3.11h material was
-/// a normally-lit `StandardMaterial`, which a real gameplay capture proved
-/// can render fully BLACK — indistinguishable from the black-frame bug this
-/// placeholder exists to fix — whenever the scene provides it no usable
-/// light. That is not a tuning miss, it is what physically-based lighting is
-/// SUPPOSED to do (`indirect + direct == 0` ⇒ output `== 0`, whatever the
-/// albedo), and this box hits that case squarely: [`placeholder_transform`]
-/// scales it to the chunk's FULL footprint/height, so a camera walking into
-/// a never-before-meshed chunk (the exact scenario this fix targets) is
-/// routinely standing INSIDE the box, surrounded by its own inner faces
-/// (`cull_mode: None` renders them on purpose — module docs above). A closed
-/// box viewed from its own interior self-shadows against the sun from
-/// nearly every angle and starves indirect/SSAO light the same way any
-/// fully-enclosed interior does — a real StandardMaterial box in that
-/// geometry goes dark regardless of `base_color`. `unlit: true` makes the
-/// fragment output `base_color` directly, with NO lighting term at all, so
-/// it stays a flat, clearly-a-placeholder mid-grey under every scene
-/// condition (bright noon, dusk, night, deep cave) instead of only some of
-/// them — the guarantee EM-3.11h was meant to provide in the first place.
-/// `perceptual_roughness`/`reflectance` are dropped: both are lit-material
-/// knobs with no effect once `unlit` is set.
-///
-/// ## BL-82 EM-3.11 round 14 — `fog_enabled: false`
-/// See the module docs' round-14 section for the full investigation. At the
-/// render-distance band where a never-before-meshed chunk typically appears
-/// (near `chunk_render_distance`), `DistanceFog` is already ~90-99% opaque,
-/// and fog application is gated ONLY by `fog_enabled` (default `true`),
-/// NEVER by `unlit`
-/// (`bevy_pbr::render::pbr_functions::main_pass_post_lighting_processing`
-/// runs after, not inside, the unlit/lit branch) — so the "obviously a
-/// placeholder" rock-grey chosen above washed out toward the pale fog/sky
-/// colour anyway, reading as empty sky rather than a crude stand-in and
-/// reproducing exactly as "the background disappeared for a couple of
-/// frames." `fog_enabled` is a first-class `StandardMaterial` field for
-/// precisely this case; setting it `false` here has NO effect on the
-/// placeholder's timing, size, or the underlying mesh-generation throughput
-/// (a separate, already-tracked, still-open question — EM-3.11c/d/e/p) — it
-/// only keeps the box visually legible as a placeholder at every distance
-/// instead of dissolving into the horizon.
-fn placeholder_material() -> StandardMaterial {
-    StandardMaterial {
-        base_color: PLACEHOLDER_BASE_COLOR,
-        unlit: true,
-        cull_mode: None,
-        fog_enabled: false,
-        ..Default::default()
-    }
-}
-
-/// Keeps the shared placeholder material's `base_color` blended
-/// [`PLACEHOLDER_HAZE_BLEND`] toward the live [`PlaceholderHazeTint`], when a
-/// host has installed one (module docs' EM-3.11-follow-up section). Runs
-/// unconditionally every `Update` (no `run_if`) but only ever WRITES when the
-/// freshly-recomputed target colour actually differs from what's already
-/// applied — see the comment inline below for why a `resource_changed`-style
-/// gate at the registration site would have been the wrong tool here despite
-/// looking like the obvious one.
-fn sync_placeholder_haze(
-    tint: Option<Res<PlaceholderHazeTint>>,
-    assets: Res<PlaceholderAssets>,
-    materials: Option<ResMut<Assets<StandardMaterial>>>,
-) {
-    let Some(tint) = tint else { return };
-    let Some(mut materials) = materials else {
-        return;
-    };
-    let Some(handle) = assets.material.as_ref() else {
-        return;
-    };
-    let target = PLACEHOLDER_BASE_COLOR.mix(&tint.0, PLACEHOLDER_HAZE_BLEND);
-    // Peek IMMUTABLY first (bevy-migration-reviewer finding): `Assets::
-    // get_mut` returns a change-detection guard whose `DerefMut`/`Drop`
-    // unconditionally mark the asset modified and push `AssetEvent::
-    // Modified` (verified against `bevy_asset-0.19.0`'s `assets.rs`),
-    // regardless of whether the value written is actually different —
-    // driving `bevy_render`'s generic re-extraction path for this material
-    // every single frame, forever, once any placeholder had ever spawned.
-    // A plain `run_if(resource_changed::<PlaceholderHazeTint>)` at the
-    // registration site would dodge that cost but silently break
-    // correctness instead: a chunk (and its placeholder) can first stream in
-    // long AFTER the tint last changed (the common case once the atmosphere
-    // has settled), and that placeholder would then never pick up the
-    // current tint at all. Re-deriving `target` from CURRENT state every
-    // frame and only taking the mutable path when it actually differs from
-    // what's already applied is correct in both the "tint just changed"
-    // and "a fresh placeholder just appeared" cases, while still making the
-    // steady-state (settled atmosphere, no new placeholders) cost a single
-    // cheap immutable lookup + `Color` comparison, no asset-system churn.
-    let Some(current) = materials.get(handle) else {
-        return;
-    };
-    if current.base_color == target {
-        return;
-    }
-    let Some(mut material) = materials.get_mut(handle) else {
-        return;
-    };
-    material.base_color = target;
 }
 
 /// In-flight meshing cap factor: [`spawn_chunk_mesh_tasks`] stops draining
@@ -1209,8 +460,6 @@ impl Plugin for ChunkMeshPipelinePlugin {
             .init_resource::<ChunkMeshIndex>()
             .init_resource::<ChunkUploadStats>()
             .init_resource::<ChunkUploadBudget>()
-            .init_resource::<PlaceholderAssets>()
-            .init_resource::<PlaceholderHintStats>()
             .add_systems(
                 Update,
                 (
@@ -1223,58 +472,7 @@ impl Plugin for ChunkMeshPipelinePlugin {
                 )
                     .chain()
                     .in_set(ChunkMeshPipelineSet),
-            )
-            // EM-3.11-follow-up (module docs): independent of the removals→
-            // spawn→apply chain above — only needs `Assets<StandardMaterial>`
-            // + the two placeholder resources, and a one-frame lag on the
-            // very first placeholder ever spawned (before its material
-            // exists to tint) is negligible. Deliberately NO `run_if` here —
-            // see [`sync_placeholder_haze`]'s own doc comment for why a
-            // `resource_changed`-gated version (the seemingly obvious
-            // optimization, flagged by a `bevy-migration-reviewer` pass) is
-            // actually WRONG: it would silently stop tinting any placeholder
-            // that first spawns after the tint last changed, which is the
-            // common case once the atmosphere settles. The function itself
-            // already avoids the real cost (an unconditional write every
-            // frame) by peeking before writing.
-            .add_systems(Update, sync_placeholder_haze)
-            // BL-82 EM-3.11 round 17: opt-in, permanent, zero-cost-when-unset
-            // diagnostic (same convention as `XINDELER_SPRITE_PERF_LOG`/
-            // `XINDELER_FAR_MESH_PERF_LOG`) — see [`log_placeholder_count`].
-            .add_systems(Update, log_placeholder_count);
-    }
-}
-
-/// BL-82 EM-3.11 round 17 (`XINDELER_PLACEHOLDER_COUNT_LOG=1`): logs the
-/// current number of SIMULTANEOUSLY up [`PlaceholderChunkMesh`] entries
-/// whenever it changes. Investigating Matías's "franja beige... del fin del
-/// mapa" report (a continuous STRIP, not an isolated plate, at the streaming
-/// frontier while exploring fresh terrain): rounds 14-16 all measured and
-/// tuned this same shared placeholder material against the ONE-BOX-AT-A-TIME
-/// case, but `spawn_chunk_mesh_tasks`'s own module docs already note "a burst
-/// of newly-streamed chunks... can genuinely have several placeholders up
-/// simultaneously" (`terrain_stream.rs` marks a new arrival's full 3×3
-/// neighbourhood dirty every time) — this diagnostic turns that structural
-/// possibility into a real measured number instead of a guess.
-fn log_placeholder_count(
-    index: Res<ChunkMeshIndex>,
-    mut last: Local<usize>,
-    mut enabled: Local<Option<bool>>,
-) {
-    let enabled = *enabled.get_or_insert_with(|| {
-        std::env::var("XINDELER_PLACEHOLDER_COUNT_LOG").is_ok_and(|v| v != "0")
-    });
-    if !enabled {
-        return;
-    }
-    let count = index.0.values().filter(|e| e.is_placeholder).count();
-    if count != *last {
-        tracing::info!(
-            count,
-            previous = *last,
-            "EM-3.11 round 17: simultaneous placeholder chunk count changed"
-        );
-        *last = count;
+            );
     }
 }
 
@@ -1311,33 +509,22 @@ fn process_chunk_removals(
 /// back once `budget × IN_FLIGHT_FACTOR` tasks are outstanding OR once
 /// `budget × SPAWN_BURST_FACTOR` NEW tasks have started THIS frame (BL-82
 /// EM-3.11n — see [`SPAWN_BURST_FACTOR`]'s docs).
+///
+/// BL-82 EM-3.11 round 19: this no longer spawns anything synchronously — no
+/// entity of any kind exists for a key between it being marked dirty and its
+/// real mesh landing via [`apply_chunk_meshes`] (module docs' round-19
+/// section). The EM-3.11h-through-18 first-load placeholder used to be
+/// spawned here.
 fn spawn_chunk_mesh_tasks(
     provider: Res<ChunkVolumeProvider>,
     layer_map: Res<ChunkLayerMap>,
     budget: Res<ChunkUploadBudget>,
     mut queue: ResMut<ChunkMeshQueue>,
     mut tasks: ResMut<ChunkMeshTasks>,
-    mut commands: Commands,
-    mut index: ResMut<ChunkMeshIndex>,
-    mut meshes: ResMut<Assets<BevyMesh>>,
-    mut placeholder_materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut placeholder_assets: ResMut<PlaceholderAssets>,
-    color_hint: Option<Res<PlaceholderColorHint>>,
-    haze_tint: Option<Res<PlaceholderHazeTint>>,
-    viewer_height: Option<Res<PlaceholderViewerHeight>>,
-    mut hint_stats: ResMut<PlaceholderHintStats>,
-    mut hint_log: Local<Option<bool>>,
 ) {
     if queue.is_empty() {
         return;
     }
-    // BL-82 EM-3.11 round 18 (`XINDELER_PLACEHOLDER_HINT_LOG=1`): opt-in,
-    // permanent, zero-cost-when-unset per-event log of every
-    // `resolve_placeholder_hint` outcome — same convention as
-    // `XINDELER_PLACEHOLDER_COUNT_LOG`/`XINDELER_FAR_MESH_PERF_LOG`.
-    let hint_log_enabled = *hint_log.get_or_insert_with(|| {
-        std::env::var("XINDELER_PLACEHOLDER_HINT_LOG").is_ok_and(|v| v != "0")
-    });
     // BL-82 EM-3.11p: wall-clock this whole system at `debug` level.
     // `provider.fetch` runs synchronously on the main thread (module docs),
     // so THIS is where a diagonal-heavier backlog actually costs a frame —
@@ -1364,124 +551,9 @@ fn spawn_chunk_mesh_tasks(
             // The provider no longer has this chunk: cancel any in-flight
             // task too, so a stale mesh can't land later (last write wins).
             tasks.0.remove(&key);
-            // EM-3.11h: also clean up an abandoned first-load placeholder —
-            // its real mesh is never coming now (the volume is gone), so
-            // nothing should be left behind to linger forever.
-            if index
-                .0
-                .get(&key)
-                .is_some_and(|entities| entities.is_placeholder)
-                && let Some(entity) = index.0.remove(&key).and_then(|entities| entities.terrain)
-            {
-                commands.entity(entity).despawn();
-            }
             tracing::debug!(?key, "chunk mesh request dropped: provider has no volume");
             continue;
         };
-
-        // EM-3.11h: a key with no entity at all yet — its first ever mesh —
-        // gets an instant, synchronous placeholder so there is always
-        // SOMETHING to draw at this chunk's footprint while the async task
-        // + upload budget catch up (module docs: this is what closes the
-        // "black frame" gap the far mesh's camera-proximity hole relied on
-        // the near pipeline to cover). A key that already has an entity
-        // (real geometry from a previous upload, OR a placeholder already
-        // up from an earlier mark of this same key) is left alone — this
-        // only ever fires once per chunk, on its very first mark.
-        if !index.0.contains_key(&key)
-            && let Some(materials) = placeholder_materials.as_deref_mut()
-        {
-            let mesh = placeholder_assets
-                .mesh
-                .get_or_insert_with(|| meshes.add(placeholder_box_mesh()))
-                .clone();
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "world z bounds ≪ 2^24, same contract as chunk_transform"
-            )]
-            let (z_lo, z_hi) = (volume.range.min.z as f32, volume.range.max.z as f32);
-            // BL-82 EM-3.11 round 17 (range check added round 18): prefer a
-            // real per-chunk colour hint over the shared neutral material,
-            // but ONLY when BOTH (a) the hint's own local
-            // [min_height, max_height] neighbourhood range says this
-            // column's height is plausibly ordinary (not a coarse-grid
-            // mismatch — round 18: a SINGLE point comparison here rejected
-            // 98.6% of real chunks live) AND (b), for a chunk NEAR the
-            // viewer's own position only, the live viewer isn't well below
-            // this chunk's own surface (module docs on
-            // `PlaceholderColorHint`/`PlaceholderViewerHeight` — (a) alone
-            // does NOT reliably detect "camera standing inside an ordinary
-            // cave under otherwise-normal terrain," the ORIGINAL EM-3.11h bug
-            // scenario, since an ordinary cave leaves the column's recorded
-            // surface height looking completely normal; (b) checks the
-            // actual failure condition directly instead of inferring it from
-            // neighbourhood height variance — but ONLY near the viewer, per
-            // `PlaceholderViewerHeight`'s own doc comment: a distant hillside
-            // chunk must not be vetoed just because the viewer happens to
-            // stand in a valley far below it). Missing `PlaceholderViewerHeight`,
-            // or a hinted chunk outside `VIEWER_PROXIMITY_CHUNKS`, degrades
-            // honestly to "check (a) only", exactly this guard's pre-(b)
-            // behaviour.
-            let (hinted, reason) = resolve_placeholder_hint(
-                key,
-                z_hi,
-                color_hint.as_deref(),
-                viewer_height.as_deref(),
-            );
-            hint_stats.record(reason);
-            if hint_log_enabled {
-                match reason {
-                    HintOutcome::NoHint => tracing::debug!(
-                        key_x = key.x,
-                        key_y = key.y,
-                        "EM-3.11 round 18: no colour hint available for this chunk"
-                    ),
-                    HintOutcome::RejectedSurface { delta } => tracing::debug!(
-                        key_x = key.x,
-                        key_y = key.y,
-                        delta,
-                        tolerance = SURFACE_HINT_TOLERANCE,
-                        "EM-3.11 round 18: colour hint rejected (surface mismatch)"
-                    ),
-                    HintOutcome::RejectedViewerBelow { below_by } => tracing::debug!(
-                        key_x = key.x,
-                        key_y = key.y,
-                        below_by,
-                        "EM-3.11 round 18: colour hint rejected (viewer below surface)"
-                    ),
-                    HintOutcome::Trusted => tracing::debug!(
-                        key_x = key.x,
-                        key_y = key.y,
-                        "EM-3.11 round 18: colour hint trusted"
-                    ),
-                }
-            }
-            let material = if let Some(hint_color) = hinted {
-                materials.add(placeholder_material_from_hint(
-                    hint_color,
-                    haze_tint.as_ref().map(|t| t.0),
-                ))
-            } else {
-                placeholder_assets
-                    .material
-                    .get_or_insert_with(|| materials.add(placeholder_material()))
-                    .clone()
-            };
-            let entity = commands
-                .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material),
-                    placeholder_transform(key, z_lo, z_hi),
-                    TerrainChunkMesh { key },
-                    PlaceholderChunkMesh,
-                ))
-                .id();
-            index.0.insert(key, ChunkEntities {
-                terrain: Some(entity),
-                fluid: None,
-                is_placeholder: true,
-            });
-        }
 
         let lut = layer_map.0.clone();
         let task = pool.spawn(async move {
@@ -1526,6 +598,11 @@ fn spawn_chunk_mesh_tasks(
 /// Applies at most [`ChunkUploadBudget::max_uploads_per_frame`] FINISHED
 /// tasks per frame: adds the mesh assets and swaps the chunk's entities
 /// (despawn old + spawn new in the same command batch — no visible hole).
+///
+/// BL-82 EM-3.11 round 19: this is now the ONLY place a chunk's entities are
+/// ever created — the first time a key appears here IS the first time
+/// anything is drawn for it (module docs' round-19 section), mirroring
+/// `xindeler-old`'s `insert_chunk`.
 fn apply_chunk_meshes(
     mut commands: Commands,
     mut tasks: ResMut<ChunkMeshTasks>,
@@ -1597,11 +674,7 @@ fn apply_chunk_meshes(
                 ))
                 .id()
         });
-        index.0.insert(key, ChunkEntities {
-            terrain,
-            fluid,
-            is_placeholder: false,
-        });
+        index.0.insert(key, ChunkEntities { terrain, fluid });
         stats.uploads_last_frame += 1;
         stats.total_uploads += 1;
     }

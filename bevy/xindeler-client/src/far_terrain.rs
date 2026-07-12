@@ -125,7 +125,6 @@ use bevy::{
 };
 use xindeler_oracle_host::{AtmosphereController, AtmosphereProfile};
 use xindeler_protocol::NetFarTerrain;
-use xindeler_render_voxel::pipeline::{ChunkKey, PlaceholderColorHint, PlaceholderViewerHeight};
 
 use crate::{
     far_terrain_material::{
@@ -149,14 +148,8 @@ pub struct FarTerrainPlugin;
 
 impl Plugin for FarTerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FarTerrainMaterialPlugin).add_systems(
-            Update,
-            (
-                receive_far_terrain,
-                retile_far_mesh,
-                sync_placeholder_viewer_height,
-            ),
-        );
+        app.add_plugins(FarTerrainMaterialPlugin)
+            .add_systems(Update, (receive_far_terrain, retile_far_mesh));
 
         // Debug-only, opt-in (`XINDELER_SMOKE_FAR_MESH_CAM=1`): parks the
         // camera high above the anchor looking outward so a
@@ -189,44 +182,6 @@ fn smoke_horizon_cam(
         let look_target = anchor.bevy_pos + Vec3::new(-500.0, 30.0, 500.0);
         *transform = Transform::from_translation(eye).looking_at(look_target, Vec3::Y);
     }
-}
-
-/// BL-82 EM-3.11 round 17 — keeps [`xindeler_render_voxel::pipeline::
-/// PlaceholderColorHint`]'s safety guard honest: the primary camera's live
-/// chunk key + world height (Bevy y-up), synced every `Update` regardless of
-/// whether the far mesh needs a re-tile this frame (unlike
-/// [`retile_far_mesh`]'s own camera read, which only matters on the rare
-/// re-tile path — placeholder spawns happen far more often, so this needs to
-/// be live every frame). A no-op (leaves the resource at whatever it last
-/// was, or absent) when no camera exists yet — matches every other "camera
-/// not ready" fallback in this crate. The chunk key uses the SAME xz → chunk
-/// convention [`crate::lod::chunk_center_bevy`]/`pipeline::chunk_transform`
-/// already share (Veloren `(32·kx, 32·ky)` → Bevy `(32·kx, 0, −32·ky)`, so
-/// inverted here as `kx = floor(x / CHUNK_EDGE)`, `ky = floor(−z /
-/// CHUNK_EDGE)`) — round-17 follow-up: `PlaceholderViewerHeight`'s own doc
-/// comment explains why the near pipeline needs this key, not just a height,
-/// to scope its cave-detection veto to the viewer's own neighbourhood
-/// instead of vetoing every hinted placeholder in the world by elevation
-/// alone.
-fn sync_placeholder_viewer_height(
-    mut commands: Commands,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
-) {
-    let Some(eye) = camera.iter().next().map(GlobalTransform::translation) else {
-        return;
-    };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk coords ≪ i32::MAX; floor() before the cast avoids sign-rounding bias"
-    )]
-    let chunk_key = ChunkKey::new(
-        (eye.x / CHUNK_EDGE).floor() as i32,
-        (-eye.z / CHUNK_EDGE).floor() as i32,
-    );
-    commands.insert_resource(PlaceholderViewerHeight {
-        chunk_key,
-        height: eye.y,
-    });
 }
 
 /// The decoded far-terrain grid (height + colour). Installed once, the first
@@ -305,23 +260,6 @@ fn receive_far_terrain(
         }
         vec![[0u8; 4]; heights.len()]
     });
-    // BL-82 EM-3.11 round 17: install a `PlaceholderColorHint` from the SAME
-    // real per-cell grid this module already uses to colour the far mesh
-    // (round 11's Phase A) — see `xindeler_render_voxel::pipeline::
-    // PlaceholderColorHint`'s doc comment for why the near pipeline's
-    // placeholder box wants this instead of its shared neutral-grey default.
-    // Cloned (not `Arc`-shared with `DecodedFarTerrain` below) to keep this a
-    // narrowly-scoped addition: the grid is capped at `LOD_ALT_MAX_DIM`²
-    // cells server-side, so duplicating it once, at boot, costs a few
-    // hundred KB at most — trivial next to a one-shot payload that already
-    // crossed the network.
-    commands.insert_resource(PlaceholderColorHint::new(placeholder_color_hint_fn(
-        msg.grid_size[0],
-        msg.grid_size[1],
-        msg.chunk_stride,
-        heights.clone(),
-        colors.clone(),
-    )));
     commands.insert_resource(FarTerrainData(DecodedFarTerrain {
         grid_w: msg.grid_size[0],
         grid_h: msg.grid_size[1],
@@ -330,86 +268,6 @@ fn receive_far_terrain(
         colors,
         horizon,
     }));
-}
-
-/// Builds the closure [`receive_far_terrain`] installs as a
-/// [`PlaceholderColorHint`]: maps a near-pipeline [`ChunkKey`] (an absolute
-/// world chunk-grid coordinate, same convention `xindeler_sim_bridge::
-/// send_far_terrain_once` samples `WorldData::col_at`/`alt_at` in) to its
-/// containing far-terrain grid cell (`key / chunk_stride`, matching that same
-/// sender's downsample stride) and returns that cell's real colour plus the
-/// recorded altitude RANGE (min/max) across its own immediate 3×3 grid-cell
-/// neighbourhood (clamped to grid bounds) — the "is this plausibly outdoor,
-/// not a cave" signal `spawn_chunk_mesh_tasks` checks against
-/// [`SURFACE_HINT_TOLERANCE`] in the host-agnostic crate.
-///
-/// ## BL-82 EM-3.11 round 18: a RANGE, not [`receive_far_terrain`]'s
-/// ## original single point
-/// Round 17 shipped comparing a placeholder's `z_hi` against ONE cell's
-/// recorded altitude. A live playtest (`--listen-server --smoke-perf-run`,
-/// `XINDELER_PLACEHOLDER_HINT_LOG=1`) found this rejected 282/286 (98.6%) of
-/// real placeholder colour hints — ordinary rolling terrain routinely varies
-/// by 50-150m across the SAME `chunk_stride`-chunk cell this one point
-/// represents (256m at the default 1024-chunk world's stride), comfortably
-/// exceeding the (deliberately modest, cave-safety) tolerance. Averaging
-/// the neighbourhood only smooths the number without fixing the comparison;
-/// this instead widens WHAT is compared against: a placeholder chunk whose
-/// height falls ANYWHERE within its neighbourhood's own recorded relief is
-/// plausibly ordinary outdoor terrain — a genuine cave void, by contrast,
-/// does not show up in `lod_alt`/`lod_base` at all (that grid only ever
-/// records the true surface), so its `z_hi` sits far below EVERY nearby
-/// sample, not just the one this used to compare against.
-///
-/// A negative key or a key outside the grid (both possible at a world's
-/// edge, or if the near pipeline is ever fed keys the boot-time grid didn't
-/// cover) is an honest "no hint", not an error — the caller already falls
-/// back cleanly.
-fn placeholder_color_hint_fn(
-    grid_w: u32,
-    grid_h: u32,
-    chunk_stride: u32,
-    heights: Vec<f32>,
-    colors: Vec<[u8; 3]>,
-) -> impl Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync + 'static {
-    let stride = chunk_stride.max(1);
-    move |key: ChunkKey| {
-        if key.x < 0 || key.y < 0 {
-            return None;
-        }
-        #[expect(clippy::cast_sign_loss, reason = "bounds-checked non-negative above")]
-        let (gi, gj) = (key.x as u32 / stride, key.y as u32 / stride);
-        if gi >= grid_w || gj >= grid_h {
-            return None;
-        }
-        let idx = (gj * grid_w + gi) as usize;
-        let rgb = colors[idx];
-        let color = Color::srgb(
-            f32::from(rgb[0]) / 255.0,
-            f32::from(rgb[1]) / 255.0,
-            f32::from(rgb[2]) / 255.0,
-        );
-
-        // BL-82 EM-3.11 round 18: min/max recorded altitude across the
-        // cell's own immediate 3x3 neighbourhood (itself + up to 8
-        // neighbours, clamped to grid bounds) — see this function's doc
-        // comment for why a range beats a single point here.
-        let (gi, gj) = (gi as i32, gj as i32);
-        let mut min_h = heights[idx];
-        let mut max_h = heights[idx];
-        for dj in -1i32..=1 {
-            for di in -1i32..=1 {
-                let (ni, nj) = (gi + di, gj + dj);
-                if ni < 0 || nj < 0 || ni >= grid_w as i32 || nj >= grid_h as i32 {
-                    continue;
-                }
-                #[expect(clippy::cast_sign_loss, reason = "bounds-checked non-negative above")]
-                let h = heights[(nj as u32 * grid_w + ni as u32) as usize];
-                min_h = min_h.min(h);
-                max_h = max_h.max(h);
-            }
-        }
-        Some((color, min_h, max_h))
-    }
 }
 
 /// Builds the far-terrain mesh once [`FarTerrainData`] has arrived, then
@@ -1155,124 +1013,5 @@ mod tests {
             "must be lower than round 11's over-tuned 0.00913 — this phase's entire reason for \
              touching fog_density at all"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // BL-82 EM-3.11 round 17 — `placeholder_color_hint_fn`
-    // -----------------------------------------------------------------------
-
-    /// A chunk key maps to the same grid cell `send_far_terrain_once` sampled
-    /// it from (`key / chunk_stride`, clamped in-bounds by the SENDER, so the
-    /// hint just needs `key / stride` here) — and returns that cell's colour,
-    /// index-aligned exactly like `cell_color`'s own per-quad lookup. Every
-    /// OTHER cell stays at height 0.0, so the returned `max_height` (this
-    /// cell's own 123.0) and `min_height` (0.0, from its neighbours) also
-    /// pin the round-18 min/max computation without conflating the two
-    /// concerns.
-    #[test]
-    fn color_hint_maps_a_chunk_key_to_its_containing_grid_cell() {
-        let grid_w = 4;
-        let grid_h = 4;
-        let stride = 8;
-        let mut colors = vec![[0u8; 3]; (grid_w * grid_h) as usize];
-        let mut heights = vec![0.0f32; (grid_w * grid_h) as usize];
-        // Cell (1, 2) — a distinctive colour/height so a wrong index is easy
-        // to spot.
-        colors[(2 * grid_w + 1) as usize] = [10, 200, 30];
-        heights[(2 * grid_w + 1) as usize] = 123.0;
-
-        let hint = placeholder_color_hint_fn(grid_w, grid_h, stride, heights, colors);
-
-        // Any chunk key inside cell (1, 2)'s covered range (x in [8, 16), y
-        // in [16, 24)) must resolve to that exact cell.
-        let (color, min_h, max_h) = hint(ChunkKey::new(9, 20)).expect("in-bounds key must hit");
-        assert_eq!(
-            max_h, 123.0,
-            "the cell's own height is the neighbourhood max"
-        );
-        assert_eq!(
-            min_h, 0.0,
-            "every neighbour is 0.0, so that's the neighbourhood min"
-        );
-        let srgba = color.to_srgba();
-        assert!((srgba.red - 10.0 / 255.0).abs() < 1e-4);
-        assert!((srgba.green - 200.0 / 255.0).abs() < 1e-4);
-        assert!((srgba.blue - 30.0 / 255.0).abs() < 1e-4);
-    }
-
-    /// A key outside the grid (negative, or past `grid_w`/`grid_h·stride`) is
-    /// an honest "no hint" — the near pipeline's own fallback (shared neutral
-    /// placeholder) already handles this cleanly, so this must never panic
-    /// or fabricate a value.
-    #[test]
-    fn color_hint_returns_none_outside_the_grid() {
-        let hint = placeholder_color_hint_fn(4, 4, 8, vec![0.0; 16], vec![[0, 0, 0]; 16]);
-        assert!(hint(ChunkKey::new(-1, 0)).is_none(), "negative x");
-        assert!(hint(ChunkKey::new(0, -1)).is_none(), "negative y");
-        assert!(
-            hint(ChunkKey::new(32, 0)).is_none(),
-            "x past grid_w·stride (4·8=32)"
-        );
-        assert!(
-            hint(ChunkKey::new(0, 32)).is_none(),
-            "y past grid_h·stride (4·8=32)"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // BL-82 EM-3.11 round 18 — neighbourhood min/max, not a single point
-    // -----------------------------------------------------------------------
-
-    /// The load-bearing round-18 regression: the hint's min/max must reflect
-    /// the FULL 3×3 neighbourhood, not just the cell itself — a live playtest
-    /// (module docs) found comparing against one cell's own point rejected
-    /// 98.6% of real placeholders on ordinary rolling terrain. A centre cell
-    /// with a low height, surrounded by neighbours of varying (higher)
-    /// height, must report the neighbourhood's true min and max, not the
-    /// centre's own value repeated.
-    #[test]
-    fn color_hint_reports_the_full_3x3_neighbourhood_min_and_max() {
-        let grid_w = 3;
-        let grid_h = 3;
-        let stride = 1;
-        let colors = vec![[0u8; 3]; (grid_w * grid_h) as usize];
-        // Row-major 3x3, centre cell (1,1) at index 4.
-        let heights = vec![
-            10.0, 20.0, 30.0, // row j=0
-            40.0, 5.0, 60.0, // row j=1 (centre = 5.0, deliberately the lowest)
-            70.0, 80.0, 90.0, // row j=2
-        ];
-
-        let hint = placeholder_color_hint_fn(grid_w, grid_h, stride, heights, colors);
-        let (_, min_h, max_h) = hint(ChunkKey::new(1, 1)).expect("centre cell must hit");
-
-        assert_eq!(
-            min_h, 5.0,
-            "the neighbourhood minimum is the centre cell itself here"
-        );
-        assert_eq!(
-            max_h, 90.0,
-            "the neighbourhood maximum is the bottom-right corner neighbour"
-        );
-    }
-
-    /// A cell at the GRID'S EDGE only has as many neighbours as actually
-    /// exist (no phantom out-of-bounds samples) — mirrors
-    /// `boundary_corner_averages_only_in_bounds_neighbours`'s same concern
-    /// for the far mesh's own corner-height averaging.
-    #[test]
-    fn color_hint_neighbourhood_clamps_to_grid_bounds_at_the_edge() {
-        let grid_w = 2;
-        let grid_h = 2;
-        let stride = 1;
-        let colors = vec![[0u8; 3]; 4];
-        let heights = vec![0.0, 10.0, 20.0, 30.0]; // (0,0)=0 (1,0)=10 (0,1)=20 (1,1)=30
-
-        let hint = placeholder_color_hint_fn(grid_w, grid_h, stride, heights, colors);
-        // Corner cell (0, 0): its only real neighbours are itself, (1,0),
-        // (0,1) and (1,1) — the whole grid, since it's only 2x2.
-        let (_, min_h, max_h) = hint(ChunkKey::new(0, 0)).expect("corner cell must hit");
-        assert_eq!(min_h, 0.0);
-        assert_eq!(max_h, 30.0);
     }
 }

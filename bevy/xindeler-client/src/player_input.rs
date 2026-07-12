@@ -31,6 +31,7 @@ use common::{terrain::Block, vol::ReadVol};
 use vek::Vec3 as VVec3;
 use xindeler_app::GameplaySet;
 use xindeler_protocol::{LocalPlayerInput, NetLocalPlayer};
+use xindeler_render_voxel::pipeline::ChunkMeshIndex;
 
 use crate::{
     camera::{FlyCam, FlyCamMovementEnabled, FlyCamSet},
@@ -255,6 +256,11 @@ fn third_person_camera(
     player: Query<(&Transform, Option<&Interpolated>), (With<NetLocalPlayer>, Without<FlyCam>)>,
     mut cameras: Query<(&mut Transform, &FlyCam), Without<NetLocalPlayer>>,
     terrain: Res<SharedTerrain>,
+    // BL-82 EM-3.11 round 19: gates `terrain.boom_cast` on the SAME "does this
+    // chunk have its real render mesh yet" signal `xindeler-render-voxel`
+    // tracks — see `terrain_stream::TerrainStore::boom_cast`'s doc comment
+    // for the "colliding with something invisible" bug this closes.
+    mesh_index: Res<ChunkMeshIndex>,
     mut focus: Local<Option<Vec3>>,
     mut cam_dist: Local<Option<f32>>,
     mut perf_log: Local<Option<bool>>,
@@ -340,7 +346,7 @@ fn third_person_camera(
         let dist = if collision_enabled {
             let pivot_sim = to_vek(bevy_to_sim(look_at));
             let dir_sim = to_vek(bevy_to_sim(-forward));
-            let clamped = terrain.boom_cast(pivot_sim, dir_sim, CAM_BACK);
+            let clamped = terrain.boom_cast(pivot_sim, dir_sim, CAM_BACK, &mesh_index);
             smoothed_boom(&mut cam_dist, clamped, snap_boom, time.delta_secs())
         } else {
             CAM_BACK
