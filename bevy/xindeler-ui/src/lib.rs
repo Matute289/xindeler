@@ -93,15 +93,17 @@ impl Plugin for XindelerUiPlugin {
                     button::update_button_visuals,
                     tooltip::update_tooltip,
                     notification::advance_notifications,
+                    slot::update_slot_visuals,
                     // BL-82 EM-5.5: the generic HudAction -> HudState wiring
                     // (see that function's own doc comment for why it lives
                     // here rather than per-screen).
                     hud_state::apply_hud_actions,
-                    slot::update_slot_visuals,
                 ),
             );
-        // BL-82 EM-5.6: the drag-drop slot's global drag/drop observers +
-        // its `SlotDropped` message.
+        // BL-82 EM-5.3/EM-5.6: the drag-drop slot primitive's global
+        // drag/drop observers + its `SlotDropped` message — not per-entity,
+        // every `HudSlot` anywhere in the app is drag-drop-capable the
+        // moment it's spawned.
         slot::install_observers(app);
     }
 }

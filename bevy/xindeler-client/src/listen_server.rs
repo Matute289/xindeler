@@ -37,18 +37,19 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    ChatBridgePlugin, CombatHudMirrorPlugin, LodAltStreamPlugin, MapDataStreamPlugin,
-    PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player, boot_test_server,
+    ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
+    MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin,
+    SimEntityMirrorPlugin, SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player,
+    boot_test_server,
 };
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
-    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
-    lod::LodCullingPlugin, map_view::MapViewPlugin, player_input::PlayerInputPlugin,
-    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, map_view::MapViewPlugin,
+    player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -219,6 +220,11 @@ impl Plugin for ListenServerPlugin {
         // ordering relative to `SimEntityMirrorPlugin` doesn't matter here
         // (see `xindeler_sim_bridge::chat`'s own module doc comment).
         app.add_plugins(ChatBridgePlugin);
+        // BL-82 EM-5.3: the skillbar/hotbar mirror (resolved ability-pool/
+        // slot bindings + per-ability cooldowns) — same reasoning/ordering
+        // as `CombatHudMirrorPlugin` above (reads `SimMirror`, split into its
+        // own call, the tuple above is already at the 15-plugin ceiling).
+        app.add_plugins(HotbarMirrorPlugin);
         // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors +
         // request applicators (spec §3.2/§6) — same ordering reasoning as
         // `CombatHudMirrorPlugin` above (reads `SimMirror`).
@@ -275,6 +281,11 @@ impl Plugin for ListenServerPlugin {
         // BL-82 EM-5.4: the chat panel (scrollback, channel tabs, input box)
         // reading `NetChatMsg`/writing `ChatSendRequest`. Pure Bevy.
         app.add_plugins(ChatViewPlugin);
+        // BL-82 EM-5.3: the skillbar/hotbar screen (drag-to-assign, keybind
+        // labels, cooldown sweeps) reading the mirror above. Reuses the
+        // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)
+        // — no new UI plugin registration needed.
+        app.add_plugins(HotbarViewPlugin);
         // BL-82 EM-5.6: the inventory/bag + paper-doll screen, loot feed, and
         // the two-party trade window — pure Bevy, reading the mirrors above.
         app.add_plugins((

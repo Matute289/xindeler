@@ -37,6 +37,8 @@ mod far_terrain_material;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod figure_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod hotbar;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod hud_toast;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod inventory_ui;

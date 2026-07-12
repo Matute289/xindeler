@@ -426,7 +426,10 @@ fn display_name(input: GameInput) -> String {
 /// `Digit1` → `1`, `Mouse(Left)` → `LMB`, anything else falls back to its
 /// `Debug` form so a rare/exotic key still shows SOMETHING rather than
 /// silently blanking).
-fn key_label(binding: KeyOrMouse) -> String {
+///
+/// `pub(crate)` (BL-82 EM-5.3): `hotbar.rs` reuses this exact formatter for
+/// its slot keybind labels rather than duplicating the prettifier.
+pub(crate) fn key_label(binding: KeyOrMouse) -> String {
     match binding {
         KeyOrMouse::Key(key) => {
             let debug = format!("{key:?}");
