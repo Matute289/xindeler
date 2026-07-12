@@ -271,6 +271,91 @@
 //! struct lives in `xindeler-app`, outside this task's crate set, so v1
 //! hosts insert [`ChunkUploadBudget`] directly — the settings hookup is a
 //! one-line follow-up there.
+//!
+//! ## BL-82 EM-3.11 round 18 — round 17's colour hint was rejecting ~99% of
+//! ## real chunks; fixed with a local-relief-aware surface check, not a 5th
+//! ## blend-constant retune
+//! Matías re-tested after round 17 (PR #71, merged) and reported
+//! (`record14.mov`): objects at the streaming frontier still flicker, and the
+//! light-brown "end of map" strip is still visible. Two distinct symptoms were
+//! confirmed live, not assumed:
+//! - An isolated tan/beige plate (round 14-16's class of bug) reappearing —
+//!   meaning round 17's colour hint was NOT actually being applied for that
+//!   chunk, falling back to the round-16 neutral/haze-blended path.
+//! - A large, hard-edged, flat neutral-grey mass that never blends with its
+//!   surroundings at all — same neutral-fallback path, just for a CLUSTER of
+//!   simultaneous placeholders (round 17's own "many placeholders share one
+//!   flat colour" scenario) rather than one isolated box.
+//!
+//! **Root cause, confirmed with live instrumentation (`XINDELER_PLACEHOLDER_
+//! HINT_LOG=1`, [`PlaceholderHintStats`]), not assumed:** ran `--listen-server
+//! --smoke-perf-run` with a scripted walker over a fresh world. Of 286 real
+//! placeholder colour-hint lookups, **282 (98.6%) were REJECTED by the
+//! round-17 surface check**, `(z_hi - expected_surface_z).abs() >
+//! SURFACE_HINT_TOLERANCE` — only 4 were ever trusted. Measured rejection
+//! deltas ranged 51.5–219.8m (median ~76m, mean ~89m), overwhelmingly in the
+//! 50–150m band. Root cause: [`PlaceholderColorHint`]'s `expected_surface_z`
+//! is a SINGLE coarse corner sample (`xindeler_client::far_terrain`'s grid,
+//! one sample per up to `chunk_stride` chunks — 256m at the default
+//! 1024-chunk world), while ordinary rolling/hilly terrain routinely varies
+//! by more than [`SURFACE_HINT_TOLERANCE`] (48m) across that same 256m
+//! footprint — round 17's own doc comment assumed a genuine cave interior
+//! sits "tens to hundreds of metres" below the recorded surface, comfortably
+//! outside 48m, but never checked whether ORDINARY surface relief also
+//! routinely exceeds 48m relative to one specific nearby corner. It does:
+//! `world`'s own cave generation (`world/src/layer/cave.rs`) only starts
+//! ramping "underground" 80m+ below the local surface (`AVG_LEVEL_DEPTH =
+//! 120`), which OVERLAPS the very range (51–150m) round 17's tolerance was
+//! rejecting as "plausibly a cave" — so a blind tolerance bump big enough to
+//! stop rejecting ordinary terrain would ALSO start re-admitting shallow
+//! caves, reintroducing the original EM-3.11h bug this guard exists to
+//! prevent. That ruled out "retune the constant again" (this round's own
+//! standing project rule against a 6th guess-and-retune of the same kind of
+//! knob) and pointed at the REAL defect: comparing a placeholder's precise
+//! `z_hi` against a single distant point sample is simply the wrong
+//! comparison, regardless of what threshold it uses.
+//!
+//! **Fix: compare against the LOCAL RANGE of nearby recorded surface heights,
+//! not one point.** [`PlaceholderColorHint`]'s closure now returns `(colour,
+//! min_height, max_height)` — the min/max recorded altitude across the
+//! target cell's own immediate 3×3 grid-cell neighbourhood (clamped to grid
+//! bounds), computed once in `xindeler_client::far_terrain::
+//! placeholder_color_hint_fn` from data it already holds (the same
+//! `DecodedFarTerrain::heights` the far mesh itself reads). The hint is
+//! trusted when the placeholder's `z_hi` falls within `[min_height -
+//! SURFACE_HINT_TOLERANCE, max_height + SURFACE_HINT_TOLERANCE]` — ordinary
+//! rolling terrain, where NEARBY samples already record the real relief,
+//! now passes on its own evidence instead of being compared to one
+//! unrelated corner; a genuine cave still fails, because a cave void does
+//! not show up in ANY nearby surface sample (the `lod_alt`/`lod_base` grid
+//! only ever records the true surface), so its `z_hi` sits far below every
+//! sample in the neighbourhood, not just one. [`SURFACE_HINT_TOLERANCE`]'s
+//! numeric value (48m) is UNCHANGED — this fix corrects WHAT it is compared
+//! against, not the number itself.
+//!
+//! **Foliage/tree flicker — traced to a genuinely SEPARATE root cause this
+//! round** (rounds 14-17 all folded it into the terrain-placeholder finding;
+//! this round's evidence says otherwise): `xindeler-client::sprite_view`'s
+//! vegetation-instance spawn is architecturally DECOUPLED from this crate's
+//! terrain-mesh pipeline — it reacts to its own `CompressedChunk` stream on
+//! its own timeline (module docs there), with no dependency on whether the
+//! parent chunk's REAL mesh (vs. this module's placeholder) is up. Comparing
+//! against `xindeler-old` (the mature pre-Bevy client) found it does NOT
+//! have this gap: its `mesh_worker` computes a chunk's opaque terrain AND
+//! its sprite instances in the SAME async task, applied to the SAME
+//! `TerrainChunkData` in ONE atomic swap
+//! (`voxygen/src/scene/terrain/mod.rs`) — sprites there are structurally
+//! incapable of appearing before their parent chunk's real terrain. This
+//! port's sprite pipeline never re-established that link, so a sprite
+//! (rendered with a normally-LIT `StandardMaterial`, unlike this module's
+//! deliberately `unlit` placeholder) can spawn floating over/inside the
+//! flat, dim placeholder box before the real terrain/lighting for that spot
+//! exists — reading as a solid black silhouette that "resolves" into real
+//! colour once the real mesh replaces the placeholder. Fixed on the sprite
+//! side (`sprite_view.rs`), by gating each pending chunk's sprite spawn on
+//! the NEW [`ChunkMeshIndex::has_real_terrain_mesh`] this round adds, not
+//! here — this module stays the host-agnostic mesh pipeline and never learns
+//! about sprites.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -498,6 +583,20 @@ impl ChunkMeshIndex {
     /// Keys of every currently-spawned chunk. Used by palette hot reload to
     /// re-mark all live chunks dirty (their per-vertex layers changed).
     pub fn keys(&self) -> impl Iterator<Item = ChunkKey> + '_ { self.0.keys().copied() }
+
+    /// BL-82 EM-3.11 round 18 — `true` only once `key` has its REAL,
+    /// greedy-meshed terrain (not the EM-3.11h synchronous first-load
+    /// [`PlaceholderChunkMesh`], and not merely "unmarked"/absent). A public
+    /// escape hatch for [`ChunkEntities::is_placeholder`] (which stays
+    /// private — module docs) so a HOST crate can gate its OWN
+    /// terrain-dependent content (e.g. `xindeler-client::sprite_view`'s
+    /// vegetation instances) on the same "is this chunk's real geometry up
+    /// yet" question this module already tracks internally, instead of
+    /// re-deriving it or reaching into private state.
+    #[must_use]
+    pub fn has_real_terrain_mesh(&self, key: ChunkKey) -> bool {
+        self.0.get(&key).is_some_and(|e| !e.is_placeholder)
+    }
 }
 
 /// Upload instrumentation (complements the tracing spans).
@@ -686,33 +785,39 @@ pub struct PlaceholderHazeTint(pub Color);
 /// [`PLACEHOLDER_BASE_COLOR`], WITHOUT this crate ever depending on
 /// `xindeler-client`/atmosphere/far-terrain types (same "generic host hook"
 /// shape as [`ChunkVolumeProvider`]/[`PlaceholderHazeTint`]). Returns
-/// `(colour, expected_surface_z)` for a chunk key that the host CAN place —
+/// `(colour, min_height, max_height)` for a chunk key that the host CAN
+/// place — `min_height`/`max_height` are the recorded surface altitude
+/// across the hint's own LOCAL NEIGHBOURHOOD (round-18 module docs: NOT a
+/// single point sample any more — round 17 shipped with a single-point
+/// comparison and a live playtest found it rejected 98.6% of real chunks,
+/// because ordinary rolling terrain routinely varies by more than the
+/// tolerance across the hint grid's own coarse cell footprint).
 /// [`spawn_chunk_mesh_tasks`] only trusts the colour when BOTH (a) the
 /// placeholder's own `z_hi` (its box's top, from the SAME volume range the
-/// real mesh will use) sits close to `expected_surface_z` (see
-/// [`SURFACE_HINT_TOLERANCE`]) AND (b) the live viewer isn't currently well
-/// BELOW that same surface (see [`PlaceholderViewerHeight`] — a
-/// `bevy-migration-reviewer` finding on the first version of this guard: (a)
-/// alone only tests "is this column's height unusual relative to a coarse
-/// neighbour sample," which does NOT reliably detect the ORIGINAL EM-3.11h
-/// bug scenario — an ordinary Veloren-style cave tunnel carved under
-/// otherwise-normal terrain leaves the column's own recorded surface height
-/// completely ordinary, so (a) alone would happily trust a bright outdoor
-/// colour while the camera stands inside a dark cave void looking at the
-/// box's own inner faces). Absent entirely (no host installed one, or the
-/// host has no data for this key — e.g. outside its downsampled grid) falls
-/// back to today's [`PLACEHOLDER_BASE_COLOR`] + [`PLACEHOLDER_HAZE_BLEND`]
-/// path, unchanged.
+/// real mesh will use) falls within `[min_height - SURFACE_HINT_TOLERANCE,
+/// max_height + SURFACE_HINT_TOLERANCE]` (see [`SURFACE_HINT_TOLERANCE`])
+/// AND (b) the live viewer isn't currently well BELOW that same surface (see
+/// [`PlaceholderViewerHeight`] — a `bevy-migration-reviewer` finding on the
+/// first version of this guard: (a) alone only tests "is this column's
+/// height unusual relative to its neighbourhood," which does NOT reliably
+/// detect the ORIGINAL EM-3.11h bug scenario — an ordinary Veloren-style
+/// cave tunnel carved under otherwise-normal terrain leaves the column's own
+/// recorded surface height (and its neighbours') completely ordinary, so (a)
+/// alone would happily trust a bright outdoor colour while the camera stands
+/// inside a dark cave void looking at the box's own inner faces). Absent
+/// entirely (no host installed one, or the host has no data for this key —
+/// e.g. outside its downsampled grid) falls back to today's
+/// [`PLACEHOLDER_BASE_COLOR`] + [`PLACEHOLDER_HAZE_BLEND`] path, unchanged.
 #[derive(Resource, Clone)]
-pub struct PlaceholderColorHint(Arc<dyn Fn(ChunkKey) -> Option<(Color, f32)> + Send + Sync>);
+pub struct PlaceholderColorHint(Arc<dyn Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync>);
 
 impl PlaceholderColorHint {
-    pub fn new(f: impl Fn(ChunkKey) -> Option<(Color, f32)> + Send + Sync + 'static) -> Self {
+    pub fn new(f: impl Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync + 'static) -> Self {
         Self(Arc::new(f))
     }
 
     #[must_use]
-    fn get(&self, key: ChunkKey) -> Option<(Color, f32)> { (self.0)(key) }
+    fn get(&self, key: ChunkKey) -> Option<(Color, f32, f32)> { (self.0)(key) }
 }
 
 /// Host-installed, OPTIONAL current viewer position (chunk key + world
@@ -763,20 +868,127 @@ pub struct PlaceholderViewerHeight {
 /// for every chunk before the reviewer caught the scoping gap.
 const VIEWER_PROXIMITY_CHUNKS: i32 = 2;
 
-/// How close (world metres) a placeholder's own `z_hi` must sit to
-/// [`PlaceholderColorHint`]'s `expected_surface_z` before its real colour is
-/// trusted (round-17 module docs). Generous on purpose: the hint's source
-/// data is itself coarse (round 11's far-terrain grid samples one cell per
-/// `chunk_stride` chunks, so `expected_surface_z` is, at best, an average
-/// over a multi-chunk neighbourhood, not this exact column) — this tolerance
-/// only needs to separate "obviously an outdoor/frontier chunk" from
-/// "obviously an underground/cave void", not to pinpoint exact terrain
-/// height. `TerrainChunk`'s typical above-ground relief is well under this
-/// figure; a genuine cave interior sits tens to hundreds of metres BELOW the
-/// recorded surface sample, comfortably outside it. ALSO reused as the
+/// How far (world metres) a placeholder's own `z_hi` may sit beyond
+/// [`PlaceholderColorHint`]'s local `[min_height, max_height]` range before
+/// its real colour is trusted (round-17 module docs; range-based comparison
+/// added round 18 — see the module docs' round-18 section for why a
+/// single-point comparison at this same tolerance rejected 98.6% of real
+/// chunks in a live playtest). This tolerance only needs to separate
+/// "obviously an outdoor/frontier chunk" from "obviously an underground/cave
+/// void", not to pinpoint exact terrain height — `world`'s own cave
+/// generation (`world/src/layer/cave.rs`, `AVG_LEVEL_DEPTH = 120`) only
+/// starts ramping "underground" 80m+ below the local surface, comfortably
+/// outside a well-chosen margin BEYOND the neighbourhood's own recorded
+/// range (as opposed to beyond one arbitrary nearby point, which routinely
+/// undershoots ordinary relief — round-18 finding). ALSO reused as the
 /// [`PlaceholderViewerHeight`] margin (same "coarse, not exact" tolerance
 /// applies to both checks).
 const SURFACE_HINT_TOLERANCE: f32 = 48.0;
+
+/// BL-82 EM-3.11 round 18 diagnostic classification of one
+/// [`PlaceholderColorHint`] lookup — see [`resolve_placeholder_hint`]. `Copy`
+/// so a caller can both log and feed [`PlaceholderHintStats`] without
+/// re-deriving anything.
+#[derive(Debug, Clone, Copy)]
+enum HintOutcome {
+    /// No host-installed [`PlaceholderColorHint`], or the host has no data
+    /// for this key (outside its grid, or negative — round-17 module docs on
+    /// `placeholder_color_hint_fn`) — an honest "no hint", not a rejection.
+    NoHint,
+    /// A hint existed but the placeholder's own `z_hi` sat outside
+    /// `[min_height - SURFACE_HINT_TOLERANCE, max_height +
+    /// SURFACE_HINT_TOLERANCE]` (round-18 module docs — a LOCAL RANGE, not a
+    /// single point, as of this round). `delta` is the signed distance
+    /// (metres) from `z_hi` to the nearest end of that range (0 would never
+    /// reach this variant — it means "inside the range", i.e. trusted).
+    /// Before this round's fix, comparing against a single coarse corner
+    /// sample instead of the local range made this fire on ~98.6% of real
+    /// chunks in a live playtest (module docs).
+    RejectedSurface { delta: f32 },
+    /// The surface check passed, but the viewer-proximity cave-safety veto
+    /// (round 17's `PlaceholderViewerHeight`) rejected it: the live viewer is
+    /// near this chunk and sits `below_by` metres below `z_hi -
+    /// SURFACE_HINT_TOLERANCE`.
+    RejectedViewerBelow { below_by: f32 },
+    /// Trusted — the caller uses the hint's real colour.
+    Trusted,
+}
+
+/// BL-82 EM-3.11 round 18 — the round-17 hint-trust filter chain, pulled out
+/// of [`spawn_chunk_mesh_tasks`] into its own function so it can report WHY a
+/// hint was accepted or rejected (see [`HintOutcome`]), not just the final
+/// yes/no `spawn_chunk_mesh_tasks` needs to pick a material. Behaviour is
+/// byte-for-byte the same round-17 logic (module docs on
+/// [`PlaceholderColorHint`]/[`PlaceholderViewerHeight`]) — this refactor adds
+/// observability, it does not change what gets trusted.
+fn resolve_placeholder_hint(
+    key: ChunkKey,
+    z_hi: f32,
+    color_hint: Option<&PlaceholderColorHint>,
+    viewer_height: Option<&PlaceholderViewerHeight>,
+) -> (Option<Color>, HintOutcome) {
+    let Some((hint_color, min_height, max_height)) = color_hint.and_then(|hint| hint.get(key))
+    else {
+        return (None, HintOutcome::NoHint);
+    };
+    // BL-82 EM-3.11 round 18: trust when `z_hi` falls within the local
+    // neighbourhood's own recorded range (± tolerance), not when it merely
+    // sits close to ONE arbitrary nearby point (module docs' round-18
+    // section — the single-point version rejected 98.6% of real chunks in a
+    // live playtest). `delta` is the signed distance to the nearest bound,
+    // used only for diagnostics (`HintOutcome::RejectedSurface`).
+    let delta = if z_hi < min_height {
+        z_hi - min_height
+    } else if z_hi > max_height {
+        z_hi - max_height
+    } else {
+        0.0
+    };
+    if delta.abs() > SURFACE_HINT_TOLERANCE {
+        return (None, HintOutcome::RejectedSurface { delta });
+    }
+    if let Some(viewer) = viewer_height {
+        let near_viewer = (key.x - viewer.chunk_key.x).abs() <= VIEWER_PROXIMITY_CHUNKS
+            && (key.y - viewer.chunk_key.y).abs() <= VIEWER_PROXIMITY_CHUNKS;
+        if near_viewer {
+            let floor = z_hi - SURFACE_HINT_TOLERANCE;
+            if viewer.height < floor {
+                return (None, HintOutcome::RejectedViewerBelow {
+                    below_by: floor - viewer.height,
+                });
+            }
+        }
+    }
+    (Some(hint_color), HintOutcome::Trusted)
+}
+
+/// BL-82 EM-3.11 round 18 — aggregate counts of every
+/// [`resolve_placeholder_hint`] outcome since boot (mirrors
+/// [`ChunkUploadStats`]'s always-on, cheap-counter role). Lets a host (or a
+/// test) confirm HOW OFTEN each rejection reason fires without needing a
+/// live screenshot capture — this round's own investigation used exactly
+/// this (plus `XINDELER_PLACEHOLDER_HINT_LOG=1` for the per-event detail) to
+/// confirm `RejectedSurface`/`RejectedViewerBelow` fire far more than round
+/// 17 anticipated in real hilly/mountainous terrain (module docs' round-18
+/// section).
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct PlaceholderHintStats {
+    pub trusted: u64,
+    pub rejected_surface: u64,
+    pub rejected_viewer_below: u64,
+    pub no_hint: u64,
+}
+
+impl PlaceholderHintStats {
+    fn record(&mut self, outcome: HintOutcome) {
+        match outcome {
+            HintOutcome::NoHint => self.no_hint += 1,
+            HintOutcome::RejectedSurface { .. } => self.rejected_surface += 1,
+            HintOutcome::RejectedViewerBelow { .. } => self.rejected_viewer_below += 1,
+            HintOutcome::Trusted => self.trusted += 1,
+        }
+    }
+}
 
 /// BL-82 EM-3.11 round 17 — small, DISTANCE-INDEPENDENT atmospheric assist
 /// blended into a [`PlaceholderColorHint`]-sourced placeholder colour, mixed
@@ -998,6 +1210,7 @@ impl Plugin for ChunkMeshPipelinePlugin {
             .init_resource::<ChunkUploadStats>()
             .init_resource::<ChunkUploadBudget>()
             .init_resource::<PlaceholderAssets>()
+            .init_resource::<PlaceholderHintStats>()
             .add_systems(
                 Update,
                 (
@@ -1112,10 +1325,19 @@ fn spawn_chunk_mesh_tasks(
     color_hint: Option<Res<PlaceholderColorHint>>,
     haze_tint: Option<Res<PlaceholderHazeTint>>,
     viewer_height: Option<Res<PlaceholderViewerHeight>>,
+    mut hint_stats: ResMut<PlaceholderHintStats>,
+    mut hint_log: Local<Option<bool>>,
 ) {
     if queue.is_empty() {
         return;
     }
+    // BL-82 EM-3.11 round 18 (`XINDELER_PLACEHOLDER_HINT_LOG=1`): opt-in,
+    // permanent, zero-cost-when-unset per-event log of every
+    // `resolve_placeholder_hint` outcome — same convention as
+    // `XINDELER_PLACEHOLDER_COUNT_LOG`/`XINDELER_FAR_MESH_PERF_LOG`.
+    let hint_log_enabled = *hint_log.get_or_insert_with(|| {
+        std::env::var("XINDELER_PLACEHOLDER_HINT_LOG").is_ok_and(|v| v != "0")
+    });
     // BL-82 EM-3.11p: wall-clock this whole system at `debug` level.
     // `provider.fetch` runs synchronously on the main thread (module docs),
     // so THIS is where a diagonal-heavier backlog actually costs a frame —
@@ -1178,12 +1400,15 @@ fn spawn_chunk_mesh_tasks(
                 reason = "world z bounds ≪ 2^24, same contract as chunk_transform"
             )]
             let (z_lo, z_hi) = (volume.range.min.z as f32, volume.range.max.z as f32);
-            // BL-82 EM-3.11 round 17: prefer a real per-chunk colour hint
-            // over the shared neutral material, but ONLY when BOTH (a) the
-            // hint's own `expected_surface_z` says this column's height is
-            // plausibly ordinary (not a coarse-grid mismatch) AND (b), for a
-            // chunk NEAR the viewer's own position only, the live viewer
-            // isn't well below this chunk's own surface (module docs on
+            // BL-82 EM-3.11 round 17 (range check added round 18): prefer a
+            // real per-chunk colour hint over the shared neutral material,
+            // but ONLY when BOTH (a) the hint's own local
+            // [min_height, max_height] neighbourhood range says this
+            // column's height is plausibly ordinary (not a coarse-grid
+            // mismatch — round 18: a SINGLE point comparison here rejected
+            // 98.6% of real chunks live) AND (b), for a chunk NEAR the
+            // viewer's own position only, the live viewer isn't well below
+            // this chunk's own surface (module docs on
             // `PlaceholderColorHint`/`PlaceholderViewerHeight` — (a) alone
             // does NOT reliably detect "camera standing inside an ordinary
             // cave under otherwise-normal terrain," the ORIGINAL EM-3.11h bug
@@ -1197,21 +1422,41 @@ fn spawn_chunk_mesh_tasks(
             // or a hinted chunk outside `VIEWER_PROXIMITY_CHUNKS`, degrades
             // honestly to "check (a) only", exactly this guard's pre-(b)
             // behaviour.
-            let hinted = color_hint
-                .as_ref()
-                .and_then(|hint| hint.get(key))
-                .filter(|(_, expected_surface_z)| {
-                    (z_hi - expected_surface_z).abs() <= SURFACE_HINT_TOLERANCE
-                })
-                .filter(|_| {
-                    viewer_height.as_ref().is_none_or(|viewer| {
-                        let near_viewer = (key.x - viewer.chunk_key.x).abs()
-                            <= VIEWER_PROXIMITY_CHUNKS
-                            && (key.y - viewer.chunk_key.y).abs() <= VIEWER_PROXIMITY_CHUNKS;
-                        !near_viewer || viewer.height >= z_hi - SURFACE_HINT_TOLERANCE
-                    })
-                });
-            let material = if let Some((hint_color, _)) = hinted {
+            let (hinted, reason) = resolve_placeholder_hint(
+                key,
+                z_hi,
+                color_hint.as_deref(),
+                viewer_height.as_deref(),
+            );
+            hint_stats.record(reason);
+            if hint_log_enabled {
+                match reason {
+                    HintOutcome::NoHint => tracing::debug!(
+                        key_x = key.x,
+                        key_y = key.y,
+                        "EM-3.11 round 18: no colour hint available for this chunk"
+                    ),
+                    HintOutcome::RejectedSurface { delta } => tracing::debug!(
+                        key_x = key.x,
+                        key_y = key.y,
+                        delta,
+                        tolerance = SURFACE_HINT_TOLERANCE,
+                        "EM-3.11 round 18: colour hint rejected (surface mismatch)"
+                    ),
+                    HintOutcome::RejectedViewerBelow { below_by } => tracing::debug!(
+                        key_x = key.x,
+                        key_y = key.y,
+                        below_by,
+                        "EM-3.11 round 18: colour hint rejected (viewer below surface)"
+                    ),
+                    HintOutcome::Trusted => tracing::debug!(
+                        key_x = key.x,
+                        key_y = key.y,
+                        "EM-3.11 round 18: colour hint trusted"
+                    ),
+                }
+            }
+            let material = if let Some(hint_color) = hinted {
                 materials.add(placeholder_material_from_hint(
                     hint_color,
                     haze_tint.as_ref().map(|t| t.0),
