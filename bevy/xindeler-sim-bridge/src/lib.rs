@@ -109,6 +109,9 @@ pub use entity_factory::{
     spawn_from_spawning_rules,
 };
 
+mod map;
+pub use map::{MapDataState, MapDataStreamPlugin};
+
 mod oracle;
 pub use oracle::ServerOraclePlugin;
 

@@ -48,8 +48,8 @@ use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
-    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    lod::LodCullingPlugin, map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -112,6 +112,16 @@ impl Plugin for NetClientPlugin {
             // the EM-5.2 mirror off `NetLocalPlayer` — verbatim reuse, same
             // as every other consumer plugin in this list.
             CombatHudViewPlugin,
+            // BL-82 EM-5.5: the minimap + full map screens — verbatim reuse,
+            // same as every other consumer plugin in this list. Consumer-
+            // only here: `MapDataStreamPlugin` (the `NetMapData` producer) is
+            // an `EmbeddedPlayer`-reading listen-server-only plugin (mirrors
+            // `LodAltStreamPlugin`'s own exact limitation, module doc
+            // comment) — this spectator-only net-client mode never boots an
+            // `EmbeddedPlayer`, so the map screens simply stay empty here
+            // (spec §3.2 "degrade clean"), same as the far-terrain mesh does
+            // today.
+            MapViewPlugin,
             // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
             // gamepad) — reuses `CombatHudViewPlugin`'s own `XindelerUiPlugin`
             // registration, same as every other consumer plugin in this list.

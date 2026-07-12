@@ -77,6 +77,16 @@ rand = { workspace = true }
 # (the EM-4.7 batch-spawn test already used it the same way) to a regular one
 # now that production code calls it too.
 rand_chacha = { workspace = true }
+# BL-82 EM-5.5 (`map.rs`): names `common_net::msg::world_msg::PoiInfo` for
+# `EmbeddedPlayer::pois`'s return type — `client::Client::pois()` already
+# returns this type, but naming it in a function signature requires a direct
+# dependency (the `client` crate doesn't re-export it at its own root).
+common-net = { package = "xindeler-common-net", path = "../../common/net" }
+# BL-82 EM-5.5 (`map.rs`): decodes `client::WorldData::map_image()`'s
+# `Arc<DynamicImage>` into raw RGB pixels for the downsampled `NetMapData`
+# background broadcast — the same `image` crate `client`/`world` already use
+# to build that texture, pulled in here only to READ pixels back out.
+image = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

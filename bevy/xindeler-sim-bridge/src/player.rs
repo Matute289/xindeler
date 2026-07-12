@@ -318,6 +318,17 @@ impl EmbeddedPlayer {
     /// broadcasts `xindeler_protocol::NetFarTerrain`).
     pub fn world_data(&self) -> &WorldData { self.client.world_data() }
 
+    /// Every currently-known site + extra marker (BL-82 EM-5.5) — kind/wpos/
+    /// label/quest-flag, verbatim [`client::Client::markers`]. Populated the
+    /// same moment [`Self::world_data`] is (the initial handshake), so it's
+    /// available well before [`Self::is_in_game`]. Source for the one-shot
+    /// `NetMapData` broadcast (`xindeler-sim-bridge::map::send_map_data_once`).
+    pub fn markers(&self) -> impl Iterator<Item = &common::map::Marker> { self.client.markers() }
+
+    /// Named terrain features (peaks/lakes) — verbatim [`client::Client::
+    /// pois`]. Same availability as [`Self::markers`].
+    pub fn pois(&self) -> &[common_net::msg::world_msg::PoiInfo] { self.client.pois() }
+
     fn character_jumping(&self) -> bool { self.jumping }
 
     fn set_character_jumping(&mut self, jumping: bool) { self.jumping = jumping; }
