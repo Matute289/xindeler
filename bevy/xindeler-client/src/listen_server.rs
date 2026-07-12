@@ -44,9 +44,10 @@ use xindeler_sim_bridge::{
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -230,6 +231,10 @@ impl Plugin for ListenServerPlugin {
         // globes, buff strip, crosshair, death/respawn, overhead health
         // bars) reading the mirror above. Pure Bevy.
         app.add_plugins(CombatHudViewPlugin);
+        // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
+        // gamepad). Reuses the widget kit `CombatHudViewPlugin` already
+        // added (`XindelerUiPlugin`) — no new UI plugin registration needed.
+        app.add_plugins(ControlsScreenPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

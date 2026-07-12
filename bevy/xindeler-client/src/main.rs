@@ -25,6 +25,8 @@ mod camera;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod combat_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod controls_screen;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod entity_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain;
@@ -200,6 +202,14 @@ fn main() -> AppExit {
     )
     .add_plugins((
         XindelerAppPlugin,
+        // BL-82 EM-5.11: the keymap/gamepad input-MODEL layer — added
+        // UNCONDITIONALLY (not feature-gated) since `ActionState`/`KeyMap`
+        // are meaningful in every mode (demo/listen-server/net-client), not
+        // just where a real embedded player exists. Must run AFTER
+        // `XindelerAppPlugin` in this tuple so `XindelerSettings` (which
+        // `XindelerAppPlugin::build` inserts synchronously) already exists
+        // when the settings-seeding step right below runs.
+        xindeler_input::XindelerInputPlugin,
         camera::CameraRigPlugin,
         light::LightRigPlugin,
         atmosphere::AtmospherePlugin,
@@ -212,6 +222,20 @@ fn main() -> AppExit {
         // otherwise.
         perf_log::PerfLogPlugin,
     ));
+
+    // BL-82 EM-5.11 (T56.12): seed the live `KeyMap` resource from the
+    // persisted `XindelerSettings::controls` — `XindelerInputPlugin::build`
+    // above only `init_resource`s a STOCK `KeyMap` (it has no dependency on
+    // `xindeler-app`/settings, keeping it a pure input-model crate), so this
+    // one-line glue (same posture as `xindeler-ui::scale`'s own doc comment:
+    // "threaded through by whichever shell wires the two together") is what
+    // makes a rebind persisted in a PREVIOUS session actually apply on boot.
+    let persisted_controls = app
+        .world()
+        .resource::<xindeler_app::XindelerSettings>()
+        .controls
+        .clone();
+    app.insert_resource(persisted_controls);
 
     // The synthetic 5×5 demo, the listen-server's embedded terrain, and the
     // EM-4.2b remote net-client are mutually exclusive: all three drive the
