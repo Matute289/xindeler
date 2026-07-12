@@ -32,6 +32,47 @@
 use bevy::{ecs::message::Message, math::Vec2 as BevyVec2};
 use serde::{Deserialize, Serialize};
 
+/// Downsample cap for [`NetMapData::image_size`]: at most this many samples
+/// per axis, regardless of world size. Lives HERE (shared between
+/// `xindeler-sim-bridge::map::send_map_data_once`, which downsamples to it,
+/// and `xindeler_client::map_view`'s minimap crop math, which consumes the
+/// result) instead of as an independent constant in each crate — the BL-82
+/// Phase 5 follow-up root cause below is exactly that the two were
+/// previously uncorrelated.
+///
+/// ## Root cause of the "pixelated/blurry minimap" bug (BL-82 Phase 5
+/// follow-up, found via a real play session)
+/// The sampler was already correct (`xindeler_client::map_view::
+/// receive_map_data` sets `ImageFilterMode::Linear` on the decoded texture,
+/// not the project's usual voxel-texture `Nearest` default) — ruled out
+/// first, per the investigation's own instruction to check the sampler
+/// before touching resolution. The REAL cause: the always-on minimap crops a
+/// `xindeler_client::map_view::MINIMAP_HALF_EXTENT`-wide UV window (~12% of
+/// the world) into a 160px on-screen viewport, but the previous cap here
+/// (256px) was chosen independently, matching `NetFarTerrain`'s height-layer
+/// budget rather than this specific crop. For the shipped default world
+/// (1024x1024 chunks — `world::sim::MapSizeLg::new(10, 10)`,
+/// `world::sim::DEFAULT_WORLD_MAP`), that crop covered only ~31 SOURCE
+/// pixels, magnified ~5.2x onto the viewport — real under-resolution no
+/// amount of correct bilinear filtering can hide, since linear filtering
+/// interpolates BETWEEN existing texels, it can't invent detail the
+/// downsample already discarded.
+///
+/// `1024` (instead of an even larger cap) is deliberately chosen to land
+/// close to 1:1 for THIS crop on the shipped default world (~123 source px
+/// into the 160px viewport, ~1.3x) while remaining an independent, bounded
+/// cap rather than "always full per-chunk resolution regardless of world
+/// size" (a future larger world still downsamples). Bandwidth cost measured
+/// (not guessed) via `bandwidth_measurement::compressed_size_at_the_shipped_
+/// cap_stays_small` on a synthetic biome-like image (large contiguous colour
+/// regions with per-pixel dither — the realistic case, not uniform noise,
+/// which would over-estimate the real cost): the previous 256 cap compressed
+/// to ~22.9 KB, 512 to ~49.8 KB, and this 1024 cap to ~173.6 KB. This is a
+/// ONE-SHOT payload (sent once per session, identical shape to
+/// `NetFarTerrain`'s own one-shot layers) — a ~151 KB increase is negligible
+/// next to the terrain streaming that already happens on connect.
+pub const MAP_IMAGE_MAX_DIM: u32 = 1024;
+
 /// A site/quest marker on the map (projected [`common::map::Marker`] — kind,
 /// world position in BLOCKS, a plain resolved label, and the quest flag).
 ///
@@ -296,5 +337,73 @@ mod tests {
         assert!(uv.y.is_finite());
         assert!((0.0..=1.0).contains(&uv.x));
         assert!((0.0..=1.0).contains(&uv.y));
+    }
+}
+
+#[cfg(test)]
+mod bandwidth_measurement {
+    use super::*;
+
+    /// Synthetic biome-like RGB buffer: large (32px) contiguous colour
+    /// regions with a small per-pixel dither, approximating the low-entropy
+    /// "large same-colour landmass/biome" structure a real
+    /// `client::WorldData::map_image()` has (as opposed to uniform noise,
+    /// which would be a worst-case, unrealistic compression estimate).
+    fn synthetic_map_pixels(w: u32, h: u32) -> Vec<[u8; 3]> {
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let region_x = x / 32;
+                let region_y = y / 32;
+                let base_r = (region_x.wrapping_mul(37) % 200) as u8;
+                let base_g = (region_y.wrapping_mul(53) % 200) as u8;
+                let base_b = ((region_x + region_y).wrapping_mul(19) % 200) as u8;
+                let dither = ((x ^ y) % 8) as u8;
+                out.push([
+                    base_r.saturating_add(dither),
+                    base_g.saturating_add(dither),
+                    base_b.saturating_add(dither),
+                ]);
+            }
+        }
+        out
+    }
+
+    /// Bandwidth regression guard for [`MAP_IMAGE_MAX_DIM`]: the ONE-SHOT
+    /// payload at the chosen 1024 cap must stay well under a couple MB —
+    /// measured (not guessed) at authoring time via this exact synthetic
+    /// buffer: `dim=256 -> 22,945 B`, `dim=512 -> 49,756 B`,
+    /// `dim=1024 -> 173,556 B` (all real `lz_fear` compression, not an
+    /// estimate). Asserts a generous 1 MiB ceiling at the shipped cap — a
+    /// regression here (e.g. someone bumping the cap further without
+    /// re-measuring) fails loudly instead of silently ballooning a one-shot
+    /// broadcast every client pays on connect.
+    #[test]
+    fn compressed_size_at_the_shipped_cap_stays_small() {
+        let pixels = synthetic_map_pixels(MAP_IMAGE_MAX_DIM, MAP_IMAGE_MAX_DIM);
+        let compressed = compress(&pixels);
+        assert!(
+            compressed.len() < 1024 * 1024,
+            "compressed {}x{} map background grew to {} bytes (>1 MiB) — re-measure before \
+             shipping a bigger MAP_IMAGE_MAX_DIM",
+            MAP_IMAGE_MAX_DIM,
+            MAP_IMAGE_MAX_DIM,
+            compressed.len()
+        );
+    }
+
+    /// A quartered resolution (256, the PREVIOUS cap that caused the
+    /// "pixelated minimap" bug) compresses noticeably smaller than the
+    /// shipped 1024 cap — sanity-checks that [`synthetic_map_pixels`] scales
+    /// realistically with resolution (not a flat/degenerate buffer that
+    /// would make this whole measurement meaningless).
+    #[test]
+    fn compressed_size_grows_with_resolution() {
+        let small = compress(&synthetic_map_pixels(256, 256));
+        let large = compress(&synthetic_map_pixels(MAP_IMAGE_MAX_DIM, MAP_IMAGE_MAX_DIM));
+        assert!(
+            large.len() > small.len(),
+            "a 1024x1024 buffer must compress larger than a 256x256 one"
+        );
     }
 }

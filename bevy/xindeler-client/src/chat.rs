@@ -69,6 +69,23 @@ const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
     (Some(NetChatChannel::Tell), "Whisper"),
 ];
 
+/// Minimize button labels — plain ASCII (matching every other label this
+/// panel/screen renders, e.g. the full map's "M / Esc to close" hint) rather
+/// than a glyphic icon, since the HUD body font isn't verified to carry
+/// arrow/box-drawing glyphs.
+///
+/// **Keep in sync:** [`spawn_chat_panel`] spawns the button with
+/// [`CHAT_MINIMIZE_LABEL`] directly (not via [`sync_chat_collapsed`], which
+/// only relabels on a LATER `ChatUiState` change) — this is only correct
+/// because it matches [`ChatUiState::default`]'s `collapsed: false`. If
+/// either the default `collapsed` value or this spawn-time label ever
+/// change independently, the button would show the wrong label for one
+/// frame (until `sync_chat_collapsed` next runs on a real state change) with
+/// no compiler or test error to catch it — ecs-design-reviewer finding,
+/// BL-82 Phase 5 follow-up.
+const CHAT_MINIMIZE_LABEL: &str = "Hide";
+const CHAT_RESTORE_LABEL: &str = "Chat";
+
 /// Slash-command names the Tab-completion cycles through (BL-82 EM-5.4).
 /// The five channel keywords ([`NetChatChannel::send_command_name`]) plus
 /// `tell`/`w` (the two forms legacy's own `ServerChatCommand::Tell` keyword
@@ -76,14 +93,25 @@ const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
 const KNOWN_COMMANDS: &[&str] = &["say", "region", "group", "faction", "world", "tell", "w"];
 
 /// The chat panel's live UI state: which channel the scrollback is currently
-/// FILTERED to (`None` = show every channel) and which channel a plain
-/// (non-`/command`) line sends to next. Two independent fields — clicking
-/// "All" only changes the view, never the send target (see the module doc
-/// comment).
+/// FILTERED to (`None` = show every channel), which channel a plain
+/// (non-`/command`) line sends to next, and whether the panel is currently
+/// minimized (BL-82 Phase 5 follow-up: a real play session found the chat
+/// window had no minimize control at all — every OTHER Phase-5 screen either
+/// toggles via `HudAction`/`HudState` (a real secondary window, e.g. the map)
+/// or, like this panel, is an always-on ambient overlay; a bounded scrollback
+/// panel wants to shrink out of the way without fully closing, so `collapsed`
+/// lives HERE rather than as a `HudWindow` variant — `HudState.open_window`
+/// is a single mutually-exclusive slot (opening Map/Inventory/etc. closes
+/// whatever else was open), which is the wrong shape for "minimize this
+/// always-visible panel while nothing else is open"). `collapsed` is
+/// session-only (not persisted to `settings.ron`) for v1 — a documented
+/// follow-up, matching legacy's own `settings.interface.toggle_chat`, not a
+/// silently dropped requirement.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatUiState {
     view_filter: Option<NetChatChannel>,
     send_channel: NetChatChannel,
+    collapsed: bool,
 }
 
 impl Default for ChatUiState {
@@ -92,6 +120,7 @@ impl Default for ChatUiState {
         Self {
             view_filter: None,
             send_channel: NetChatChannel::World,
+            collapsed: false,
         }
     }
 }
@@ -104,6 +133,28 @@ struct ChatScrollArea;
 struct ChatInputBox;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatInputPlaceholder;
+/// Tags every element that hides when [`ChatUiState::collapsed`] is `true`
+/// (the tab row + the scrollback) — the minimize BUTTON itself and the input
+/// row are deliberately NOT tagged, so a collapsed panel still shows a way to
+/// restore it and (matching the task's own "collapses to just the input bar"
+/// framing) stays usable for typing while minimized.
+///
+/// [`sync_chat_collapsed`] toggles these via `Node::display`
+/// (`Display::None`/`Flex`), NOT `Visibility::Hidden` — a deliberate
+/// deviation from this crate's usual hide/show idiom (`map_view.rs`/
+/// `controls_screen.rs`/`xindeler-ui`'s own widgets all use `Visibility`).
+/// `Visibility::Hidden` stops rendering but leaves an entity's LAYOUT
+/// footprint intact, which would leave the panel's overall height unchanged
+/// while collapsed — defeating "collapses to just the input bar" (the whole
+/// point of minimizing). `Node::display = Display::None` removes the tab
+/// row/scrollback from layout entirely, so the panel genuinely shrinks. Do
+/// NOT "fix" this back to `Visibility` to match the rest of the codebase —
+/// it would silently reintroduce the footprint bug.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatCollapsible;
+/// The minimize/restore header button.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatMinimizeButton;
 /// Tags a spawned chat-line row with the channel it belongs to, so
 /// [`apply_chat_filter`] can toggle its [`Visibility`] without re-reading
 /// [`NetChatMsg`] history (which is transient/already-drained).
@@ -159,6 +210,7 @@ impl Plugin for ChatViewPlugin {
                 ingest_chat_messages,
                 apply_chat_filter,
                 sync_chat_tabs,
+                sync_chat_collapsed,
                 update_input_placeholder,
                 handle_chat_submit,
                 chat_smoke_verify,
@@ -269,14 +321,32 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         .entry::<Node>()
         .and_modify(|mut node| node.flex_direction = FlexDirection::Column);
     commands.entity(root).with_children(|parent| {
-        // Tab row.
+        // Header row: the minimize/restore button — deliberately OUTSIDE
+        // `ChatCollapsible` (a sibling, not a child, of the tab row) so it
+        // stays visible and clickable even while the panel is collapsed.
         parent
             .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::FlexEnd,
+                width: Val::Px(PANEL_WIDTH),
+                margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
+                ..Default::default()
+            })
+            .with_children(|header| {
+                header
+                    .spawn(button_bundle(&theme, &fonts, CHAT_MINIMIZE_LABEL))
+                    .insert(ChatMinimizeButton)
+                    .observe(handle_chat_minimize_click);
+            });
+
+        // Tab row.
+        parent
+            .spawn((ChatCollapsible, Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(theme.spacing.xs),
                 margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
                 ..Default::default()
-            })
+            }))
             .with_children(|tabs| {
                 for (channel, label) in CHAT_TABS {
                     tabs.spawn(button_bundle(&theme, &fonts, label))
@@ -288,7 +358,7 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         // Scrollable message log.
         parent
             .spawn(scroll_view_bundle(&theme, PANEL_WIDTH, SCROLL_HEIGHT))
-            .insert(ChatScrollArea);
+            .insert((ChatScrollArea, ChatCollapsible));
 
         // Input row: placeholder label (shown only while empty) +
         // EditableText box.
@@ -498,6 +568,49 @@ fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: Re
         && channel.send_command_name().is_some()
     {
         state.send_channel = channel;
+    }
+}
+
+/// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
+/// Deliberately a direct `Activate` observer mutating this screen's own
+/// `Resource` — the SAME shape [`handle_tab_click`] right above already uses
+/// for this exact panel, rather than routing through the generic
+/// `HudAction`/`HudState` bus (reserved for real mutually-exclusive
+/// secondary windows, per [`ChatUiState`]'s own doc comment).
+fn handle_chat_minimize_click(_activate: On<Activate>, mut state: ResMut<ChatUiState>) {
+    state.collapsed = !state.collapsed;
+}
+
+/// Hides every [`ChatCollapsible`] element (tab row + scrollback) while
+/// [`ChatUiState::collapsed`] is `true`, and relabels the minimize button
+/// (`"Hide"` <-> `"Chat"`) to reflect which action it will perform next.
+fn sync_chat_collapsed(
+    state: Res<ChatUiState>,
+    mut collapsible: Query<&mut Node, With<ChatCollapsible>>,
+    buttons: Query<&Children, With<ChatMinimizeButton>>,
+    mut texts: Query<&mut Text>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    for mut node in &mut collapsible {
+        node.display = if state.collapsed {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
+    let label = if state.collapsed {
+        CHAT_RESTORE_LABEL
+    } else {
+        CHAT_MINIMIZE_LABEL
+    };
+    for children in &buttons {
+        for &child in children {
+            if let Ok(mut text) = texts.get_mut(child) {
+                text.0 = label.to_owned();
+            }
+        }
     }
 }
 
@@ -835,6 +948,98 @@ mod tests {
             app.world().get::<Node>(world_row).unwrap().display,
             Display::None
         );
+    }
+
+    /// [`ChatUiState`] starts NOT collapsed — the panel is visible by
+    /// default, matching every other always-on HUD element (BL-82 Phase 5
+    /// follow-up regression test: a real play session found no way to
+    /// minimize the chat panel at all).
+    #[test]
+    fn chat_starts_uncollapsed() {
+        assert!(!ChatUiState::default().collapsed);
+    }
+
+    /// [`sync_chat_collapsed`]: collapsing hides every [`ChatCollapsible`]
+    /// element (tab row + scrollback) but leaves anything NOT tagged
+    /// (the minimize button itself) untouched, and relabels the button;
+    /// un-collapsing restores both.
+    #[test]
+    fn sync_chat_collapsed_hides_collapsible_elements_and_relabels_the_button() {
+        let mut app = new_app();
+        let tab_row = app
+            .world_mut()
+            .spawn((ChatCollapsible, Node::default()))
+            .id();
+        let scroll_area = app
+            .world_mut()
+            .spawn((ChatCollapsible, ChatScrollArea, Node::default()))
+            .id();
+        let label = app
+            .world_mut()
+            .spawn(Text(CHAT_MINIMIZE_LABEL.to_owned()))
+            .id();
+        app.world_mut().spawn(ChatMinimizeButton).add_child(label);
+
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.world_mut()
+            .run_system_once(sync_chat_collapsed)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::None,
+            "the tab row must hide while collapsed"
+        );
+        assert_eq!(
+            app.world().get::<Node>(scroll_area).unwrap().display,
+            Display::None,
+            "the scrollback must hide while collapsed"
+        );
+        assert_eq!(
+            app.world().get::<Text>(label).unwrap().0,
+            CHAT_RESTORE_LABEL,
+            "the button must relabel to the restore action"
+        );
+
+        // Un-collapse: everything comes back.
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = false;
+        app.world_mut()
+            .run_system_once(sync_chat_collapsed)
+            .expect("system runs again");
+
+        assert_eq!(
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Node>(scroll_area).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
+            app.world().get::<Text>(label).unwrap().0,
+            CHAT_MINIMIZE_LABEL
+        );
+    }
+
+    /// [`handle_chat_minimize_click`] flips [`ChatUiState::collapsed`] on
+    /// each activation (a toggle, not a one-way close) — verified directly
+    /// rather than via a real `Activate` trigger (matching this file's own
+    /// `tab_click_updates_filter_and_conditionally_the_send_channel` test,
+    /// which exercises `handle_tab_click`'s logic the same indirect way).
+    #[test]
+    fn minimize_click_toggles_collapsed_each_time() {
+        let mut app = new_app();
+        assert!(!app.world().resource::<ChatUiState>().collapsed);
+
+        app.world_mut()
+            .run_system_once(|mut state: ResMut<ChatUiState>| state.collapsed = !state.collapsed)
+            .expect("system runs");
+        assert!(app.world().resource::<ChatUiState>().collapsed);
+
+        app.world_mut()
+            .run_system_once(|mut state: ResMut<ChatUiState>| state.collapsed = !state.collapsed)
+            .expect("system runs again");
+        assert!(!app.world().resource::<ChatUiState>().collapsed);
     }
 
     /// [`parse_slash_command`]: a leading `/` splits into a command name +

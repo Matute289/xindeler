@@ -54,7 +54,7 @@ pub use crate::{
         InventoryActionRequest, NetEquippedSlot, NetInventory, NetInventorySlot, NetItemStack,
     },
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
-    map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
+    map::{MAP_IMAGE_MAX_DIM, NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     owner_visibility::{ClientOwnedUid, NetOwnerOnly},
     social::{
