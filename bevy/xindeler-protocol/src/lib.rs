@@ -16,6 +16,7 @@
 
 pub mod ai_mode;
 pub mod aurora_overlay;
+pub mod chat;
 pub mod dimension_id;
 pub mod interest;
 pub mod login;
@@ -36,6 +37,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::{
     ai_mode::AiExecutionMode,
     aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
+    chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
     dimension_id::DimensionId,
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
@@ -698,6 +700,10 @@ impl Plugin for XindelerProtocolPlugin {
         // PlayerInput — this is a one-shot discrete request, not a per-tick
         // state sample.
         app.add_client_message::<LoginRequest>(XindelerChannel::Events.delivery());
+        // BL-82 EM-5.4: a player-typed chat line or slash command — a
+        // one-shot discrete request like LoginRequest, not a per-tick state
+        // sample.
+        app.add_client_message::<ChatSendRequest>(XindelerChannel::Events.delivery());
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients
@@ -740,6 +746,11 @@ impl Plugin for XindelerProtocolPlugin {
         // it must not be queued behind entity replication either.
         app.add_server_message::<HudToast>(XindelerChannel::Events.delivery())
             .make_message_independent::<HudToast>();
+        // BL-82 EM-5.4: the chat message stream. No entity references (a
+        // plain classified/rendered line), so it must not be queued behind
+        // entity replication either — same reasoning as `HudToast` above.
+        app.add_server_message::<NetChatMsg>(XindelerChannel::Events.delivery())
+            .make_message_independent::<NetChatMsg>();
         // BL-82 EM-4.2d: per-client interest management. Registering this
         // filter does NOT itself add `RegionKey`/`ClientVisibleRegions` to any
         // entity — it only teaches replicon how to interpret them where they
@@ -1232,5 +1243,103 @@ mod tests {
             vec![payload],
             "listen server must see its own terrain locally"
         );
+    }
+
+    /// BL-82 EM-5.4: `NetChatMsg` replicates server → client over the real
+    /// loopback exactly like `HudToast`/`LoginResult` (a plain broadcast
+    /// message, no entity references).
+    #[test]
+    fn net_chat_msg_replicates() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let payload = NetChatMsg {
+            channel: NetChatChannel::Say,
+            sender_uid: Some(NetUid(7)),
+            sender_alias: Some("Hero".to_owned()),
+            text: "hello there".to_owned(),
+        };
+        server_app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: payload.clone(),
+        });
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let received: Vec<_> = client_app
+            .world_mut()
+            .resource_mut::<Messages<NetChatMsg>>()
+            .drain()
+            .collect();
+        assert_eq!(received, vec![payload]);
+    }
+
+    /// Listen-server path: `ToClients<NetChatMsg>` with no connected client
+    /// loops back locally, same as `compressed_chunk_loops_back_locally_on_
+    /// listen_server` above — this is how the listen-server's own chat
+    /// broadcast (`xindeler-sim-bridge::chat::broadcast_embedded_chat`)
+    /// reaches its own embedded player's client-side scrollback.
+    #[test]
+    fn net_chat_msg_loops_back_locally_on_listen_server() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut app = new_app();
+        let payload = NetChatMsg {
+            channel: NetChatChannel::World,
+            sender_uid: None,
+            sender_alias: None,
+            text: "server started".to_owned(),
+        };
+        app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: payload.clone(),
+        });
+        app.update();
+
+        let received: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<NetChatMsg>>()
+            .drain()
+            .collect();
+        assert_eq!(received, vec![payload]);
+    }
+
+    /// BL-82 EM-5.4: `ChatSendRequest` (both the `Channel` and `Command`
+    /// shapes) travels client → server and surfaces as `FromClient<_>` —
+    /// the wire-shape half for a future real remote client, mirroring
+    /// `player_input_reaches_server` above.
+    #[test]
+    fn chat_send_request_reaches_server() {
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let channel_req = ChatSendRequest::Channel {
+            channel: NetChatChannel::Say,
+            text: "hello".to_owned(),
+        };
+        let command_req = ChatSendRequest::Command {
+            name: "tell".to_owned(),
+            args: vec!["Bob".to_owned(), "hi".to_owned()],
+        };
+        client_app.world_mut().write_message(channel_req.clone());
+        client_app.world_mut().write_message(command_req.clone());
+
+        client_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        server_app.update();
+
+        let received: Vec<_> = server_app
+            .world_mut()
+            .resource_mut::<Messages<FromClient<ChatSendRequest>>>()
+            .drain()
+            .collect();
+        assert_eq!(received.len(), 2, "server should receive both requests");
+        assert_eq!(received[0].message, channel_req);
+        assert_eq!(received[1].message, command_req);
     }
 }
