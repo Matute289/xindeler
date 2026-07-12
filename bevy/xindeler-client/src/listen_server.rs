@@ -246,6 +246,11 @@ impl Plugin for ListenServerPlugin {
             xindeler_sim_bridge::InventoryMirrorPlugin,
             xindeler_sim_bridge::TradeMirrorPlugin,
         ));
+        // BL-82 EM-5.7: the character diary / skill-tree mirror
+        // (`NetSkillSet`/`NetAbilityPool`) + the SP-spend request applicator
+        // — same ordering reasoning as `CombatHudMirrorPlugin`/`HotbarMirrorPlugin`
+        // above (reads `SimMirror`).
+        app.add_plugins(xindeler_sim_bridge::SkillSetMirrorPlugin);
         // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
         // registration — see `xindeler_oracle_host::atmosphere_sync`'s
         // module doc comment for why this can't live in
@@ -306,6 +311,10 @@ impl Plugin for ListenServerPlugin {
             crate::inventory_ui::InventoryUiPlugin,
             crate::trade_ui::TradeUiPlugin,
         ));
+        // BL-82 EM-5.7: the character diary / skill-tree screen (Stats tab +
+        // the generic per-group tree renderer + Abilities tab) reading the
+        // `SkillSetMirrorPlugin` mirror above. Pure Bevy.
+        app.add_plugins(crate::diary::DiaryUiPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

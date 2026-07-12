@@ -187,5 +187,12 @@ impl Plugin for NetClientPlugin {
             InventoryUiPlugin,
             TradeUiPlugin,
         ));
+        // BL-82 EM-5.7: the character diary / skill-tree screen — verbatim
+        // reuse, same as every other consumer plugin above (both the Stats
+        // tab and the generic tree renderer degrade clean with no
+        // `NetSkillSet`/`NetAbilityPool` mirrored yet on this spectator-only
+        // path). Split into its own call — the tuple above is already at the
+        // plugin-tuple arity ceiling `bevy_app`'s `Plugins` impls support.
+        app.add_plugins(crate::diary::DiaryUiPlugin);
     }
 }

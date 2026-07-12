@@ -69,6 +69,13 @@ common = { package = "xindeler-common", path = "../../common", features = [
     "no-assets",
 ] }
 vek = { workspace = true }
+# BL-82 EM-5.7: `diary.rs` parses the frozen skill-tree RON manifests directly
+# (see that module's own doc comment for why it does NOT go through
+# `common`'s `assets_manager`-backed statics despite linking `common` for
+# types) — needs `serde::de::DeserializeOwned` + a log line on a bad/missing
+# manifest file.
+serde = { workspace = true }
+tracing = { workspace = true }
 # EM-3.8: parse the `.vox` bytes the client loads via `AssetServer` into the
 # `DotVoxData` the figure loader consumes (SAME "5.x" line `common` pins).
 dot_vox = "5.1"
@@ -109,3 +116,8 @@ tempfile = { workspace = true }
 # `xindeler-sim-bridge`'s own dev-dependency for the identical reason).
 # Test-only.
 common-i18n = { package = "xindeler-common-i18n", path = "../../common/i18n" }
+# BL-82 EM-5.7's `diary` tests build real `common::comp::skillset::
+# SkillPrerequisite::All`/`Any` fixtures, whose inner map is `hashbrown::
+# HashMap` (not `std::collections::HashMap`) — same "type library" dev-dep
+# pattern as `common-i18n` just above. Test-only.
+hashbrown = { workspace = true }

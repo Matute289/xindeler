@@ -472,6 +472,24 @@ impl EmbeddedPlayer {
             self.client.send_command(name, args);
         }
     }
+
+    /// Applies a client-side skill-point spend through the embedded player's
+    /// real network `unlock_skill` send (BL-82 EM-5.7) — a genuine
+    /// client->server request over the loopback socket, never a direct ECS
+    /// write (isolation-law rule 4). `client::Client::unlock_skill` already
+    /// existed (sends the same `ClientGeneral::UnlockSkill` the legacy
+    /// diary's `Event::UnlockSkill` handler sends — `server/src/sys/msg/
+    /// in_game.rs` already processes it), so no server-side change was
+    /// needed for this. A no-op before the player is in game, matching every
+    /// other `EmbeddedPlayer` pass-through's guard (see e.g.
+    /// [`Self::send_chat_request`] above). The sim itself validates
+    /// prerequisites/cost/availability server-side — this never assumes the
+    /// spend succeeds.
+    pub fn unlock_skill(&mut self, skill: comp::skillset::skills::Skill) {
+        if self.is_in_game() {
+            self.client.unlock_skill(skill);
+        }
+    }
 }
 
 /// Pure decision logic for [`EmbeddedPlayer::send_chat_request`] (BL-82

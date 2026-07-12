@@ -67,8 +67,12 @@ pub struct HotbarMirrorCache(std::collections::HashMap<specs::Entity, NetAbiliti
 
 /// `common::comp::ability::AuxiliaryAbility` -> the replicable
 /// [`NetAuxiliaryAbility`] (see that type's own doc comment for why both
-/// exist).
-fn to_net_aux(ability: comp::ability::AuxiliaryAbility) -> NetAuxiliaryAbility {
+/// exist). `pub(crate)`: `crate::skillset::mirror_skillset_state` (BL-82
+/// EM-5.7) reuses this exact conversion for `NetAbilityPool`'s entries —
+/// the SAME resolution `mirror_hotbar_state` does, just over
+/// `AbilityPool::all_available_abilities` instead of the current bound-slot
+/// set, so it must not diverge into a second copy.
+pub(crate) fn to_net_aux(ability: comp::ability::AuxiliaryAbility) -> NetAuxiliaryAbility {
     use comp::ability::AuxiliaryAbility as A;
     #[expect(
         clippy::cast_possible_truncation,
