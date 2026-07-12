@@ -37,8 +37,8 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    LodAltStreamPlugin, PlayerBridgePlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
+    LodAltStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin,
+    SimEntityMirrorPlugin, SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
@@ -204,6 +204,19 @@ impl Plugin for ListenServerPlugin {
         // BL-82 EM-4.9 (Phase D): retargets `AtmosphereController` on
         // `SetClientAtmosphere` arrival.
         app.add_plugins(AtmosphereSyncViewPlugin);
+        // BL-82 EM-4.9 follow-up: the generic (ORACLE-agnostic)
+        // dimension-transfer mechanism (mirror `DimensionId`/`DimensionRoot`
+        // retag + occupant bookkeeping + player-eject-on-teardown). Dormant
+        // for ORACLE events specifically on this path (`ServerOraclePlugin`
+        // is never added to the listen-server client — see
+        // `xindeler_sim_bridge::oracle`'s own doc comment), but still real
+        // and exercised by the generic `XINDELER_DEBUG_SPINUP_DIMENSION`/
+        // `XINDELER_DEBUG_DRAIN_DIMENSION` debug-command path (a listen-server
+        // admin transferring the embedded local player into a debug-spun
+        // dimension must still be ejected cleanly on teardown). Split into
+        // its own call — the tuple above is already at the 15-plugin
+        // ceiling.
+        app.add_plugins(PlayerTransferPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

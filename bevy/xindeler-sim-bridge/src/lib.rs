@@ -106,6 +106,9 @@ pub use entity_factory::{
 mod oracle;
 pub use oracle::ServerOraclePlugin;
 
+mod player_transfer;
+pub use player_transfer::{PlayerDimensionSession, PlayerTransferPlugin, TransferPlayerDimension};
+
 mod player;
 // BL-82 EM-4.11 follow-up (bevy-migration-reviewer audit): `tick_player` and
 // `TickPerfLog` are deliberately NOT re-exported here — no crate outside
@@ -237,16 +240,21 @@ pub struct SimLoadoutCache(pub HashMap<specs::Entity, NetLoadout>);
 #[derive(Resource, Default, Debug)]
 pub struct SimRegionCache(pub HashMap<specs::Entity, RegionKey>);
 
-/// The [`DimensionId`] each currently-mirrored sim entity was assigned WHEN
-/// FIRST SEEN (BL-82 EM-4.9, Phase C / T51.6) — decided once, in
-/// [`mirror_sim_entities`], and never revisited afterward (there is no
-/// player/NPC dimension-TRANSFER path yet; a mirror keeps the dimension it
-/// was created with for its whole lifetime). Defaults every entity to
+/// The [`DimensionId`] each currently-mirrored sim entity is currently
+/// assigned to. Decided WHEN FIRST SEEN in [`mirror_sim_entities`] (BL-82
+/// EM-4.9, Phase C / T51.6) — defaults every entity to
 /// [`DimensionId::DEFAULT`] unless [`PendingDimensionAttribution`] had a
-/// pending non-default assignment waiting for it — see that resource's own
-/// doc comment for the full correlation mechanism and its documented limits.
-/// Entries are pruned alongside [`SimMirror`]/[`SimLoadoutCache`]/
-/// [`SimRegionCache`] when an entity disappears.
+/// pending non-default assignment waiting for it (see that resource's own
+/// doc comment for the full correlation mechanism and its documented
+/// limits) — but CAN be revisited afterward: [`crate::player_transfer::
+/// apply_player_dimension_transfers`] (BL-82 EM-4.9 follow-up, closing the
+/// "no dimension-transfer path exists yet" gap this doc comment used to
+/// describe) is the single validated choke point that moves an
+/// already-mirrored REAL PLAYER between dimensions after the fact. An NPC's
+/// mirror still keeps the dimension it was created with for its whole
+/// lifetime — nothing transfers NPCs, only players. Entries are pruned
+/// alongside [`SimMirror`]/[`SimLoadoutCache`]/[`SimRegionCache`] when an
+/// entity disappears.
 #[derive(Resource, Default, Debug)]
 pub struct SimEntityDimension(pub HashMap<specs::Entity, DimensionId>);
 
