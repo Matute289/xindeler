@@ -97,6 +97,9 @@
 //! `docs/design/specs/2026-07-10-bl82-wave3-regression-fixes-design.md` Finding
 //! F for why this comment needed correcting.
 
+mod combat_hud;
+pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
+
 mod entity_factory;
 pub use entity_factory::{
     NextSpawnCorrelationId, PendingDimensionAttribution, apply_pending_entity_template_spawns,
@@ -1641,7 +1644,12 @@ fn mirror_admits_new_entity(dimension: Option<&DimensionState>) -> bool {
 /// `Teardown`) never gets a brand-new mirror entity, while entities ALREADY
 /// mirrored keep updating regardless of lifecycle — "existing players may
 /// finish/leave normally" during `Draining` (spec §1.8).
-fn mirror_sim_entities(
+// BL-82 EM-5.2: widened from private to `pub(crate)` so the new
+// `combat_hud::mirror_combat_hud_state` system (a sibling module, kept
+// separate from this already-huge function rather than folded in — see that
+// module's doc comment) can order itself `.after(mirror_sim_entities)` in the
+// SAME `FixedUpdate` schedule; still not part of the crate's public API.
+pub(crate) fn mirror_sim_entities(
     sim: Option<NonSendMut<SimServer>>,
     // EM-3.7b: the embedded local player, if any. Used to tag ITS mirror entity
     // with `NetLocalPlayer` so the client's third-person camera follows it.

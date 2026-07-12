@@ -22,8 +22,8 @@ use xindeler_dimensions::{
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimTerrainStreamPlugin, tick_sim,
+    CombatHudMirrorPlugin, PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin,
+    SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -253,6 +253,15 @@ impl Plugin for SimServerPlugin {
             events_dir: self.config.events_dir.clone(),
             ..Default::default()
         });
+
+        // BL-82 EM-5.2: the first Phase-5 HUD state-mirror slice
+        // (energy/poise/combo/XP/buffs) — reads `SimMirror`, so it must be
+        // added after `SimEntityMirrorPlugin` above (which populates it this
+        // same tick). Split into its own `add_plugins` call — the main tuple
+        // above is already at the 15-plugin ceiling `bevy_app`'s `Plugins`
+        // trait impls support (same reason `AtmosphereSyncMessagePlugin`
+        // above was already split out).
+        app.add_plugins(CombatHudMirrorPlugin);
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,

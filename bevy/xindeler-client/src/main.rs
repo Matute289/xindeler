@@ -23,6 +23,8 @@
 mod atmosphere;
 mod camera;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod combat_hud;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod entity_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain;

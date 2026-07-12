@@ -48,6 +48,9 @@ bevy = { version = "=0.19.0", features = ["file_watcher"] }
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }
 # AtmosphereProfile asset + AtmosphereController (EM-2.4, spec §5.4).
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# BL-82 EM-5.1: the widget kit (panel/bar/button/tooltip/notification/theme/
+# i18n) the core combat HUD (EM-5.2, `combat_hud.rs`) builds on.
+xindeler-ui = { path = "../xindeler-ui" }
 # EM-3.2..3.5: greedy mesher + bevy conversion + VoxelMaterialExt + block
 # palette (EM-3.4) + async chunk pipeline (EM-3.5).
 xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [

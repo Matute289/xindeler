@@ -28,10 +28,28 @@ pub fn userdata_dir() -> PathBuf {
 /// All persisted user settings. Serialized as RON at
 /// `<userdata>/settings.ron`; unknown/missing fields fall back to defaults so
 /// old files keep loading as the struct grows.
-#[derive(Resource, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct XindelerSettings {
     pub graphics: GraphicsSettings,
+    /// BL-82 EM-5.1 T56.6 — the UI-scale foundation (legacy `ui/scale.rs`
+    /// analog): a global multiplier `xindeler-ui`'s `HudScale` resource
+    /// applies to Bevy's own `UiScale`. Persisted here (not in `xindeler-ui`
+    /// itself) because settings persistence is this crate's established
+    /// seam (`save()`/`load_or_default()`) — the EM-5.12 settings UI reads/
+    /// writes this field like every other toggle. Manual `Default` impl
+    /// below (not `#[derive(Default)]`) because the correct default is
+    /// `1.0`, not `f32`'s own `0.0` (which would render an invisible HUD).
+    pub ui_scale: f32,
+}
+
+impl Default for XindelerSettings {
+    fn default() -> Self {
+        Self {
+            graphics: GraphicsSettings::default(),
+            ui_scale: 1.0,
+        }
+    }
 }
 
 /// Graphics quality tier (EM-2.5). Every tier except [`Custom`] is a preset
@@ -324,6 +342,24 @@ mod tests {
         };
         settings.sanitize();
         assert_eq!(settings.experimental, ExperimentalGraphics::default());
+    }
+
+    /// BL-82 EM-5.1 T56.6: the default UI scale is `1.0` (identity), never
+    /// `f32`'s own `0.0` default — an invisible HUD would be a silent, hard-
+    /// to-diagnose regression on any fresh install.
+    #[test]
+    fn default_ui_scale_is_identity() {
+        assert_eq!(XindelerSettings::default().ui_scale, 1.0);
+    }
+
+    /// A settings.ron predating the `ui_scale` field still loads and gets
+    /// the `1.0` default, same guarantee `old_settings_files_still_load`
+    /// already covers for the graphics sub-struct.
+    #[test]
+    fn old_settings_files_default_ui_scale_to_identity() {
+        let text = "(graphics: (taa: false, shadow_cascades: 2))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.ui_scale, 1.0);
     }
 
     #[test]
