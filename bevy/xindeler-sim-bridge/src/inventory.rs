@@ -25,24 +25,33 @@ use bevy::{
         message::MessageReader,
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res, ResMut},
+        system::{Commands, Query, Res, ResMut},
     },
 };
-use bevy_replicon::prelude::FromClient;
+use bevy_replicon::prelude::{ClientId, FromClient};
 use common::{comp, event::InventoryManipEvent, uid::Uid};
 use specs::WorldExt;
 use xindeler_protocol::{
     InventoryActionRequest, NetEquippedSlot, NetInventory, NetInventorySlot, NetOwnerOnly,
 };
 
-use crate::{SimMirror, SimServer, mirror_sim_entities, tick_sim};
+use crate::{PlayerDimensionSession, SimMirror, SimServer, mirror_sim_entities, tick_sim};
 
 /// Last-mirrored [`NetInventory`] per sim entity — the same dedup shape
 /// [`crate::SimLoadoutCache`]/[`crate::combat_hud::CombatHudMirrorCache`]
 /// already use: an inventory is `Vec`-shaped, so re-inserting an UNCHANGED
 /// value every tick would still force replicon to treat it as mutated.
+///
+/// `owner` is the SAME dedup discipline applied to [`NetOwnerOnly`]
+/// (bevy-migration-reviewer MAJOR, BL-82 EM-5.6 follow-up): re-inserting an
+/// UNCHANGED `NetOwnerOnly` every tick would retrigger `bevy_replicon`'s
+/// O(clients) `VisibilityFilter` recomputation for no reason, exactly the
+/// cost [`crate::SimRegionCache`] already exists to avoid for `RegionKey`.
 #[derive(Resource, Default, Debug)]
-pub struct InventoryMirrorCache(HashMap<specs::Entity, NetInventory>);
+pub struct InventoryMirrorCache {
+    inventory: HashMap<specs::Entity, NetInventory>,
+    owner: HashMap<specs::Entity, u64>,
+}
 
 /// Converts one sim `Item` into its wire projection. `#[allow(deprecated)]`:
 /// `ItemDesc::legacy_name` is the one raw, plain-`&str` display name an item
@@ -61,10 +70,24 @@ pub(crate) fn item_name(item: &comp::Item) -> String { item.legacy_name().into_o
 /// [`crate::combat_hud::mirror_combat_hud_state`]'s `Some(..) => insert /
 /// None => remove` shape.
 ///
-/// `NetOwnerOnly` is deliberately NEVER removed once written (mirrors how
-/// [`xindeler_protocol::NetUid`] is a permanent identity, never revoked) —
-/// see this module's own doc comment for why sharing it with
-/// [`crate::trade::mirror_trade_state`] this way is safe.
+/// BL-82 EM-5.6 follow-up (ecs-design-reviewer MAJOR): an entity whose `Uid`
+/// lookup fails this tick now `continue`s past EVERYTHING for that entity
+/// (matching [`crate::trade::mirror_trade_state`]'s own stricter shape)
+/// rather than the previous inconsistent behaviour of skipping only the
+/// `NetOwnerOnly` tag while still upserting `NetInventory` — the latter
+/// would (transiently) leave a real `NetInventory` on an entity with NO
+/// `NetOwnerOnly` at all, which per `bevy_replicon`'s own documented
+/// behaviour (see `xindeler_protocol::visibility`'s module doc comment: "an
+/// entity that never carries \[the filter component\] at all... keeps
+/// replicon's ordinary DEFAULT-VISIBLE behavior") would make that bag
+/// visible to every client, not just its owner — the exact leak this whole
+/// filter exists to prevent. `NetOwnerOnly` itself is deliberately NEVER
+/// REMOVED once written (mirrors how [`xindeler_protocol::NetUid`] is a
+/// permanent identity, never revoked) but IS now dedup-cached (mirroring
+/// [`crate::SimRegionCache`]'s own reasoning for `RegionKey`) so it's only
+/// actually re-inserted the first tick it's known — see this module's own
+/// doc comment for why sharing it with [`crate::trade::mirror_trade_state`]
+/// this way is safe.
 pub fn mirror_inventory_state(
     sim: Option<NonSendMut<SimServer>>,
     mirror: Res<SimMirror>,
@@ -73,7 +96,12 @@ pub fn mirror_inventory_state(
 ) {
     let Some(sim) = sim else { return };
 
-    cache.0.retain(|entity, _| mirror.0.contains_key(entity));
+    cache
+        .inventory
+        .retain(|entity, _| mirror.0.contains_key(entity));
+    cache
+        .owner
+        .retain(|entity, _| mirror.0.contains_key(entity));
 
     let ecs = sim.server.state().ecs();
     let inventories = ecs.read_storage::<comp::Inventory>();
@@ -82,8 +110,13 @@ pub fn mirror_inventory_state(
     for (&sim_entity, &bevy_entity) in mirror.0.iter() {
         let mut ec = commands.entity(bevy_entity);
 
-        if let Some(uid) = uids.get(sim_entity) {
-            ec.insert(NetOwnerOnly(uid.0.get()));
+        let Some(&uid) = uids.get(sim_entity) else {
+            continue;
+        };
+        let owner = uid.0.get();
+        if cache.owner.get(&sim_entity) != Some(&owner) {
+            ec.insert(NetOwnerOnly(owner));
+            cache.owner.insert(sim_entity, owner);
         }
 
         match inventories.get(sim_entity) {
@@ -130,50 +163,87 @@ pub fn mirror_inventory_state(
                     equipped,
                     capacity,
                 };
-                if cache.0.get(&sim_entity) != Some(&net_inventory) {
+                if cache.inventory.get(&sim_entity) != Some(&net_inventory) {
                     ec.insert(net_inventory.clone());
-                    cache.0.insert(sim_entity, net_inventory);
+                    cache.inventory.insert(sim_entity, net_inventory);
                 }
             },
             None => {
                 ec.remove::<NetInventory>();
-                cache.0.remove(&sim_entity);
+                cache.inventory.remove(&sim_entity);
             },
         }
     }
 }
 
+/// Resolves the SIM ENTITY a `FromClient<_>` request should be attributed to
+/// — real client identity FIRST, via [`PlayerDimensionSession`] (the SAME
+/// connection-entity ↔ sim-entity correlation `xindeler-server-app::login`
+/// establishes for every REAL remote client, at the exact call site that
+/// also inserts [`xindeler_protocol::ClientOwnedUid`] — see that module's
+/// doc comment), falling back to the embedded local player ONLY when the
+/// client has NO connection entity at all (`ClientId::entity()` returns
+/// `None` for `ClientId::Server`, which is exactly what a listen-server's
+/// OWN local write drains as — see `bevy_replicon`'s `ClientMessageAppExt::
+/// add_client_message` doc comment: "drained... and written locally as
+/// `FromClient<M>`... with `client_id` equal to `ClientId::Server`").
+///
+/// BL-82 EM-5.6 follow-up (bevy-migration-reviewer + ecs-design-reviewer,
+/// both BLOCKER): every applicator in this module and `trade.rs` used to
+/// resolve the acting entity via the embedded-player shortcut
+/// UNCONDITIONALLY, ignoring `client_id` entirely. On `xindeler-server-app`
+/// (the real dedicated server) there is no `EmbeddedPlayer` at all, so
+/// EVERY real remote client's inventory/trade action was silently dropped
+/// (a direct contradiction of this epic's locked "real replication
+/// end-to-end, not a stub" scope, §9 Q7=A) — and even on a listen-server
+/// with a SECOND real connection, that client's actions would have been
+/// misattributed to the embedded host. This function is the shared fix,
+/// reused by every applicator in both this module and `crate::trade`.
+pub(crate) fn resolve_client_entity(
+    client_id: ClientId,
+    sim: &SimServer,
+    player: Option<&crate::EmbeddedPlayer>,
+    sessions: &Query<&PlayerDimensionSession>,
+) -> Option<specs::Entity> {
+    match client_id.entity() {
+        Some(connection_entity) => sessions
+            .get(connection_entity)
+            .ok()
+            .map(|session| session.0),
+        None => player
+            .and_then(|p| p.uid())
+            .and_then(|uid| crate::player::player_sim_entity(sim, uid)),
+    }
+}
+
 /// Drains [`InventoryActionRequest`]s and re-emits each one as a
 /// `common::event::InventoryManipEvent` through the sim's public event bus —
-/// see the module doc comment. Resolves the acting entity via the embedded
-/// local player's own `Uid` (`crate::player::player_sim_entity`, the SAME
-/// resolution [`crate::mirror_sim_entities`] itself uses to tag the player's
-/// mirror) — v1 has exactly one controllable entity per bridge instance
-/// (the embedded local player), matching every other single-controllable-
-/// entity assumption `xindeler-sim-bridge::player` already makes; resolving
-/// a REMOTE client's own entity from its `ClientId` (multiple simultaneous
-/// controllable entities) is EM-4.2b/EM-4.2c territory
-/// (`xindeler-server-app::login`'s `ActiveReplicaSessions`), not duplicated
-/// here.
+/// see the module doc comment. Resolves the acting entity PER MESSAGE via
+/// [`resolve_client_entity`] (a real dedicated server can have many
+/// simultaneously-connected clients, each needing its OWN resolution, not a
+/// single bridge-wide fallback).
 pub fn apply_inventory_action_requests(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<bevy::ecs::change_detection::NonSend<crate::EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
     mut requests: MessageReader<FromClient<InventoryActionRequest>>,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(entity) = player
-        .and_then(|p| p.uid())
-        .and_then(|uid| crate::player::player_sim_entity(&sim, uid))
-    else {
-        // No controllable entity resolved yet (still connecting, or this
-        // bridge instance is a spectator-only fallback) — drop pending
-        // requests rather than buffering them forever (degrade clean, spec
-        // §3.2).
+    let Some(sim) = sim else {
+        // No sim booted yet — drop pending requests rather than buffering
+        // them forever (degrade clean, spec §3.2).
         requests.clear();
         return;
     };
 
-    for FromClient { message, .. } in requests.read() {
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            // This specific client's identity didn't resolve (still
+            // connecting, or a stale/forged client id) — skip just this
+            // request, not the whole batch (other clients' requests in the
+            // same batch are unrelated and must still be processed).
+            continue;
+        };
         sim.server
             .state()
             .emit_event_now(InventoryManipEvent(entity, message.0.clone()));
@@ -248,7 +318,19 @@ mod tests {
                     "common.items.consumable.potion_minor",
                 ))
                 .expect("space for one potion");
-            ecs.create_entity().with(inventory).build()
+            // A real mirrored entity always carries a `Uid` (every entity
+            // `mirror_sim_entities` mirrors is created via
+            // `create_entity_synced`) — `mirror_inventory_state` now
+            // requires one too (ecs-design-reviewer follow-up: skip the
+            // WHOLE entity, not just the `NetOwnerOnly` tag, when it's
+            // missing — see that fix's own doc comment).
+            let entity = ecs.create_entity().with(inventory).build();
+            let mut uids = ecs.write_storage::<Uid>();
+            let mut id_maps = ecs.write_resource::<common::uid::IdMaps>();
+            uids.insert(entity, id_maps.allocate(entity)).unwrap();
+            drop(uids);
+            drop(id_maps);
+            entity
         };
 
         let bevy_entity = app.world_mut().spawn_empty().id();
@@ -302,7 +384,13 @@ mod tests {
         let sim_entity = {
             let mut sim = app.world_mut().non_send_mut::<SimServer>();
             let ecs = sim.server.state_mut().ecs_mut();
-            ecs.create_entity().with(Inventory::with_empty()).build()
+            let entity = ecs.create_entity().with(Inventory::with_empty()).build();
+            let mut uids = ecs.write_storage::<Uid>();
+            let mut id_maps = ecs.write_resource::<common::uid::IdMaps>();
+            uids.insert(entity, id_maps.allocate(entity)).unwrap();
+            drop(uids);
+            drop(id_maps);
+            entity
         };
         let bevy_entity = app.world_mut().spawn_empty().id();
         app.world_mut()
@@ -327,5 +415,87 @@ mod tests {
             .expect("second run removes the stale mirror");
         app.update();
         assert!(app.world().get::<NetInventory>(bevy_entity).is_none());
+    }
+
+    /// BL-82 EM-5.6 follow-up (bevy-migration-reviewer + ecs-design-reviewer,
+    /// both BLOCKER): [`resolve_client_entity`] resolves a REAL client
+    /// connection (`ClientId::Client`) via its [`PlayerDimensionSession`] —
+    /// the core fix for "every remote client's action was silently dropped
+    /// on a dedicated server" — without needing a real embedded player at
+    /// all (this is exactly the path a genuine `xindeler-server-app` remote
+    /// client takes; `EmbeddedPlayer` is the OTHER, listen-server-only path,
+    /// covered by the sibling test below).
+    #[test]
+    fn resolve_client_entity_uses_the_real_connection_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let target_sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            ecs.create_entity().build()
+        };
+        let connection_entity = app
+            .world_mut()
+            .spawn(PlayerDimensionSession(target_sim_entity))
+            .id();
+        let client_id = ClientId::Client(connection_entity);
+
+        let resolved = app
+            .world_mut()
+            .run_system_once(
+                move |sim: bevy::ecs::change_detection::NonSend<SimServer>,
+                      sessions: Query<&PlayerDimensionSession>| {
+                    resolve_client_entity(client_id, &sim, None, &sessions)
+                },
+            )
+            .expect("system runs");
+
+        assert_eq!(resolved, Some(target_sim_entity));
+    }
+
+    /// A real client connection with NO [`PlayerDimensionSession`] yet
+    /// (still logging in, or a stale/forged connection entity) resolves to
+    /// `None` rather than falling back to the embedded player — a real
+    /// client's action must never get misattributed to the host.
+    #[test]
+    fn resolve_client_entity_returns_none_for_an_unresolved_real_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        let connection_entity = app.world_mut().spawn_empty().id();
+        let client_id = ClientId::Client(connection_entity);
+
+        let resolved = app
+            .world_mut()
+            .run_system_once(
+                move |sim: bevy::ecs::change_detection::NonSend<SimServer>,
+                      sessions: Query<&PlayerDimensionSession>| {
+                    resolve_client_entity(client_id, &sim, None, &sessions)
+                },
+            )
+            .expect("system runs");
+
+        assert_eq!(resolved, None);
+    }
+
+    /// `ClientId::Server` (no connection entity at all — the listen-server's
+    /// own local loopback write) with no `EmbeddedPlayer` resolves to `None`
+    /// rather than panicking — degrade clean.
+    #[test]
+    fn resolve_client_entity_returns_none_for_server_id_without_an_embedded_player() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let resolved = app
+            .world_mut()
+            .run_system_once(
+                |sim: bevy::ecs::change_detection::NonSend<SimServer>,
+                 sessions: Query<&PlayerDimensionSession>| {
+                    resolve_client_entity(ClientId::Server, &sim, None, &sessions)
+                },
+            )
+            .expect("system runs");
+
+        assert_eq!(resolved, None);
     }
 }

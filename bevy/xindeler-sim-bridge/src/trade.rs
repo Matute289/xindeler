@@ -34,7 +34,7 @@ use bevy::{
         message::MessageReader,
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res, ResMut},
+        system::{Commands, Query, Res, ResMut},
     },
 };
 use bevy_replicon::prelude::FromClient;
@@ -52,14 +52,23 @@ use xindeler_protocol::{
     TradeInviteRequest, TradeInviteResponseRequest,
 };
 
-use crate::{SimMirror, SimServer, inventory::item_name, mirror_sim_entities, tick_sim};
+use crate::{
+    PlayerDimensionSession, SimMirror, SimServer,
+    inventory::{item_name, resolve_client_entity},
+    mirror_sim_entities, tick_sim,
+};
 
 /// Last-mirrored [`NetTrade`]/[`NetIncomingTradeInvite`] per sim entity —
-/// same dedup shape as [`crate::inventory::InventoryMirrorCache`].
+/// same dedup shape as [`crate::inventory::InventoryMirrorCache`], INCLUDING
+/// the `owner` dedup guard (bevy-migration-reviewer MAJOR, BL-82 EM-5.6
+/// follow-up — see that cache's own doc comment for why re-inserting an
+/// unchanged `NetOwnerOnly` every tick is a real, avoidable
+/// `VisibilityFilter`-recomputation cost, not a hypothetical one).
 #[derive(Resource, Default, Debug)]
 pub struct TradeMirrorCache {
     trade: HashMap<specs::Entity, NetTrade>,
     invite: HashMap<specs::Entity, NetIncomingTradeInvite>,
+    owner: HashMap<specs::Entity, u64>,
 }
 
 /// Resolves one side of a [`common::trade::PendingTrade`]'s offer
@@ -113,6 +122,9 @@ pub fn mirror_trade_state(
     cache
         .invite
         .retain(|entity, _| mirror.0.contains_key(entity));
+    cache
+        .owner
+        .retain(|entity, _| mirror.0.contains_key(entity));
 
     let ecs = sim.server.state().ecs();
     let uids = ecs.read_storage::<Uid>();
@@ -126,7 +138,11 @@ pub fn mirror_trade_state(
         let Some(&my_uid) = uids.get(sim_entity) else {
             continue;
         };
-        ec.insert(NetOwnerOnly(my_uid.0.get()));
+        let owner = my_uid.0.get();
+        if cache.owner.get(&sim_entity) != Some(&owner) {
+            ec.insert(NetOwnerOnly(owner));
+            cache.owner.insert(sim_entity, owner);
+        }
 
         // Incoming, not-yet-accepted invite (only ever meaningful for Trade
         // — a Group invite is EM-5.8's own concern).
@@ -197,35 +213,30 @@ pub fn mirror_trade_state(
     }
 }
 
-/// The embedded local player's own sim entity, if resolvable — the shared
-/// helper every applicator system in this module (and
-/// [`crate::inventory::apply_inventory_action_requests`]) uses; see that
-/// function's doc comment for the "single controllable entity" v1 scope
-/// note.
-fn local_player_entity(
-    sim: &SimServer,
-    player: Option<&crate::EmbeddedPlayer>,
-) -> Option<specs::Entity> {
-    player
-        .and_then(|p| p.uid())
-        .and_then(|uid| crate::player::player_sim_entity(sim, uid))
-}
-
 /// Drains [`TradeInviteRequest`]s and re-emits each as `common::event::
 /// InitiateInviteEvent` (`InviteKind::Trade`) — the sim resolves
 /// `target_uid` → entity itself (`server::events::invite`), so an invalid/
 /// out-of-range target is rejected sim-side exactly like the legacy client.
+/// Resolves the acting entity PER MESSAGE via
+/// [`crate::inventory::resolve_client_entity`] — see that function's doc
+/// comment for why (BL-82 EM-5.6 follow-up, BLOCKER: a bridge-wide
+/// embedded-player-only fallback silently dropped every real remote
+/// client's trade actions on a dedicated server).
 pub fn apply_trade_invite_requests(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<bevy::ecs::change_detection::NonSend<crate::EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
     mut requests: MessageReader<FromClient<TradeInviteRequest>>,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(entity) = local_player_entity(&sim, player.as_deref()) else {
+    let Some(sim) = sim else {
         requests.clear();
         return;
     };
-    for FromClient { message, .. } in requests.read() {
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            continue;
+        };
         // `Uid` wraps a `NonZeroU64` — a `target_uid` of `0` is never a real
         // sim identity (see `common::uid::Uid`), so it's simply skipped
         // rather than panicking on a malformed/stale request.
@@ -241,18 +252,23 @@ pub fn apply_trade_invite_requests(
 }
 
 /// Drains [`TradeInviteResponseRequest`]s and re-emits each as
-/// `common::event::InviteResponseEvent`.
+/// `common::event::InviteResponseEvent`. Resolves the acting entity PER
+/// MESSAGE — see [`apply_trade_invite_requests`]'s doc comment.
 pub fn apply_trade_invite_response_requests(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<bevy::ecs::change_detection::NonSend<crate::EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
     mut requests: MessageReader<FromClient<TradeInviteResponseRequest>>,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(entity) = local_player_entity(&sim, player.as_deref()) else {
+    let Some(sim) = sim else {
         requests.clear();
         return;
     };
-    for FromClient { message, .. } in requests.read() {
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            continue;
+        };
         let response = if message.accept {
             InviteResponse::Accept
         } else {
@@ -268,17 +284,23 @@ pub fn apply_trade_invite_response_requests(
 /// ProcessTradeActionEvent` — the sim itself validates that `entity` is
 /// actually a party to `trade_id` (`Trades::process_trade_action`'s
 /// `which_party` check), so a stale/forged trade id is rejected sim-side.
+/// Resolves the acting entity PER MESSAGE — see
+/// [`apply_trade_invite_requests`]'s doc comment.
 pub fn apply_trade_action_requests(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<bevy::ecs::change_detection::NonSend<crate::EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
     mut requests: MessageReader<FromClient<TradeActionRequest>>,
 ) {
-    let Some(sim) = sim else { return };
-    let Some(entity) = local_player_entity(&sim, player.as_deref()) else {
+    let Some(sim) = sim else {
         requests.clear();
         return;
     };
-    for FromClient { message, .. } in requests.read() {
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            continue;
+        };
         sim.server.state().emit_event_now(ProcessTradeActionEvent(
             entity,
             message.trade_id,
