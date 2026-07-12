@@ -115,6 +115,19 @@ pub use entity_factory::{
 mod map;
 pub use map::{MapDataState, MapDataStreamPlugin};
 
+// BL-82 EM-5.6: the inventory/bag mirror + inventory-mutation applicator
+// (spec §3.2/§6). `item_name` is `pub(crate)` and reused by `trade.rs` (same-
+// crate sibling module) rather than duplicating the item-display-name
+// resolution.
+pub mod inventory;
+pub use inventory::{
+    InventoryMirrorPlugin, apply_inventory_action_requests, mirror_inventory_state,
+};
+
+// BL-82 EM-5.6: the two-party trade mirror + invite/action applicators.
+pub mod trade;
+pub use trade::{TradeMirrorPlugin, mirror_trade_state};
+
 mod oracle;
 pub use oracle::ServerOraclePlugin;
 

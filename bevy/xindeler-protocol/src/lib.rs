@@ -20,10 +20,13 @@ pub mod chat;
 pub mod dimension_id;
 pub mod hotbar;
 pub mod interest;
+pub mod inventory;
 pub mod login;
 pub mod map;
 pub mod narrative;
+pub mod owner_visibility;
 pub mod social;
+pub mod trade;
 pub mod visibility;
 
 use bevy::{
@@ -47,13 +50,21 @@ pub use crate::{
         NetCooldownEntry, NetCooldowns, NetHotbarSlot,
     },
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
+    inventory::{
+        InventoryActionRequest, NetEquippedSlot, NetInventory, NetInventorySlot, NetItemStack,
+    },
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
     map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
+    owner_visibility::{ClientOwnedUid, NetOwnerOnly},
     social::{
         DialogueResponseRequest, GroupAction, GroupActionRequest, LocalDialogueResponse,
         LocalGroupAction, NetDialogue, NetGroupMember, NetGroupState, NetInviteKind,
         NetPendingInvite, NetPlayerList, NetPlayerListEntry,
+    },
+    trade::{
+        NetIncomingTradeInvite, NetTrade, NetTradeOfferEntry, TradeActionRequest,
+        TradeInviteRequest, TradeInviteResponseRequest,
     },
     visibility::{ClientVisibleRegions, RegionKey, region_key_for_pos},
 };
@@ -707,7 +718,13 @@ impl Plugin for XindelerProtocolPlugin {
             // EM-4.2f: the entity's stable sim identity (player or NPC), so a
             // future AURORA consumer can correlate a rendered figure back to
             // the sim's Uid/NpcId across respawns/reconnects.
-            .replicate::<NetUid>();
+            .replicate::<NetUid>()
+            // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors
+            // (spec §3.2/§6) — self-scoped via `NetOwnerOnly` below, NOT
+            // broadcast like the entity-visible comps above.
+            .replicate::<NetInventory>()
+            .replicate::<NetTrade>()
+            .replicate::<NetIncomingTradeInvite>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
@@ -730,6 +747,14 @@ impl Plugin for XindelerProtocolPlugin {
         // comment) — a plain Bevy message, not a replicon message; it never
         // crosses a socket.
         app.add_message::<hotbar::LocalAssignHotbarSlot>();
+        // BL-82 EM-5.6: discrete, infrequent gameplay-intent requests
+        // (inventory moves, trade invites/actions) — the Events lane
+        // (ordered/reliable), same class as LoginRequest above, not the
+        // high-frequency State lane.
+        app.add_client_message::<InventoryActionRequest>(XindelerChannel::Events.delivery());
+        app.add_client_message::<TradeInviteRequest>(XindelerChannel::Events.delivery());
+        app.add_client_message::<TradeInviteResponseRequest>(XindelerChannel::Events.delivery());
+        app.add_client_message::<TradeActionRequest>(XindelerChannel::Events.delivery());
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients
@@ -801,6 +826,12 @@ impl Plugin for XindelerProtocolPlugin {
         // LocalDialogueResponse in-process handoff) — see `social`'s own
         // module doc comment for the full rationale.
         social::register(app);
+        // BL-82 EM-5.6: per-owner scoping for `NetInventory`/`NetTrade`/
+        // `NetIncomingTradeInvite` — see `owner_visibility`'s module doc
+        // comment. Independent of (and additive alongside) the RegionKey
+        // filter above: this one only hides three specific components, never
+        // the whole entity.
+        app.add_visibility_filter::<owner_visibility::NetOwnerOnly>();
     }
 }
 

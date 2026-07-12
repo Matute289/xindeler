@@ -22,8 +22,9 @@ use xindeler_dimensions::{
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    CombatHudMirrorPlugin, HotbarMirrorPlugin, PlayerTransferPlugin, SIM_TICK_HZ,
-    ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
+    CombatHudMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin, PlayerTransferPlugin,
+    SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, TradeMirrorPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -262,6 +263,10 @@ impl Plugin for SimServerPlugin {
         // trait impls support (same reason `AtmosphereSyncMessagePlugin`
         // above was already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+        // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors + request
+        // applicators — same ordering reasoning as `CombatHudMirrorPlugin`
+        // above (reads `SimMirror`, populated by `SimEntityMirrorPlugin`).
+        app.add_plugins((InventoryMirrorPlugin, TradeMirrorPlugin));
 
         // BL-82 EM-5.3: the skillbar/hotbar mirror (resolved ability-pool/
         // slot bindings + per-ability cooldowns) — same reasoning as

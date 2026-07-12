@@ -225,6 +225,13 @@ impl Plugin for ListenServerPlugin {
         // as `CombatHudMirrorPlugin` above (reads `SimMirror`, split into its
         // own call, the tuple above is already at the 15-plugin ceiling).
         app.add_plugins(HotbarMirrorPlugin);
+        // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors +
+        // request applicators (spec §3.2/§6) — same ordering reasoning as
+        // `CombatHudMirrorPlugin` above (reads `SimMirror`).
+        app.add_plugins((
+            xindeler_sim_bridge::InventoryMirrorPlugin,
+            xindeler_sim_bridge::TradeMirrorPlugin,
+        ));
         // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
         // registration — see `xindeler_oracle_host::atmosphere_sync`'s
         // module doc comment for why this can't live in
@@ -279,6 +286,12 @@ impl Plugin for ListenServerPlugin {
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)
         // — no new UI plugin registration needed.
         app.add_plugins(HotbarViewPlugin);
+        // BL-82 EM-5.6: the inventory/bag + paper-doll screen, loot feed, and
+        // the two-party trade window — pure Bevy, reading the mirrors above.
+        app.add_plugins((
+            crate::inventory_ui::InventoryUiPlugin,
+            crate::trade_ui::TradeUiPlugin,
+        ));
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

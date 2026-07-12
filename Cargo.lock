@@ -12235,6 +12235,7 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "hashbrown 0.17.1",
  "image",
  "rand 0.10.1",
  "rand_chacha 0.10.0",
