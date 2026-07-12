@@ -52,7 +52,7 @@ so an upgrade waits until the dep tree catches up.
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
 | **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10, 3.8d, 3.8e, 3.9b, 3.10b, 3.11-FH (P-A+P-B), 3.12 all done (PRs #7–#20, #26, #28–#30, #57, #60, #64): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling, a real full-horizon far-mesh (real colour + curvature bend + occlusion dissolve) + camera-collision spring-arm**. Open: EM-3.9c (sprite wind-sway v2, unstarted), EM-3.11-FH Phase C (streamed LOD objects, unstarted), EM-3.11 **[M]** (Matías in-game smoke) 🔵 18 rounds in, all merged — round 18 awaiting his live retest; EM-3.11p (diagonal stutter) not formally closed |
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress, essentially content-complete** — EM-4.1→4.12 all done (PRs #27, #33, #45, #46, #49, #52, #58, #59, #61, #65, #66): headless server shell, transport/login/interest-mgmt, dimension lifecycle+teardown+GC, entity factory, narrative hooks, AI-gateway/AURORA readiness seams, full E2E ORACLE event drill (EM-4.9) all real and passing. **Only open item: EM-4.2's full 24h soak run** (10-min soak-readiness sanity done; the multi-hour run itself not yet executed/reported) |
-| **5** | UI (bevy_ui + widget kit), audio & playable parity | ⚪ **design authored** (2026-07-11, Opus — spec/plan/tasks 56); **not blocked**, EM-5.1 + EM-5.2 start-ready; 16 epics (5.2→5.8 unbundled + 3 new); **worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total")** |
+| **5** | UI (bevy_ui + widget kit), audio & playable parity | 🔵 **in progress** — Wave A (EM-5.1 + EM-5.2 proof slice) shipped (this PR); 16 epics (5.2→5.8 unbundled + 3 new); **worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total")** |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.7 + EM-7.9→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86) |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
@@ -162,7 +162,8 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 `specs/2026-07-11-bl82-phase5-ui-audio-parity-design.md` + `plans/…-plan.md` +
 `tasks/56-bl82-phase5-ui-audio-parity-tasks.md`. **Not blocked** — Phase 5 is the immediate next phase
 (Phase 3 gate met; Phase 4 content-complete bar the 24h soak). **EM-5.1 (UI foundation) + EM-5.2 (proof
-slice) are start-ready now**; the 7-fork worksheet is now **locked** (below).
+slice) are SHIPPED** (Wave A, this PR); the 7-fork worksheet is now **locked** (below), gating the
+later-scope epics (Wave B/C).
 
 **Worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total", no lean cutover):** Matías
 returned the §Worksheet choosing the full-fidelity option on every fork (as with Phase 7's "maximalist"
@@ -173,7 +174,7 @@ confirmed (our theme over `bevy_ui`+`bevy_ui_widgets`+`EditableText`, zero new U
 **direct Kira in our own `bevy/*` crate, NOT the `bevy_kira_audio` wrapper** (we own the Bevy glue —
 EM-5.10 is the largest epic, splits 5.10a–e); **Q3** = full server browser; **Q4** = full 4-tab crafting;
 **Q5** = gamepad in v1; **Q6** = full multi-language i18n + hot-swap; **Q7 (META)** = full parity in v1.
-EM-5.1 + EM-5.2 authorized to proceed in parallel.
+EM-5.1 + EM-5.2 authorized to proceed in parallel — both now shipped, see the EM-5.1/EM-5.2 rows below.
 
 **Two facts shape the phase:** (1) **Feathers is editor-tooling-only / experimental** — Bevy's own docs
 say NOT to use it for game UI ("copy the code into your project"). So the locked `[Q4]=B` "bevy_ui +
@@ -190,8 +191,8 @@ accessibility/i18n-depth — cross-cutting). Audio/input/settings/parity keep th
 
 | Task | What | Status |
 |---|---|---|
-| EM-5.1 | **UI foundation** — Xindeler widget kit (`bevy_ui`+`bevy_ui_widgets`+`EditableText`) + theme (Feathers copied-from) + i18n seam (`.ftl`/parley) + HUD state machine (replaces legacy `Show`) + real notification/toast (subsumes EM-4.8) + UI-scale | ⚪ start-ready |
-| EM-5.2 | **Core combat HUD** — HP/energy globes, poise, XP/level, combo, buff/debuff strip, floating combat text, crosshair, death/respawn + damage vignette, in-world overhead nameplates/bars/bubbles. **The proof slice** (proves the mirror pattern). *New mirror:* `NetEnergy`/`NetPoise`/`NetBuffs`/`NetCombo`/`NetXp` | ⚪ start-ready |
+| EM-5.1 | **UI foundation** — Xindeler widget kit (`bevy/xindeler-ui`: Panel/Bar-globe/Button/Tooltip/queued-Notification on `bevy_ui`+`bevy_ui_widgets`, NOT `bevy_feathers`) + `HudTheme`/`HudFonts` token layer + i18n seam (thin `fluent`/`.ftl` loader, degrades to the key on a miss) + `HudState`/`HudAction` state machine (replaces legacy `Show`) + real queued notification (subsumes EM-4.8's throwaway toast) + `UiScale` seam (`XindelerSettings::ui_scale`) | ✅ **shipped** (this PR) — 15 tests; Slider/Checkbox/Radio/TextInput/List/Grid/Modal/TabBar/drag-drop-slot/`.vox`-icon deferred to the first screen that needs them (documented in the crate's own module doc, not silently dropped) |
+| EM-5.2 | **Core combat HUD** — HP/energy/poise globes, XP bar+level, combo counter, buff/debuff strip (themed swatch icons + hover tooltip), crosshair, death/respawn screen + low-health vignette, in-world overhead health bars over other mirrored entities (via `Camera::world_to_viewport`, reusing the already-mirrored `NetHealth`). **The proof slice** (proves the §3.2 mirror pattern end-to-end). *New mirror:* `NetEnergy`/`NetPoise`/`NetCombo`/`NetXp`/`NetBuffs` (`xindeler-sim-bridge::combat_hud::mirror_combat_hud_state`, additive `.after(mirror_sim_entities)`) | ✅ **shipped** (this PR) — 4+2 mirror tests + 4 client widget tests, verified live against a real booted listen-server (`--smoke-screenshot`); floating combat text deferred (needs a `common::Outcome` mirror/message that doesn't exist yet — flagged, not silently skipped) |
 | EM-5.3 | **Skillbar / hotbar + cooldowns** — 10 slots + keybind labels + icons + cooldown sweeps + stance icons; drag-to-bind. *New mirror:* `NetAbilities`/`NetCooldowns` (none of it reaches the client today) | ⚪ |
 | EM-5.4 | **Chat** — log, input, channel tabs, command completion, mentions. *New:* `NetChatMsg` + client→server send | ⚪ |
 | EM-5.5 | **Map** — minimap (POIs/group) + full world map (sites/markers/zoom-pan). *New:* `NetMapData` | ⚪ |

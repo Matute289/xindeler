@@ -9,5 +9,49 @@ workspace = true
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
-# Skeleton uses no default features (no render stack yet); features arrive with each phase.
-bevy = { version = "=0.19.0", default-features = false }
+# BL-82 EM-5.1: the widget kit needs the retained-mode `bevy_ui` render tree,
+# the headless `bevy_ui_widgets` behaviours (button/checkbox/slider — the
+# ONLY sanctioned widget-behaviour dep, per the locked [Q1] decision: NOT
+# `bevy_feathers`, which is copied-from for its theme/token APPROACH, never a
+# runtime dependency — see this crate's doc comment), `bevy_text` (parley
+# text stack) for labels, and `bevy_asset`/`bevy_image` so the theme can load
+# real fonts via `AssetServer`. `std`: this crate targets desktop only (same
+# posture as every other `bevy/*` crate).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_ui",
+    "bevy_ui_widgets",
+    "bevy_ui_render",
+    "bevy_text",
+    "bevy_color",
+    "bevy_asset",
+    "bevy_state",
+    "bevy_render",
+    "bevy_winit",
+    "default_font",
+    "png",
+    # Real pointer-event backend for the button/tooltip hover+click
+    # machinery `bevy_ui_widgets` provides types for but does not itself
+    # enable — without this, buttons/tooltips compile but never receive a
+    # real click/hover at runtime.
+    "bevy_picking",
+    "ui_picking",
+] }
+# BL-82 EM-5.1 T56.3: the i18n seam. `fluent`/`fluent-bundle`/`unic-langid`
+# are the engine-agnostic `.ftl` parsing crates the spec (§4) names as the
+# sanctioned "thin in-house loader" foundation — NOT a Bevy-specific i18n
+# dep (none is maintained enough to depend on), and NOT a new addition to the
+# UI-toolkit dep surface (`bevy_feathers` stays excluded either way). Already
+# resolved in the workspace lock (legacy `voxygen/` used the same crate
+# before BL-82 removed it from the workspace).
+fluent = "0.17"
+unic-langid = { version = "0.9", features = ["macros"] }
+# `bevy_ui_widgets` (the headless button/checkbox/slider behaviour crate) is
+# not re-exported at a `bevy::...` path even with the `bevy_ui_widgets`
+# facade feature enabled (that feature only turns ON the internal plugin —
+# using its TYPES needs the standalone crate directly, the same way every
+# other split-out bevy sub-crate works). Pinned exact, same as `bevy` itself.
+bevy_ui_widgets = "=0.19.0"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -75,6 +75,82 @@ pub struct NetHealth {
     pub max: f32,
 }
 
+/// Replicated energy (mana/stamina-equivalent) snapshot of an entity (BL-82
+/// EM-5.2 — the first Phase-5 HUD mirror slice, spec §3.2/§6).
+///
+/// Flattened from the sim's `comp::Energy` (`current()`/`maximum()`), exactly
+/// like [`NetHealth`] flattens `comp::Health` — the client only needs the
+/// pair for the energy globe, ability-cost gating stays server-side.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct NetEnergy {
+    pub current: f32,
+    pub max: f32,
+}
+
+/// Replicated poise snapshot of an entity (BL-82 EM-5.2).
+///
+/// Flattened from the sim's `comp::Poise` (`current()`/`maximum()`) — the
+/// HUD's poise indicator only needs the pair, poise-break math stays
+/// server-side.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct NetPoise {
+    pub current: f32,
+    pub max: f32,
+}
+
+/// Replicated combo counter (BL-82 EM-5.2), flattened from `comp::Combo`.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub struct NetCombo {
+    pub counter: u32,
+}
+
+/// Replicated character-level/XP-bar snapshot (BL-82 EM-5.2).
+///
+/// This fork derives `character_level` GLOBALLY from lifetime experience
+/// across every `SkillSet` group (`common::comp::skillset`), not per-group —
+/// see that module's doc comment. `xp_into_level`/`xp_for_level` are already
+/// the COMPACT projection the XP bar needs (progress within the current
+/// level + the level's total span), computed from
+/// `SkillSet::total_earned_exp()`/`character_level()` and the free
+/// `skillset::total_exp_for_level` helper — not the raw lifetime total (which
+/// would make the client redo the same subtraction every frame for no
+/// benefit — "project, don't dump").
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub struct NetXp {
+    pub level: u16,
+    pub xp_into_level: u32,
+    pub xp_for_level: u32,
+}
+
+/// One active buff/debuff, projected for the HUD strip (BL-82 EM-5.2).
+///
+/// One entry per DISTINCT active [`common::comp::BuffKind`] on the entity
+/// (not one per stack instance) — `strength`/`remaining_secs` describe the
+/// kind's current CONTROLLING instance (the strongest, which
+/// `comp::Buffs::iter_kind` already sorts first) and `stacks` counts how many
+/// instances of that kind are active. This is the compact shape a buff icon
+/// (icon + stack badge + duration ring) needs, not the sim's full `Buff`
+/// (effects/source/category bookkeeping stays server-side).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct NetBuffEntry {
+    pub kind: common::comp::buff::BuffKind,
+    pub strength: f32,
+    /// Seconds remaining, if the buff has a finite duration (`None` = a
+    /// constant/permanent buff, matching `Buff::end_time: Option<Time>`).
+    pub remaining_secs: Option<f32>,
+    pub stacks: u32,
+}
+
+/// Replicated buff/debuff strip (BL-82 EM-5.2): every distinct active
+/// [`common::comp::buff::BuffKind`] on the entity, flattened from
+/// `comp::Buffs`. A `Vec` component (like [`NetLoadout`]'s strings) rather
+/// than per-buff entities — bounded by the (small, fixed) `BuffKind` enum, so
+/// this stays a "small `Net*` component", not a bulk-data message (spec
+/// §3.2's "bulk data = messages" rule targets unbounded collections like
+/// inventory, not this).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct NetBuffs(pub Vec<NetBuffEntry>);
+
 /// Replicated body identifier (which model/species an entity displays as).
 ///
 /// EM-3.8: carries the FULL sim `comp::Body` — not just a class id. Real
@@ -598,6 +674,14 @@ impl Plugin for XindelerProtocolPlugin {
             // armour) so the client assembles the real character, not a fixed
             // test loadout. Only humanoids carry it; a plain-data component.
             .replicate::<NetLoadout>()
+            // BL-82 EM-5.2: the first Phase-5 HUD state-mirror slice (spec
+            // §3.2/§6) — energy/poise/combo/XP/buffs, following the
+            // NetHealth/NetLoadout pattern exactly.
+            .replicate::<NetEnergy>()
+            .replicate::<NetPoise>()
+            .replicate::<NetCombo>()
+            .replicate::<NetXp>()
+            .replicate::<NetBuffs>()
             // EM-3.7b: the local-player marker on the mirror entity so the
             // client's third-person camera knows which capsule to follow.
             .replicate::<NetLocalPlayer>()
@@ -789,6 +873,61 @@ mod tests {
             .single(client_app.world())
             .expect("the humanoid loadout reaches the client");
         assert_eq!(*got, loadout, "the loadout round-trips byte-for-byte");
+    }
+
+    /// BL-82 EM-5.2: the first Phase-5 HUD mirror slice (`NetEnergy`/
+    /// `NetPoise`/`NetCombo`/`NetXp`/`NetBuffs`) round-trips server → client
+    /// exactly like `NetHealth`/`NetLoadout` above — this is the acceptance
+    /// bar `ecs-design-reviewer` checks for "every new `Net*` mirror gets a
+    /// round-trip test" (spec §3.2/plan "Every mirror PR").
+    #[test]
+    fn combat_hud_mirror_replicates() {
+        use common::comp::buff::BuffKind;
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let energy = NetEnergy {
+            current: 42.0,
+            max: 100.0,
+        };
+        let poise = NetPoise {
+            current: 10.0,
+            max: 30.0,
+        };
+        let combo = NetCombo { counter: 7 };
+        let xp = NetXp {
+            level: 5,
+            xp_into_level: 120,
+            xp_for_level: 500,
+        };
+        let buffs = NetBuffs(vec![NetBuffEntry {
+            kind: BuffKind::Regeneration,
+            strength: 2.5,
+            remaining_secs: Some(9.5),
+            stacks: 2,
+        }]);
+
+        server_app
+            .world_mut()
+            .spawn((Replicated, energy, poise, combo, xp, buffs.clone()));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let mut q = client_app
+            .world_mut()
+            .query::<(&NetEnergy, &NetPoise, &NetCombo, &NetXp, &NetBuffs)>();
+        let (got_energy, got_poise, got_combo, got_xp, got_buffs) = q
+            .single(client_app.world())
+            .expect("the combat-HUD mirror reaches the client");
+        assert_eq!(*got_energy, energy);
+        assert_eq!(*got_poise, poise);
+        assert_eq!(*got_combo, combo);
+        assert_eq!(*got_xp, xp);
+        assert_eq!(*got_buffs, buffs, "buff strip round-trips byte-for-byte");
     }
 
     /// BL-82 EM-4.2f acceptance: `NetUid` (the mirrored entity's stable sim

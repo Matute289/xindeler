@@ -45,10 +45,10 @@ use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, entity_view::EntityViewPlugin,
-    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
-    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
+    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -106,6 +106,11 @@ impl Plugin for NetClientPlugin {
             // BL-82 EM-4.9 (Phase D): retargets `AtmosphereController` on
             // `SetClientAtmosphere` arrival.
             AtmosphereSyncViewPlugin,
+            // BL-82 EM-5.2: the core combat HUD (health/energy/poise/XP/
+            // combo globes, buff strip, crosshair, death/respawn) reading
+            // the EM-5.2 mirror off `NetLocalPlayer` — verbatim reuse, same
+            // as every other consumer plugin in this list.
+            CombatHudViewPlugin,
         ));
     }
 }
