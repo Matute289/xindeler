@@ -39,14 +39,15 @@ use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
     CombatHudMirrorPlugin, LodAltStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
     SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    boot_embedded_player, boot_test_server,
+    SocialMirrorPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
     entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
     hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -196,6 +197,14 @@ impl Plugin for ListenServerPlugin {
         // support (same reason `AtmosphereSyncMessagePlugin` below is
         // already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+        // BL-82 EM-5.8: the social/group/dialogue server-side mirror
+        // (NetPlayerList/NetGroupState/NetDialogue projection + LocalGroupAction/
+        // LocalDialogueResponse action application) — reads/writes
+        // `EmbeddedPlayer`, so it must be added after `PlayerBridgePlugin`
+        // above (registration order doesn't matter for the `.after(tick_sim)`
+        // ordering itself, just for this doc convention). Split into its own
+        // call — the tuple above is already at the 15-plugin ceiling.
+        app.add_plugins(SocialMirrorPlugin);
         // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
         // registration — see `xindeler_oracle_host::atmosphere_sync`'s
         // module doc comment for why this can't live in
@@ -230,6 +239,10 @@ impl Plugin for ListenServerPlugin {
         // globes, buff strip, crosshair, death/respawn, overhead health
         // bars) reading the mirror above. Pure Bevy.
         app.add_plugins(CombatHudViewPlugin);
+        // BL-82 EM-5.8: the social/group/dialogue HUD (player list, group/
+        // party frames, invite banner, v1-minimal NPC dialogue) reading the
+        // `SocialMirrorPlugin` mirror above. Pure Bevy.
+        app.add_plugins(SocialHudViewPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

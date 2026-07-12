@@ -97,3 +97,11 @@ xindeler-transport = { path = "../xindeler-transport", optional = true }
 # world into a scratch dir, same as that crate's own `#[ignore]`d
 # `streams_real_chunks_to_local_client` test.
 tempfile = { workspace = true }
+# BL-82 EM-5.8's `social_hud` tests build a real `common::rtsim::Dialogue`
+# fixture, whose `Response.msg`/`DialogueKind::{Statement,Question}.msg` are
+# `common_i18n::Content` — not re-exported through `common`'s own public API,
+# so this crate (already a `common` dependent) takes it directly, same
+# "type library" pattern `common` itself already establishes for it (mirrors
+# `xindeler-sim-bridge`'s own dev-dependency for the identical reason).
+# Test-only.
+common-i18n = { package = "xindeler-common-i18n", path = "../../common/i18n" }

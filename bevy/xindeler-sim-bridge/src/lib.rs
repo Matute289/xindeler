@@ -123,6 +123,12 @@ pub use player::{
     EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
 };
 
+mod social;
+pub use social::{
+    GroupStateCache, PlayerListCache, SocialMirrorPlugin, apply_local_dialogue_response,
+    apply_local_group_actions, mirror_dialogue, mirror_group_state, mirror_player_list,
+};
+
 use std::{
     collections::HashMap,
     path::Path,
