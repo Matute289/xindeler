@@ -60,7 +60,7 @@ const MINIMAP_PANEL_PX: f32 = 160.0;
 /// control on the minimap — a follow-up, matching EM-5.1's own precedent of
 /// deferring some interactive knobs).
 ///
-/// This crops a `2 * MINIMAP_HALF_EXTENT` (~12%) slice of
+/// This crops a `2 * MINIMAP_HALF_EXTENT` (~9%) slice of
 /// [`xindeler_protocol::map::NetMapData`]'s background image into
 /// [`MINIMAP_PANEL_PX`] on-screen pixels — see
 /// [`xindeler_protocol::map::MAP_IMAGE_MAX_DIM`]'s own doc comment for the
@@ -69,7 +69,36 @@ const MINIMAP_PANEL_PX: f32 = 160.0;
 /// "pixelated/blurry minimap" bug: real under-resolution, not a sampler
 /// filtering bug). Changing either this extent or the panel size without
 /// re-checking that math risks reintroducing the same blockiness.
-const MINIMAP_HALF_EXTENT: f32 = 0.06;
+///
+/// ## BL-82 EM-5.5 follow-up (2026-07-12): "too far away" / not enough zoom
+/// A live play session (`record17.mov`) reported the always-on minimap
+/// looking like it was viewed from too far away, wanting the "height"
+/// lowered and more detail. The prior `0.06` (~12% of world width, a
+/// ~1966-block radius for the shipped default 1024-chunk world) was
+/// sanity-checked against the legacy `voxygen` minimap
+/// (`voxygen/src/hud/minimap.rs`'s `minimap_zoom: 160.0` default —
+/// `xindeler-old` ships the exact same untouched value): legacy's initial
+/// zoom shows roughly 0.6% of world width, ~20x tighter than `0.06` was
+/// here, confirming this minimap really was unusually zoomed out by
+/// Veloren-family standards. Lowered to `0.045` (~9% of world width, a
+/// ~1475-block radius): a meaningful but deliberately NOT extreme
+/// "lower the height" (legacy's own minimap is further user-zoomable via
+/// `+`/`-`, a real interactive knob this minimap still doesn't have —
+/// stays deferred per this const's own first paragraph, not reintroduced
+/// here). Chosen to respect the resolution ceiling this data source
+/// actually has: `client::WorldData::map_image()` is inherently 1 pixel
+/// per chunk (32 blocks) with no sub-chunk detail to extract, so
+/// tightening the crop trades screen-pixel magnification for zoom —
+/// `0.045` keeps the resulting magnification at ~1.74x, comfortably under
+/// the `< 2.0` "acceptable" bound the Phase 5 pixelation fix established
+/// (see the `minimap_crop_stays_close_to_native_resolution_for_the_default_world`
+/// test below), rather than gambling right at that edge (`0.04` would
+/// have landed at ~1.95x, too close for comfort). A genuinely
+/// higher-resolution "local terrain" minimap — legacy's separate
+/// real-time `show_voxel_map` sampling actual nearby block colours, not
+/// this low-res world-map image — is a real, larger follow-up: flagged
+/// here, not silently promised by this constant tweak.
+const MINIMAP_HALF_EXTENT: f32 = 0.045;
 const ARROW_SIZE_PX: f32 = 18.0;
 const MARKER_DOT_PX: f32 = 8.0;
 /// Side length of the SQUARE map viewport (where the map image/markers
@@ -991,6 +1020,55 @@ mod tests {
              source pixels for the viewport size, which will look pixelated regardless of sampler \
              filtering"
         );
+    }
+
+    /// Regression test for the "minimap looks viewed from too far away" bug
+    /// report (BL-82 EM-5.5 follow-up, `record17.mov`): pins the minimap to
+    /// showing a meaningfully SMALLER slice of the world than the pre-fix
+    /// `0.06` default (~12% of world width) — a future accidental revert of
+    /// [`MINIMAP_HALF_EXTENT`] back toward that value regresses the exact
+    /// zoomed-out-ness Matías reported, even though
+    /// [`minimap_crop_stays_close_to_native_resolution_for_the_default_world`]
+    /// alone wouldn't catch it (that test only guards the OTHER direction —
+    /// zooming in too far and pixelating). Also asserts the real-world
+    /// radius (in blocks) shown for the shipped default 1024-chunk world
+    /// stays under the pre-fix radius, using the same
+    /// `chunk-size (32 blocks) * world_size_chunks` math
+    /// `xindeler_protocol::wpos_to_screen_uv` and the sim-bridge downsample
+    /// use.
+    ///
+    /// `MINIMAP_HALF_EXTENT` and the numbers below are all `const`, so the
+    /// comparisons are compile-time-foldable — clippy's
+    /// `assertions_on_constants` rightly wants that expressed as a `const`
+    /// assertion rather than a runtime one (a `let` binding wouldn't change
+    /// that: the values are still const-derived). Kept as a `#[test]` (not a
+    /// bare top-level `const _: () = assert!(...)`) so it shows up in normal
+    /// test output alongside its sibling regression test above, but the
+    /// `const { ... }` blocks mean a violation actually fails at COMPILE
+    /// time, not just at test-run time — a stronger guard, not a weaker one.
+    #[test]
+    fn minimap_default_zoom_is_tighter_than_the_pre_fix_zoomed_out_value() {
+        const PRE_FIX_HALF_EXTENT: f32 = 0.06;
+        const DEFAULT_WORLD_CHUNKS: f32 = 1024.0;
+        const CHUNK_SIZE_BLOCKS: f32 = 32.0;
+        const RADIUS_BLOCKS: f32 = MINIMAP_HALF_EXTENT * DEFAULT_WORLD_CHUNKS * CHUNK_SIZE_BLOCKS;
+        const PRE_FIX_RADIUS_BLOCKS: f32 =
+            PRE_FIX_HALF_EXTENT * DEFAULT_WORLD_CHUNKS * CHUNK_SIZE_BLOCKS;
+
+        const {
+            assert!(
+                MINIMAP_HALF_EXTENT < PRE_FIX_HALF_EXTENT,
+                "MINIMAP_HALF_EXTENT regressed back toward (or past) the pre-fix zoomed-out \
+                 default"
+            );
+        }
+        const {
+            assert!(
+                RADIUS_BLOCKS < PRE_FIX_RADIUS_BLOCKS,
+                "minimap world-radius (blocks) is not tighter than the pre-fix radius for the \
+                 shipped default world"
+            );
+        }
     }
 
     /// The heading contract [`heading_from_forward`]'s doc comment promises:
