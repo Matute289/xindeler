@@ -22,7 +22,7 @@ use xindeler_dimensions::{
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
     SimTerrainStreamPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
@@ -208,6 +208,14 @@ impl Plugin for SimServerPlugin {
             SimBridgePlugin,
             SimTerrainStreamPlugin,
             SimEntityMirrorPlugin,
+            // BL-82 EM-4.9 follow-up: the generic (ORACLE-agnostic)
+            // dimension-transfer mechanism — `ServerOraclePlugin` below also
+            // guard-adds this itself (see its own doc comment), but adding it
+            // explicitly here too keeps a debug-spun dimension's
+            // player-eject-on-teardown behavior correct even if
+            // `ServerOraclePlugin`'s DmEvent machinery is ever disabled on a
+            // given deployment.
+            PlayerTransferPlugin,
             // BL-82 EM-4.2d: per-client interest management, scoping each
             // connected client's replicated-entity visibility to the regions
             // its own `ClientViewpoint` covers (see

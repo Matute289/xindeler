@@ -208,6 +208,7 @@ pub fn handle_replicon_logins(
     mut requests: MessageReader<FromClient<LoginRequest>>,
     mut results: MessageWriter<ToClients<LoginResult>>,
     mut disconnects: MessageWriter<DisconnectRequest>,
+    mut commands: bevy::ecs::system::Commands,
 ) {
     let Some(mut sim) = sim else { return };
 
@@ -220,7 +221,14 @@ pub fn handle_replicon_logins(
         &mut results,
         &mut disconnects,
     );
-    advance_character_loads(&mut sim, &mut logins, &mut active, &loader.0, &mut results);
+    advance_character_loads(
+        &mut sim,
+        &mut logins,
+        &mut active,
+        &loader.0,
+        &mut results,
+        &mut commands,
+    );
 }
 
 /// Phase 1: for each new [`LoginRequest`], allocate a sim entity (`Uid` only
@@ -390,6 +398,7 @@ fn advance_character_loads(
     active: &mut ActiveReplicaSessions,
     loader: &CharacterLoader,
     results: &mut MessageWriter<ToClients<LoginResult>>,
+    commands: &mut bevy::ecs::system::Commands,
 ) {
     for message in loader.messages() {
         // `DatabaseBatchCompletion` is only ever produced by `CharacterUpdater`
@@ -450,6 +459,7 @@ fn advance_character_loads(
                     character_id,
                     characters,
                     *data_result,
+                    commands,
                 );
                 logins.0.remove(&client_id);
             },
@@ -607,6 +617,7 @@ fn handle_character_data(
         ),
         server::persistence::error::PersistenceError,
     >,
+    commands: &mut bevy::ecs::system::Commands,
 ) {
     match data_result {
         Ok((components, _metadata)) => {
@@ -640,6 +651,20 @@ fn handle_character_data(
                     // kick) this client — see `ActiveReplicaSessions`'s doc
                     // comment.
                     active.0.insert(target_entity, client_id);
+                    // BL-82 EM-4.9 follow-up: link this session's own
+                    // connection entity to the sim entity it controls, so
+                    // `xindeler-sim-bridge::player_transfer` can keep this
+                    // client's `ClientViewpoint.dimension` in sync the moment
+                    // this player is transferred between dimensions — see
+                    // `PlayerDimensionSession`'s own doc comment for the full
+                    // reasoning (and why this is a no-op, not an error, for
+                    // the listen-server's embedded local player, which never
+                    // has a `ClientId`/connection entity at all).
+                    if let Some(client_entity) = client_id.entity() {
+                        commands
+                            .entity(client_entity)
+                            .insert(xindeler_sim_bridge::PlayerDimensionSession(target_entity));
+                    }
                     reply(
                         results,
                         client_id,

@@ -152,15 +152,31 @@ impl ClientViewpoint {
 
 /// Cached recompute-trigger state, mirroring
 /// `server::presence::RegionSubscription`'s own `fuzzy_chunk`/
-/// `last_entity_view_distance` fields exactly, so
+/// `last_entity_view_distance` fields, so
 /// [`recompute_client_visible_regions`] fires on the identical condition the
-/// legacy system's own `Sys::run` does. Not `pub`: purely this module's
+/// legacy system's own `Sys::run` does — PLUS one field the legacy stack has
+/// no equivalent of: [`Self::dimension`] (BL-82 EM-4.9 follow-up,
+/// bevy-migration-reviewer BLOCKER finding). Not `pub`: purely this module's
 /// internal bookkeeping, never read outside
 /// [`recompute_client_visible_regions`].
+///
+/// ## Why `dimension` is required, not optional
+/// A player-dimension-transfer (`xindeler_sim_bridge::player_transfer::
+/// apply_player_dimension_transfers`) flips a `ClientViewpoint.dimension` in
+/// place WITHOUT moving `pos`/`view_distance` (the event dimension shares the
+/// same physical coordinates as `DimensionId::DEFAULT` — see that function's
+/// own doc comment). Before this field existed, `needs_recompute` below only
+/// ever looked at chunk-crossing/view-distance, so a pure dimension flip
+/// never re-triggered a recompute at all: the client's
+/// `ClientVisibleRegions` stayed keyed to the OLD dimension's `RegionKey`s
+/// forever, meaning a transferred player's client would see NOTHING in the
+/// new dimension (their own re-tagged mirror entity included) — the
+/// deliverable this whole mechanism exists for, silently unmet end-to-end.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct RegionRecomputeState {
     fuzzy_chunk: Vec2<i32>,
     last_view_distance: u32,
+    dimension: DimensionId,
 }
 
 /// The BL-82 EM-4.2d visibility system. For every connected client entity
@@ -196,9 +212,13 @@ pub(crate) fn recompute_client_visible_regions(
         // Same trigger `server/src/sys/subscription.rs::Sys::run` uses: only
         // recompute when moving to a new chunk (fuzzy-bordered, to avoid
         // rapid triggering along chunk boundaries) or when the view distance
-        // itself changed. A brand-new `ClientViewpoint` (no cached state yet)
-        // always recomputes — mirrors
-        // `initialize_region_subscription`'s unconditional first computation.
+        // itself changed — PLUS (BL-82 EM-4.9 follow-up) when the viewpoint's
+        // OWN dimension changed, which the legacy stack has no equivalent
+        // trigger for (see `RegionRecomputeState::dimension`'s own doc
+        // comment for why this is required, not an extra safety net). A
+        // brand-new `ClientViewpoint` (no cached state yet) always
+        // recomputes — mirrors `initialize_region_subscription`'s
+        // unconditional first computation.
         let needs_recompute = match state {
             None => true,
             Some(state) => {
@@ -214,6 +234,7 @@ pub(crate) fn recompute_client_visible_regions(
                         })
                         .reduce_or())
                     || state.last_view_distance != vd
+                    || state.dimension != viewpoint.dimension
             },
         };
         if !needs_recompute {
@@ -229,6 +250,7 @@ pub(crate) fn recompute_client_visible_regions(
             RegionRecomputeState {
                 fuzzy_chunk: chunk,
                 last_view_distance: vd,
+                dimension: viewpoint.dimension,
             },
         ));
     }
@@ -381,6 +403,61 @@ mod tests {
         assert_ne!(
             &unchanged, moved,
             "crossing many chunks/regions must produce a different visible-region set"
+        );
+    }
+
+    /// BL-82 EM-4.9 follow-up regression (bevy-migration-reviewer BLOCKER
+    /// finding): a viewpoint whose DIMENSION changes but whose `pos`/
+    /// `view_distance` stay IDENTICAL (the exact shape of a
+    /// `player_transfer::apply_player_dimension_transfers` call — the event
+    /// dimension shares the same physical coordinates as `DimensionId::
+    /// DEFAULT`) must still force a recompute. Before `RegionRecomputeState`
+    /// carried `dimension`, this case fell through `needs_recompute` as
+    /// unchanged (no chunk crossing, no view-distance change), so a
+    /// transferred player's client kept the OLD dimension's
+    /// `ClientVisibleRegions` forever — seeing nothing in the new dimension,
+    /// including their own re-tagged mirror entity.
+    #[test]
+    fn recompute_fires_on_a_pure_dimension_change_with_identical_pos_and_view_distance() {
+        let mut app = new_app();
+        let client = app
+            .world_mut()
+            .spawn(ClientViewpoint::new(
+                DimensionId::default(),
+                Vec2::new(0.0, 0.0),
+                1,
+            ))
+            .id();
+        app.world_mut()
+            .run_system_once(recompute_client_visible_regions)
+            .expect("system runs");
+        let default_dimension_regions = app
+            .world()
+            .get::<ClientVisibleRegions>(client)
+            .unwrap()
+            .clone();
+
+        // Same exact pos/view_distance, ONLY the dimension changes.
+        app.world_mut()
+            .entity_mut(client)
+            .insert(ClientViewpoint::new(DimensionId(1), Vec2::new(0.0, 0.0), 1));
+        app.world_mut()
+            .run_system_once(recompute_client_visible_regions)
+            .expect("system runs");
+        let event_dimension_regions = app.world().get::<ClientVisibleRegions>(client).unwrap();
+
+        assert_ne!(
+            &default_dimension_regions, event_dimension_regions,
+            "a pure dimension change (identical pos/view_distance) must still force a recompute — \
+             otherwise a transferred player's client keeps seeing the OLD dimension's regions \
+             forever"
+        );
+        assert!(
+            event_dimension_regions
+                .0
+                .iter()
+                .all(|k| k.dimension == DimensionId(1)),
+            "the recomputed set must be keyed entirely by the NEW dimension"
         );
     }
 }

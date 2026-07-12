@@ -24,6 +24,7 @@ use xindeler_dimensions::{
     DimensionId, DimensionLifecycle, DimensionRegistry, DimensionSpinupConfig, DimensionTornDown,
     DrainDimension, SpinupDimension, WorldGenThreadPool,
 };
+use xindeler_sim_bridge::{PlayerDimensionSession, TransferPlayerDimension};
 
 use crate::sim::SimServer;
 
@@ -42,6 +43,18 @@ pub struct DebugDimensionCommands {
     /// immediate here since this shell never registers a Bevy-side occupant
     /// for its own dimensions) in one boot, observable via `/metrics`.
     pub drain: Option<u64>,
+    /// BL-82 EM-4.9 follow-up: if set, once this dimension id reaches
+    /// `Active`, transfers the first currently-tracked real replicon session
+    /// ([`PlayerDimensionSession`]) into it. A deterministic manual lever for
+    /// the player-transfer mechanism (`xindeler_sim_bridge::player_transfer`)
+    /// — mirrors [`Self::spinup`]/[`Self::drain`]'s own "no chat/console
+    /// admin-command bridge exists yet" convention, and doubles as this
+    /// codebase's fast, non-flaky way to drive a REAL logged-in player
+    /// through the transfer end to end in an integration test (proximity
+    /// requires the player to physically be standing inside an event's
+    /// trigger zone, which a black-box subprocess test cannot arrange
+    /// deterministically without this).
+    pub transfer_player: Option<u64>,
 }
 
 impl DebugDimensionCommands {
@@ -52,7 +65,14 @@ impl DebugDimensionCommands {
         let drain = std::env::var("XINDELER_DEBUG_DRAIN_DIMENSION")
             .ok()
             .and_then(|v| v.parse().ok());
-        Self { spinup, drain }
+        let transfer_player = std::env::var("XINDELER_DEBUG_TRANSFER_PLAYER_DIMENSION")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        Self {
+            spinup,
+            drain,
+            transfer_player,
+        }
     }
 }
 
@@ -62,6 +82,7 @@ impl DebugDimensionCommands {
 pub(crate) struct DebugDimensionState {
     spinup_sent: bool,
     drain_sent: bool,
+    transfer_sent: bool,
 }
 
 /// Wraps `DimensionId::DEFAULT` around the sim's ALREADY-generated
@@ -101,6 +122,8 @@ pub fn apply_debug_dimension_commands(
     registry: Res<DimensionRegistry>,
     mut spinup_writer: bevy::ecs::message::MessageWriter<SpinupDimension>,
     mut drain_writer: bevy::ecs::message::MessageWriter<DrainDimension>,
+    mut transfer_writer: bevy::ecs::message::MessageWriter<TransferPlayerDimension>,
+    sessions: bevy::ecs::system::Query<&PlayerDimensionSession>,
 ) {
     if !state.spinup_sent
         && let Some(id) = commands.spinup
@@ -131,6 +154,28 @@ pub fn apply_debug_dimension_commands(
             "debug command: draining dimension (XINDELER_DEBUG_DRAIN_DIMENSION)"
         );
         state.drain_sent = true;
+    }
+
+    // BL-82 EM-4.9 follow-up: transfers the FIRST currently-tracked real
+    // replicon session into `id` once it's `Active`. "First" is an
+    // intentional v1 simplification (this debug lever is for a
+    // single-session manual/test drive, not a multi-player admin tool) —
+    // see `DebugDimensionCommands::transfer_player`'s own doc comment.
+    if !state.transfer_sent
+        && let Some(id) = commands.transfer_player
+        && registry.lifecycle(DimensionId(id)) == Some(DimensionLifecycle::Active)
+        && let Some(session) = sessions.iter().next()
+    {
+        transfer_writer.write(TransferPlayerDimension {
+            sim_entity: session.0,
+            target: DimensionId(id),
+        });
+        tracing::info!(
+            dimension = id,
+            "debug command: transferring the first tracked player session into dimension \
+             (XINDELER_DEBUG_TRANSFER_PLAYER_DIMENSION)"
+        );
+        state.transfer_sent = true;
     }
 }
 

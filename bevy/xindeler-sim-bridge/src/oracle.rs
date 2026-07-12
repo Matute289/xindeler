@@ -62,16 +62,18 @@ use bevy::{
     app::{App, FixedUpdate, Plugin},
     asset::{AssetEvent, AssetId, AssetServer, Assets, Handle},
     ecs::{
-        change_detection::NonSendMut,
+        change_detection::{NonSend, NonSendMut},
         message::{MessageReader, MessageWriter},
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res, ResMut},
+        system::{Commands, Query, Res, ResMut},
     },
     log::{info, warn},
 };
+use common::comp;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use specs::WorldExt;
 use xindeler_dimensions::{
     DimensionActivated, DimensionId, DimensionLifecycle, DimensionRegistry, DimensionSpinupConfig,
     DimensionTornDown, DrainDimension, SpinupDimension,
@@ -82,7 +84,10 @@ use xindeler_oracle_host::{
 };
 use xindeler_protocol::NarrativeHooks;
 
-use crate::SimServer;
+use crate::{
+    SimEntityDimension, SimServer,
+    player_transfer::{PlayerDimensionSession, TransferPlayerDimension},
+};
 
 /// Arbitrary — real per-event seed derivation beyond `DmEvent.dimension_config
 /// .seed_modifier` (which already XORs onto whatever base seed is handed to
@@ -185,6 +190,40 @@ struct OracleEventRegistry(HashMap<AssetId<DmEvent>, ActiveEvent>);
 #[derive(Resource, Debug, Default)]
 struct EntityTemplateHandles(HashMap<String, Handle<EntityTemplate>>);
 
+/// One event's player-transfer trigger zone (BL-82 EM-4.9 follow-up, closing
+/// the "no live player-transfer trigger" gap): a circle in world-space XY,
+/// sim axes, matching the SAME `origin`/`spawn_radius` [`spawn_event_minions`]
+/// already scatters its minions around/within — see [`EventTransferZones`]'s
+/// doc comment for why reusing that exact geometry (rather than inventing a
+/// new `DmEvent` schema field) is the deliberate v1 choice.
+#[derive(Debug, Clone, Copy)]
+struct TransferZone {
+    origin: vek::Vec2<f32>,
+    radius: f32,
+}
+
+/// Every currently-`Active` event's [`TransferZone`], keyed by its
+/// [`DimensionId`] (BL-82 EM-4.9 follow-up). Populated by
+/// [`spawn_event_minions`] the moment it resolves a REAL origin (i.e. only once
+/// a live [`SimServer`] and generated terrain make that origin meaningful — a
+/// sim-less test producer run never registers a zone, so
+/// [`detect_player_dimension_entry`] has nothing to act on there), and cleared
+/// by [`cleanup_dimension_side_tables_on_teardown`] alongside the other
+/// per-dimension side tables this module already prunes on teardown.
+///
+/// ## Why reuse `spawn_radius`, not a new schema field
+/// `DmEvent.spawning_rules.spawn_radius` already IS "how far from this
+/// event's origin its content extends" — the exact zone a player should
+/// consider themselves to have "entered the event". Adding a SEPARATE
+/// trigger-radius field would let an event author's minion-scatter radius and
+/// player-entry radius drift apart for no expressive benefit v1 needs; the
+/// shipped `mist_bound.dmevent.ron` fixture needs zero changes as a result.
+/// A future event that genuinely wants a different entry radius than its
+/// scatter radius can widen this to a dedicated field then — not a breaking
+/// change, since this table's shape is internal to this module.
+#[derive(Resource, Debug, Default)]
+struct EventTransferZones(HashMap<DimensionId, TransferZone>);
+
 /// `AssetEvent::Added`/`Modified` → allocate a dimension, spin it up, record
 /// its atmosphere + narrative hook (BL-82 EM-4.9, T51.2/T51.3). Never
 /// re-ingests the SAME asset id twice (a `Modified` re-fire after the initial
@@ -255,6 +294,7 @@ fn spawn_event_minions(
     asset_server: Res<AssetServer>,
     mut handles: ResMut<EntityTemplateHandles>,
     mut activated: MessageReader<DimensionActivated>,
+    mut zones: ResMut<EventTransferZones>,
 ) {
     for DimensionActivated(dimension) in activated.read() {
         for active_event in registry_state.0.values_mut() {
@@ -345,6 +385,15 @@ fn spawn_event_minions(
                     .sim()
                     .get_alt_approx(centre.map(|e| e as i32))
                     .unwrap_or(0.0);
+                // BL-82 EM-4.9 follow-up: register this event's player-transfer
+                // trigger zone the SAME instant its origin becomes real (a
+                // live sim + generated terrain) — see `EventTransferZones`'s
+                // own doc comment for why this reuses `spawn_radius` verbatim
+                // rather than a new schema field.
+                zones.0.insert(dimension, TransferZone {
+                    origin: centre,
+                    radius: dm_event.spawning_rules.spawn_radius.max(0.0),
+                });
                 [centre.x, centre.y, alt + 3.0]
             },
             // No live sim (e.g. a fast, sim-less headless test exercising
@@ -374,6 +423,104 @@ fn spawn_event_minions(
             spawned.len(),
             dimension.0
         );
+    }
+}
+
+/// The v1 player-transfer TRIGGER (BL-82 EM-4.9 follow-up — see this crate's
+/// `player_transfer` module doc comment for why proximity was chosen over an
+/// explicit narrative-hook command). Every tick, checks every tracked REAL
+/// player's own sim position against every currently-`Active` event's
+/// [`TransferZone`] and emits [`TransferPlayerDimension`] the instant a
+/// `DimensionId::DEFAULT`-resident player enters one.
+///
+/// "Tracked player" here means a sim entity linked by a
+/// [`PlayerDimensionSession`] — a real, logged-in replicon session
+/// (`xindeler-server-app::login`'s own doc comment describes how that link is
+/// populated). The listen-server's embedded local player is deliberately NOT
+/// a candidate here: `ServerOraclePlugin` is never added to the listen-server
+/// client (`DmEventPlugin`'s own doc comment: "only a server-side host is
+/// meant to ever register [it]"), so this system never even runs there in
+/// practice — but it is written to iterate ANY linked session generically
+/// rather than hardcode a single-player assumption, in case a future
+/// (dedicated-server, multi-session) run of `xindeler-client`'s embedded path
+/// ever changes that.
+///
+/// ## One-way crossing (v1, deliberate)
+/// Only players currently resident in `DimensionId::DEFAULT` are considered
+/// for entry — a player already inside a (different) dimension is never
+/// re-evaluated for ANOTHER proximity transfer by this system. Combined with
+/// the `DimensionLifecycle::Active` check below, this also closes a subtler
+/// race: without it, a player ejected by [`eject_players_before_dimension_
+/// teardown`] back to `DEFAULT` while still standing inside a just-retired
+/// event's (not yet fully torn down) zone would otherwise be pulled straight
+/// back in on the very next tick.
+/// The PURE decision core of [`detect_player_dimension_entry`], factored out
+/// so the geometry/one-way-crossing/active-lifecycle logic is unit-testable
+/// without booting a real `SimServer` (BL-82 EM-4.9 follow-up,
+/// bevy-migration-reviewer MAJOR finding — mirrors `crate::
+/// recompute_aurora_overlay`'s own "pure function, thinly wrapped by a
+/// system" precedent). Returns the FIRST zone (in `zones`' iteration order)
+/// whose circle contains `pos`, provided:
+/// - `current` is `DimensionId::DEFAULT` (the one-way-crossing gate — see
+///   [`detect_player_dimension_entry`]'s own doc comment for why a player
+///   already inside a dimension is never re-evaluated here), and
+/// - `is_active(dimension)` holds (the zone's dimension must currently be
+///   `DimensionLifecycle::Active` — closes the "ejected back to DEFAULT,
+///   immediately re-pulled into a still-draining dimension" race that same doc
+///   comment describes).
+///
+/// `None` if no zone matches (or the one-way gate blocks the check
+/// entirely).
+fn find_entry_transfer(
+    pos: vek::Vec2<f32>,
+    current: DimensionId,
+    zones: &HashMap<DimensionId, TransferZone>,
+    is_active: impl Fn(DimensionId) -> bool,
+) -> Option<DimensionId> {
+    if current != DimensionId::DEFAULT {
+        return None; // one-way crossing
+    }
+    zones
+        .iter()
+        .find(|&(&dimension, zone)| {
+            is_active(dimension)
+                && (pos - zone.origin).magnitude_squared() <= zone.radius * zone.radius
+        })
+        .map(|(&dimension, _)| dimension)
+}
+
+fn detect_player_dimension_entry(
+    sim: Option<NonSend<SimServer>>,
+    registry: Res<DimensionRegistry>,
+    zones: Res<EventTransferZones>,
+    sessions: Query<&PlayerDimensionSession>,
+    entity_dims: Res<SimEntityDimension>,
+    mut transfer_writer: MessageWriter<TransferPlayerDimension>,
+) {
+    if zones.0.is_empty() {
+        return; // cheap bail-out — no active event has a real zone yet
+    }
+    let Some(sim) = sim else { return };
+
+    let ecs = sim.server.state().ecs();
+    let positions = ecs.read_storage::<comp::Pos>();
+
+    for session in &sessions {
+        let sim_entity = session.0;
+        let Some(pos) = positions.get(sim_entity) else {
+            continue;
+        };
+        let current = entity_dims
+            .0
+            .get(&sim_entity)
+            .copied()
+            .unwrap_or(DimensionId::DEFAULT);
+        let xy = vek::Vec2::new(pos.0.x, pos.0.y);
+        if let Some(target) = find_entry_transfer(xy, current, &zones.0, |dimension| {
+            registry.lifecycle(dimension) == Some(DimensionLifecycle::Active)
+        }) {
+            transfer_writer.write(TransferPlayerDimension { sim_entity, target });
+        }
     }
 }
 
@@ -457,10 +604,20 @@ fn cleanup_dimension_side_tables_on_teardown(
     mut torn_down: MessageReader<DimensionTornDown>,
     mut atmospheres: ResMut<DimensionAtmospheres>,
     mut hooks: ResMut<NarrativeHooks>,
+    mut zones: ResMut<EventTransferZones>,
 ) {
     for event in torn_down.read() {
         atmospheres.remove(event.id);
         hooks.unregister(event.id);
+        // BL-82 EM-4.9 follow-up: same bounding rationale as the two tables
+        // above — without this, `EventTransferZones` would grow by one stale
+        // entry per retired event for the life of the process. A stale zone
+        // is also more than just a leak: `detect_player_dimension_entry`'s
+        // own `DimensionLifecycle::Active` re-check already guards against it
+        // ever firing a transfer into a dead dimension, but removing the
+        // entry here means the (bounded, cheap) proximity scan doesn't keep
+        // paying for a permanently-dead zone forever either.
+        zones.0.remove(&event.id);
     }
 }
 
@@ -640,11 +797,27 @@ impl Plugin for ServerOraclePlugin {
             ChroniclePlugin,
             OracleEventManifestPlugin,
         ));
+        // BL-82 EM-4.9 follow-up: `detect_player_dimension_entry` (below)
+        // emits `TransferPlayerDimension`, which needs
+        // `crate::PlayerTransferPlugin`'s `add_message` registration to
+        // exist first — guarded (mirrors `SimBridgePlugin`'s own
+        // `is_plugin_added::<DimensionsPlugin>` check) so this plugin is
+        // self-sufficient regardless of whether a caller already added
+        // `PlayerTransferPlugin` separately (both `xindeler-server-app::
+        // plugin::SimServerPlugin` and `xindeler-client::listen_server` do,
+        // for the generic debug-spinup case — re-adding here would be
+        // harmless either way since `add_plugins` on an already-added plugin
+        // only panics for plugins that don't declare themselves idempotent,
+        // and `is_plugin_added` avoids that entirely).
+        if !app.is_plugin_added::<crate::PlayerTransferPlugin>() {
+            app.add_plugins(crate::PlayerTransferPlugin);
+        }
         app.init_resource::<NextDimensionId>();
         app.init_resource::<OracleEventRegistry>();
         app.init_resource::<EntityTemplateHandles>();
         app.init_resource::<WellKnownEventHandles>();
         app.init_resource::<WellKnownEventFilenames>();
+        app.init_resource::<EventTransferZones>();
         app.insert_resource(OracleEventsDir(self.events_dir.clone()));
         app.insert_resource(OracleEventManifestPath(self.manifest_path.clone()));
         app.add_systems(bevy::app::Startup, request_oracle_event_manifest);
@@ -663,6 +836,18 @@ impl Plugin for ServerOraclePlugin {
             spawn_event_minions
                 .after(xindeler_dimensions::spinup::poll_spinup_tasks)
                 .before(crate::apply_pending_entity_template_spawns),
+        );
+        // BL-82 EM-4.9 follow-up: the proximity player-transfer trigger — see
+        // `detect_player_dimension_entry`'s own doc comment. Must run AFTER
+        // `spawn_event_minions` (which is what actually populates
+        // `EventTransferZones`) and BEFORE `apply_player_dimension_transfers`
+        // (see that function's own doc comment for why its ordering relative
+        // to the teardown chain is load-bearing).
+        app.add_systems(
+            FixedUpdate,
+            detect_player_dimension_entry
+                .after(spawn_event_minions)
+                .before(crate::player_transfer::apply_player_dimension_transfers),
         );
         app.add_systems(
             FixedUpdate,
@@ -684,6 +869,119 @@ mod tests {
     use xindeler_oracle_host::entity_template::PendingEntityTemplateSpawn;
 
     use super::*;
+
+    /// BL-82 EM-4.9 follow-up (bevy-migration-reviewer MAJOR finding): the
+    /// actual v1 proximity-trigger geometry, unit-tested via
+    /// [`find_entry_transfer`] — the pure core `detect_player_dimension_
+    /// entry` wraps. No sim/assets needed.
+    mod find_entry_transfer_tests {
+        use super::*;
+
+        fn zone(origin: (f32, f32), radius: f32) -> TransferZone {
+            TransferZone {
+                origin: vek::Vec2::new(origin.0, origin.1),
+                radius,
+            }
+        }
+
+        #[test]
+        fn a_default_resident_player_inside_an_active_zone_is_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((100.0, 100.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(110.0, 100.0), // 10 units from centre, well within radius 40
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true, // Active
+            );
+
+            assert_eq!(target, Some(DimensionId(1)));
+        }
+
+        #[test]
+        fn a_player_outside_the_zones_radius_is_not_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((100.0, 100.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(200.0, 100.0), // 100 units away, outside radius 40
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(target, None);
+        }
+
+        /// The circle boundary is INCLUSIVE (`<=`, not `<`), matching
+        /// `find_entry_transfer`'s own implementation.
+        #[test]
+        fn exactly_on_the_radius_boundary_counts_as_inside() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((0.0, 0.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(40.0, 0.0), // exactly `radius` away
+                DimensionId::DEFAULT,
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(target, Some(DimensionId(1)));
+        }
+
+        /// One-way crossing: a player already resident in a NON-default
+        /// dimension is never considered for (another) entry transfer, even
+        /// if physically standing inside a different zone.
+        #[test]
+        fn a_player_not_resident_in_default_is_never_transferred() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(2), zone((0.0, 0.0), 999_999.0)); // huge, would match anything
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId(1), // already inside a different dimension
+                &zones,
+                |_| true,
+            );
+
+            assert_eq!(
+                target, None,
+                "the one-way-crossing gate must block re-evaluation entirely"
+            );
+        }
+
+        /// A zone whose dimension is not currently `Active` (e.g. Draining
+        /// after the event was just retired) must never pull a player in —
+        /// closes the "ejected to DEFAULT, immediately re-pulled back in"
+        /// race this function's own doc comment describes.
+        #[test]
+        fn a_zone_whose_dimension_is_not_active_never_transfers() {
+            let mut zones = HashMap::new();
+            zones.insert(DimensionId(1), zone((0.0, 0.0), 40.0));
+
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId::DEFAULT,
+                &zones,
+                |_| false, // not Active (Draining/Teardown/unknown)
+            );
+
+            assert_eq!(target, None);
+        }
+
+        #[test]
+        fn no_zones_at_all_yields_no_transfer() {
+            let target = find_entry_transfer(
+                vek::Vec2::new(0.0, 0.0),
+                DimensionId::DEFAULT,
+                &HashMap::new(),
+                |_| true,
+            );
+            assert_eq!(target, None);
+        }
+    }
 
     /// Style-B (T51.9-E2, the fast CI-runnable partial): boots a headless
     /// `App` with the REAL `ServerOraclePlugin` (no `SimServer`/real world —
