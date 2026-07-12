@@ -78,7 +78,7 @@ use bevy::{
 };
 use xindeler_oracle_host::AtmosphereController;
 
-use crate::{far_terrain::FarTerrainMesh, light::Sun};
+use crate::light::Sun;
 
 /// The full far-terrain material type, as stored in `Assets` /
 /// `MeshMaterial3d`.
@@ -238,10 +238,18 @@ impl Plugin for FarTerrainMaterialPlugin {
 }
 
 /// Every frame, pushes the LIVE sun direction + atmosphere fog/sky colours
-/// into whichever [`FarTerrainMaterial`] asset the currently-spawned far
-/// mesh entity uses (`bend_strength`/`bend_start` are set once at material
-/// creation in `far_terrain::retile_far_mesh` and left alone here — they
-/// only change on a rare re-tile, not every frame).
+/// into EVERY [`FarTerrainMaterial`] asset currently in use — the far-terrain
+/// sheet (`far_terrain::FarTerrainMesh`) AND, as of BL-82 EM-3.11-FH Phase C,
+/// any per-zone LOD-object mesh (`crate::lod_objects`) that reuses this exact
+/// material so distant trees/structures dissolve into the SAME live haze the
+/// terrain does (`bend_strength`/`bend_start` are set once at material
+/// creation — `far_terrain::retile_far_mesh` for the sheet,
+/// `lod_objects::spawn_zone_mesh` for a zone — and left alone here; they only
+/// change on a rare re-tile/re-spawn, not every frame). No longer filtered to
+/// `With<far_terrain::FarTerrainMesh>` (Phase C review: any entity using this
+/// material wants the live sync, regardless of which system spawned it) — a
+/// strictly broader, still-correct query, since the terrain sheet's own
+/// behaviour is unchanged.
 ///
 /// Falls back to [`AtmosphereProfile::default`]'s colours (via
 /// `FarTerrainExtension::default`, never mutated) when no
@@ -251,7 +259,7 @@ impl Plugin for FarTerrainMaterialPlugin {
 /// this module's "never crash a test/tool app that skipped a plugin"
 /// convention (see `far_terrain.rs::retile_far_mesh`'s `haze` fallback).
 fn sync_far_terrain_material(
-    far_meshes: Query<&MeshMaterial3d<FarTerrainMaterial>, With<FarTerrainMesh>>,
+    far_meshes: Query<&MeshMaterial3d<FarTerrainMaterial>>,
     mut materials: ResMut<Assets<FarTerrainMaterial>>,
     suns: Query<&Transform, With<Sun>>,
     atmosphere: Option<Res<AtmosphereController>>,

@@ -38,17 +38,17 @@ use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
     ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
-    MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin,
-    SimEntityMirrorPlugin, SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player,
-    boot_test_server,
+    LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
+    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
+    SocialMirrorPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, map_view::MapViewPlugin,
-    player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
+    map_view::MapViewPlugin, player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
     sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
@@ -213,6 +213,20 @@ impl Plugin for ListenServerPlugin {
         // registration convention exactly. Split into its own call — the
         // tuple above is already at the 15-plugin ceiling.
         app.add_plugins(MapDataStreamPlugin);
+        // BL-82 EM-3.11-FH Phase C: the streamed LOD-object zone mirror
+        // (distant trees/structures) — same ordering reasoning as
+        // `MapDataStreamPlugin` above (reads `EmbeddedPlayer`, added after
+        // `PlayerBridgePlugin`). Split into its own call — the tuple above
+        // is already at the 15-plugin ceiling.
+        app.add_plugins(LodZoneStreamPlugin);
+        // Client-side: bakes + renders the streamed LOD-object zones onto
+        // the far-terrain horizon (reuses `FarTerrainMaterial`'s bend/
+        // dissolve shader so objects sit on the same curved surface). Reads
+        // `NetLodZone`/`NetLodZoneRemove`, so ordering relative to
+        // `FarTerrainPlugin` above doesn't matter (separate mesh/material
+        // instances, no shared state). Split into its own call for the same
+        // 15-plugin-ceiling reason.
+        app.add_plugins(LodObjectsPlugin);
         // BL-82 EM-5.4: the chat bridge (broadcasts the embedded player's
         // real chat traffic as `NetChatMsg` + applies `ChatSendRequest`
         // sends back onto that same Client) — reads/writes `EmbeddedPlayer`

@@ -112,6 +112,9 @@ pub use entity_factory::{
     spawn_from_spawning_rules,
 };
 
+mod lod_objects;
+pub use lod_objects::{LOD_ZONE_MAX_OBJECTS, LodZoneStreamPlugin, LodZoneStreamState};
+
 mod map;
 pub use map::{MapDataState, MapDataStreamPlugin};
 
