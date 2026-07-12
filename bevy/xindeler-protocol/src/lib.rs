@@ -1258,7 +1258,7 @@ mod tests {
 
         let payload = NetChatMsg {
             channel: NetChatChannel::Say,
-            sender_uid: Some(7),
+            sender_uid: Some(NetUid(7)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello there".to_owned(),
         };

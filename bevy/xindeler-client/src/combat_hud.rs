@@ -84,21 +84,33 @@ pub struct CombatHudViewPlugin;
 
 impl Plugin for CombatHudViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(xindeler_ui::XindelerUiPlugin)
-            .add_systems(
-                Startup,
-                spawn_combat_hud.after(xindeler_ui::theme::init_theme),
-            )
-            .add_systems(
-                Update,
-                (
-                    sync_local_player_bars,
-                    sync_buff_strip,
-                    sync_death_screen_and_vignette,
-                    handle_respawn_button,
-                    overhead_health_bars,
-                ),
-            );
+        // BL-82 EM-5.4 (bevy-migration-reviewer BLOCKER finding): `XindelerUiPlugin`
+        // doesn't override `is_unique()` (defaults `true`), so adding it twice in
+        // the same App panics ("plugin was already added in application"). This
+        // crate now has MULTIPLE view plugins that each want `XindelerUiPlugin`
+        // present (`chat::ChatViewPlugin` is the other one) — an UNCONDITIONAL add
+        // here only "worked" by accident of registration ORDER (this plugin
+        // happened to be added first in every real shell); guarding it the same
+        // way `chat::ChatViewPlugin` and `XindelerUiPlugin`'s own inner
+        // `UiWidgetsPlugins` add already do makes it order-independent instead of
+        // a landmine for the next view plugin/reordering.
+        if !app.is_plugin_added::<xindeler_ui::XindelerUiPlugin>() {
+            app.add_plugins(xindeler_ui::XindelerUiPlugin);
+        }
+        app.add_systems(
+            Startup,
+            spawn_combat_hud.after(xindeler_ui::theme::init_theme),
+        )
+        .add_systems(
+            Update,
+            (
+                sync_local_player_bars,
+                sync_buff_strip,
+                sync_death_screen_and_vignette,
+                handle_respawn_button,
+                overhead_health_bars,
+            ),
+        );
     }
 }
 

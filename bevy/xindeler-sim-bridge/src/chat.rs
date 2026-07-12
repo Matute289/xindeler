@@ -33,6 +33,25 @@
 //! embedded Client's tick, not the sim's 30 Hz `FixedUpdate`), ordered
 //! `.after(tick_player)` so a chat event captured THIS frame is broadcast the
 //! SAME frame, not one frame stale.
+//!
+//! ## ⚠️ Known gap: not wired into `xindeler-server-app` yet (disclosed, not
+//! silently narrowed — ecs-design-reviewer finding, BL-82 EM-5.4)
+//! [`ChatBridgePlugin`] is added ONLY by `xindeler-client::listen_server`
+//! today. `xindeler-server-app` (the real dedicated multiplayer server, with
+//! its own per-client `ActiveReplicaSessions` map) has NO chat wiring at all.
+//! This module's design — one [`EmbeddedPlayer`]'s inbox, broadcast via
+//! `SendTargets::All` — is safe ONLY because a listen-server has exactly ONE
+//! real chat participant; the sim's own `Server::send_chat`
+//! (`server/src/state_ext.rs`) already does correct per-client recipient
+//! narrowing (Say/Region by distance, Tell by uid, …), so copying this
+//! exact shape onto `xindeler-server-app`'s multi-client topology would leak
+//! one player's private/proximity-scoped lines to every other connected
+//! client. A real fix needs a NEW bridge reading each active replica
+//! session's own chat inbox and targeting `SendTargets::Single` per
+//! recipient — not a copy-paste of this module. Tracked in
+//! `docs/backlog/engine-migration.md`'s EM-5.4 row as a required follow-up
+//! before the EM-5.13 cutover (§Q7=A locks "full parity" — multi-player chat
+//! on the real server is core, not optional).
 
 use bevy::{
     app::{App, Plugin, Update},
@@ -45,7 +64,7 @@ use bevy::{
 use bevy_replicon::prelude::{SendTargets, ToClients};
 use common::{comp, uid::IdMaps};
 use specs::WorldExt;
-use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
+use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg, NetUid};
 
 use crate::{EmbeddedPlayer, SimServer, player::tick_player};
 
@@ -83,7 +102,7 @@ fn project_chat_msg(sim: &SimServer, msg: &comp::ChatMsg) -> NetChatMsg {
     let sender_alias = sender_uid.and_then(|uid| resolve_sender_alias(sim, uid));
     NetChatMsg {
         channel,
-        sender_uid: sender_uid.map(|uid| uid.0.get()),
+        sender_uid: sender_uid.map(|uid| NetUid(uid.0.get())),
         sender_alias,
         text: render_content(msg.content()),
     }
@@ -201,7 +220,7 @@ mod tests {
         let net = project_chat_msg(&sim, &msg);
 
         assert_eq!(net.channel, NetChatChannel::Say);
-        assert_eq!(net.sender_uid, Some(uid.0.get()));
+        assert_eq!(net.sender_uid, Some(NetUid(uid.0.get())));
         assert_eq!(net.sender_alias.as_deref(), Some("Hero"));
         assert_eq!(net.text, "hello there");
     }

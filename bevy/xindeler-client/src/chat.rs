@@ -14,12 +14,12 @@
 //! - Bounded scrollback (`MAX_CHAT_HISTORY` lines — old lines AND their row
 //!   entities are evicted, never growing unbounded — the task's own "history
 //!   should be bounded" requirement).
-//! - Channel tabs: **All** (view filter only) + the five sendable channels
-//!   (Say/Region/Group/Faction/World, per `NetChatChannel::send_command_ name`)
-//!   + **Whisper** (view filter only — sending a `Tell` is reachable by typing
-//!   `/tell <alias> <message>`, see the protocol module's doc comment for why).
-//!   Clicking a sendable tab ALSO becomes the active send channel for the next
-//!   plain (non-`/command`) line typed.
+//! - Channel tabs: **All** (view filter only) plus the five sendable channels
+//!   (Say/Region/Group/Faction/World, per `NetChatChannel::send_command_name`)
+//!   plus **Whisper** (view filter only — sending a `Tell` is reachable by
+//!   typing `/tell <alias> <message>`, see the protocol module's doc comment
+//!   for why). Clicking a sendable tab ALSO becomes the active send channel for
+//!   the next plain (non-`/command`) line typed.
 //! - `EditableText` input: Enter sends; a leading `/` bypasses the channel tabs
 //!   entirely and sends a raw [`ChatSendRequest::Command`] (full slash-command
 //!   parity, not just the six named channels); Tab cycles command-name
@@ -136,11 +136,16 @@ impl Plugin for ChatViewPlugin {
         // `XindelerUiPlugin` is a plain `Plugin` (`is_unique()` defaults to
         // `true`), and `combat_hud::CombatHudViewPlugin` — added alongside
         // this plugin in every real shell (`listen_server.rs`/`net_client.
-        // rs`) — ALSO adds it unconditionally. Without this guard, adding
-        // both view plugins to the same App panics ("plugin was already
-        // added in application") the moment `ChatViewPlugin` builds second —
-        // this crate's own `xindeler_ui::XindelerUiPlugin::build` guards its
-        // OWN inner `UiWidgetsPlugins` add the same way, for the same reason.
+        // rs`) — ALSO adds it (behind the identical guard, following a
+        // bevy-migration-reviewer BLOCKER finding: an earlier version of this
+        // fix guarded only ONE of the two call sites, which only avoided the
+        // "plugin was already added" panic by accident of registration
+        // ORDER — reordering the two view plugins, or adding a third one
+        // ahead of `CombatHudViewPlugin`, silently reintroduced it). Both
+        // call sites now guard identically, so the add is truly
+        // order-independent — this crate's own
+        // `xindeler_ui::XindelerUiPlugin::build` guards its OWN inner
+        // `UiWidgetsPlugins` add the same way, for the same reason.
         if !app.is_plugin_added::<xindeler_ui::XindelerUiPlugin>() {
             app.add_plugins(xindeler_ui::XindelerUiPlugin);
         }
@@ -619,6 +624,7 @@ fn handle_chat_submit(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
+    use xindeler_protocol::NetUid;
 
     use super::*;
 
@@ -647,7 +653,7 @@ mod tests {
     fn formats_lines_with_and_without_a_resolved_sender() {
         let with_sender = NetChatMsg {
             channel: NetChatChannel::Say,
-            sender_uid: Some(1),
+            sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello".to_owned(),
         };
@@ -684,7 +690,7 @@ mod tests {
 
         app.world_mut().write_message(NetChatMsg {
             channel: NetChatChannel::World,
-            sender_uid: Some(1),
+            sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello world".to_owned(),
         });

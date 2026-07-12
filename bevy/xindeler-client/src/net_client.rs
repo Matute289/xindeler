@@ -111,13 +111,19 @@ impl Plugin for NetClientPlugin {
             // the EM-5.2 mirror off `NetLocalPlayer` — verbatim reuse, same
             // as every other consumer plugin in this list.
             CombatHudViewPlugin,
-            // BL-82 EM-5.4: the chat panel — verbatim reuse too. `NetChatMsg`
-            // receive/scrollback works identically over the real transport;
-            // SENDING is a no-op until EM-4.2c's login lands a controllable
-            // session here (there is no `xindeler-sim-bridge`/embedded
-            // player on this path at all — see the module doc comment), so
-            // a typed line simply queues a `ChatSendRequest` nobody answers
-            // yet, degrading clean rather than panicking.
+            // BL-82 EM-5.4: the chat panel — verbatim reuse too. The
+            // RECEIVE-side code (NetChatMsg -> scrollback) is wire-shape
+            // correct over this real transport, but currently moot in
+            // practice: `xindeler-server-app` (the server this path
+            // connects to) has no chat bridge wired up at all yet — a
+            // disclosed gap, see `xindeler-sim-bridge::chat`'s own module
+            // doc comment and `docs/backlog/engine-migration.md`'s EM-5.4
+            // row. SENDING is ALSO a no-op until EM-4.2c's login lands a
+            // controllable session here (there is no
+            // `xindeler-sim-bridge`/embedded player on this path at all —
+            // see this module's own doc comment), so a typed line simply
+            // queues a `ChatSendRequest` nobody answers yet, degrading
+            // clean rather than panicking.
             ChatViewPlugin,
         ));
     }

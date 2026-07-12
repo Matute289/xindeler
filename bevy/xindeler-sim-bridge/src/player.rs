@@ -335,50 +335,61 @@ impl EmbeddedPlayer {
     /// counterpart to [`Self::drain_pending_chat`]. Exactly mirrors how
     /// movement (`controller_inputs_from` → `client.tick`) and jump
     /// (`client.handle_input`) already reach the sim: a genuine call through
-    /// `client::Client`'s own public API (`send_command`/`send_chat`), which
-    /// sends a real `ClientGeneral` message over the loopback socket to the
-    /// embedded `Server` — never a direct sim-state write (isolation law).
-    ///
-    /// A no-op before the embedded player reaches [`PlayerStage::InGame`]
-    /// (nothing sane to attribute the message to yet) and for an
-    /// empty/whitespace-only channel line — degrades clean, never panics.
+    /// `client::Client`'s own public API (`send_command`), which sends a real
+    /// `ClientGeneral` message over the loopback socket to the embedded
+    /// `Server` — never a direct sim-state write (isolation law). All the
+    /// actual branching/validation lives in [`resolve_chat_send`] (a pure
+    /// function, unit-tested without a live `Client` — see its own doc
+    /// comment); this method is a thin `send_command` applicator.
     pub(crate) fn send_chat_request(&mut self, request: &xindeler_protocol::ChatSendRequest) {
-        use xindeler_protocol::{ChatSendRequest, NetChatChannel};
-
-        if self.stage != PlayerStage::InGame {
-            return;
+        if let Some((name, args)) = resolve_chat_send(self.stage == PlayerStage::InGame, request) {
+            self.client.send_command(name, args);
         }
+    }
+}
 
-        match request {
-            ChatSendRequest::Channel { channel, text } => {
-                let text = text.trim();
-                if text.is_empty() {
-                    return;
-                }
-                // Only the five channel-tab-sendable kinds resolve a command
-                // name (see `NetChatChannel::send_command_name`'s doc
-                // comment) — `Tell`/`Npc`/`System` are receive-only and this
-                // arm simply ignores them rather than sending garbage.
-                if let Some(name) = channel.send_command_name() {
-                    self.client
-                        .send_command(name.to_owned(), vec![text.to_owned()]);
-                }
-                debug_assert!(
-                    !matches!(
-                        channel,
-                        NetChatChannel::Tell | NetChatChannel::Npc | NetChatChannel::System
-                    ),
-                    "the chat UI must never construct a Channel request for a receive-only \
-                     channel: {channel:?}"
-                );
-            },
-            ChatSendRequest::Command { name, args } => {
-                if name.trim().is_empty() {
-                    return;
-                }
-                self.client.send_command(name.clone(), args.clone());
-            },
-        }
+/// Pure decision logic for [`EmbeddedPlayer::send_chat_request`] (BL-82
+/// EM-5.4 follow-up, reviewer-flagged testability gap): given whether the
+/// embedded player is currently in-game and the request to apply, returns
+/// the `(name, args)` to hand to `client::Client::send_command`, or `None`
+/// if nothing should be sent. Factored out so this branching is
+/// unit-testable directly, matching this file's own established convention
+/// for the same reason (`controller_inputs_from`/`tick_is_due`/
+/// `predicted_local_transform` are all pure functions carved out of a
+/// method/system that otherwise needs a live `Client`/`EmbeddedPlayer`).
+///
+/// `None` cases: not yet [`PlayerStage::InGame`] (nothing sane to attribute
+/// the message to yet); a [`ChatSendRequest::Channel`] whose text is empty/
+/// whitespace-only, or whose channel is one of the three receive-only kinds
+/// ([`NetChatChannel::Tell`]/[`NetChatChannel::Npc`]/
+/// [`NetChatChannel::System`] — `channel.send_command_name()` already
+/// returns `None` for exactly these, so no separate match arm is needed); a
+/// [`ChatSendRequest::Command`] whose name is empty/whitespace-only.
+fn resolve_chat_send(
+    in_game: bool,
+    request: &xindeler_protocol::ChatSendRequest,
+) -> Option<(String, Vec<String>)> {
+    use xindeler_protocol::ChatSendRequest;
+
+    if !in_game {
+        return None;
+    }
+
+    match request {
+        ChatSendRequest::Channel { channel, text } => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let name = channel.send_command_name()?;
+            Some((name.to_owned(), vec![text.to_owned()]))
+        },
+        ChatSendRequest::Command { name, args } => {
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some((name.clone(), args.clone()))
+        },
     }
 }
 
@@ -1410,6 +1421,101 @@ mod tests {
             bevy::math::Vec3::new(2.0, 5.0, -20.0),
             "the second frame must update the SAME component in place, not leave the first \
              frame's value behind"
+        );
+    }
+
+    /// BL-82 EM-5.4 follow-up (bevy-migration-reviewer / ecs-design-reviewer
+    /// MINOR: `send_chat_request`'s branching had no direct test). Not
+    /// in-game yet: nothing is sent regardless of the request's shape.
+    #[test]
+    fn resolve_chat_send_is_none_before_in_game() {
+        use xindeler_protocol::{ChatSendRequest, NetChatChannel};
+
+        assert_eq!(
+            resolve_chat_send(false, &ChatSendRequest::Channel {
+                channel: NetChatChannel::Say,
+                text: "hello".to_owned(),
+            }),
+            None
+        );
+        assert_eq!(
+            resolve_chat_send(false, &ChatSendRequest::Command {
+                name: "say".to_owned(),
+                args: vec!["hello".to_owned()],
+            }),
+            None
+        );
+    }
+
+    /// A [`ChatSendRequest::Channel`] with a sendable channel and non-empty
+    /// text resolves to `(keyword, [trimmed text])`; whitespace-only text
+    /// resolves to `None` (nothing sent, not an empty command).
+    #[test]
+    fn resolve_chat_send_channel_resolves_to_the_command_keyword() {
+        use xindeler_protocol::{ChatSendRequest, NetChatChannel};
+
+        assert_eq!(
+            resolve_chat_send(true, &ChatSendRequest::Channel {
+                channel: NetChatChannel::Region,
+                text: "  hello there  ".to_owned(),
+            }),
+            Some(("region".to_owned(), vec!["hello there".to_owned()]))
+        );
+        assert_eq!(
+            resolve_chat_send(true, &ChatSendRequest::Channel {
+                channel: NetChatChannel::Say,
+                text: "   ".to_owned(),
+            }),
+            None,
+            "whitespace-only text must resolve to None, not an empty send"
+        );
+    }
+
+    /// A [`ChatSendRequest::Channel`] naming a RECEIVE-ONLY channel
+    /// (`Tell`/`Npc`/`System`, none of which have a `send_command_name`)
+    /// resolves to `None` — the chat UI must never be able to send garbage
+    /// through one of these, even if it somehow constructed such a request.
+    #[test]
+    fn resolve_chat_send_channel_rejects_receive_only_channels() {
+        use xindeler_protocol::{ChatSendRequest, NetChatChannel};
+
+        for channel in [
+            NetChatChannel::Tell,
+            NetChatChannel::Npc,
+            NetChatChannel::System,
+        ] {
+            assert_eq!(
+                resolve_chat_send(true, &ChatSendRequest::Channel {
+                    channel,
+                    text: "hello".to_owned(),
+                }),
+                None,
+                "{channel:?} must never resolve to a send"
+            );
+        }
+    }
+
+    /// A [`ChatSendRequest::Command`] with a non-empty name passes its name
+    /// and args through verbatim; an empty/whitespace-only name resolves to
+    /// `None`.
+    #[test]
+    fn resolve_chat_send_command_passes_name_and_args_through() {
+        use xindeler_protocol::ChatSendRequest;
+
+        assert_eq!(
+            resolve_chat_send(true, &ChatSendRequest::Command {
+                name: "tell".to_owned(),
+                args: vec!["Bob".to_owned(), "hi".to_owned()],
+            }),
+            Some(("tell".to_owned(), vec!["Bob".to_owned(), "hi".to_owned()]))
+        );
+        assert_eq!(
+            resolve_chat_send(true, &ChatSendRequest::Command {
+                name: "  ".to_owned(),
+                args: vec![],
+            }),
+            None,
+            "a whitespace-only command name must resolve to None"
         );
     }
 }

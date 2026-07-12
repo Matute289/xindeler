@@ -132,11 +132,16 @@ impl NetChatChannel {
 #[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NetChatMsg {
     pub channel: NetChatChannel,
-    /// The speaking entity's stable sim identity ([`crate::NetUid`]'s inner
-    /// value) — `None` for a channel with no single speaker ([`System`]).
+    /// The speaking entity's stable sim identity — `None` for a channel with
+    /// no single speaker ([`System`]). The sanctioned wire type for this
+    /// (`crate::NetUid`, already used to correlate a mirrored figure back to
+    /// its sim `Uid`/`NpcId` for AURORA, BL-15/BL-83) rather than a bare
+    /// `u64`, so a future consumer (self-mention highlight, click-to-whisper)
+    /// can match it directly against a mirrored entity's own `NetUid`
+    /// component without a manual re-wrap.
     ///
     /// [`System`]: NetChatChannel::System
-    pub sender_uid: Option<u64>,
+    pub sender_uid: Option<crate::NetUid>,
     /// The speaker's display alias, resolved SERVER-SIDE
     /// (`xindeler-sim-bridge::chat` reads `comp::Player::alias` off the
     /// sim). `None` when the sender has no resolvable alias (an NPC, or a
