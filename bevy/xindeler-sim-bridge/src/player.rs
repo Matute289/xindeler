@@ -428,6 +428,22 @@ impl EmbeddedPlayer {
     /// pois`]. Same availability as [`Self::markers`].
     pub fn pois(&self) -> &[common_net::msg::world_msg::PoiInfo] { self.client.pois() }
 
+    /// The embedded client's OWN live LOD-object zone cache (BL-82 EM-3.11-FH
+    /// Phase C) — verbatim [`client::Client::lod_zones`]. Populated (and
+    /// kept up to date, added-to/culled) entirely INSIDE `Client::tick`
+    /// (`tick_player`'s existing `player.client.tick(...)` call already
+    /// drives this every frame): the embedded client requests zones in a
+    /// spiral around its own position (throttled ~5 s) and culls ones that
+    /// fall out of its `lod_distance`, over the SAME real TCP-loopback
+    /// connection + `server::lod::Lod` (whole-world-precomputed) the old
+    /// engine's own voxygen client used — no new request/response plumbing
+    /// needed here, only mirroring the result (`xindeler_sim_bridge::
+    /// lod_objects::send_lod_zone_updates` reads this every frame and
+    /// diff-broadcasts new/removed zones over replicon).
+    pub fn lod_zones(&self) -> &hashbrown::HashMap<vek::Vec2<i32>, common::lod::Zone> {
+        self.client.lod_zones()
+    }
+
     fn character_jumping(&self) -> bool { self.jumping }
 
     fn set_character_jumping(&mut self, jumping: bool) { self.jumping = jumping; }
@@ -457,19 +473,6 @@ impl EmbeddedPlayer {
         }
     }
 
-    /// Applies a client-side hotbar drag-drop assignment through the
-    /// embedded player's real network `change_ability` send (BL-82 EM-5.3) —
-    /// a genuine client->server request over the loopback socket, never a
-    /// direct ECS write (isolation-law rule 4), matching every other
-    /// `EmbeddedPlayer` pass-through's "guard on `is_in_game`, then call the
-    /// matching `Client` method" idiom (see e.g. `position`/`velocity`
-    /// above). A no-op before the player is in game (nothing to bind yet).
-    pub fn assign_hotbar_slot(&mut self, slot: usize, ability: comp::ability::AuxiliaryAbility) {
-        if self.is_in_game() {
-            self.client.change_ability(slot, ability);
-        }
-    }
-
     /// Applies a client-side skill-point spend through the embedded player's
     /// real network `unlock_skill` send (BL-82 EM-5.7) — a genuine
     /// client->server request over the loopback socket, never a direct ECS
@@ -479,7 +482,7 @@ impl EmbeddedPlayer {
     /// in_game.rs` already processes it), so no server-side change was
     /// needed for this. A no-op before the player is in game, matching every
     /// other `EmbeddedPlayer` pass-through's guard (see e.g.
-    /// [`Self::assign_hotbar_slot`] above). The sim itself validates
+    /// [`Self::send_chat_request`] above). The sim itself validates
     /// prerequisites/cost/availability server-side — this never assumes the
     /// spend succeeds.
     pub fn unlock_skill(&mut self, skill: comp::skillset::skills::Skill) {

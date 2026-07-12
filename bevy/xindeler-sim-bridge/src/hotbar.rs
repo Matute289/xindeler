@@ -5,34 +5,53 @@
 //! for EM-5.2 — a separate, additive system rather than folded into
 //! `mirror_sim_entities`/`mirror_combat_hud_state`.
 //!
-//! Also owns the write half: [`apply_local_hotbar_assignment`] drains
-//! `xindeler_protocol::LocalAssignHotbarSlot` (the listen-server in-process
-//! counterpart of the real `AssignHotbarSlot` client message — see that
-//! type's own doc comment) and calls straight into the embedded player's
-//! `client::Client::change_ability` (via [`crate::player::EmbeddedPlayer::
-//! assign_hotbar_slot`]) — a REAL client->server network send over the
-//! loopback socket, never a direct ECS mutation from this bridge
-//! (isolation-law rule 4). Mirrors EM-5.8's `LocalGroupAction`/
-//! `apply_local_group_actions` precedent exactly.
+//! Also owns the write half: [`apply_hotbar_assignment_requests`] drains
+//! `FromClient<xindeler_protocol::AssignHotbarSlot>` (the real replicon
+//! client message — see that type's own doc comment) and re-emits it as a
+//! `common::event::ChangeAbilityEvent` through the sim's own public event
+//! bus (`common_state::State::emit_event_now`), following
+//! `crate::inventory::apply_inventory_action_requests`'s exact shape —
+//! never a direct ECS mutation from this bridge (isolation-law rule 4).
+//!
+//! BL-82 EM-5.3 follow-up (bevy-migration-reviewer + ecs-design-reviewer):
+//! this replaces a previous `apply_local_hotbar_assignment`, which drained a
+//! separate `LocalAssignHotbarSlot` plain-Bevy-message (modeled after
+//! EM-5.8's `LocalGroupAction`) and resolved the acting client PURELY via
+//! the embedded-player shortcut, ignoring which real client actually sent
+//! the request — the exact anti-pattern EM-5.6 was blocked on by two
+//! independent reviewers and fixed (see `crate::inventory::
+//! resolve_client_entity`'s own doc comment). Harmless while
+//! `HotbarMirrorPlugin` only ever ran on a listen-server with exactly one
+//! real player, but silently dropped every real remote client's rebind
+//! request on `xindeler-server-app` (the real dedicated, multi-client
+//! server) the moment this plugin was wired in there (which it already is —
+//! `bevy/xindeler-server-app/src/plugin.rs`).
 
 use bevy::{
-    app::{App, FixedUpdate, Plugin, Update},
+    app::{App, FixedUpdate, Plugin},
     ecs::{
-        change_detection::NonSendMut,
+        change_detection::{NonSend, NonSendMut},
         message::MessageReader,
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res, ResMut},
+        system::{Commands, Query, Res, ResMut},
     },
 };
-use common::{comp, comp::inventory::item::tool::AbilityContext, resources::Time as SimTime};
+use bevy_replicon::prelude::FromClient;
+use common::{
+    comp, comp::inventory::item::tool::AbilityContext, event::ChangeAbilityEvent,
+    resources::Time as SimTime,
+};
 use specs::WorldExt;
 use xindeler_protocol::{
-    LocalAssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldownEntry, NetCooldowns,
+    AssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldownEntry, NetCooldowns,
     NetHotbarSlot,
 };
 
-use crate::{EmbeddedPlayer, SimMirror, SimServer, mirror_sim_entities, tick_sim};
+use crate::{
+    EmbeddedPlayer, PlayerDimensionSession, SimMirror, SimServer, inventory::resolve_client_entity,
+    mirror_sim_entities, tick_sim,
+};
 
 /// Last-mirrored [`NetAbilities`] per sim entity — same dedup shape
 /// `CombatHudMirrorCache` uses for `NetCombo`/`NetXp` (a slot binding only
@@ -69,9 +88,9 @@ pub(crate) fn to_net_aux(ability: comp::ability::AuxiliaryAbility) -> NetAuxilia
     }
 }
 
-/// The inverse of [`to_net_aux`] — used by [`apply_local_hotbar_assignment`]
-/// to turn a client's rebind request back into the sim's own enum before
-/// calling `Client::change_ability`.
+/// The inverse of [`to_net_aux`] — used by [`apply_hotbar_assignment_requests`]
+/// to turn a client's rebind request back into the sim's own
+/// `AuxiliaryAbility` before emitting a `ChangeAbilityEvent`.
 fn from_net_aux(ability: NetAuxiliaryAbility) -> comp::ability::AuxiliaryAbility {
     use comp::ability::AuxiliaryAbility as A;
     match ability {
@@ -186,51 +205,80 @@ pub fn mirror_hotbar_state(
     }
 }
 
-/// Drains [`LocalAssignHotbarSlot`] (the client hotbar's own drag-drop
-/// resolution) and applies it through the embedded player's real
-/// `client::Client::change_ability` — a genuine client->server network send,
-/// never a direct ECS write (isolation-law rule 4). A no-op if no embedded
-/// player exists yet (degrade clean — same posture as every other
-/// `Option<NonSendMut<EmbeddedPlayer>>` consumer in this crate).
-pub fn apply_local_hotbar_assignment(
-    mut events: MessageReader<LocalAssignHotbarSlot>,
-    player: Option<NonSendMut<EmbeddedPlayer>>,
+/// Drains [`FromClient<AssignHotbarSlot>`] and re-emits each one as a
+/// `common::event::ChangeAbilityEvent` through the sim's public event bus —
+/// see the module doc comment. Resolves the acting entity PER MESSAGE via
+/// [`resolve_client_entity`] (a real dedicated server can have many
+/// simultaneously-connected clients, each needing its OWN resolution, not a
+/// single bridge-wide fallback), following
+/// `crate::inventory::apply_inventory_action_requests`'s exact shape.
+///
+/// `auxiliary_key` is computed HERE from the resolved entity's own
+/// `Inventory` (`comp::ActiveAbilities::active_auxiliary_key`) — the same
+/// pure logic `client::Client::change_ability` used to compute inline before
+/// sending; it is never carried over the wire since each entity must use its
+/// OWN equipped tools, not whatever the requesting client happened to
+/// compute.
+pub fn apply_hotbar_assignment_requests(
+    sim: Option<NonSendMut<SimServer>>,
+    player: Option<NonSend<EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
+    mut requests: MessageReader<FromClient<AssignHotbarSlot>>,
 ) {
-    let Some(mut player) = player else { return };
-    for event in events.read() {
+    let Some(sim) = sim else {
+        // No sim booted yet — drop pending requests rather than buffering
+        // them forever (degrade clean, spec §3.2).
+        requests.clear();
+        return;
+    };
+
+    let ecs = sim.server.state().ecs();
+    let inventories = ecs.read_storage::<comp::Inventory>();
+
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            // This specific client's identity didn't resolve (still
+            // connecting, or a stale/forged client id) — skip just this
+            // request, not the whole batch (other clients' requests in the
+            // same batch are unrelated and must still be processed).
+            continue;
+        };
+        let auxiliary_key = comp::ActiveAbilities::active_auxiliary_key(inventories.get(entity));
         // `u32 as usize` is a widening (never-truncating) conversion on
         // every supported target — no `cast_possible_truncation` risk.
-        player.assign_hotbar_slot(event.slot as usize, from_net_aux(event.ability));
+        sim.server.state().emit_event_now(ChangeAbilityEvent {
+            entity,
+            slot: message.slot as usize,
+            auxiliary_key,
+            new_ability: from_net_aux(message.ability),
+        });
     }
 }
 
-/// Registers [`HotbarMirrorCache`] + [`mirror_hotbar_state`] in
-/// `FixedUpdate` (after `tick_sim`/`mirror_sim_entities` — exactly
-/// `CombatHudMirrorPlugin`'s own ordering, for the same reason: this tick's
-/// fresh sim state, this tick's up-to-date `SimMirror` identity map) and
-/// [`apply_local_hotbar_assignment`] in `Update` (the embedded player's own
-/// pass-through methods are driven from `Update`, matching
-/// `PlayerBridgePlugin`'s `tick_player`/chat's `broadcast_embedded_chat`
-/// cadence, not the 30 Hz sim schedule).
+/// Registers [`HotbarMirrorCache`] + [`mirror_hotbar_state`] +
+/// [`apply_hotbar_assignment_requests`] in `FixedUpdate`, after `tick_sim`/
+/// `mirror_sim_entities` — exactly `InventoryMirrorPlugin`'s own ordering
+/// (this tick's fresh sim state, this tick's up-to-date `SimMirror` identity
+/// map).
 pub struct HotbarMirrorPlugin;
 
 impl Plugin for HotbarMirrorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HotbarMirrorCache>()
-            .add_systems(
-                FixedUpdate,
-                mirror_hotbar_state
-                    .after(tick_sim)
-                    .after(mirror_sim_entities),
-            )
-            .add_systems(Update, apply_local_hotbar_assignment);
+        app.init_resource::<HotbarMirrorCache>().add_systems(
+            FixedUpdate,
+            (mirror_hotbar_state, apply_hotbar_assignment_requests)
+                .after(tick_sim)
+                .after(mirror_sim_entities),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use bevy::{app::App, ecs::system::RunSystemOnce, prelude::MinimalPlugins};
-    use common::resources::Time;
+    use bevy_replicon::prelude::ClientId;
+    use common::{event::ChangeAbilityEvent, resources::Time};
     use specs::{Builder, WorldExt};
     use xindeler_protocol::{NetAbilities, NetAuxiliaryAbility, NetCooldowns};
 
@@ -397,7 +445,7 @@ mod tests {
     }
 
     /// [`to_net_aux`]/[`from_net_aux`] round-trip every variant — the
-    /// conversion [`apply_local_hotbar_assignment`] relies on to turn a
+    /// conversion [`apply_hotbar_assignment_requests`] relies on to turn a
     /// client rebind request back into the sim's own enum.
     #[test]
     fn net_aux_conversion_round_trips_every_variant() {
@@ -412,5 +460,134 @@ mod tests {
         ] {
             assert_eq!(from_net_aux(to_net_aux(aux)), aux);
         }
+    }
+
+    /// Drains every queued [`ChangeAbilityEvent`] straight from the sim's own
+    /// `EventBus` (`common::event::EventBus::recv_all`) — the same public
+    /// read API the sim's own dispatcher uses, letting these tests verify
+    /// EXACTLY what [`apply_hotbar_assignment_requests`] resolved and queued
+    /// without needing a full sim tick (out of scope here: these tests are
+    /// about client-identity resolution, not the downstream
+    /// `ActiveAbilities::change_ability` mutation, which is already covered
+    /// by `common::comp::ability`'s own unit tests).
+    fn drain_change_ability_events(app: &mut App) -> Vec<ChangeAbilityEvent> {
+        let sim = app.world_mut().non_send_mut::<SimServer>();
+        sim.server
+            .state()
+            .ecs()
+            .read_resource::<common::event::EventBus<ChangeAbilityEvent>>()
+            .recv_all()
+            .collect()
+    }
+
+    /// BL-82 EM-5.3 follow-up (bevy-migration-reviewer + ecs-design-reviewer,
+    /// both BLOCKER — the exact anti-pattern EM-5.6 was blocked on and
+    /// fixed): [`apply_hotbar_assignment_requests`] resolves a REAL client
+    /// connection (`ClientId::Client`) via its [`PlayerDimensionSession`] and
+    /// re-emits the request as a `ChangeAbilityEvent` targeting THAT
+    /// connection's own sim entity — the core fix for "every remote client's
+    /// hotbar rebind was silently dropped on a dedicated server" — without
+    /// needing an `EmbeddedPlayer` at all (exactly the path a genuine
+    /// `xindeler-server-app` remote client takes; `EmbeddedPlayer` is the
+    /// OTHER, listen-server-only path, covered by the sibling test below).
+    #[test]
+    fn apply_hotbar_assignment_requests_changes_the_real_connections_own_entity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        app.add_message::<FromClient<AssignHotbarSlot>>();
+
+        let target_sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            ecs.create_entity()
+                .with(comp::ActiveAbilities::default_limited(
+                    comp::ability::BASE_ABILITY_LIMIT,
+                ))
+                .build()
+        };
+        let connection_entity = app
+            .world_mut()
+            .spawn(PlayerDimensionSession(target_sim_entity))
+            .id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(connection_entity),
+            message: AssignHotbarSlot {
+                slot: 0,
+                ability: NetAuxiliaryAbility::MainWeapon(2),
+            },
+        });
+
+        app.world_mut()
+            .run_system_once(apply_hotbar_assignment_requests)
+            .expect("system runs");
+
+        let events = drain_change_ability_events(&mut app);
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one ChangeAbilityEvent must be queued for the resolved entity"
+        );
+        assert_eq!(events[0].entity, target_sim_entity);
+        assert_eq!(events[0].slot, 0);
+        assert_eq!(
+            events[0].new_ability,
+            comp::ability::AuxiliaryAbility::MainWeapon(2)
+        );
+    }
+
+    /// A real client connection with NO [`PlayerDimensionSession`] yet
+    /// (still logging in, or a stale/forged connection entity) must NOT
+    /// change any entity's ability — a real client's action must never get
+    /// misattributed (here: to nothing changing at all, rather than falling
+    /// back to whatever entity happens to be resolved next).
+    #[test]
+    fn apply_hotbar_assignment_requests_ignores_an_unresolved_real_connection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        app.add_message::<FromClient<AssignHotbarSlot>>();
+
+        let connection_entity = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(connection_entity),
+            message: AssignHotbarSlot {
+                slot: 0,
+                ability: NetAuxiliaryAbility::MainWeapon(1),
+            },
+        });
+
+        app.world_mut()
+            .run_system_once(apply_hotbar_assignment_requests)
+            .expect("system runs without panicking");
+
+        assert!(
+            drain_change_ability_events(&mut app).is_empty(),
+            "an unresolved real connection must not queue a ChangeAbilityEvent"
+        );
+    }
+
+    /// `ClientId::Server` (the listen-server's own local loopback echo) with
+    /// NO `EmbeddedPlayer` present degrades clean — no event, no panic —
+    /// matching `resolve_client_entity`'s own equivalent test in
+    /// `crate::inventory`.
+    #[test]
+    fn apply_hotbar_assignment_requests_degrades_clean_for_server_id_without_embedded_player() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        app.add_message::<FromClient<AssignHotbarSlot>>();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: AssignHotbarSlot {
+                slot: 0,
+                ability: NetAuxiliaryAbility::MainWeapon(1),
+            },
+        });
+
+        app.world_mut()
+            .run_system_once(apply_hotbar_assignment_requests)
+            .expect("system runs without panicking despite no EmbeddedPlayer");
+
+        assert!(drain_change_ability_events(&mut app).is_empty());
     }
 }

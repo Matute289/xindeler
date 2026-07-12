@@ -49,9 +49,9 @@ use crate::{
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
     hud_toast::HudToastViewPlugin, inventory_ui::InventoryUiPlugin, lod::LodCullingPlugin,
-    map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
-    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin, trade_ui::TradeUiPlugin,
+    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin,
+    palette_material::PaletteMaterialPlugin, social_hud::SocialHudViewPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin, trade_ui::TradeUiPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -98,6 +98,14 @@ impl Plugin for NetClientPlugin {
             SpriteViewPlugin,
             LodCullingPlugin,
             FarTerrainPlugin,
+            // BL-82 EM-3.11-FH Phase C: renders the streamed LOD-object
+            // zones — verbatim reuse, same as every other consumer plugin in
+            // this list. Consumer-only here (no `LodZoneStreamPlugin`
+            // producer on this path — same "no `EmbeddedPlayer`" limitation
+            // `MapViewPlugin`'s own comment below documents): degrades clean
+            // (no zones ever arrive, so nothing renders) until a real
+            // dedicated server broadcasts `NetLodZone`.
+            LodObjectsPlugin,
             // The chunk pipeline needs the palette-derived ChunkLayerMap +
             // ChunkMaterials to mesh at all (same reason
             // `listen_server::ListenServerPlugin` adds this).
@@ -150,6 +158,20 @@ impl Plugin for NetClientPlugin {
             // queues a `ChatSendRequest` nobody answers yet, degrading
             // clean rather than panicking.
             ChatViewPlugin,
+        ));
+        // BL-82 EM-3.11-FH Phase C (drive-by fix, pre-existing on
+        // `development`): the tuple above was already at 17 plugins before
+        // this task added `LodObjectsPlugin`, one past `bevy_app`'s own
+        // `Plugins` tuple-arity ceiling of 15 (`all_tuples!(...,0,15,...)` in
+        // `bevy_app-0.19.0/src/plugin.rs`) — `cargo build -p xindeler-client
+        // --features net-client` already failed to compile on `development`
+        // HEAD, unrelated to this change (the repo's real CI gate,
+        // `.github/scripts/code-quality.sh`, never builds the `net-client`
+        // feature, so this went unnoticed). Split the tail into a second
+        // call, same "already at the ceiling" convention
+        // `listen_server::ListenServerPlugin` already documents for its own
+        // main tuple.
+        app.add_plugins((
             // BL-82 EM-5.3: the skillbar/hotbar screen — verbatim reuse, same
             // as every other consumer plugin in this list. This mode has no
             // embedded/controllable local player yet (module doc comment,
