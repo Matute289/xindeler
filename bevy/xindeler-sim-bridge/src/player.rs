@@ -428,6 +428,22 @@ impl EmbeddedPlayer {
     /// pois`]. Same availability as [`Self::markers`].
     pub fn pois(&self) -> &[common_net::msg::world_msg::PoiInfo] { self.client.pois() }
 
+    /// The embedded client's OWN live LOD-object zone cache (BL-82 EM-3.11-FH
+    /// Phase C) — verbatim [`client::Client::lod_zones`]. Populated (and
+    /// kept up to date, added-to/culled) entirely INSIDE `Client::tick`
+    /// (`tick_player`'s existing `player.client.tick(...)` call already
+    /// drives this every frame): the embedded client requests zones in a
+    /// spiral around its own position (throttled ~5 s) and culls ones that
+    /// fall out of its `lod_distance`, over the SAME real TCP-loopback
+    /// connection + `server::lod::Lod` (whole-world-precomputed) the old
+    /// engine's own voxygen client used — no new request/response plumbing
+    /// needed here, only mirroring the result (`xindeler_sim_bridge::
+    /// lod_objects::send_lod_zone_updates` reads this every frame and
+    /// diff-broadcasts new/removed zones over replicon).
+    pub fn lod_zones(&self) -> &hashbrown::HashMap<vek::Vec2<i32>, common::lod::Zone> {
+        self.client.lod_zones()
+    }
+
     fn character_jumping(&self) -> bool { self.jumping }
 
     fn set_character_jumping(&mut self, jumping: bool) { self.jumping = jumping; }

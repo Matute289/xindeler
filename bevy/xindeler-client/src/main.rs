@@ -48,6 +48,8 @@ mod listen_server;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod lod_objects;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod map_view;
 #[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
