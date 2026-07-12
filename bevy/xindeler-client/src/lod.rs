@@ -110,6 +110,13 @@ pub struct CullingConfig {
     /// Matches the reference engines: neither `xindeler-old`'s LOD nor
     /// Minecraft's render distance toggles an already-drawn object on/off
     /// at a bare radius with no grace band.
+    ///
+    /// Perceptual note for anyone re-tuning the bands later: because the
+    /// dead-zone is symmetric, the EFFECTIVE first-appearance radius is
+    /// `render_distance - cull_hysteresis/2`, not `render_distance` — e.g. the
+    /// sprite band shows vegetation from 112 m rather than 128 m (and hides it
+    /// at 144 m). Both edges stay comfortably inside the streamed radius, so
+    /// nothing is ever shown past what the stream actually holds.
     pub cull_hysteresis: f32,
 }
 
@@ -215,9 +222,17 @@ fn within_band(
 /// applied to this STEADY-STATE per-frame system instead of new-chunk
 /// arrival), which would cost extra `Changed<Visibility>` propagation work
 /// even with NO terrain streaming in flight.
+///
+/// Takes the query's `Mut<Visibility>` by `&mut` (NOT `&mut Visibility`) and
+/// writes through [`bevy::prelude::DetectChangesMut::set_if_neq`]: that is what
+/// keeps `Changed<Visibility>` (and the `InheritedVisibility` propagation it
+/// drives across every sprite parent's subtree) from firing every frame for the
+/// non-flipping majority. Coercing `&mut Mut<Visibility>` to `&mut Visibility`
+/// would deref-mut and trip the change tick unconditionally BEFORE the equality
+/// guard runs, defeating the whole point (rust-perf-reviewer, round 20).
 fn apply_band(
     visible: bool,
-    vis: &mut Visibility,
+    vis: &mut Mut<Visibility>,
     shown: &mut u32,
     hidden: &mut u32,
     flips: &mut u32,
@@ -229,10 +244,10 @@ fn apply_band(
         *hidden += 1;
         Visibility::Hidden
     };
-    // Only write when it actually changes, so we don't needlessly trip
-    // `Changed<Visibility>` (and the visibility propagation it drives).
-    if *vis != want {
-        *vis = want;
+    // `set_if_neq` writes (and trips change detection) ONLY on a real change,
+    // and returns whether it changed — so a steady, non-flipping frame does
+    // zero `Visibility` writes and zero propagation work.
+    if vis.set_if_neq(want) {
         *flips += 1;
     }
 }
