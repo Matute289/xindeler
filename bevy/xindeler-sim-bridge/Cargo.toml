@@ -52,6 +52,11 @@ tracing = { workspace = true }
 # Read chunk keys / world positions off the sim (Vec2/Vec3), matching the logic
 # crates' vek version.
 vek = { workspace = true }
+# BL-82 EM-5.6 (`trade.rs`): `common::trade::PendingTrade::offers` is typed
+# over `hashbrown::HashMap` (not `std`'s) — named directly rather than
+# guessing at a re-export, matching this crate's existing "name the sim's
+# own types" discipline for `specs`/`vek` above.
+hashbrown = { workspace = true }
 # EM-4.5: tags every mirrored entity with `DimensionId(0)`/`DimensionRoot`
 # (the default dimension, wrapped once at boot via `ensure_default_dimension`)
 # and gates NEW mirror-entity creation on `DimensionLifecycle::

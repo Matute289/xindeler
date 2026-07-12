@@ -664,6 +664,27 @@ fn handle_character_data(
                         commands
                             .entity(client_entity)
                             .insert(xindeler_sim_bridge::PlayerDimensionSession(target_entity));
+                        // BL-82 EM-5.6: the SAME connection<->sim-entity
+                        // correlation, for the per-owner inventory/trade
+                        // visibility filter (`xindeler_protocol::
+                        // owner_visibility` — see that module's doc
+                        // comment). Reads the sim's own `Uid` for
+                        // `target_entity` (already resolved by
+                        // `update_character_data` just above) and tags this
+                        // connection entity with it; absent only if `Uid`
+                        // is somehow missing (defensive — every character
+                        // entity gets one at creation).
+                        if let Some(uid) = sim
+                            .server
+                            .state()
+                            .ecs()
+                            .read_storage::<common::uid::Uid>()
+                            .get(target_entity)
+                        {
+                            commands
+                                .entity(client_entity)
+                                .insert(xindeler_protocol::ClientOwnedUid(uid.0.get()));
+                        }
                     }
                     reply(
                         results,
