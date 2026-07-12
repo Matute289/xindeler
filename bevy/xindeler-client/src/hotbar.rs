@@ -501,14 +501,14 @@ fn sync_cooldown_overlays(
 /// client-identity fix, which retired the old listen-server-only
 /// `LocalAssignHotbarSlot` shortcut):
 /// - a drag ENTIRELY within the hotbar (`from`/`to` both [`HOTBAR_GROUP`])
-///   swaps the two slots' bindings via TWO [`AssignHotbarSlot`] messages —
-///   the module doc comment's original "real drag-to-assign" contract;
+///   swaps the two slots' bindings via TWO [`AssignHotbarSlot`] messages — the
+///   module doc comment's original "real drag-to-assign" contract;
 /// - BL-82 EM-5.7: a drag FROM the diary's Abilities tab
 ///   (`crate::diary::DIARY_ABILITY_GROUP`) INTO a hotbar slot binds that
-///   ability into the target slot via ONE [`AssignHotbarSlot`] — the
-///   dragged ability is decoded straight from the [`SlotDropped::from_address`]
-///   (packed via `NetAuxiliaryAbility::to_slot_address_raw`, see that type's
-///   own doc comment), no `abilities` lookup needed for the source side.
+///   ability into the target slot via ONE [`AssignHotbarSlot`] — the dragged
+///   ability is decoded straight from the [`SlotDropped::from_address`] (packed
+///   via `NetAuxiliaryAbility::to_slot_address_raw`, see that type's own doc
+///   comment), no `abilities` lookup needed for the source side.
 ///
 /// A drop involving any OTHER group is silently ignored — not mis-applied —
 /// exactly the module doc comment's original posture, just narrowed to the
