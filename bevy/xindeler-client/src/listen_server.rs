@@ -219,6 +219,13 @@ impl Plugin for ListenServerPlugin {
         // ordering relative to `SimEntityMirrorPlugin` doesn't matter here
         // (see `xindeler_sim_bridge::chat`'s own module doc comment).
         app.add_plugins(ChatBridgePlugin);
+        // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors +
+        // request applicators (spec §3.2/§6) — same ordering reasoning as
+        // `CombatHudMirrorPlugin` above (reads `SimMirror`).
+        app.add_plugins((
+            xindeler_sim_bridge::InventoryMirrorPlugin,
+            xindeler_sim_bridge::TradeMirrorPlugin,
+        ));
         // BL-82 EM-4.9 (Phase D): symmetric `SetClientAtmosphere` message
         // registration — see `xindeler_oracle_host::atmosphere_sync`'s
         // module doc comment for why this can't live in
@@ -268,6 +275,12 @@ impl Plugin for ListenServerPlugin {
         // BL-82 EM-5.4: the chat panel (scrollback, channel tabs, input box)
         // reading `NetChatMsg`/writing `ChatSendRequest`. Pure Bevy.
         app.add_plugins(ChatViewPlugin);
+        // BL-82 EM-5.6: the inventory/bag + paper-doll screen, loot feed, and
+        // the two-party trade window — pure Bevy, reading the mirrors above.
+        app.add_plugins((
+            crate::inventory_ui::InventoryUiPlugin,
+            crate::trade_ui::TradeUiPlugin,
+        ));
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

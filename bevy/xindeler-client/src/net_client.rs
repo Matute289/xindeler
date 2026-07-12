@@ -48,9 +48,9 @@ use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
-    lod::LodCullingPlugin, map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
-    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    inventory_ui::InventoryUiPlugin, lod::LodCullingPlugin, map_view::MapViewPlugin,
+    palette_material::PaletteMaterialPlugin, social_hud::SocialHudViewPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin, trade_ui::TradeUiPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -149,6 +149,13 @@ impl Plugin for NetClientPlugin {
             // queues a `ChatSendRequest` nobody answers yet, degrading
             // clean rather than panicking.
             ChatViewPlugin,
+            // BL-82 EM-5.6: the inventory/bag + paper-doll screen and the
+            // two-party trade window — verbatim reuse, same as every other
+            // consumer plugin in this list (both are pure Bevy, reading the
+            // `NetInventory`/`NetTrade`/`NetIncomingTradeInvite` mirrors the
+            // SAME way regardless of which transport carried them here).
+            InventoryUiPlugin,
+            TradeUiPlugin,
         ));
     }
 }

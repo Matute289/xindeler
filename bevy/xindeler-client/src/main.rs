@@ -38,6 +38,8 @@ mod far_terrain_material;
 mod figure_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod hud_toast;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod inventory_ui;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;
@@ -59,6 +61,8 @@ mod social_hud;
 mod sprite_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod terrain_stream;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod trade_ui;
 mod voxel_demo;
 
 use bevy::{

@@ -22,16 +22,16 @@
 //! [`notification`] (the real queued toast, subsuming EM-4.8), [`theme`]
 //! (colour/spacing/radius/font tokens), [`i18n`] (the fluent `.ftl` seam),
 //! [`hud_state`] (the `Show`-replacement state machine), [`scale`] (the
-//! UI-scale seam). Deferred to the screens that first need them (documented
-//! here rather than stubbed, per "get the primitives right, don't over-build
-//! one-off screen-specific widgets" — spec §2 engineering note): Slider/
-//! Checkbox/Radio/TextInput direct wrappers (no v1 screen needs them yet —
-//! EM-5.2's proof slice needs Panel/Bar/Button/Tooltip/Notification only),
-//! List/Grid, Modal dialog, Tab bar, the drag-drop slot (needed by
-//! EM-5.3/5.6/5.7/5.15 — lands with whichever of those is first), and the
-//! `.vox`-icon-as-UI-icon path (needed once a screen shows real item/ability
-//! icons — EM-5.3's hotbar is the first). [`scroll`] (ScrollView) landed with
-//! EM-5.4 (chat) — the first screen that needed it.
+//! UI-scale seam), and (BL-82 EM-5.6) [`slot`] (the drag-drop item-slot
+//! primitive bag/trade/hotbar/crafting screens share). Deferred to the
+//! screens that first need them (documented here rather than stubbed, per
+//! "get the primitives right, don't over-build one-off screen-specific
+//! widgets" — spec §2 engineering note): Slider/Checkbox/Radio/TextInput
+//! direct wrappers (no v1 screen needs them yet), Modal dialog, Tab bar, and
+//! the `.vox`-icon-as-UI-icon path (needed once a screen shows real item/
+//! ability icons — EM-5.6's bag/trade screens use a themed text-glyph
+//! placeholder meanwhile, see `slot`'s own doc comment). [`scroll`]
+//! (ScrollView) landed with EM-5.4 (chat) — the first screen that needed it.
 
 pub mod bar;
 pub mod button;
@@ -41,6 +41,7 @@ pub mod notification;
 pub mod panel;
 pub mod scale;
 pub mod scroll;
+pub mod slot;
 pub mod theme;
 pub mod tooltip;
 
@@ -96,7 +97,11 @@ impl Plugin for XindelerUiPlugin {
                     // (see that function's own doc comment for why it lives
                     // here rather than per-screen).
                     hud_state::apply_hud_actions,
+                    slot::update_slot_visuals,
                 ),
             );
+        // BL-82 EM-5.6: the drag-drop slot's global drag/drop observers +
+        // its `SlotDropped` message.
+        slot::install_observers(app);
     }
 }
