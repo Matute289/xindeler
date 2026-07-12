@@ -251,10 +251,12 @@ fn sync_group_panel(
     root: Query<(Entity, Option<&Children>), With<GroupMembersRoot>>,
     rows: Query<Entity, With<GroupMemberRow>>,
     mirrored: Query<(&NetUid, Option<&NetHealth>)>,
+    local_uid: Query<&NetUid, With<NetLocalPlayer>>,
 ) {
     if !state.is_changed() {
         return;
     }
+    let my_uid = local_uid.single().ok().map(|u| u.0);
 
     let in_group = !state.0.members.is_empty();
     if let Ok(mut visibility) = panel_visibility.single_mut() {
@@ -352,37 +354,43 @@ fn sync_group_panel(
             },
         }
 
-        let kick_uid = member.uid;
-        let kick_entity = commands
-            .spawn(button_bundle(&theme, &fonts, "Kick"))
-            .insert(KickTarget(kick_uid))
-            .observe(
-                |activate: On<Activate>,
-                 targets: Query<&KickTarget>,
-                 mut actions: MessageWriter<LocalGroupAction>| {
-                    if let Ok(target) = targets.get(activate.entity) {
-                        actions.write(LocalGroupAction(GroupAction::Kick(target.0)));
-                    }
-                },
-            )
-            .id();
-        commands.entity(row_entity).add_child(kick_entity);
+        // Never show Kick/Make-Leader on the local player's OWN row — the
+        // server enforces leader-only permission regardless, but a
+        // self-target button is confusing UX, not just a no-op
+        // (bevy-migration-reviewer follow-up).
+        if Some(member.uid) != my_uid {
+            let kick_uid = member.uid;
+            let kick_entity = commands
+                .spawn(button_bundle(&theme, &fonts, "Kick"))
+                .insert(KickTarget(kick_uid))
+                .observe(
+                    |activate: On<Activate>,
+                     targets: Query<&KickTarget>,
+                     mut actions: MessageWriter<LocalGroupAction>| {
+                        if let Ok(target) = targets.get(activate.entity) {
+                            actions.write(LocalGroupAction(GroupAction::Kick(target.0)));
+                        }
+                    },
+                )
+                .id();
+            commands.entity(row_entity).add_child(kick_entity);
 
-        let leader_uid = member.uid;
-        let assign_entity = commands
-            .spawn(button_bundle(&theme, &fonts, "Make Leader"))
-            .insert(AssignLeaderTarget(leader_uid))
-            .observe(
-                |activate: On<Activate>,
-                 targets: Query<&AssignLeaderTarget>,
-                 mut actions: MessageWriter<LocalGroupAction>| {
-                    if let Ok(target) = targets.get(activate.entity) {
-                        actions.write(LocalGroupAction(GroupAction::AssignLeader(target.0)));
-                    }
-                },
-            )
-            .id();
-        commands.entity(row_entity).add_child(assign_entity);
+            let leader_uid = member.uid;
+            let assign_entity = commands
+                .spawn(button_bundle(&theme, &fonts, "Make Leader"))
+                .insert(AssignLeaderTarget(leader_uid))
+                .observe(
+                    |activate: On<Activate>,
+                     targets: Query<&AssignLeaderTarget>,
+                     mut actions: MessageWriter<LocalGroupAction>| {
+                        if let Ok(target) = targets.get(activate.entity) {
+                            actions.write(LocalGroupAction(GroupAction::AssignLeader(target.0)));
+                        }
+                    },
+                )
+                .id();
+            commands.entity(row_entity).add_child(assign_entity);
+        }
     }
 }
 

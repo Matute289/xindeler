@@ -42,8 +42,12 @@ use serde::{Deserialize, Serialize};
 
 /// One row of the online-player list (BL-82 EM-5.8). Flattened from the sim's
 /// `comp::Player`/`comp::Stats` — the client only needs identity + display
-/// name, never the account alias/battle-mode/uuid bookkeeping that stays
-/// server-side (spec §3.2 "project, don't dump").
+/// name, never `battle_mode`/`uuid` bookkeeping (both stay server-side, spec
+/// §3.2 "project, don't dump"). `name` prefers the character's `Stats.name`
+/// but falls back to the account `alias` when `Stats` isn't present yet
+/// (`xindeler_sim_bridge::social::flatten_name`) — `comp::Player.alias` is
+/// the ordinary chosen display/chat name in this codebase (`common::comp::
+/// player`), not a secret, so this fallback is not a privacy leak.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetPlayerListEntry {
     /// The player's stable sim `Uid` (see `xindeler_protocol::NetUid`'s own

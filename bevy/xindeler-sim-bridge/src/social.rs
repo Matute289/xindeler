@@ -319,17 +319,31 @@ pub struct SocialMirrorPlugin;
 
 impl Plugin for SocialMirrorPlugin {
     fn build(&self, app: &mut App) {
+        // `.chain()` (ecs-design-reviewer follow-up): four of these five
+        // systems take `Option<NonSendMut<EmbeddedPlayer>>` — an undeclared
+        // ambiguity is harmless here (an action applied this tick can't
+        // affect the sim before a LATER tick anyway, since
+        // `apply_local_group_actions`/`apply_local_dialogue_response` only
+        // enqueue a real network send on the embedded `Client`, dispatched
+        // by the NEXT `tick_player` call), but every other multi-system
+        // group in this crate that shares exclusive access closes the
+        // ordering explicitly (`PlayerBridgePlugin`'s own `tick_player`/
+        // `mirror_local_player_prediction` chain) — this does the same, for
+        // documentation/determinism: apply this frame's player intent
+        // first, then project the (necessarily one-tick-stale) sim state
+        // back out.
         app.init_resource::<PlayerListCache>()
             .init_resource::<GroupStateCache>()
             .add_systems(
                 FixedUpdate,
                 (
+                    apply_local_group_actions,
+                    apply_local_dialogue_response,
                     mirror_player_list,
                     mirror_group_state,
                     mirror_dialogue,
-                    apply_local_group_actions,
-                    apply_local_dialogue_response,
                 )
+                    .chain()
                     .after(tick_sim),
             );
     }
