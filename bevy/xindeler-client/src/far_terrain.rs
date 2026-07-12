@@ -660,6 +660,7 @@ mod tests {
             .insert_resource(CullingConfig {
                 chunk_render_distance: 100.0,
                 sprite_render_distance: 50.0,
+                ..Default::default()
             })
             // A big flat grid (physical extent 8*4*32 = 1024 m per axis) so a
             // ~164 m-radius hole never swallows the whole thing.

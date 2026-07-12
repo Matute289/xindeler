@@ -88,6 +88,29 @@ pub struct CullingConfig {
     /// is hidden. Sprites dominate the entity count, so a nearer band here is
     /// the biggest win.
     pub sprite_render_distance: f32,
+    /// BL-82 EM-3.11 round 20 — hysteresis dead-zone width (Bevy metres)
+    /// straddling BOTH bands' nominal `*_render_distance`. An entity is SHOWN
+    /// once it comes within `render_distance - cull_hysteresis/2`, HIDDEN once
+    /// it passes `render_distance + cull_hysteresis/2`, and KEEPS its current
+    /// visibility anywhere in between. Without this, both bands were a hard
+    /// `dist <= radius` cutoff (no dead-zone): an object sitting near a band
+    /// edge toggled `Visibility` Visible↔Hidden every time the eye-to-object
+    /// distance crossed the radius by even a hair — and in third person the eye
+    /// ORBITS the pivot by ~`CAM_BACK` (9 m) during mouse-look, so any object
+    /// in a ~18 m-wide annulus at the radius re-crossed it twice per camera
+    /// sweep, reading as terrain/trees (chunk band, 224 m) and vegetation
+    /// (sprite band, 128 m) flickering "disappear then reappear" as the player
+    /// looks around. A dead-zone comfortably wider than that orbit amplitude
+    /// (1 chunk = 32 m) makes a single boundary crossing latch, so an object
+    /// only appears/disappears ONCE as the player genuinely approaches/recedes,
+    /// never chattering. Measured live (`XINDELER_CULL_PERF_LOG`, round-20
+    /// findings): on the VISIBLE sprite band, a same-world straight-walk-plus-
+    /// mouse-look A/B cut the worst object's flicker from 29 flips to 5 (and
+    /// total flip events ~40 %), eliminating the rapid boundary chatter.
+    /// Matches the reference engines: neither `xindeler-old`'s LOD nor
+    /// Minecraft's render distance toggles an already-drawn object on/off
+    /// at a bare radius with no grace band.
+    pub cull_hysteresis: f32,
 }
 
 impl Default for CullingConfig {
@@ -97,6 +120,10 @@ impl Default for CullingConfig {
             chunk_render_distance: 7.0 * CHUNK_EDGE,
             // ~4 chunks: a much nearer band for the dominant sprite population.
             sprite_render_distance: 4.0 * CHUNK_EDGE,
+            // 1 chunk of dead-zone — wider than the ~9 m third-person camera
+            // orbit, so mouse-look never re-crosses both edges (see the field
+            // docs).
+            cull_hysteresis: CHUNK_EDGE,
         }
     }
 }
@@ -149,11 +176,32 @@ fn horizontal_dist_sq(a: Vec3, b: Vec3) -> f32 {
     dx * dx + dz * dz
 }
 
-/// The band decision, factored out so it is unit-testable without an App:
-/// `true` (visible) iff `point` is within `max_distance` horizontally of `eye`.
+/// The band decision, factored out so it is unit-testable without an App.
+/// BL-82 EM-3.11 round 20 — HYSTERESIS: `point` is SHOWN once it comes within
+/// `render_distance - hysteresis/2`, HIDDEN once it passes `render_distance +
+/// hysteresis/2`, and KEEPS `currently_visible` anywhere in the dead-zone
+/// between (see [`CullingConfig::cull_hysteresis`] for why — stops a
+/// boundary object toggling as the third-person camera eye orbits during
+/// mouse-look). A `hysteresis` of `0.0` collapses to the old hard `dist <=
+/// render_distance` cutoff, so callers/tests can still exercise a bare radius.
 #[must_use]
-fn within_band(point: Vec3, eye: Vec3, max_distance: f32) -> bool {
-    horizontal_dist_sq(point, eye) <= max_distance * max_distance
+fn within_band(
+    point: Vec3,
+    eye: Vec3,
+    render_distance: f32,
+    hysteresis: f32,
+    currently_visible: bool,
+) -> bool {
+    let d_sq = horizontal_dist_sq(point, eye);
+    let show = (render_distance - 0.5 * hysteresis).max(0.0);
+    let hide = render_distance + 0.5 * hysteresis;
+    if d_sq <= show * show {
+        true // definitely inside → show
+    } else if d_sq > hide * hide {
+        false // definitely outside → hide
+    } else {
+        currently_visible // dead-zone → latch whatever it already is
+    }
 }
 
 /// Sets `vis` to the band result, counting the flip for the stats. Kept tiny so
@@ -206,13 +254,28 @@ fn cull_chunk_meshes(
         return; // no camera yet — leave everything as-is
     };
     let max = config.chunk_render_distance;
+    let hyst = config.cull_hysteresis;
     let (mut shown, mut hidden, mut flips) = (0u32, 0u32, 0u32);
     for (marker, mut vis) in &mut terrain {
-        let visible = within_band(chunk_center_bevy(marker.key), eye, max);
+        let currently_visible = !matches!(*vis, Visibility::Hidden);
+        let visible = within_band(
+            chunk_center_bevy(marker.key),
+            eye,
+            max,
+            hyst,
+            currently_visible,
+        );
         apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     for (marker, mut vis) in &mut fluid {
-        let visible = within_band(chunk_center_bevy(marker.key), eye, max);
+        let currently_visible = !matches!(*vis, Visibility::Hidden);
+        let visible = within_band(
+            chunk_center_bevy(marker.key),
+            eye,
+            max,
+            hyst,
+            currently_visible,
+        );
         apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     stats.chunks_visible = shown;
@@ -247,9 +310,11 @@ fn cull_sprite_chunks(
         return;
     };
     let max = config.sprite_render_distance;
+    let hyst = config.cull_hysteresis;
     let (mut shown, mut hidden, mut flips) = (0u32, 0u32, 0u32);
     for (parent, mut vis) in &mut parents {
-        let visible = within_band(parent.centroid, eye, max);
+        let currently_visible = !matches!(*vis, Visibility::Hidden);
+        let visible = within_band(parent.centroid, eye, max, hyst, currently_visible);
         apply_band(visible, &mut vis, &mut shown, &mut hidden, &mut flips);
     }
     stats.sprite_parents_visible = shown;
@@ -287,18 +352,77 @@ mod tests {
     fn band_ignores_height() {
         let eye = Vec3::new(0.0, 1000.0, 0.0); // camera 1 km up
         let point = Vec3::new(10.0, 0.0, 0.0); // 10 m away horizontally
-        // A 20 m band keeps it visible despite the 1 km vertical gap.
-        assert!(within_band(point, eye, 20.0));
+        // A 20 m band keeps it visible despite the 1 km vertical gap (no
+        // hysteresis → hard radius; current-visibility argument is irrelevant).
+        assert!(within_band(point, eye, 20.0, 0.0, false));
         // A 5 m band hides it (10 m > 5 m horizontally).
-        assert!(!within_band(point, eye, 5.0));
+        assert!(!within_band(point, eye, 5.0, 0.0, true));
     }
 
     #[test]
-    fn band_is_a_hard_radius() {
+    fn band_is_a_hard_radius_without_hysteresis() {
         let eye = Vec3::ZERO;
-        // Exactly on the radius = visible (inclusive); just past = hidden.
-        assert!(within_band(Vec3::new(10.0, 0.0, 0.0), eye, 10.0));
-        assert!(!within_band(Vec3::new(10.01, 0.0, 0.0), eye, 10.0));
+        // hysteresis 0 → exactly on the radius = visible (inclusive); just past
+        // = hidden, regardless of prior state.
+        assert!(within_band(
+            Vec3::new(10.0, 0.0, 0.0),
+            eye,
+            10.0,
+            0.0,
+            false
+        ));
+        assert!(!within_band(
+            Vec3::new(10.01, 0.0, 0.0),
+            eye,
+            10.0,
+            0.0,
+            true
+        ));
+    }
+
+    /// BL-82 EM-3.11 round 20 — the hysteresis dead-zone latches an object's
+    /// visibility so a boundary crossing doesn't chatter as the camera eye
+    /// jitters/orbits. This is the regression test for the round-20 flicker
+    /// fix (see [`CullingConfig::cull_hysteresis`]).
+    #[test]
+    fn band_has_a_hysteresis_dead_zone() {
+        let eye = Vec3::ZERO;
+        let hyst = 8.0; // dead-zone spans [10-4, 10+4] = [6, 14]
+        let render = 10.0;
+        // Well inside the show edge (< 6 m) → shown regardless of prior state.
+        assert!(within_band(
+            Vec3::new(5.0, 0.0, 0.0),
+            eye,
+            render,
+            hyst,
+            false
+        ));
+        // Well outside the hide edge (> 14 m) → hidden regardless of prior state.
+        assert!(!within_band(
+            Vec3::new(15.0, 0.0, 0.0),
+            eye,
+            render,
+            hyst,
+            true
+        ));
+        // In the dead-zone (10 m, between 6 and 14): LATCH the current state —
+        // a currently-visible object stays visible, a hidden one stays hidden.
+        // This is exactly what stops the flicker: the same point does NOT flip
+        // just because it drifted a hair across the nominal radius.
+        assert!(within_band(
+            Vec3::new(10.0, 0.0, 0.0),
+            eye,
+            render,
+            hyst,
+            true
+        ));
+        assert!(!within_band(
+            Vec3::new(10.0, 0.0, 0.0),
+            eye,
+            render,
+            hyst,
+            false
+        ));
     }
 
     /// Headless system test: a camera at the origin, one near chunk and one far
@@ -310,6 +434,7 @@ mod tests {
         app.insert_resource(CullingConfig {
             chunk_render_distance: 3.0 * CHUNK_EDGE,
             sprite_render_distance: 2.0 * CHUNK_EDGE,
+            cull_hysteresis: 0.0,
         })
         .init_resource::<CullStats>()
         .add_systems(Update, cull_chunk_meshes);
@@ -366,6 +491,7 @@ mod tests {
         app.insert_resource(CullingConfig {
             chunk_render_distance: 10.0 * CHUNK_EDGE,
             sprite_render_distance: 2.0 * CHUNK_EDGE, // 64 m
+            cull_hysteresis: 0.0,
         })
         .init_resource::<CullStats>()
         .add_systems(Update, cull_sprite_chunks);
@@ -419,6 +545,7 @@ mod tests {
         app.insert_resource(CullingConfig {
             chunk_render_distance: 3.0 * CHUNK_EDGE,
             sprite_render_distance: 2.0 * CHUNK_EDGE,
+            cull_hysteresis: 0.0,
         })
         .init_resource::<CullStats>()
         .add_systems(Update, cull_chunk_meshes);
@@ -456,5 +583,79 @@ mod tests {
             Visibility::Visible,
             "camera moved into range → visible again"
         );
+    }
+
+    /// BL-82 EM-3.11 round 20 — the flicker, reproduced at the SYSTEM level and
+    /// shown fixed: a chunk parked right AT the nominal render distance while
+    /// the camera oscillates a hair back and forth across it (mimicking the
+    /// third-person eye orbiting during mouse-look). With the default 1-chunk
+    /// hysteresis the chunk's `Visibility` latches after the first frame and
+    /// never flips again; with hysteresis disabled it flips on every crossing.
+    /// The `flips`-accumulator lives in `apply_band`, but `CullStats` doesn't
+    /// expose it, so this asserts on the observable `Visibility` staying put.
+    #[test]
+    fn hysteresis_stops_a_boundary_chunk_flickering_as_the_eye_oscillates() {
+        // Chunk (10,0): centre x ≈ 336 m. Put the render distance exactly there
+        // so the chunk sits ON the nominal boundary.
+        let center = chunk_center_bevy(VVec2::new(10, 0));
+        let radius = center.length(); // horizontal distance from origin
+
+        // Small oscillation amplitude — far smaller than 1 chunk (32 m), like a
+        // camera-orbit jitter around the boundary.
+        let nudge = 4.0_f32;
+
+        for (hysteresis, expect_flip) in [(CHUNK_EDGE, false), (0.0, true)] {
+            let mut app = App::new();
+            app.insert_resource(CullingConfig {
+                chunk_render_distance: radius,
+                sprite_render_distance: 2.0 * CHUNK_EDGE,
+                cull_hysteresis: hysteresis,
+            })
+            .init_resource::<CullStats>()
+            .add_systems(Update, cull_chunk_meshes);
+
+            let cam = app
+                .world_mut()
+                .spawn((
+                    Camera3d::default(),
+                    GlobalTransform::from_translation(Vec3::ZERO),
+                ))
+                .id();
+            let chunk = app
+                .world_mut()
+                .spawn((
+                    TerrainChunkMesh {
+                        key: VVec2::new(10, 0),
+                    },
+                    Visibility::Visible,
+                ))
+                .id();
+
+            // Settle one frame at the boundary, then record the state.
+            app.update();
+            let settled = *app.world().get::<Visibility>(chunk).unwrap();
+
+            // Oscillate the eye a few metres nearer / farther across the
+            // radius: `+dir*nudge` moves TOWARD the chunk (distance
+            // radius-nudge, inside), `-dir*nudge` moves away (radius+nudge,
+            // outside). nudge (4 m) ≪ the 1-chunk (32 m) dead-zone, so with
+            // hysteresis both extremes stay inside the dead-zone and latch.
+            let dir = center.normalize();
+            let mut any_flip = false;
+            for i in 0..8 {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                *app.world_mut().get_mut::<GlobalTransform>(cam).unwrap() =
+                    GlobalTransform::from_translation(dir * (sign * nudge));
+                app.update();
+                if *app.world().get::<Visibility>(chunk).unwrap() != settled {
+                    any_flip = true;
+                }
+            }
+            assert_eq!(
+                any_flip, expect_flip,
+                "hysteresis={hysteresis}: boundary chunk flip-on-oscillation should be \
+                 {expect_flip}"
+            );
+        }
     }
 }
