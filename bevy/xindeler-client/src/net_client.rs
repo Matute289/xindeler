@@ -49,7 +49,8 @@ use crate::{
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
     lod::LodCullingPlugin, map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -112,6 +113,14 @@ impl Plugin for NetClientPlugin {
             // the EM-5.2 mirror off `NetLocalPlayer` — verbatim reuse, same
             // as every other consumer plugin in this list.
             CombatHudViewPlugin,
+            // BL-82 EM-5.8: the social/group/dialogue HUD — on this
+            // spectator-only remote path there is no embedded player to
+            // act for, so this only ever shows the (real, broadcast)
+            // `NetPlayerList`; group/dialogue actions the UI writes simply
+            // have no consumer yet (a genuinely remote group/dialogue
+            // gameplay path is a follow-up, see `social_hud`'s own module
+            // doc comment).
+            SocialHudViewPlugin,
             // BL-82 EM-5.5: the minimap + full map screens — verbatim reuse,
             // same as every other consumer plugin in this list. Consumer-
             // only here: `MapDataStreamPlugin` (the `NetMapData` producer) is

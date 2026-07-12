@@ -54,6 +54,8 @@ mod post;
 mod scene;
 mod smoke;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod social_hud;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod sprite_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod terrain_stream;

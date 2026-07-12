@@ -22,6 +22,7 @@ pub mod interest;
 pub mod login;
 pub mod map;
 pub mod narrative;
+pub mod social;
 pub mod visibility;
 
 use bevy::{
@@ -44,6 +45,11 @@ pub use crate::{
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
     map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
+    social::{
+        DialogueResponseRequest, GroupAction, GroupActionRequest, LocalDialogueResponse,
+        LocalGroupAction, NetDialogue, NetGroupMember, NetGroupState, NetInviteKind,
+        NetPendingInvite, NetPlayerList, NetPlayerListEntry,
+    },
     visibility::{ClientVisibleRegions, RegionKey, region_key_for_pos},
 };
 
@@ -770,6 +776,13 @@ impl Plugin for XindelerProtocolPlugin {
         // comment for the full design and why registering it symmetrically
         // here (rather than only server-side) is safe.
         app.add_visibility_filter::<visibility::RegionKey>();
+
+        // BL-82 EM-5.8: social/group/dialogue wire contract (NetPlayerList/
+        // NetGroupState/NetDialogue server messages, GroupActionRequest/
+        // DialogueResponseRequest client messages, LocalGroupAction/
+        // LocalDialogueResponse in-process handoff) — see `social`'s own
+        // module doc comment for the full rationale.
+        social::register(app);
     }
 }
 
