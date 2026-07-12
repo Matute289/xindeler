@@ -59,6 +59,8 @@ use common::{
     ViewDistances,
     clock::Clock,
     comp,
+    comp::invite::InviteKind,
+    rtsim,
     uid::{IdMaps, Uid},
     util::Dir,
 };
@@ -236,6 +238,14 @@ pub struct EmbeddedPlayer {
     /// [`max_player_tick_interval`]). `None` until the first dispatch ever
     /// runs, so the ceiling never blocks the initial tick.
     last_tick_wall: Option<Instant>,
+    /// BL-82 EM-5.8: NPC-initiated dialogue turns (`ClientEvent::Dialogue`)
+    /// captured by [`capture_social_events`] each [`tick_player`] dispatch —
+    /// `xindeler_sim_bridge::social::mirror_dialogue` drains this via
+    /// [`Self::take_pending_dialogue`] to project `xindeler_protocol::
+    /// NetDialogue`. A `Vec` (not a single `Option`) so a burst of multiple
+    /// dialogue turns arriving within one skipped-frame gap (see
+    /// [`tick_player`]'s Hz-ceiling doc comment) is never silently dropped.
+    pending_dialogue: Vec<(Uid, rtsim::Dialogue<true>)>,
     /// Chat lines the embedded Client received THIS tick (BL-82 EM-5.4),
     /// captured from `client.tick()`'s returned frontend events by
     /// [`tick_player`] (the only place those events surface) and drained by
@@ -317,6 +327,106 @@ impl EmbeddedPlayer {
     /// far-terrain grid (`send_far_terrain_once` in `lib.rs`, which
     /// broadcasts `xindeler_protocol::NetFarTerrain`).
     pub fn world_data(&self) -> &WorldData { self.client.world_data() }
+
+    /// Drains every NPC-initiated dialogue turn captured since the last call
+    /// (BL-82 EM-5.8) — see [`Self::pending_dialogue`]'s own doc comment.
+    pub fn take_pending_dialogue(&mut self) -> Vec<(Uid, rtsim::Dialogue<true>)> {
+        std::mem::take(&mut self.pending_dialogue)
+    }
+
+    /// Sends a real group invite to `invitee` over the embedded `Client`'s
+    /// network connection (BL-82 EM-5.8) — `client::Client::send_invite`
+    /// itself pushes a `ControlEvent::InitiateInvite` that the sim's
+    /// `InitiateInviteEvent` handler processes, exactly the same path a
+    /// genuinely remote client's invite takes. A no-op before the player is
+    /// in-game (mirrors every other action method below).
+    pub fn send_group_invite(&mut self, invitee: Uid, kind: InviteKind) {
+        if self.is_in_game() {
+            self.client.send_invite(invitee, kind);
+        }
+    }
+
+    /// Accepts the local player's currently outstanding incoming invite, if
+    /// any (`client::Client::invite()`'s own target) — a no-op if there is
+    /// none (the sim/client itself already guards this; this is just a
+    /// defensive early-out matching this module's "in-game only" posture).
+    pub fn accept_invite(&mut self) {
+        if self.is_in_game() {
+            self.client.accept_invite();
+        }
+    }
+
+    /// Declines the local player's currently outstanding incoming invite, if
+    /// any.
+    pub fn decline_invite(&mut self) {
+        if self.is_in_game() {
+            self.client.decline_invite();
+        }
+    }
+
+    /// Leaves the local player's current group, if any.
+    pub fn leave_group(&mut self) {
+        if self.is_in_game() {
+            self.client.leave_group();
+        }
+    }
+
+    /// Requests kicking `member` from the local player's group — the sim
+    /// itself enforces the leader-only permission check
+    /// (`server::events::group_manip`); a non-leader's request is simply
+    /// rejected server-side, never trusted client-side.
+    pub fn kick_from_group(&mut self, member: Uid) {
+        if self.is_in_game() {
+            self.client.kick_from_group(member);
+        }
+    }
+
+    /// Requests handing group leadership to `member` — same server-side
+    /// permission enforcement note as [`Self::kick_from_group`].
+    pub fn assign_group_leader(&mut self, member: Uid) {
+        if self.is_in_game() {
+            self.client.assign_group_leader(member);
+        }
+    }
+
+    /// Sends a dialogue turn (an Ack/Response, or a fresh `Start`) to
+    /// `target` (BL-82 EM-5.8), resolving `target`'s sim `Entity` via the
+    /// embedded `Client`'s own `IdMaps` (the SAME sim `target` lives in —
+    /// the embedded player is a loopback client to this exact `SimServer`).
+    /// Returns `false` (a no-op, logged) if `target` doesn't resolve to a
+    /// live entity — e.g. the NPC despawned/moved out of view between the UI
+    /// rendering the prompt and the player answering it.
+    pub fn perform_dialogue(&mut self, target: Uid, dialogue: rtsim::Dialogue) -> bool {
+        if !self.is_in_game() {
+            return false;
+        }
+        let Some(entity) = self
+            .client
+            .state()
+            .ecs()
+            .read_resource::<IdMaps>()
+            .uid_entity(target)
+        else {
+            tracing::warn!(
+                ?target,
+                "perform_dialogue: target Uid no longer resolves to a live sim entity"
+            );
+            return false;
+        };
+        self.client.perform_dialogue(entity, dialogue);
+        true
+    }
+
+    /// Every currently-known site + extra marker (BL-82 EM-5.5) — kind/wpos/
+    /// label/quest-flag, verbatim [`client::Client::markers`]. Populated the
+    /// same moment [`Self::world_data`] is (the initial handshake), so it's
+    /// available well before [`Self::is_in_game`]. Source for the one-shot
+    /// `NetMapData` broadcast (`xindeler-sim-bridge::map::send_map_data_once`).
+    pub fn markers(&self) -> impl Iterator<Item = &common::map::Marker> { self.client.markers() }
+
+    /// Named terrain features (peaks/lakes) — verbatim [`client::Client::
+    /// pois`]. Same availability as [`Self::markers`].
+    pub fn pois(&self) -> &[common_net::msg::world_msg::PoiInfo] { self.client.pois() }
 
     fn character_jumping(&self) -> bool { self.jumping }
 
@@ -543,6 +653,7 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
         uid: None,
         jumping: false,
         last_tick_wall: None,
+        pending_dialogue: Vec::new(),
         pending_chat: Vec::new(),
     })
 }
@@ -742,6 +853,9 @@ pub(crate) fn tick_player(
     player.client.cleanup();
 
     advance_stage(&mut player, &events);
+    // BL-82 EM-5.8: stash any NPC-initiated dialogue turns this tick's
+    // events carried — see `capture_social_events`'s own doc comment.
+    capture_social_events(&mut player, &events);
     // BL-82 EM-5.4: stash any `Event::Chat` this tick's dispatch produced —
     // `client.tick()`'s returned events are the ONLY place they surface, so
     // this capture must live here; `xindeler-sim-bridge::chat::
@@ -891,6 +1005,22 @@ fn advance_stage(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
             }
         },
         PlayerStage::Failed => {},
+    }
+}
+
+/// BL-82 EM-5.8: scans this frame's `client.tick()` events for
+/// `ClientEvent::Dialogue` (an NPC addressing the local player — quest/
+/// dialogue, v1-minimal) and stashes each one in
+/// [`EmbeddedPlayer::pending_dialogue`] for `xindeler_sim_bridge::social::
+/// mirror_dialogue` to drain and project as `xindeler_protocol::NetDialogue`.
+/// Called right after [`advance_stage`] in [`tick_player`] — a small,
+/// additive scan over the same `events` slice that function already
+/// iterates, not a second `client.tick()` dispatch.
+fn capture_social_events(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
+    for event in events {
+        if let ClientEvent::Dialogue(sender, dialogue) = event {
+            player.pending_dialogue.push((*sender, dialogue.clone()));
+        }
     }
 }
 

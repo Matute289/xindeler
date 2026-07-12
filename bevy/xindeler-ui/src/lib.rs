@@ -94,6 +94,10 @@ impl Plugin for XindelerUiPlugin {
                     tooltip::update_tooltip,
                     notification::advance_notifications,
                     slot::update_slot_visuals,
+                    // BL-82 EM-5.5: the generic HudAction -> HudState wiring
+                    // (see that function's own doc comment for why it lives
+                    // here rather than per-screen).
+                    hud_state::apply_hud_actions,
                 ),
             );
         // BL-82 EM-5.3: the drag-drop slot primitive's global observers (not

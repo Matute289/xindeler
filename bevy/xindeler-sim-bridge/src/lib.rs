@@ -112,6 +112,9 @@ pub use entity_factory::{
     spawn_from_spawning_rules,
 };
 
+mod map;
+pub use map::{MapDataState, MapDataStreamPlugin};
+
 mod oracle;
 pub use oracle::ServerOraclePlugin;
 
@@ -127,6 +130,12 @@ mod player;
 // API surface for a scheduling detail + a pure diagnostic type.
 pub use player::{
     EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
+};
+
+mod social;
+pub use social::{
+    GroupStateCache, PlayerListCache, SocialMirrorPlugin, apply_local_dialogue_response,
+    apply_local_group_actions, mirror_dialogue, mirror_group_state, mirror_player_list,
 };
 
 use std::{

@@ -45,6 +45,8 @@ mod light;
 mod listen_server;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod map_view;
 #[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
 mod perf_log;
@@ -53,6 +55,8 @@ mod player_input;
 mod post;
 mod scene;
 mod smoke;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod social_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod sprite_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]

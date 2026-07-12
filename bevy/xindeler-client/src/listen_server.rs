@@ -38,15 +38,17 @@ use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
     ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
-    PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimTerrainStreamPlugin, boot_embedded_player, boot_test_server,
+    MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin,
+    SimEntityMirrorPlugin, SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player,
+    boot_test_server,
 };
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, map_view::MapViewPlugin,
+    player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
     sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
@@ -197,6 +199,20 @@ impl Plugin for ListenServerPlugin {
         // support (same reason `AtmosphereSyncMessagePlugin` below is
         // already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+        // BL-82 EM-5.8: the social/group/dialogue server-side mirror
+        // (NetPlayerList/NetGroupState/NetDialogue projection + LocalGroupAction/
+        // LocalDialogueResponse action application) — reads/writes
+        // `EmbeddedPlayer`, so it must be added after `PlayerBridgePlugin`
+        // above (registration order doesn't matter for the `.after(tick_sim)`
+        // ordering itself, just for this doc convention). Split into its own
+        // call — the tuple above is already at the 15-plugin ceiling.
+        app.add_plugins(SocialMirrorPlugin);
+        // BL-82 EM-5.5: the one-shot map-data broadcast (background image +
+        // site/POI markers) — reads `EmbeddedPlayer`, so it's added after
+        // `PlayerBridgePlugin`, matching `LodAltStreamPlugin`'s own
+        // registration convention exactly. Split into its own call — the
+        // tuple above is already at the 15-plugin ceiling.
+        app.add_plugins(MapDataStreamPlugin);
         // BL-82 EM-5.4: the chat bridge (broadcasts the embedded player's
         // real chat traffic as `NetChatMsg` + applies `ChatSendRequest`
         // sends back onto that same Client) — reads/writes `EmbeddedPlayer`
@@ -243,6 +259,14 @@ impl Plugin for ListenServerPlugin {
         // globes, buff strip, crosshair, death/respawn, overhead health
         // bars) reading the mirror above. Pure Bevy.
         app.add_plugins(CombatHudViewPlugin);
+        // BL-82 EM-5.8: the social/group/dialogue HUD (player list, group/
+        // party frames, invite banner, v1-minimal NPC dialogue) reading the
+        // `SocialMirrorPlugin` mirror above. Pure Bevy.
+        app.add_plugins(SocialHudViewPlugin);
+        // BL-82 EM-5.5: the minimap + full map screens, reading the
+        // `MapDataStreamPlugin` broadcast above + the already-mirrored local
+        // player `NetPos`/`NetOri`. Pure Bevy.
+        app.add_plugins(MapViewPlugin);
         // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
         // gamepad). Reuses the widget kit `CombatHudViewPlugin` already
         // added (`XindelerUiPlugin`) — no new UI plugin registration needed.
