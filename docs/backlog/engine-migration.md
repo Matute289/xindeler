@@ -52,7 +52,7 @@ so an upgrade waits until the dep tree catches up.
 | **2** | Bevy core + graphics pipeline | ✅ **complete** (PRs #5, #6) |
 | **3** | Voxel meshing, terrain & figures | 🔵 **in progress** — EM-3.1→3.10, 3.8d, 3.8e, 3.9b, 3.10b, 3.11-FH (P-A+P-B), 3.12 all done (PRs #7–#20, #26, #28–#30, #57, #60, #64): **real Xindeler terrain + entities + a controllable character + real animated `.vox` figures (quadruped/humanoid/birds) with REAL equipped weapons/armor/lantern/helmets/glider + vegetation sprites & translucent animated water render in Bevy, with frustum + distance-band culling, a real full-horizon far-mesh (real colour + curvature bend + occlusion dissolve) + camera-collision spring-arm**. Open: EM-3.9c (sprite wind-sway v2, unstarted), EM-3.11-FH Phase C (streamed LOD objects, unstarted), EM-3.11 **[M]** (Matías in-game smoke) 🔵 17 rounds in, all merged — round 17 (PR #71) awaiting his live retest; EM-3.11p (diagonal stutter) not formally closed |
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress, essentially content-complete** — EM-4.1→4.12 all done (PRs #27, #33, #45, #46, #49, #52, #58, #59, #61, #65, #66): headless server shell, transport/login/interest-mgmt, dimension lifecycle+teardown+GC, entity factory, narrative hooks, AI-gateway/AURORA readiness seams, full E2E ORACLE event drill (EM-4.9) all real and passing. **Only open item: EM-4.2's full 24h soak run** (10-min soak-readiness sanity done; the multi-hour run itself not yet executed/reported) |
-| **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
+| **5** | UI (bevy_ui + widget kit), audio & playable parity | ⚪ **design authored** (2026-07-11, Opus — spec/plan/tasks 56); **not blocked**, EM-5.1 + EM-5.2 start-ready; 16 epics (5.2→5.8 unbundled + 3 new); worksheet pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.7 + EM-7.9→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86) |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
@@ -156,17 +156,45 @@ AI coordination note (2026-07-07): Phase 4 must leave the server ready to connec
 | EM-3.11-FH | **Full-horizon LOD terrain — the structural beige-horizon fix** (follow-up to EM-3.11 round-11 fog retune `114a079664` + EM-4.10 P4, which its own commit message flagged as the real fix). `record9.mov` still shows a flat, undetailed distant plateau with a hard edge = "the map ends here". Root cause: the Bevy far-terrain pipeline renders a strictly weaker world than the old engine (heightmap-only `NetLodAlt` → flat synthetic `height_tint`, masked solely by fog) and leans on fog to hide it. **Key finding: the richer LOD data already exists server-side** in `client::WorldData` (`lod_base` colour + `lod_horizon` occlusion, the same struct the old client used) — `send_lod_alt_once` samples only `alt_at` and discards it; a sampling+transport+rendering task, not worldgen. **Phased:** P-A real colour (sample `lod_base`, send `colors`, bake real vertex colour — closes the symptom); P-B `lod_horizon` occlusion + atmospheric silhouette blend + restore near/mid fog clarity (Path-1 custom material vs Path-2 texture-driven spiral = Matías fork); P-C streamed LOD objects (distant trees/houses). **Spec/plan/tasks:** `docs/design/specs/2026-07-11-bl82-full-horizon-lod-terrain-design.md` + `plans/2026-07-11-bl82-full-horizon-lod-terrain-plan.md` + `tasks/50-bl82-full-horizon-lod-terrain-tasks.md`. | ✅ P-A shipped (PR #57). **P-B shipped (PR #60):** Matías's Path decision resolved to the **A+C synthesis** — `client::WorldData::horizon_at` (T49.5) + server-side `lod_horizon` sampling (index-aligned with heights/colors, verified against a real booted world) + a new `ExtendedMaterial<StandardMaterial, FarTerrainExtension>` (`far_terrain_material.rs`/`.wgsl`, T49.6): a vertex-shader world-curvature bend (`drop = bend_strength·(dist − bend_start)²`, zero across the near band by construction) plus a fragment-shader soft horizon-occlusion + fog-colour dissolve, composing with (not replacing) `DistanceFog`. `fog_density` restored `0.00913→0.00667` (T49.7); the round-11 fog-coverage regression test re-expressed as a looser, explicitly-reasoned invariant now that the material does the edge-hiding. Shipped default `bend_strength = 0.00005` (imperceptible near the seam, ~12 m drop by 500 m beyond it — see `far_terrain_material.rs` doc comments for the full reasoning); `0.0`/`XINDELER_FAR_MESH_BEND_STRENGTH` env override both verified as clean disables. Verified: real-world sim-bridge integration test (horizon index-alignment), unit tests (bend formula, per-quad horizon bake), and `XINDELER_SMOKE_FAR_MESH_CAM=1` live renders (confirmed the bend visibly deforms the mesh with no seam at an exaggerated strength; caught and fixed a real bug live — the fragment dissolve was blending toward the dark `sky_color` void tint instead of the pale `fog_color` haze tone). Since then hardened further by EM-3.11 rounds 14-17 (placeholder-chunk colour/blend fixes, PRs #63/#67/#69/#71). P-C (streamed LOD objects) remains ⚪, unstarted. |
 | EM-4.12 **[cleanup]** | **Data-driven-content cleanup** (comprehensive architecture review, 3 MODERATE findings): (1) `xindeler-sim-bridge::oracle`'s `WELL_KNOWN_EVENT_FILENAMES` compiled-in event-name list → `OracleEventManifest` RON asset (`assets/xindeler/oracle_events/manifest.oracle_manifest.ron`, mirrors `PredictiveGcAsset`/T48.6); (2) `far_terrain_material::FAR_MESH_BEND_STRENGTH` + the mesh's `bend_start` → two new `AtmosphereProfile` fields (`far_mesh_bend_strength`/`far_mesh_bend_start_scale`, floored ≥1.0 to preserve the near/far seam invariant) in `default.atmo.ron`, hot-reloadable + per-biome DmEvent-overridable like every sibling atmosphere knob; (3) the `dm_event::bounds::SPAWN_RADIUS` vs. `event_gen_opts()` world-size cross-crate invariant (which broke silently once before) is now pinned by a unit test computing the real half-extent instead of a doc-comment-only cross-reference. | ✅ PR #65 merged, reviewed clean (bevy-migration-reviewer + game-architecture-reviewer, no blockers/majors, only optional nits) |
 
-## Phase 5 — UI (bevy_ui + Feathers), audio & playable parity ⚪
+## Phase 5 — UI (bevy_ui + widget kit), audio & playable parity ⚪
+
+**Design authored 2026-07-11 (Opus).** Full spec/plan/tasks in the private design repo:
+`specs/2026-07-11-bl82-phase5-ui-audio-parity-design.md` + `plans/…-plan.md` +
+`tasks/56-bl82-phase5-ui-audio-parity-tasks.md`. **Not blocked** — Phase 5 is the immediate next phase
+(Phase 3 gate met; Phase 4 content-complete bar the 24h soak). **EM-5.1 (UI foundation) + EM-5.2 (proof
+slice) are start-ready now**; a 7-fork worksheet (plan §Worksheet) gates only later scope.
+
+**Two facts shape the phase:** (1) **Feathers is editor-tooling-only / experimental** — Bevy's own docs
+say NOT to use it for game UI ("copy the code into your project"). So the locked `[Q4]=B` "bevy_ui +
+Feathers" is honoured as **`bevy_ui` + headless `bevy_ui_widgets` + `EditableText` + our own Xindeler
+theme** (Feathers copied-from, not a runtime dep — **zero new UI third-party deps**). (2) **The phase's
+real spine is a new HUD state-mirror replication layer** — the Bevy client mirrors almost no gameplay
+state today (only pos/health/body/cosmetic-loadout), so nearly every screen adds a small read-only `Net*`
+protocol comp + a `xindeler-sim-bridge` projection (the `NetHealth`/`NetLoadout` pattern) — roughly as
+much work as the UI itself, and the dominant `ecs-design-reviewer` surface of the phase.
+
+**EM-5.2→5.8 unbundled** into real per-screen rows; **3 new epics added** (EM-5.14 char select/creation —
+it's the pre-game flow, not a HUD panel; EM-5.15 crafting — 2.4k LOC, too big to bury; EM-5.16
+accessibility/i18n-depth — cross-cutting). Audio/input/settings/parity keep their anchored numbers.
 
 | Task | What | Status |
 |---|---|---|
-| EM-5.1 | UI foundation — Xindeler widget kit + theme on `bevy_ui`+Feathers | ⚪ |
-| EM-5.2→5.8 | HUD screens — health/buffs, hotbar+cooldowns, chat, map, bag/trade, diary, char-select/creation | ⚪ |
-| EM-5.9 | Main menu + server browser / login flow | ⚪ |
-| EM-5.10 | Audio (`bevy_audio`/`bevy_kira_audio`) — existing `.ogg`/spatial | ⚪ |
-| EM-5.11 | Input rebinding (persisted keymap, gamepad) | ⚪ |
-| EM-5.12 | Settings menu (graphics tiers, audio, controls, i18n) | ⚪ |
-| EM-5.13 **[M]** | Full parity play session → **cutover decision** | ⚪ |
+| EM-5.1 | **UI foundation** — Xindeler widget kit (`bevy_ui`+`bevy_ui_widgets`+`EditableText`) + theme (Feathers copied-from) + i18n seam (`.ftl`/parley) + HUD state machine (replaces legacy `Show`) + real notification/toast (subsumes EM-4.8) + UI-scale | ⚪ start-ready |
+| EM-5.2 | **Core combat HUD** — HP/energy globes, poise, XP/level, combo, buff/debuff strip, floating combat text, crosshair, death/respawn + damage vignette, in-world overhead nameplates/bars/bubbles. **The proof slice** (proves the mirror pattern). *New mirror:* `NetEnergy`/`NetPoise`/`NetBuffs`/`NetCombo`/`NetXp` | ⚪ start-ready |
+| EM-5.3 | **Skillbar / hotbar + cooldowns** — 10 slots + keybind labels + icons + cooldown sweeps + stance icons; drag-to-bind. *New mirror:* `NetAbilities`/`NetCooldowns` (none of it reaches the client today) | ⚪ |
+| EM-5.4 | **Chat** — log, input, channel tabs, command completion, mentions. *New:* `NetChatMsg` + client→server send | ⚪ |
+| EM-5.5 | **Map** — minimap (POIs/group) + full world map (sites/markers/zoom-pan). *New:* `NetMapData` | ⚪ |
+| EM-5.6 | **Inventory / bag / trade / loot** — paper-doll loadout, bag grid, tooltips, drag-drop slots, loot feed, overitem prompts, two-party trade. *New:* `NetInventory` (full) + `NetTrade` | ⚪ (trade scope = Q4/Q7) |
+| EM-5.7 | **Diary / skill-trees** — stats + weapon trees + **class trees (data-driven, reuse BL-06)** + abilities tab + SP spend. *New:* `NetSkillSet` | ⚪ |
+| EM-5.8 | **Social / group / dialogue** — player list, party frames, invites; NPC quest/dialogue (v1-minimal, AURORA seam). *New:* `NetPlayerList`/`NetGroup`/`NetDialogue` | ⚪ |
+| EM-5.9 | **Main menu + connect flow** — menu, disclaimer, login (matches EM-4.2c handshake), connecting/loading, credits; **server-browser vs direct-connect = worksheet Q3** | ⚪ (Q3) |
+| EM-5.10 | **Audio** — Kira-based (backend = worksheet Q2); music (explore/combat) + SFX (event mappers over `common::Outcome`) + ambience + spatial + volumes. Frozen manifests reused. Bard instrument bank (252 files) deferred | ⚪ (Q2) |
+| EM-5.11 | **Input rebinding** — port `GameInput` (~90 actions) to a keymap `Res` + `settings.ron` `controls` section (delta-vs-default) + winit→Bevy migration note; **gamepad = worksheet Q5** | ⚪ (Q5) |
+| EM-5.12 | **Settings + esc menu** — pause menu + all tabs (interface, video/**exposes existing `GraphicsTier`**, sound, controls/rebind, gameplay, chat, language, networking, accessibility); extends `XindelerSettings::save()` | ⚪ |
+| EM-5.13 **[M]** | **Full parity play session → cutover decision** — Matías plays against the concrete parity checklist (spec §8); all `[core]` pass → retire legacy client (gate into Phase 6 / EM-6.4) | ⚪ terminal gate |
+| EM-5.14 | **Character select + creation** *(new row — pre-game flow, was buried in the 5.2→5.8 bundle)* — char list + 3D preview + creation wizard (reuse the 2026-06-12 design: Body→Appearance→Class→Alignment→Background→Finish). *New:* `NetCharList` + creation submit | ⚪ |
+| EM-5.15 | **Crafting** *(new row — 2.4k LOC, unbundled)* — recipes/search/categories + ingredient slots + craft; **salvage/repair/modular = worksheet Q4**. *New:* `NetRecipes` (reuses `NetInventory`) | ⚪ (Q4) |
+| EM-5.16 | **Accessibility, UI scaling & i18n depth** *(new row — cross-cutting)* — subtitles (with 5.10), reduced-flashing, scaling, **full i18n coverage = worksheet Q6** | ⚪ (Q6) |
 
 ## Phase 6 — Upstream-sync drills & hardening ⚪
 
