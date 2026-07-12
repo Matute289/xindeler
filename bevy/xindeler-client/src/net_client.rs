@@ -46,9 +46,10 @@ use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -111,6 +112,10 @@ impl Plugin for NetClientPlugin {
             // the EM-5.2 mirror off `NetLocalPlayer` — verbatim reuse, same
             // as every other consumer plugin in this list.
             CombatHudViewPlugin,
+            // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
+            // gamepad) — reuses `CombatHudViewPlugin`'s own `XindelerUiPlugin`
+            // registration, same as every other consumer plugin in this list.
+            ControlsScreenPlugin,
             // BL-82 EM-5.4: the chat panel — verbatim reuse too. The
             // RECEIVE-side code (NetChatMsg -> scrollback) is wire-shape
             // correct over this real transport, but currently moot in

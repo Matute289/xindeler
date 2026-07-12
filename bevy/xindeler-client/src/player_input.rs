@@ -157,12 +157,16 @@ fn toggle_camera_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ThirdPer
     }
 }
 
-/// Reads WASD / Space / Ctrl and the camera yaw, writes [`LocalPlayerInput`] in
-/// SIM axes. Movement is camera-relative and only active while the cursor is
-/// grabbed (same gate the fly-cam look uses) so typing/UI later won't drive the
-/// player. Jump = Space; look = the camera's forward, converted to sim axes.
+/// Reads the [`GameInput::MoveForward`]/`MoveBack`/`MoveLeft`/`MoveRight`/
+/// `Jump` actions (BL-82 EM-5.11: via [`xindeler_input::ActionState`] —
+/// keyboard/mouse AND gamepad both drive these the same way, so rebinding
+/// either device changes the in-game effect immediately) and the camera
+/// yaw, writes [`LocalPlayerInput`] in SIM axes. Movement is camera-relative
+/// and only active while the cursor is grabbed (same gate the fly-cam look
+/// uses) so typing/UI later won't drive the player. Look = the camera's
+/// forward, converted to sim axes.
 fn gather_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    action_state: Res<xindeler_input::ActionState>,
     cursor_options: Query<&CursorOptions, With<PrimaryWindow>>,
     cameras: Query<&Transform, With<FlyCam>>,
     mut input: ResMut<LocalPlayerInput>,
@@ -182,18 +186,26 @@ fn gather_input(
 
     let mut wish_bevy = Vec3::ZERO;
     if grabbed {
-        if keys.pressed(KeyCode::KeyW) {
+        if action_state.pressed(xindeler_input::GameInput::MoveForward) {
             wish_bevy += fwd;
         }
-        if keys.pressed(KeyCode::KeyS) {
+        if action_state.pressed(xindeler_input::GameInput::MoveBack) {
             wish_bevy -= fwd;
         }
-        if keys.pressed(KeyCode::KeyD) {
+        if action_state.pressed(xindeler_input::GameInput::MoveRight) {
             wish_bevy += right;
         }
-        if keys.pressed(KeyCode::KeyA) {
+        if action_state.pressed(xindeler_input::GameInput::MoveLeft) {
             wish_bevy -= right;
         }
+        // BL-82 EM-5.11: the gamepad left stick contributes an analog
+        // direction on top of any digital keys held — same "full-speed once
+        // past deadzone" feel as WASD below (the subsequent
+        // `normalize_or_zero()` collapses any non-zero combined vector to a
+        // unit direction either way); partial-speed analog throttling
+        // (walk vs. run off stick magnitude) is a documented v1 follow-up,
+        // not silently dropped.
+        wish_bevy += fwd * action_state.move_axis.y + right * action_state.move_axis.x;
     }
     let wish_bevy = wish_bevy.normalize_or_zero();
 
@@ -205,7 +217,7 @@ fn gather_input(
 
     *input = LocalPlayerInput {
         move_dir,
-        jump: grabbed && keys.pressed(KeyCode::Space),
+        jump: grabbed && action_state.pressed(xindeler_input::GameInput::Jump),
         look,
     };
 }

@@ -44,9 +44,10 @@ use xindeler_sim_bridge::{
 
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, player_input::PlayerInputPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, player_input::PlayerInputPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -237,6 +238,10 @@ impl Plugin for ListenServerPlugin {
         // globes, buff strip, crosshair, death/respawn, overhead health
         // bars) reading the mirror above. Pure Bevy.
         app.add_plugins(CombatHudViewPlugin);
+        // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
+        // gamepad). Reuses the widget kit `CombatHudViewPlugin` already
+        // added (`XindelerUiPlugin`) — no new UI plugin registration needed.
+        app.add_plugins(ControlsScreenPlugin);
         // BL-82 EM-5.4: the chat panel (scrollback, channel tabs, input box)
         // reading `NetChatMsg`/writing `ChatSendRequest`. Pure Bevy.
         app.add_plugins(ChatViewPlugin);

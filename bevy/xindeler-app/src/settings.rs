@@ -41,6 +41,19 @@ pub struct XindelerSettings {
     /// below (not `#[derive(Default)]`) because the correct default is
     /// `1.0`, not `f32`'s own `0.0` (which would render an invisible HUD).
     pub ui_scale: f32,
+    /// BL-82 EM-5.11 (T56.12) — the `controls` section: keyboard/mouse
+    /// keymap + gamepad bindings (buttons/chords/axes), persisted as a delta
+    /// against each sub-map's own defaults (see `xindeler_input::KeyMap` and
+    /// its `keybind`/`gamepad` submodules for the delta-serde shape).
+    /// `#[serde(default)]` on this struct + `KeyMap: Default` together mean
+    /// an old `settings.ron` missing this key entirely still loads, getting
+    /// the full stock keymap — same backward-compat guarantee `ui_scale`
+    /// established for itself.
+    pub controls: xindeler_input::KeyMap,
+    /// BL-82 EM-5.11 — closes the `camera.rs` `TODO(EM-5.11)`: fly-cam
+    /// speed/fast-multiplier/mouse-sensitivity move out of a hardcoded
+    /// `FlyCam::default()` and into user-facing, persisted settings.
+    pub camera: CameraSettings,
 }
 
 impl Default for XindelerSettings {
@@ -48,6 +61,37 @@ impl Default for XindelerSettings {
         Self {
             graphics: GraphicsSettings::default(),
             ui_scale: 1.0,
+            controls: xindeler_input::KeyMap::default(),
+            camera: CameraSettings::default(),
+        }
+    }
+}
+
+/// Camera-rig tunables a player expects to control (mouse sensitivity, debug
+/// fly-cam speed). Kept here (not on `FlyCam` itself) so `spawn_camera`
+/// reads them the same way it already reads `GraphicsSettings` — a single
+/// persisted source, not a hardcoded struct default.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CameraSettings {
+    /// Free fly-cam base speed, m/s (debug camera only — the real gameplay
+    /// camera follows the player, it doesn't use this).
+    pub fly_speed: f32,
+    /// Shift-held speed multiplier on [`Self::fly_speed`].
+    pub fly_fast_multiplier: f32,
+    /// Mouse-look sensitivity, radians/pixel — applies to BOTH the debug
+    /// fly-cam and the real third-person orbit (both read the same `FlyCam`
+    /// yaw/pitch integration, `player_input::third_person_camera`'s doc
+    /// comment).
+    pub mouse_sensitivity: f32,
+}
+
+impl Default for CameraSettings {
+    fn default() -> Self {
+        Self {
+            fly_speed: 12.0,
+            fly_fast_multiplier: 4.0,
+            mouse_sensitivity: 0.002,
         }
     }
 }
@@ -379,5 +423,48 @@ mod tests {
             settings.graphics.experimental,
             ExperimentalGraphics::default()
         );
+    }
+
+    /// BL-82 EM-5.11 (T56.12): a settings.ron predating the `controls`
+    /// section entirely still loads and gets the FULL stock keymap (not an
+    /// empty/broken one) — same backward-compat guarantee `ui_scale` and
+    /// `graphics` each already established for themselves.
+    #[test]
+    fn old_settings_files_default_controls_to_the_stock_keymap() {
+        let text = "(graphics: (taa: false, shadow_cascades: 2))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.controls, xindeler_input::KeyMap::default());
+    }
+
+    /// A settings.ron with real rebind customizations round-trips through
+    /// save/load intact (the actual end-to-end persistence path EM-5.11
+    /// needs: rebind → restart → the customization survives).
+    #[test]
+    fn rebound_controls_round_trip_through_ron() {
+        use xindeler_input::{GameInput, KeyOrMouse};
+
+        let mut settings = XindelerSettings::default();
+        settings.controls.keyboard.modify_binding(
+            GameInput::Jump,
+            KeyOrMouse::Key(bevy::input::keyboard::KeyCode::KeyZ),
+        );
+        let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
+            .expect("settings serialize");
+        let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
+        assert_eq!(
+            round_tripped.controls.keyboard.get_binding(GameInput::Jump),
+            Some(KeyOrMouse::Key(bevy::input::keyboard::KeyCode::KeyZ))
+        );
+    }
+
+    /// BL-82 EM-5.11: a settings.ron predating `camera` entirely still loads
+    /// and gets the same defaults `camera.rs`'s hardcoded `FlyCam::default()`
+    /// used to hold — this is a value-preserving move, not a behavior change.
+    #[test]
+    fn old_settings_files_default_camera_settings() {
+        let text = "(graphics: (taa: false, shadow_cascades: 2))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.camera, CameraSettings::default());
+        assert_eq!(settings.camera.mouse_sensitivity, 0.002);
     }
 }
