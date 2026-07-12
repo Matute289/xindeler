@@ -161,6 +161,21 @@ struct LodZoneMeshes {
     entities: HashMap<[i32; 2], Entity>,
 }
 
+/// A single shared [`FarTerrainMaterial`] asset reused by EVERY LOD-object
+/// zone mesh (bevy-migration-reviewer / rust-perf-reviewer finding, BL-82
+/// EM-3.11-FH Phase C review): [`bend_uniforms`] derives its output only from
+/// global inputs (`CullingConfig` + `AtmosphereController`), never anything
+/// per-zone, so every zone's material would otherwise be created with
+/// byte-identical field values — N separate GPU assets for one logical
+/// material. Sharing one handle across all zones keeps BOTH the GPU resource
+/// count AND [`crate::far_terrain_material::sync_far_terrain_material`]'s
+/// per-frame live-uniform-sync cost bounded independent of how many zones are
+/// streamed (that system dedupes by asset id — see its own doc comment —
+/// which is what actually turns "one write per entity" into "one write per
+/// unique material" once entities share a handle).
+#[derive(Resource)]
+struct LodZoneMaterial(Handle<FarTerrainMaterial>);
+
 /// Reads [`NetLodZone`]/[`NetLodZoneRemove`] and keeps [`LodZoneMeshes`] in
 /// sync: a new/updated zone gets its stale mesh (if any) despawned and a
 /// fresh one baked+spawned; a removed zone's mesh is despawned outright.
@@ -173,12 +188,19 @@ fn receive_lod_zones(
     atmosphere: Option<Res<AtmosphereController>>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut materials: ResMut<Assets<FarTerrainMaterial>>,
+    shared_material: Option<Res<LodZoneMaterial>>,
 ) {
     for msg in remove_reader.read() {
         if let Some(entity) = state.entities.remove(&msg.key) {
             commands.entity(entity).try_despawn();
         }
     }
+
+    // Reused across every zone processed THIS call (and, once the resource
+    // insert lands, every subsequent frame too) — see [`LodZoneMaterial`]'s
+    // doc comment for why one shared handle is correct here (no per-zone
+    // variation in the material's own fields).
+    let mut material_handle = shared_material.as_ref().map(|m| m.0.clone());
 
     for msg in zone_reader.read() {
         if let Some(old) = state.entities.remove(&msg.key) {
@@ -206,14 +228,11 @@ fn receive_lod_zones(
             "EM-3.11-FH Phase C: baked + spawned an LOD-object zone mesh"
         );
 
-        let (bend_strength, bend_start, fog_color, sky_color) =
-            bend_uniforms(&culling, atmosphere.as_deref());
-
-        let entity = commands
-            .spawn((
-                LodZoneMesh { key: msg.key },
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(materials.add(FarTerrainMaterial {
+        let handle = material_handle
+            .get_or_insert_with(|| {
+                let (bend_strength, bend_start, fog_color, sky_color) =
+                    bend_uniforms(&culling, atmosphere.as_deref());
+                let handle = materials.add(FarTerrainMaterial {
                     base: StandardMaterial {
                         base_color: Color::WHITE,
                         cull_mode: None, // simplified geometry, winding not guaranteed both ways
@@ -228,7 +247,17 @@ fn receive_lod_zones(
                         sky_color,
                         ..default()
                     },
-                })),
+                });
+                commands.insert_resource(LodZoneMaterial(handle.clone()));
+                handle
+            })
+            .clone();
+
+        let entity = commands
+            .spawn((
+                LodZoneMesh { key: msg.key },
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(handle),
                 Transform::IDENTITY, // positions are already absolute world-space
                 Visibility::Visible,
             ))
@@ -517,16 +546,24 @@ fn push_box_walls(
 /// Bakes every object in a zone into ONE combined [`BevyMesh`], or `None` if
 /// the objects yield no geometry (empty input, already guarded by the
 /// caller) or the result would exceed [`MAX_TRIANGLES_PER_ZONE`] (a defensive
-/// cap independent of the server's own [`crate::lod_objects`]-sibling budget
-/// — see that constant's doc comment).
+/// cap independent of the server's own `xindeler_sim_bridge::lod_objects::
+/// LOD_ZONE_MAX_OBJECTS` budget — a sibling CRATE, not reachable from an
+/// intra-doc link here, see that constant's own doc comment).
 fn zone_mesh_from_objects(zone_key: [i32; 2], objects: &[Object]) -> Option<BevyMesh> {
     let zone_origin = Vec2::new(to_wpos(zone_key[0]) as f32, to_wpos(zone_key[1]) as f32);
 
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut horizons: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    // With-capacity hints (rust-perf-reviewer minor finding): worst-case
+    // structures contribute 36 vertices/12 triangles each (see
+    // `zone_mesh_from_objects`'s own push-site below), so this is a safe
+    // upper-bound estimate — cheap insurance against Rust's doubling growth
+    // strategy reallocating+copying several times per zone bake. Not a hot
+    // per-frame path (baked once per zone arrival), but a free win.
+    let estimated_vertices = objects.len() * 36;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(estimated_vertices);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(estimated_vertices);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(estimated_vertices);
+    let mut horizons: Vec<[f32; 4]> = Vec::with_capacity(estimated_vertices);
+    let mut indices: Vec<u32> = Vec::with_capacity(estimated_vertices);
 
     for object in objects {
         if positions.len() / 3 > MAX_TRIANGLES_PER_ZONE {
@@ -779,5 +816,42 @@ mod tests {
     fn real_color_is_used_over_fallback() {
         let colored_house = house(0, 0, 0);
         assert_ne!(object_roof_color(&colored_house), STRUCTURE_ROOF_FALLBACK);
+    }
+
+    /// bevy-migration-reviewer finding: [`MAX_TRIANGLES_PER_ZONE`] was only
+    /// asserted by doc comment, never exercised by a test. A zone with more
+    /// trees than the budget allows (4 triangles/tree) must produce a mesh
+    /// bounded at (approximately) the cap — truncated, not unbounded — this
+    /// pins the actual enforcement, not just the intent. The check happens
+    /// BEFORE each object is baked, so the result can overshoot by at most
+    /// one object's worth of geometry (documented slop, immaterial at this
+    /// budget) — asserted as an upper bound with headroom, not an exact
+    /// equality, so this test doesn't become brittle if that slop is ever
+    /// tightened.
+    #[test]
+    fn zone_mesh_is_truncated_at_the_triangle_budget() {
+        // 4 triangles/tree; comfortably past MAX_TRIANGLES_PER_ZONE (20_000)
+        // once baked in full.
+        let objects: Vec<Object> = (0..6_000)
+            .map(|i| tree((i % 500) as i16, (i / 500) as i16, 0))
+            .collect();
+        let mesh = zone_mesh_from_objects([0, 0], &objects).expect("non-empty");
+        let VertexAttributeValues::Float32x3(positions) = mesh
+            .attribute(BevyMesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+        else {
+            panic!("expected Float32x3 positions");
+        };
+        let triangle_count = positions.len() / 3;
+        assert!(
+            triangle_count <= MAX_TRIANGLES_PER_ZONE + 12, /* +1 structure's worth of slop,
+                                                            * generously */
+            "must be bounded near MAX_TRIANGLES_PER_ZONE, got {triangle_count} triangles"
+        );
+        assert!(
+            triangle_count < 6_000 * 4,
+            "must actually have truncated, not baked every one of the 6000 trees' worth of \
+             geometry (24000 triangles)"
+        );
     }
 }

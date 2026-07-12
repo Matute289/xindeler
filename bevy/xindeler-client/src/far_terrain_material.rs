@@ -238,18 +238,32 @@ impl Plugin for FarTerrainMaterialPlugin {
 }
 
 /// Every frame, pushes the LIVE sun direction + atmosphere fog/sky colours
-/// into EVERY [`FarTerrainMaterial`] asset currently in use — the far-terrain
-/// sheet (`far_terrain::FarTerrainMesh`) AND, as of BL-82 EM-3.11-FH Phase C,
-/// any per-zone LOD-object mesh (`crate::lod_objects`) that reuses this exact
-/// material so distant trees/structures dissolve into the SAME live haze the
-/// terrain does (`bend_strength`/`bend_start` are set once at material
-/// creation — `far_terrain::retile_far_mesh` for the sheet,
-/// `lod_objects::spawn_zone_mesh` for a zone — and left alone here; they only
-/// change on a rare re-tile/re-spawn, not every frame). No longer filtered to
+/// into EVERY unique [`FarTerrainMaterial`] asset currently in use — the
+/// far-terrain sheet (`far_terrain::FarTerrainMesh`) AND, as of BL-82
+/// EM-3.11-FH Phase C, the ONE shared material every LOD-object zone mesh
+/// reuses (`crate::lod_objects::LodZoneMaterial`) so distant trees/structures
+/// dissolve into the SAME live haze the terrain does (`bend_strength`/
+/// `bend_start` are set once at material creation — `far_terrain::
+/// retile_far_mesh` for the sheet, `lod_objects::receive_lod_zones` for the
+/// shared LOD material — and left alone here; they only change on a rare
+/// re-tile/first-zone-spawn, not every frame). No longer filtered to
 /// `With<far_terrain::FarTerrainMesh>` (Phase C review: any entity using this
 /// material wants the live sync, regardless of which system spawned it) — a
 /// strictly broader, still-correct query, since the terrain sheet's own
 /// behaviour is unchanged.
+///
+/// ## Dedupes by asset id (rust-perf-reviewer finding, BL-82 EM-3.11-FH Phase
+/// C review)
+/// Every LOD-object zone entity's [`MeshMaterial3d`] points at the SAME
+/// shared handle (`lod_objects::LodZoneMaterial`) — without deduping, this
+/// system would call [`Assets::get_mut`] once per ENTITY (potentially dozens
+/// of zones), and `get_mut` unconditionally fires an `AssetEvent::Modified`
+/// regardless of whether the write actually changed anything, forcing
+/// `bevy_pbr`'s extraction/GPU-upload path to reprocess that asset that many
+/// times a frame for no benefit. Tracking already-synced [`AssetId`]s this
+/// call keeps the real cost at one write per UNIQUE material (today: the
+/// terrain sheet + the one shared LOD material = at most 2), independent of
+/// how many entities — zone meshes included — reference them.
 ///
 /// Falls back to [`AtmosphereProfile::default`]'s colours (via
 /// `FarTerrainExtension::default`, never mutated) when no
@@ -286,7 +300,11 @@ fn sync_far_terrain_material(
         },
     );
 
+    let mut synced = bevy::platform::collections::HashSet::new();
     for handle in &far_meshes {
+        if !synced.insert(handle.0.id()) {
+            continue; // already wrote this exact asset this frame
+        }
         if let Some(mut material) = materials.get_mut(&handle.0) {
             material.extension.sun_direction = sun_direction.extend(0.0);
             material.extension.fog_color = fog_color;

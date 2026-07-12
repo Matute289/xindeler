@@ -63,6 +63,16 @@ use serde::{Deserialize, Serialize};
 /// that (giving headroom for that server-side cap to grow later without
 /// touching this constant) while still bounding worst-case memory use to
 /// something a client can always safely allocate.
+///
+/// ## What this does NOT cover (bevy-migration-reviewer finding)
+/// This only bounds the DECOMPRESSED size — the amplification vector. The
+/// COMPRESSED wire size (`NetLodZone::objects.len()` itself, i.e. the bytes
+/// actually received before decompression even starts) is unbounded at this
+/// layer; a peer could still send a large, non-amplifying blob, bounded only
+/// by whatever the transport (replicon/quinnet) itself enforces as a max
+/// message size — that is that layer's job, not this one's. "Hardened
+/// against a decompression bomb" is not the same claim as "hardened against
+/// every oversized payload."
 const MAX_DECOMPRESSED_ZONE_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
 /// Server → client: a batch of LOD objects (trees/structures) for zone `key`
