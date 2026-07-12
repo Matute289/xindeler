@@ -104,7 +104,7 @@ mod combat_hud;
 pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 
 mod hotbar;
-pub use hotbar::{HotbarMirrorPlugin, apply_local_hotbar_assignment, mirror_hotbar_state};
+pub use hotbar::{HotbarMirrorPlugin, apply_hotbar_assignment_requests, mirror_hotbar_state};
 
 mod entity_factory;
 pub use entity_factory::{

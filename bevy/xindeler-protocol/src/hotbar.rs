@@ -19,20 +19,32 @@
 //! dump" (spec §3.2): this is the compact shape a hotbar icon needs, not the
 //! sim's own `ActiveAbilities`/`AbilityPool` structs.
 //!
-//! ## The write half: real drag-to-assign, the listen-server posture
-//! [`AssignHotbarSlot`] is the real replicon client message (wire shape for a
-//! FUTURE genuinely-remote client, registered like `PlayerInput`/EM-5.4's
-//! `ChatSendRequest`) — no server-side handler exists for it yet (same
-//! "future-remote-ready, dormant today" posture EM-5.4/EM-5.8 already
-//! established for their own wire messages). [`LocalAssignHotbarSlot`] is
-//! the one that actually drives gameplay TODAY: a plain in-process Bevy
-//! message the client's hotbar UI writes directly, drained by
-//! `xindeler-sim-bridge::hotbar::apply_local_hotbar_assignment`, which calls
-//! straight into the embedded player's real `client::Client::change_ability`
-//! — a genuine client->server network send over the loopback socket, never
-//! a direct ECS write (isolation-law rule 4) — exactly EM-5.8's
-//! `LocalGroupAction`/`apply_local_group_actions` precedent
-//! (`bevy/xindeler-sim-bridge/src/social.rs`).
+//! ## The write half: real drag-to-assign (BL-82 EM-5.3 follow-up)
+//! [`AssignHotbarSlot`] is the real replicon client message the hotbar UI
+//! writes directly (registered like `PlayerInput`/EM-5.4's `ChatSendRequest`
+//! via `add_client_message`) — for a genuinely-remote client on
+//! `xindeler-server-app` it travels the real wire; for the listen-server's
+//! own embedded player, `bevy_replicon` locally echoes it as
+//! `FromClient<AssignHotbarSlot>` with `client_id == ClientId::Server`
+//! (`ClientMessageAppExt::add_client_message`'s own documented behaviour) —
+//! the EXACT same single-message shape `InventoryActionRequest`/
+//! `TradeInviteRequest` already use, not a second parallel local-only
+//! message. `xindeler-sim-bridge::hotbar::apply_hotbar_assignment_requests`
+//! is the one server-side handler for both cases: it resolves the acting
+//! sim entity via `xindeler-sim-bridge::inventory::resolve_client_entity`
+//! (real connection first via `PlayerDimensionSession`, embedded-player
+//! fallback ONLY for `ClientId::Server`) and re-emits the request as a
+//! `common::event::ChangeAbilityEvent` through the sim's own public event
+//! bus — mirroring `apply_inventory_action_requests`'s exact shape (isolation
+//! -law rule 4: sim writes via public APIs only).
+//!
+//! Earlier versions of this module also had a `LocalAssignHotbarSlot`
+//! plain-Bevy-message shortcut (modeled after EM-5.8's `LocalGroupAction`)
+//! that resolved the acting client PURELY via the embedded-player shortcut,
+//! ignoring `client_id` entirely — the exact anti-pattern EM-5.6 was blocked
+//! on and fixed. It has been removed in favour of the single-message
+//! pattern above (BL-82 EM-5.3 follow-up, matching EM-5.6's
+//! already-reviewed-and-accepted fix).
 
 use bevy::ecs::{component::Component, message::Message};
 use serde::{Deserialize, Serialize};
@@ -107,20 +119,12 @@ pub struct NetCooldownEntry {
 pub struct NetCooldowns(pub Vec<NetCooldownEntry>);
 
 /// Client -> server: bind an ability into a hotbar auxiliary slot (BL-82
-/// EM-5.3 drag-to-assign). The real replicon wire shape for a FUTURE
-/// genuinely-remote client — see this module's own doc comment for why the
-/// listen-server path does not read this today (`LocalAssignHotbarSlot`
-/// does).
+/// EM-5.3 drag-to-assign). The real replicon wire message, handled server-side
+/// by `xindeler-sim-bridge::hotbar::apply_hotbar_assignment_requests` for
+/// both a genuinely-remote client AND the listen-server's own local echo —
+/// see this module's own doc comment.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssignHotbarSlot {
-    pub slot: u32,
-    pub ability: NetAuxiliaryAbility,
-}
-
-/// The in-process listen-server counterpart of [`AssignHotbarSlot`] — see
-/// this module's own doc comment.
-#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocalAssignHotbarSlot {
     pub slot: u32,
     pub ability: NetAuxiliaryAbility,
 }
@@ -198,8 +202,9 @@ mod tests {
     }
 
     /// `AssignHotbarSlot` travels client -> server (surfacing as
-    /// `FromClient<_>`) — the wire-shape half of drag-to-assign for a future
-    /// remote client (same posture as EM-5.4/EM-5.8's own wire messages).
+    /// `FromClient<_>`) — the wire-shape half of drag-to-assign, now handled
+    /// server-side by `xindeler-sim-bridge::hotbar::
+    /// apply_hotbar_assignment_requests` (BL-82 EM-5.3 follow-up).
     #[test]
     fn assign_hotbar_slot_reaches_server() {
         let mut server_app = new_app();
