@@ -278,6 +278,34 @@ impl SharedTerrain {
     }
 }
 
+/// Unlike [`SharedTerrain`]'s `boom_cast` impl above (listen-server-only
+/// third-person camera collision), this method has no listen-server-specific
+/// dependency, so it lives in its own, UNGATED `impl` block — `SharedTerrain`
+/// itself (and `TerrainStreamPlugin`) is installed under BOTH the
+/// `listen-server` and `net-client` features (`net_client.rs` also adds
+/// `TerrainStreamPlugin` + `SpriteViewPlugin`), so a caller compiled under
+/// either feature (e.g. `sprite_view`) needs this available regardless.
+impl SharedTerrain {
+    /// Returns the already-decoded chunk at `key`, if this store has received
+    /// it (BL-82 EM-3.9c). Lets other client-side consumers reuse the SAME
+    /// decoded `TerrainChunk` this store already holds instead of
+    /// independently lz4-decompressing + bincode-deserializing the same
+    /// `CompressedChunk` bytes a SECOND time — `sprite_view`'s per-chunk
+    /// sprite build used to do exactly that (its own module docs called it
+    /// out as an accepted-but-unresolved v1 cost, deferred by EM-3.9b to this
+    /// epic). Cheap: one read-lock + one `Arc::clone`, no re-decode.
+    ///
+    /// `None` means "not (yet) in this store" — could be a chunk that hasn't
+    /// streamed in yet, one this client never received, or one removed since.
+    /// Callers that also hold the original `CompressedChunk` message should
+    /// fall back to `CompressedChunk::decode` in that case rather than
+    /// treating it as a hard error (this store's insertion timing relative to
+    /// another system's own message read is not a contract this method makes).
+    pub(crate) fn get_chunk(&self, key: [i32; 2]) -> Option<Arc<TerrainChunk>> {
+        self.0.read().ok()?.chunks.get(&key).cloned()
+    }
+}
+
 /// Where the spectator camera should look — the anchor world position, mapped
 /// into Bevy space. Set once the first [`TerrainAnchor`] arrives; consumed by
 /// [`crate::camera`]'s listen-server camera placement.
@@ -818,6 +846,33 @@ mod tests {
                 .get(VVec2::new(0, 0))
                 .is_none(),
             "a RemoveChunk must despawn the chunk's mesh entity"
+        );
+    }
+
+    /// BL-82 EM-3.9c: [`SharedTerrain::get_chunk`] returns the already-decoded
+    /// chunk once `receive_chunks` has processed it (so `sprite_view` can
+    /// reuse it instead of decoding the same `CompressedChunk` bytes again),
+    /// and `None` for a key this store never received.
+    #[test]
+    fn shared_terrain_get_chunk_reuses_the_decoded_store() {
+        let mut app = test_app();
+        app.world_mut()
+            .write_message(CompressedChunk::encode([0, 0], &solid_chunk(4)));
+        drain_until(&mut app, 500, |app| {
+            app.world()
+                .resource::<SharedTerrain>()
+                .get_chunk([0, 0])
+                .is_some()
+        });
+
+        let shared = app.world().resource::<SharedTerrain>();
+        assert!(
+            shared.get_chunk([0, 0]).is_some(),
+            "a streamed chunk must be fetchable from the shared store"
+        );
+        assert!(
+            shared.get_chunk([99, 99]).is_none(),
+            "an unstreamed key must miss, not fabricate a chunk"
         );
     }
 
