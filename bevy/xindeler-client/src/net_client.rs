@@ -45,9 +45,10 @@ use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, combat_hud::CombatHudViewPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
+    lod::LodCullingPlugin, map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
     social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
     terrain_stream::TerrainStreamPlugin,
 };
@@ -120,6 +121,34 @@ impl Plugin for NetClientPlugin {
             // gameplay path is a follow-up, see `social_hud`'s own module
             // doc comment).
             SocialHudViewPlugin,
+            // BL-82 EM-5.5: the minimap + full map screens — verbatim reuse,
+            // same as every other consumer plugin in this list. Consumer-
+            // only here: `MapDataStreamPlugin` (the `NetMapData` producer) is
+            // an `EmbeddedPlayer`-reading listen-server-only plugin (mirrors
+            // `LodAltStreamPlugin`'s own exact limitation, module doc
+            // comment) — this spectator-only net-client mode never boots an
+            // `EmbeddedPlayer`, so the map screens simply stay empty here
+            // (spec §3.2 "degrade clean"), same as the far-terrain mesh does
+            // today.
+            MapViewPlugin,
+            // BL-82 EM-5.11: the input-rebinding screen (keyboard/mouse +
+            // gamepad) — reuses `CombatHudViewPlugin`'s own `XindelerUiPlugin`
+            // registration, same as every other consumer plugin in this list.
+            ControlsScreenPlugin,
+            // BL-82 EM-5.4: the chat panel — verbatim reuse too. The
+            // RECEIVE-side code (NetChatMsg -> scrollback) is wire-shape
+            // correct over this real transport, but currently moot in
+            // practice: `xindeler-server-app` (the server this path
+            // connects to) has no chat bridge wired up at all yet — a
+            // disclosed gap, see `xindeler-sim-bridge::chat`'s own module
+            // doc comment and `docs/backlog/engine-migration.md`'s EM-5.4
+            // row. SENDING is ALSO a no-op until EM-4.2c's login lands a
+            // controllable session here (there is no
+            // `xindeler-sim-bridge`/embedded player on this path at all —
+            // see this module's own doc comment), so a typed line simply
+            // queues a `ChatSendRequest` nobody answers yet, degrading
+            // clean rather than panicking.
+            ChatViewPlugin,
         ));
     }
 }

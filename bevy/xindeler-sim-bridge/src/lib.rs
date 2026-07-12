@@ -97,6 +97,9 @@
 //! `docs/design/specs/2026-07-10-bl82-wave3-regression-fixes-design.md` Finding
 //! F for why this comment needed correcting.
 
+mod chat;
+pub use chat::{ChatBridgePlugin, apply_chat_send_requests, broadcast_embedded_chat};
+
 mod combat_hud;
 pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 
@@ -105,6 +108,9 @@ pub use entity_factory::{
     NextSpawnCorrelationId, PendingDimensionAttribution, apply_pending_entity_template_spawns,
     spawn_from_spawning_rules,
 };
+
+mod map;
+pub use map::{MapDataState, MapDataStreamPlugin};
 
 mod oracle;
 pub use oracle::ServerOraclePlugin;

@@ -4,6 +4,7 @@ members = [
     "bevy/xindeler-app",
     "bevy/xindeler-client",
     "bevy/xindeler-dimensions",
+    "bevy/xindeler-input",
     "bevy/xindeler-oracle-host",
     "bevy/xindeler-protocol",
     "bevy/xindeler-render-voxel",

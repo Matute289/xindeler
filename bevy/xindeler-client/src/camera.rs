@@ -114,7 +114,12 @@ impl Plugin for CameraRigPlugin {
                 (cursor_grab, fly_cam_look, fly_cam_move)
                     .chain()
                     .in_set(FlyCamSet)
-                    .in_set(GameplaySet),
+                    .in_set(GameplaySet)
+                    // BL-82 EM-5.11: `fly_cam_look` reads `ActionState` (the
+                    // gamepad look stick) — order after it resolves this
+                    // frame's real gamepad state rather than reading a
+                    // frame-stale value.
+                    .after(xindeler_input::InputResolveSet),
             );
     }
 }
@@ -139,8 +144,11 @@ pub struct FlyCam {
     pitch_carry: f32,
 }
 
-// TODO(EM-5.11): speed/sensitivity belong in XindelerSettings (user-facing
-// input settings); hardcoded defaults are Phase-2 fly-cam scaffolding only.
+// BL-82 EM-5.11: speed/sensitivity now come from `XindelerSettings::camera`
+// (see `spawn_camera`) — this `Default` impl is the FALLBACK when no
+// settings are threaded through (e.g. a hand-built `FlyCam` in a test), kept
+// numerically identical to the values `CameraSettings::default()` also uses
+// so nothing changes for a fresh install.
 impl Default for FlyCam {
     fn default() -> Self {
         Self {
@@ -257,6 +265,13 @@ fn spawn_camera(
         FlyCam {
             yaw,
             pitch,
+            // BL-82 EM-5.11: sourced from the persisted `CameraSettings`
+            // (closes the `TODO(EM-5.11)` this field used to carry) — a
+            // fresh install's values are numerically identical to the old
+            // hardcoded defaults, so this is a value-preserving move.
+            speed: settings.camera.fly_speed,
+            fast_multiplier: settings.camera.fly_fast_multiplier,
+            sensitivity: settings.camera.mouse_sensitivity,
             ..Default::default()
         },
     ));
@@ -308,8 +323,17 @@ fn cursor_grab(
     }
 }
 
+/// BL-82 EM-5.11 — gamepad right-stick look rate, radians/second at full
+/// deflection. A held analog value (unlike a one-shot mouse delta) needs a
+/// per-second rate scaled by `time.delta_secs()`, not a per-pixel
+/// sensitivity — chosen as a moderate, controllable turn speed (a full
+/// second at max deflection turns a bit less than a half-circle).
+const GAMEPAD_LOOK_RATE_RAD_S: f32 = 2.2;
+
 fn fly_cam_look(
     motion: Res<AccumulatedMouseMotion>,
+    action_state: Res<xindeler_input::ActionState>,
+    time: Res<Time>,
     cursor_options: Query<&CursorOptions, With<PrimaryWindow>>,
     mut cameras: Query<(&mut Transform, &mut FlyCam)>,
 ) {
@@ -325,19 +349,32 @@ fn fly_cam_look(
         }
         return;
     }
+    // BL-82 EM-5.11: the gamepad right stick contributes an ADDITIONAL
+    // per-frame rotation on top of the mouse delta (never a replacement —
+    // a player can nudge the stick while also moving the mouse and both
+    // apply). Deadzone/inversion are already applied by `ActionState`
+    // (`xindeler_input::gamepad::GamepadBindings::apply_axis`), so this is
+    // just the rate-scaling step. Negated the same way the mouse delta is
+    // (`-motion.delta.x`) so pushing the stick right/up turns the camera
+    // right/up, matching mouse convention.
+    let gamepad_look = action_state.look_axis * GAMEPAD_LOOK_RATE_RAD_S * time.delta_secs();
     // Still run with zero fresh motion this frame: a pending carry (EM-3.11k)
     // must keep draining even on a frame with no new mouse delta, rather than
     // waiting for the next real mouse event to resolve.
     for (mut transform, mut cam) in &mut cameras {
-        if motion.delta == Vec2::ZERO && cam.yaw_carry == 0.0 && cam.pitch_carry == 0.0 {
+        if motion.delta == Vec2::ZERO
+            && gamepad_look == Vec2::ZERO
+            && cam.yaw_carry == 0.0
+            && cam.pitch_carry == 0.0
+        {
             continue;
         }
-        let desired_yaw = cam.yaw_carry - motion.delta.x * cam.sensitivity;
+        let desired_yaw = cam.yaw_carry - motion.delta.x * cam.sensitivity - gamepad_look.x;
         let (yaw_step, yaw_carry) = capped_look_step(desired_yaw);
         cam.yaw += yaw_step;
         cam.yaw_carry = yaw_carry;
 
-        let desired_pitch = cam.pitch_carry - motion.delta.y * cam.sensitivity;
+        let desired_pitch = cam.pitch_carry - motion.delta.y * cam.sensitivity - gamepad_look.y;
         let (pitch_step, pitch_carry) = capped_look_step(desired_pitch);
         cam.pitch_carry = pitch_carry;
         cam.pitch = (cam.pitch + pitch_step).clamp(

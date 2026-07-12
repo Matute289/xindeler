@@ -27,10 +27,11 @@
 //! one-off screen-specific widgets" — spec §2 engineering note): Slider/
 //! Checkbox/Radio/TextInput direct wrappers (no v1 screen needs them yet —
 //! EM-5.2's proof slice needs Panel/Bar/Button/Tooltip/Notification only),
-//! List/Grid/ScrollView, Modal dialog, Tab bar, the drag-drop slot (needed by
+//! List/Grid, Modal dialog, Tab bar, the drag-drop slot (needed by
 //! EM-5.3/5.6/5.7/5.15 — lands with whichever of those is first), and the
 //! `.vox`-icon-as-UI-icon path (needed once a screen shows real item/ability
-//! icons — EM-5.3's hotbar is the first).
+//! icons — EM-5.3's hotbar is the first). [`scroll`] (ScrollView) landed with
+//! EM-5.4 (chat) — the first screen that needed it.
 
 pub mod bar;
 pub mod button;
@@ -39,6 +40,7 @@ pub mod i18n;
 pub mod notification;
 pub mod panel;
 pub mod scale;
+pub mod scroll;
 pub mod theme;
 pub mod tooltip;
 
@@ -90,6 +92,10 @@ impl Plugin for XindelerUiPlugin {
                     button::update_button_visuals,
                     tooltip::update_tooltip,
                     notification::advance_notifications,
+                    // BL-82 EM-5.5: the generic HudAction -> HudState wiring
+                    // (see that function's own doc comment for why it lives
+                    // here rather than per-screen).
+                    hud_state::apply_hud_actions,
                 ),
             );
     }

@@ -24,3 +24,8 @@ bevy = { version = "=0.19.0", default-features = false, features = [
 ] }
 ron = { workspace = true }
 serde = { workspace = true }
+# BL-82 EM-5.11: the persisted `controls` section (keymap + gamepad bindings)
+# lives on `XindelerSettings` (extended, not forked — same seam as
+# `graphics`/`ui_scale`). `xindeler-input` is itself a pure input-MODEL crate
+# (no render/window features of its own), same posture as this crate.
+xindeler-input = { path = "../xindeler-input" }

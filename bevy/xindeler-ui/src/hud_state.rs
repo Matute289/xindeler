@@ -12,7 +12,11 @@
 //! `Event` enum with an open, per-screen-extensible message instead of one
 //! giant enum every screen must add a variant to.
 
-use bevy::ecs::{message::Message, resource::Resource};
+use bevy::ecs::{
+    message::{Message, MessageReader},
+    resource::Resource,
+    system::ResMut,
+};
 
 /// The one currently-open secondary/full-screen window. `None` = just the
 /// always-on combat HUD (globes/hotbar/buff strip — EM-5.2's proof slice).
@@ -29,6 +33,11 @@ pub enum HudWindow {
     Chat,
     Crafting,
     Settings,
+    /// BL-82 EM-5.11 — the input-rebinding screen (`xindeler-client::
+    /// controls_screen`). Its own window ahead of EM-5.12 folding it in as a
+    /// tab of the full esc-menu settings window (§ that epic's task board
+    /// note) — this is a real, standalone entry point, not a stub.
+    Controls,
 }
 
 /// The current HUD window state. `Resource`, not per-entity — there is
@@ -75,6 +84,27 @@ pub enum HudAction {
     Respawn,
 }
 
+/// Applies [`HudAction::ToggleWindow`]/[`HudAction::CloseWindow`] to
+/// [`HudState`] — the generic action->state wiring every screen epic that
+/// opens a REAL secondary window needs. Added here (the foundation crate,
+/// alongside [`HudState`]/[`HudAction`] themselves) rather than duplicated
+/// per-screen (BL-82 EM-5.5 is the first screen epic to need a real
+/// secondary window — EM-5.2's proof slice only ever wrote `HudAction`, it
+/// never needed anything to read `ToggleWindow`/`CloseWindow` back out).
+/// [`HudAction::Respawn`] (and any future screen-specific variant) is left
+/// for that screen's own system to drain, exactly as `combat_hud::
+/// handle_respawn_button` already does — this system only owns the two
+/// generic window-state variants.
+pub fn apply_hud_actions(mut state: ResMut<HudState>, mut actions: MessageReader<HudAction>) {
+    for action in actions.read() {
+        match action {
+            HudAction::ToggleWindow(window) => state.toggle(*window),
+            HudAction::CloseWindow => state.close(),
+            HudAction::Respawn => {},
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +132,57 @@ mod tests {
         state.toggle(HudWindow::Map);
         state.toggle(HudWindow::Map);
         assert_eq!(state.open_window(), HudWindow::None);
+    }
+
+    /// [`apply_hud_actions`] wires `HudAction::ToggleWindow`/`CloseWindow`
+    /// onto the real [`HudState`] — the BL-82 EM-5.5 acceptance bar for this
+    /// foundational addition (nothing drained these two variants before).
+    #[test]
+    fn apply_hud_actions_toggles_and_closes_the_real_state() {
+        use bevy::{app::App, ecs::system::RunSystemOnce, prelude::MinimalPlugins};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<HudState>();
+        app.add_message::<HudAction>();
+
+        app.world_mut()
+            .write_message(HudAction::ToggleWindow(HudWindow::Map));
+        app.world_mut()
+            .run_system_once(apply_hud_actions)
+            .expect("system runs");
+        assert!(app.world().resource::<HudState>().is_open(HudWindow::Map));
+
+        app.world_mut().write_message(HudAction::CloseWindow);
+        app.world_mut()
+            .run_system_once(apply_hud_actions)
+            .expect("system runs again");
+        assert!(!app.world().resource::<HudState>().is_open(HudWindow::Map));
+    }
+
+    /// `HudAction::Respawn` (a screen-specific variant) leaves `HudState`
+    /// untouched — this system only owns the two generic window variants.
+    #[test]
+    fn apply_hud_actions_ignores_screen_specific_variants() {
+        use bevy::{app::App, ecs::system::RunSystemOnce, prelude::MinimalPlugins};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<HudState>();
+        app.add_message::<HudAction>();
+
+        app.world_mut()
+            .write_message(HudAction::ToggleWindow(HudWindow::Inventory));
+        app.world_mut().write_message(HudAction::Respawn);
+        app.world_mut()
+            .run_system_once(apply_hud_actions)
+            .expect("system runs");
+
+        assert!(
+            app.world()
+                .resource::<HudState>()
+                .is_open(HudWindow::Inventory),
+            "Respawn must not clobber whatever window Toggle just opened"
+        );
     }
 }
