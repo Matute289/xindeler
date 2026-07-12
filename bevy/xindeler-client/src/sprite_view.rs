@@ -85,10 +85,14 @@ use bevy::{
     reflect::TypePath,
 };
 use common::terrain::SpriteKind;
-use vek::Vec3 as VVec3;
+use vek::{Vec2 as VVec2, Vec3 as VVec3};
 use xindeler_protocol::{CompressedChunk, RemoveChunk};
-use xindeler_render_voxel::sprite::{
-    SPRITE_MANIFEST, SPRITE_SCALE, SpriteManifest, collect_sprite_instances, sprite_model_to_bevy,
+use xindeler_render_voxel::{
+    pipeline::ChunkMeshIndex,
+    sprite::{
+        SPRITE_MANIFEST, SPRITE_SCALE, SpriteManifest, collect_sprite_instances,
+        sprite_model_to_bevy,
+    },
 };
 
 /// The sprite kinds v1 renders: the whole outdoor-safe `Plant` sprite category
@@ -495,6 +499,17 @@ fn build_chunk_sprites(
     cache: Res<SpriteMeshCache>,
     mut index: ResMut<SpriteChunkIndex>,
     pending: Query<(Entity, &PendingChunkSprites)>,
+    // `Option` (round 18): the real app always has this (`VoxelRenderPlugin`
+    // is unconditionally added in `main.rs`, wiring `xindeler-render-voxel`'s
+    // `ChunkMeshPipelinePlugin`, before `SpriteViewPlugin`) — but a minimal
+    // headless test harness exercising ONLY this module's own lifecycle
+    // (this file's `tests` module) never wires the terrain-mesh pipeline at
+    // all. Absent entirely degrades honestly to "no terrain-readiness gate"
+    // (same convention as `PlaceholderColorHint`/`PlaceholderHazeTint` in
+    // `xindeler-render-voxel::pipeline` — an optional host hook, not a
+    // silent no-op that could hide a real production gap, since production
+    // always has it).
+    mesh_index: Option<Res<ChunkMeshIndex>>,
     mut perf_log: Local<Option<bool>>,
     mut decode_queue: Local<VecDeque<CompressedChunk>>,
 ) {
@@ -569,6 +584,36 @@ fn build_chunk_sprites(
         // arrival replaced it this frame; its despawn is queued).
         if index.pending.get(&chunk.key) != Some(&marker_entity) {
             continue;
+        }
+        // BL-82 EM-3.11 round 18: also wait for the chunk's REAL terrain mesh
+        // (not `xindeler-render-voxel`'s EM-3.11h first-load placeholder box)
+        // before spawning its sprites. This pipeline is otherwise entirely
+        // decoupled from the terrain-mesh pipeline (module docs: its own
+        // `CompressedChunk` stream, no shared timing) — without this gate, a
+        // sprite (rendered with a normally-LIT `sprite_material()`, unlike
+        // the terrain pipeline's deliberately `unlit` placeholder) can spawn
+        // floating over/inside the flat, dim placeholder box before the real
+        // terrain and its lighting exist for that spot, rendering as a solid
+        // black silhouette that only "resolves" once the real mesh replaces
+        // the placeholder — Matías's reported foliage "titilan cuando se
+        // crean" (flicker when created). `xindeler-old` never has this gap:
+        // its `mesh_worker` builds a chunk's opaque terrain AND its sprite
+        // instances in the SAME async task, applied in ONE atomic swap
+        // (`voxygen/src/scene/terrain/mod.rs`) — sprites there are
+        // structurally incapable of appearing before their parent chunk's
+        // real terrain. No timeout: a `CompressedChunk` and the matching
+        // near-pipeline dirty-mark originate from the SAME "chunk arrived"
+        // event (`terrain_stream.rs`), so `ChunkMeshIndex` is guaranteed to
+        // gain at least a placeholder entry for this key at essentially the
+        // same time — this just waits the FEW EXTRA frames until that
+        // entry's placeholder resolves to real geometry, the same
+        // wait-with-no-timeout style the sprite-kind-readiness check below
+        // already uses.
+        let terrain_ready = mesh_index
+            .as_ref()
+            .is_none_or(|idx| idx.has_real_terrain_mesh(VVec2::new(chunk.key[0], chunk.key[1])));
+        if !terrain_ready {
+            continue; // real terrain not up yet — keep waiting
         }
         let ready = chunk
             .instances
@@ -980,5 +1025,193 @@ mod tests {
             app.update();
         }
         assert_eq!(parent_count(&mut app), 0, "RemoveChunk unloads the sprites");
+    }
+
+    // -------------------------------------------------------------------
+    // BL-82 EM-3.11 round 18 — sprites wait for the REAL terrain mesh
+    // -------------------------------------------------------------------
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use common::{terrain::MapSizeLg, volumes::vol_grid_2d::VolGrid2d};
+    use xindeler_render_voxel::pipeline::{
+        ChunkLayerMap, ChunkMaterials, ChunkMeshPipelinePlugin, ChunkMeshQueue, ChunkUploadBudget,
+        ChunkVolume, ChunkVolumeProvider,
+    };
+
+    /// Headless app running BOTH pipelines together (the REAL
+    /// `ChunkMeshPipelinePlugin`, not a fake), so [`build_chunk_sprites`]'s
+    /// round-18 [`ChunkMeshIndex::has_real_terrain_mesh`] gate is exercised
+    /// against a genuine placeholder-then-real transition, not an assumption.
+    fn test_app_with_terrain_pipeline(volume_available: Arc<AtomicBool>) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_message::<CompressedChunk>()
+            .add_message::<RemoveChunk>()
+            .init_resource::<SpriteChunkIndex>()
+            .add_plugins(ChunkMeshPipelinePlugin)
+            .add_systems(Update, (build_chunk_sprites, remove_chunk_sprites).chain());
+
+        // A real 3x3-chunk grid (default map size big enough to hold key
+        // (3,3) + its ±1 mesher border) with the SAME `chunk(true)` (rock +
+        // grass) at (3,3); neighbours stay the grid's default (empty) chunk,
+        // which is fine — the mesher already treats a missing neighbour that
+        // way (module docs on `ChunkVolume`).
+        let map_size_lg = MapSizeLg::new(VVec2::new(3, 3)).expect("valid test map size");
+        let default = Arc::new(TerrainChunk::new(
+            0,
+            Block::empty(),
+            Block::empty(),
+            TerrainChunkMeta::void(),
+        ));
+        let mut grid = VolGrid2d::new(map_size_lg, default).expect("chunk size is a power of two");
+        grid.insert(VVec2::new(3, 3), Arc::new(chunk(true)));
+        let grid = Arc::new(grid);
+
+        app.insert_resource(ChunkVolumeProvider::new(move |key| {
+            (volume_available.load(Ordering::Relaxed) && key == VVec2::new(3, 3))
+                .then(|| ChunkVolume::with_z_bounds(grid.clone(), key, 0, 2))
+        }))
+        .insert_resource(ChunkLayerMap::default())
+        .insert_resource(ChunkMaterials {
+            terrain: Handle::default(),
+            fluid: Handle::default(),
+        })
+        .insert_resource(ChunkUploadBudget::default());
+
+        // Pre-seed: ShortGrass Ready with one dummy variation; material set
+        // (same as `test_app`'s own pre-seed — this test is about the
+        // TERRAIN gate, not sprite-asset loading).
+        let mut cache = SpriteMeshCache {
+            all_settled: true,
+            material: Some(Handle::default()),
+            ..Default::default()
+        };
+        cache.kinds.insert(
+            SpriteKind::ShortGrass,
+            SpriteKindState::Ready(vec![SpriteVariationMesh {
+                mesh: Handle::default(),
+            }]),
+        );
+        app.insert_resource(cache);
+        app.finish();
+        app
+    }
+
+    /// The load-bearing round-18 regression: sprites for a chunk must NOT
+    /// spawn while that chunk has NO real terrain mesh at all — even though
+    /// their sprite-kind ASSETS are already `Ready` and their
+    /// `PendingChunkSprites` marker is already built — and must spawn once
+    /// the real terrain mesh appears. The volume provider starts UNAVAILABLE
+    /// (not merely "still meshing") so the "must not build yet" window is
+    /// fully deterministic (no async-task-timing race): `ChunkMeshIndex` is
+    /// guaranteed empty for this key until the test explicitly flips the
+    /// provider on, unlike waiting on a real in-flight mesh task, which could
+    /// in principle finish before the assertion runs on a slow/loaded CI box.
+    ///
+    /// Verified non-tautological: reverting the `has_real_terrain_mesh` gate
+    /// in `build_chunk_sprites` (temporarily hardcoding `terrain_ready =
+    /// true`) makes the FIRST assertion below fail — a parent builds while
+    /// the provider is still unavailable and `ChunkMeshIndex` has no entry
+    /// for the key at all.
+    #[test]
+    fn sprites_wait_for_the_real_terrain_mesh_before_spawning() {
+        let available = Arc::new(AtomicBool::new(false));
+        let mut app = test_app_with_terrain_pipeline(Arc::clone(&available));
+        let key = VVec2::new(3, 3);
+
+        // Mirrors production: the SAME "chunk arrived" event marks BOTH the
+        // near-terrain pipeline's dirty queue (`terrain_stream.rs::
+        // receive_chunks` in the real app) AND sends the sprite pipeline's
+        // `CompressedChunk` (this test does both explicitly, since the
+        // minimal harness above wires neither `terrain_stream` nor
+        // `net_client`/`listen_server`). The provider is unavailable, so the
+        // terrain pipeline's own `spawn_chunk_mesh_tasks` drops this mark
+        // entirely (module docs: a `None` fetch cancels it, no entry
+        // created — not even a placeholder) — deterministically "no real
+        // terrain, at all" for as long as `available` stays false.
+        app.world_mut()
+            .resource_mut::<ChunkMeshQueue>()
+            .mark_dirty(key);
+        app.world_mut()
+            .write_message(CompressedChunk::encode([3, 3], &chunk(true)));
+
+        // Several updates: enough for the sprite pipeline's own two-phase
+        // decode-then-build to fully settle (its `PendingChunkSprites`
+        // marker needs at least one extra update to become query-visible
+        // after the `Commands::spawn` that creates it — same reason the
+        // OTHER tests in this module poll `for _ in 0..4`), while the
+        // terrain provider stays unavailable throughout.
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<xindeler_render_voxel::pipeline::ChunkMeshIndex>()
+                .get(key)
+                .is_none(),
+            "sanity: with the provider unavailable, the terrain pipeline must have NO entry at \
+             all for this key (not even a placeholder)"
+        );
+        assert_eq!(
+            parent_count(&mut app),
+            0,
+            "sprites must NOT spawn while the chunk has no real terrain mesh at all, even though \
+             their sprite-kind assets are already Ready and their PendingChunkSprites marker is \
+             already built — this is round 18's whole point (module docs: xindeler-old ties \
+             sprite spawn to the SAME atomic mesh-worker response as the real terrain; this \
+             port's decoupled pipeline must wait explicitly instead)"
+        );
+        assert_eq!(
+            marker_count(&mut app),
+            1,
+            "the pending marker must still be waiting, not consumed"
+        );
+
+        // Let the terrain actually arrive: flip the provider on and re-mark
+        // the key (the earlier mark was consumed — dropped, per module docs
+        // — by the failed fetch above).
+        available.store(true, Ordering::Relaxed);
+        app.world_mut()
+            .resource_mut::<ChunkMeshQueue>()
+            .mark_dirty(key);
+
+        // Keep updating until the real mesh replaces the (now-spawned)
+        // placeholder (the async task pool needs a little wall-clock time —
+        // same polling pattern `xindeler-render-voxel`'s own pipeline tests
+        // use).
+        let mut settled = false;
+        for _ in 0..500 {
+            app.update();
+            if app
+                .world()
+                .resource::<xindeler_render_voxel::pipeline::ChunkMeshIndex>()
+                .has_real_terrain_mesh(key)
+            {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            settled,
+            "the real terrain mesh must eventually replace the placeholder"
+        );
+
+        // One more update so `build_chunk_sprites` can observe the now-real
+        // terrain and build the sprite parent.
+        app.update();
+        assert_eq!(
+            parent_count(&mut app),
+            1,
+            "sprites must spawn once the chunk's real terrain mesh is up"
+        );
+        assert_eq!(marker_count(&mut app), 0, "marker consumed after build");
     }
 }

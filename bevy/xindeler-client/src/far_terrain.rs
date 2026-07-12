@@ -337,20 +337,40 @@ fn receive_far_terrain(
 /// world chunk-grid coordinate, same convention `xindeler_sim_bridge::
 /// send_far_terrain_once` samples `WorldData::col_at`/`alt_at` in) to its
 /// containing far-terrain grid cell (`key / chunk_stride`, matching that same
-/// sender's downsample stride) and returns that cell's real colour plus its
-/// recorded altitude (the "is this plausibly outdoor, not a cave" signal
-/// `spawn_chunk_mesh_tasks` checks against [`SURFACE_HINT_TOLERANCE`] in the
-/// host-agnostic crate — round-17 module docs there). A negative key or a
-/// key outside the grid (both possible at a world's edge, or if the near
-/// pipeline is ever fed keys the boot-time grid didn't cover) is an honest
-/// "no hint", not an error — the caller already falls back cleanly.
+/// sender's downsample stride) and returns that cell's real colour plus the
+/// recorded altitude RANGE (min/max) across its own immediate 3×3 grid-cell
+/// neighbourhood (clamped to grid bounds) — the "is this plausibly outdoor,
+/// not a cave" signal `spawn_chunk_mesh_tasks` checks against
+/// [`SURFACE_HINT_TOLERANCE`] in the host-agnostic crate.
+///
+/// ## BL-82 EM-3.11 round 18: a RANGE, not [`receive_far_terrain`]'s
+/// ## original single point
+/// Round 17 shipped comparing a placeholder's `z_hi` against ONE cell's
+/// recorded altitude. A live playtest (`--listen-server --smoke-perf-run`,
+/// `XINDELER_PLACEHOLDER_HINT_LOG=1`) found this rejected 282/286 (98.6%) of
+/// real placeholder colour hints — ordinary rolling terrain routinely varies
+/// by 50-150m across the SAME `chunk_stride`-chunk cell this one point
+/// represents (256m at the default 1024-chunk world's stride), comfortably
+/// exceeding the (deliberately modest, cave-safety) tolerance. Averaging
+/// the neighbourhood only smooths the number without fixing the comparison;
+/// this instead widens WHAT is compared against: a placeholder chunk whose
+/// height falls ANYWHERE within its neighbourhood's own recorded relief is
+/// plausibly ordinary outdoor terrain — a genuine cave void, by contrast,
+/// does not show up in `lod_alt`/`lod_base` at all (that grid only ever
+/// records the true surface), so its `z_hi` sits far below EVERY nearby
+/// sample, not just the one this used to compare against.
+///
+/// A negative key or a key outside the grid (both possible at a world's
+/// edge, or if the near pipeline is ever fed keys the boot-time grid didn't
+/// cover) is an honest "no hint", not an error — the caller already falls
+/// back cleanly.
 fn placeholder_color_hint_fn(
     grid_w: u32,
     grid_h: u32,
     chunk_stride: u32,
     heights: Vec<f32>,
     colors: Vec<[u8; 3]>,
-) -> impl Fn(ChunkKey) -> Option<(Color, f32)> + Send + Sync + 'static {
+) -> impl Fn(ChunkKey) -> Option<(Color, f32, f32)> + Send + Sync + 'static {
     let stride = chunk_stride.max(1);
     move |key: ChunkKey| {
         if key.x < 0 || key.y < 0 {
@@ -368,7 +388,27 @@ fn placeholder_color_hint_fn(
             f32::from(rgb[1]) / 255.0,
             f32::from(rgb[2]) / 255.0,
         );
-        Some((color, heights[idx]))
+
+        // BL-82 EM-3.11 round 18: min/max recorded altitude across the
+        // cell's own immediate 3x3 neighbourhood (itself + up to 8
+        // neighbours, clamped to grid bounds) — see this function's doc
+        // comment for why a range beats a single point here.
+        let (gi, gj) = (gi as i32, gj as i32);
+        let mut min_h = heights[idx];
+        let mut max_h = heights[idx];
+        for dj in -1i32..=1 {
+            for di in -1i32..=1 {
+                let (ni, nj) = (gi + di, gj + dj);
+                if ni < 0 || nj < 0 || ni >= grid_w as i32 || nj >= grid_h as i32 {
+                    continue;
+                }
+                #[expect(clippy::cast_sign_loss, reason = "bounds-checked non-negative above")]
+                let h = heights[(nj as u32 * grid_w + ni as u32) as usize];
+                min_h = min_h.min(h);
+                max_h = max_h.max(h);
+            }
+        }
+        Some((color, min_h, max_h))
     }
 }
 
@@ -1123,9 +1163,12 @@ mod tests {
 
     /// A chunk key maps to the same grid cell `send_far_terrain_once` sampled
     /// it from (`key / chunk_stride`, clamped in-bounds by the SENDER, so the
-    /// hint just needs `key / stride` here) — and returns that cell's colour
-    /// AND recorded altitude, index-aligned exactly like `cell_color`'s own
-    /// per-quad lookup.
+    /// hint just needs `key / stride` here) — and returns that cell's colour,
+    /// index-aligned exactly like `cell_color`'s own per-quad lookup. Every
+    /// OTHER cell stays at height 0.0, so the returned `max_height` (this
+    /// cell's own 123.0) and `min_height` (0.0, from its neighbours) also
+    /// pin the round-18 min/max computation without conflating the two
+    /// concerns.
     #[test]
     fn color_hint_maps_a_chunk_key_to_its_containing_grid_cell() {
         let grid_w = 4;
@@ -1142,8 +1185,15 @@ mod tests {
 
         // Any chunk key inside cell (1, 2)'s covered range (x in [8, 16), y
         // in [16, 24)) must resolve to that exact cell.
-        let (color, surface_z) = hint(ChunkKey::new(9, 20)).expect("in-bounds key must hit");
-        assert_eq!(surface_z, 123.0);
+        let (color, min_h, max_h) = hint(ChunkKey::new(9, 20)).expect("in-bounds key must hit");
+        assert_eq!(
+            max_h, 123.0,
+            "the cell's own height is the neighbourhood max"
+        );
+        assert_eq!(
+            min_h, 0.0,
+            "every neighbour is 0.0, so that's the neighbourhood min"
+        );
         let srgba = color.to_srgba();
         assert!((srgba.red - 10.0 / 255.0).abs() < 1e-4);
         assert!((srgba.green - 200.0 / 255.0).abs() < 1e-4);
@@ -1167,5 +1217,62 @@ mod tests {
             hint(ChunkKey::new(0, 32)).is_none(),
             "y past grid_h·stride (4·8=32)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-3.11 round 18 — neighbourhood min/max, not a single point
+    // -----------------------------------------------------------------------
+
+    /// The load-bearing round-18 regression: the hint's min/max must reflect
+    /// the FULL 3×3 neighbourhood, not just the cell itself — a live playtest
+    /// (module docs) found comparing against one cell's own point rejected
+    /// 98.6% of real placeholders on ordinary rolling terrain. A centre cell
+    /// with a low height, surrounded by neighbours of varying (higher)
+    /// height, must report the neighbourhood's true min and max, not the
+    /// centre's own value repeated.
+    #[test]
+    fn color_hint_reports_the_full_3x3_neighbourhood_min_and_max() {
+        let grid_w = 3;
+        let grid_h = 3;
+        let stride = 1;
+        let colors = vec![[0u8; 3]; (grid_w * grid_h) as usize];
+        // Row-major 3x3, centre cell (1,1) at index 4.
+        let heights = vec![
+            10.0, 20.0, 30.0, // row j=0
+            40.0, 5.0, 60.0, // row j=1 (centre = 5.0, deliberately the lowest)
+            70.0, 80.0, 90.0, // row j=2
+        ];
+
+        let hint = placeholder_color_hint_fn(grid_w, grid_h, stride, heights, colors);
+        let (_, min_h, max_h) = hint(ChunkKey::new(1, 1)).expect("centre cell must hit");
+
+        assert_eq!(
+            min_h, 5.0,
+            "the neighbourhood minimum is the centre cell itself here"
+        );
+        assert_eq!(
+            max_h, 90.0,
+            "the neighbourhood maximum is the bottom-right corner neighbour"
+        );
+    }
+
+    /// A cell at the GRID'S EDGE only has as many neighbours as actually
+    /// exist (no phantom out-of-bounds samples) — mirrors
+    /// `boundary_corner_averages_only_in_bounds_neighbours`'s same concern
+    /// for the far mesh's own corner-height averaging.
+    #[test]
+    fn color_hint_neighbourhood_clamps_to_grid_bounds_at_the_edge() {
+        let grid_w = 2;
+        let grid_h = 2;
+        let stride = 1;
+        let colors = vec![[0u8; 3]; 4];
+        let heights = vec![0.0, 10.0, 20.0, 30.0]; // (0,0)=0 (1,0)=10 (0,1)=20 (1,1)=30
+
+        let hint = placeholder_color_hint_fn(grid_w, grid_h, stride, heights, colors);
+        // Corner cell (0, 0): its only real neighbours are itself, (1,0),
+        // (0,1) and (1,1) — the whole grid, since it's only 2x2.
+        let (_, min_h, max_h) = hint(ChunkKey::new(0, 0)).expect("corner cell must hit");
+        assert_eq!(min_h, 0.0);
+        assert_eq!(max_h, 30.0);
     }
 }

@@ -952,7 +952,8 @@ const TEST_PLACEHOLDER_Z_HI: f32 = (MAX_Z + 2) as f32;
 /// A real per-chunk colour hint (round-17 module docs: sourced from the same
 /// grid `xindeler_client::far_terrain` already uses to colour the far mesh)
 /// must be trusted, verbatim (no `PlaceholderHazeTint` installed here), when
-/// its `expected_surface_z` sits close to the placeholder's own `z_hi` — the
+/// its recorded `[min_height, max_height]` range brackets the placeholder's
+/// own `z_hi` (round 18: a RANGE, not a single point — module docs) — the
 /// "this is plausibly an ordinary outdoor/frontier chunk" case this round's
 /// live evidence (up to 16 simultaneous placeholders per burst, ~every 0.2s
 /// during active exploration) targets.
@@ -962,7 +963,11 @@ fn placeholder_uses_a_color_hint_when_the_chunk_is_plausibly_outdoor() {
     let hint_color = Color::srgb(0.2, 0.55, 0.15); // a plausible real grass green
     app.world_mut()
         .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
-            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+            (key == VVec2::new(3, 3)).then_some((
+                hint_color,
+                TEST_PLACEHOLDER_Z_HI,
+                TEST_PLACEHOLDER_Z_HI,
+            ))
         }));
     let key = VVec2::new(3, 3);
 
@@ -992,23 +997,27 @@ fn placeholder_uses_a_color_hint_when_the_chunk_is_plausibly_outdoor() {
     );
 }
 
-/// A colour hint whose `expected_surface_z` sits FAR from the placeholder's
-/// own `z_hi` (round-17 module docs: `SURFACE_HINT_TOLERANCE`) must be
-/// IGNORED — this is the guard that keeps the original EM-3.11h "camera
-/// standing inside the placeholder, looking at its own inner faces" cave
-/// scenario from getting a nonsensical bright-surface colour for a spot that
-/// will actually render dark underground. The placeholder must fall back to
-/// the plain shared rock-grey, exactly as if no hint were installed at all.
+/// A colour hint whose recorded `[min_height, max_height]` range sits
+/// entirely FAR from the placeholder's own `z_hi` (round-17/18 module docs:
+/// `SURFACE_HINT_TOLERANCE`) must be IGNORED — this is the guard that keeps
+/// the original EM-3.11h "camera standing inside the placeholder, looking at
+/// its own inner faces" cave scenario from getting a nonsensical
+/// bright-surface colour for a spot that will actually render dark
+/// underground. The placeholder must fall back to the plain shared
+/// rock-grey, exactly as if no hint were installed at all.
 #[test]
 fn placeholder_ignores_a_color_hint_whose_surface_is_far_from_the_chunk() {
     let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
     let hint_color = Color::srgb(0.2, 0.55, 0.15);
     app.world_mut()
         .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
-            // Recorded surface hundreds of metres above this chunk's own
-            // z_hi — exactly what a coarse far-terrain sample would say for
-            // a column whose near-pipeline volume is actually a deep cave.
-            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI + 500.0))
+            // Recorded surface RANGE hundreds of metres above this chunk's
+            // own z_hi — exactly what a coarse far-terrain neighbourhood
+            // would say for a column whose near-pipeline volume is actually
+            // a deep cave (a cave void never shows up in ANY nearby surface
+            // sample).
+            let far = TEST_PLACEHOLDER_Z_HI + 500.0;
+            (key == VVec2::new(3, 3)).then_some((hint_color, far, far))
         }));
     let key = VVec2::new(3, 3);
 
@@ -1056,9 +1065,13 @@ fn placeholder_ignores_a_matching_color_hint_when_the_viewer_is_below_the_surfac
     let hint_color = Color::srgb(0.2, 0.55, 0.15);
     app.world_mut()
         .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
-            // Surface hint MATCHES z_hi exactly — the check this test cares
-            // about is the viewer-height one, not the surface one.
-            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+            // Surface hint range MATCHES z_hi exactly — the check this test
+            // cares about is the viewer-height one, not the surface one.
+            (key == VVec2::new(3, 3)).then_some((
+                hint_color,
+                TEST_PLACEHOLDER_Z_HI,
+                TEST_PLACEHOLDER_Z_HI,
+            ))
         }));
     // The viewer is AT this exact chunk (near_viewer = true) but far below
     // its own z_hi — plausibly deep inside a cave under otherwise-ordinary
@@ -1113,7 +1126,11 @@ fn placeholder_trusts_a_distant_matching_hint_even_when_the_viewer_is_far_below_
     let hint_color = Color::srgb(0.2, 0.55, 0.15);
     app.world_mut()
         .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
-            (key == VVec2::new(3, 3)).then_some((hint_color, TEST_PLACEHOLDER_Z_HI))
+            (key == VVec2::new(3, 3)).then_some((
+                hint_color,
+                TEST_PLACEHOLDER_Z_HI,
+                TEST_PLACEHOLDER_Z_HI,
+            ))
         }));
     // The viewer is many chunks away (well outside VIEWER_PROXIMITY_CHUNKS)
     // AND far below this chunk's z_hi — the exact "camera in a valley,
@@ -1169,8 +1186,8 @@ fn simultaneous_placeholders_with_different_hints_get_different_colours() {
     app.world_mut()
         .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
             match (key.x, key.y) {
-                (3, 3) => Some((green, TEST_PLACEHOLDER_Z_HI)),
-                (3, 4) => Some((grey_rock, TEST_PLACEHOLDER_Z_HI)),
+                (3, 3) => Some((green, TEST_PLACEHOLDER_Z_HI, TEST_PLACEHOLDER_Z_HI)),
+                (3, 4) => Some((grey_rock, TEST_PLACEHOLDER_Z_HI, TEST_PLACEHOLDER_Z_HI)),
                 _ => None,
             }
         }));
@@ -1214,5 +1231,109 @@ fn simultaneous_placeholders_with_different_hints_get_different_colours() {
          different base colours, not the one shared neutral grey — this is what lets a whole \
          cluster of frontier placeholders read as roughly-correct varied terrain instead of a \
          flat, obviously-fake slab"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BL-82 EM-3.11 round 18 — local-range surface check (still occurring
+// "franja... del fin del mapa" + isolated plate)
+// ---------------------------------------------------------------------------
+
+/// The load-bearing round-18 regression: a colour hint whose OWN point is far
+/// from the placeholder's `z_hi` (round 17 would have rejected this) must
+/// still be TRUSTED when its recorded `[min_height, max_height]`
+/// neighbourhood RANGE brackets `z_hi` — real live evidence (module docs:
+/// `--smoke-perf-run` with `XINDELER_PLACEHOLDER_HINT_LOG=1`) found round 17's
+/// single-point comparison rejected 282/286 (98.6%) of real chunks, because
+/// ordinary rolling terrain routinely varies by 50-150m across the same
+/// coarse cell footprint that single point represented.
+#[test]
+fn placeholder_trusts_a_color_hint_whose_range_brackets_z_hi_even_when_its_own_point_does_not() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            // The cell's OWN recorded height sits far from z_hi (round 17
+            // alone would reject this) but its neighbourhood's min/max
+            // brackets it comfortably — the "ordinary rolling terrain"
+            // shape this round's live evidence found routine.
+            (key == VVec2::new(3, 3)).then_some((
+                hint_color,
+                TEST_PLACEHOLDER_Z_HI - 40.0,
+                TEST_PLACEHOLDER_Z_HI + 40.0,
+            ))
+        }));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        hint_color.to_srgba(),
+        "a colour hint whose local neighbourhood range brackets z_hi must be trusted — this is \
+         round 18's whole point: the single-point comparison round 17 shipped with rejected \
+         ordinary hilly terrain live, not just genuine caves"
+    );
+}
+
+/// The flip side: a range that does NOT bracket `z_hi` at all (both bounds
+/// far below it, i.e. even the highest nearby recorded sample is still far
+/// underground relative to this column) must still be REJECTED — the
+/// round-18 fix widens what counts as "plausibly outdoor," it does not
+/// remove the cave-safety guard entirely.
+#[test]
+fn placeholder_ignores_a_color_hint_whose_whole_range_is_far_below_z_hi() {
+    let mut app = test_app_with_placeholders(2, Arc::new(AtomicBool::new(true)));
+    let hint_color = Color::srgb(0.2, 0.55, 0.15);
+    app.world_mut()
+        .insert_resource(PlaceholderColorHint::new(move |key: VVec2<i32>| {
+            (key == VVec2::new(3, 3)).then_some((
+                hint_color,
+                TEST_PLACEHOLDER_Z_HI - 500.0,
+                TEST_PLACEHOLDER_Z_HI - 400.0,
+            ))
+        }));
+    let key = VVec2::new(3, 3);
+
+    app.world_mut()
+        .resource_mut::<ChunkMeshQueue>()
+        .mark_dirty(key);
+    app.update();
+
+    let world = app.world_mut();
+    let handle = world
+        .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PlaceholderChunkMesh>>()
+        .iter(world)
+        .next()
+        .expect("the placeholder must have spawned with a material")
+        .0
+        .clone();
+    let materials = world.resource::<Assets<StandardMaterial>>();
+    let material = materials
+        .get(&handle)
+        .expect("the placeholder's material handle must resolve to a real asset");
+
+    assert_eq!(
+        material.base_color.to_srgba(),
+        Color::srgb(0.35, 0.33, 0.30).to_srgba(),
+        "a colour hint whose ENTIRE local range sits far below z_hi (comfortably outside the \
+         tolerance on both ends) must still be rejected — the range-based fix widens the \
+         'plausibly outdoor' band, it does not remove the cave-safety guard"
     );
 }
