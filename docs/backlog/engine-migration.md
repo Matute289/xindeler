@@ -54,7 +54,7 @@ so an upgrade waits until the dep tree catches up.
 | **4** | Server shell, replicon transport & ORACLE foundations | 🔵 **in progress, essentially content-complete** — EM-4.1→4.12 all done (PRs #27, #33, #45, #46, #49, #52, #58, #59, #61, #65, #66): headless server shell, transport/login/interest-mgmt, dimension lifecycle+teardown+GC, entity factory, narrative hooks, AI-gateway/AURORA readiness seams, full E2E ORACLE event drill (EM-4.9) all real and passing. **Only open item: EM-4.2's full 24h soak run** (10-min soak-readiness sanity done; the multi-hour run itself not yet executed/reported) |
 | **5** | UI (bevy_ui+Feathers), audio & playable parity | ⚪ pending |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
-| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/birds) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.8 scaffolded |
+| **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** (2026-07-09, Opus-authored) — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.7 + EM-7.9→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86) |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -211,6 +211,15 @@ backlog. Each row below links its spec/plan/task doc once drafted.
 | EM-7.7 | Moon — v1 = real dynamic lunar phases, deterministically clocked (maximalist v1, worksheet 2026-07-09) | ⚪ |
 | ~~EM-7.8~~ | ~~Ambient wildlife — birds~~ **moved to BL-86** (general backlog) — Matías wants real, non-AI entities; that's entity-model/gameplay scope, not atmosphere polish | ➡️ BL-86 |
 | EM-7.9 | Calendar & seasons — v1 = looping 364-day calendar (7-day week · 13 months × 28 · 4 seasons × 91), physically-plausible solstice/equinox day-length + gradual (cosine) season transitions, all derived from the synced `TimeOfDay`; empty ORACLE `SeasonOverride` hook. **Design authored + §9 decisions LOCKED** (spec/plan + tasks/54; calendar canon `lore/01-calendar.md`; Q-PHO=A re-canons `DAYS_IN_MONTH` 40→28). Blocked until Phase 6. | ⚪ |
+| EM-7.10 | Wind vertex-displacement shaders — v1 = procedural-noise-driven vertex displacement physically bending foliage (trees/plants/flowers) and creature/figure fur, from a shared client-side wind field (sourced from the synced weather-state grid, modulated by noise for gusts); normal-consistent by construction (supersedes the reverted EM-3.9c sprite-sway, whose bug was displacement breaking sprite lighting) (maximalist v1, worksheet 2026-07-09; private spec `2026-07-09-visual-detail-atmosphere-polish.md` §2.9) | ⚪ |
+| EM-7.11 | Dynamic wet-ground PBR — v1 = exposed blocks get roughness/metallic modified live during rain (darkened albedo + lowered roughness for wet sheen), driven by the weather-state grid and gated by canopy interception (EM-7.12) so only rain-exposed ground wets; ramps in/out with rain intensity, dries over time (maximalist v1, worksheet 2026-07-09; private spec §2.10) | ⚪ |
+| EM-7.12 | Canopy rain interception — v1 = real rain occlusion by tree canopies (a depth/occlusion pass, legacy `rain_occlusion` as the technique reference) producing dry zones under dense foliage, plus a secondary procedural drip effect at canopy edges; couples EM-7.4 (rain), EM-7.2 (canopy geometry) and EM-7.11 (dry = not wet) (maximalist v1, worksheet 2026-07-09; private spec §2.11) | ⚪ |
+| EM-7.13 | Weather↔wind physics coupling — v1 = the shared wind field physically drives weather visuals: rain vectors go diagonal under wind, particle drag reacts to storm intensity, clouds advect on the same wind — one wind source feeds foliage (EM-7.10), rain (EM-7.4) and clouds (EM-7.3) coherently (maximalist v1, worksheet 2026-07-09; private spec §2.12) | ⚪ |
+
+**Numbering note:** EM-7.10→7.13 were originally drafted as EM-7.9→7.12 inside the private atmosphere
+spec before the public EM-7.9 slot was claimed by Calendar & Seasons (2026-07-11) — renumbered
+2026-07-11 (`docs/design` commit `6d8ca5b`) to free it cleanly; these four rows were only just now
+added to this public table (they existed in the private spec all along but were never surfaced here).
 
 **Day/night ↔ sim sync:** `SunCycle` (client-local real-time stub) gets a read-only mirror of the sim's
 authoritative `TimeOfDay` as part of this phase — cheap correctness win Matías asked for explicitly (was
