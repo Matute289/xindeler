@@ -39,6 +39,8 @@ mod light;
 mod listen_server;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod map_view;
 #[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
 mod perf_log;

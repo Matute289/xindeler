@@ -90,6 +90,10 @@ impl Plugin for XindelerUiPlugin {
                     button::update_button_visuals,
                     tooltip::update_tooltip,
                     notification::advance_notifications,
+                    // BL-82 EM-5.5: the generic HudAction -> HudState wiring
+                    // (see that function's own doc comment for why it lives
+                    // here rather than per-screen).
+                    hud_state::apply_hud_actions,
                 ),
             );
     }

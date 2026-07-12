@@ -12204,6 +12204,7 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "bevy_replicon",
+ "image",
  "rand 0.10.1",
  "rand_chacha 0.10.0",
  "ron",
@@ -12214,6 +12215,7 @@ dependencies = [
  "vek",
  "xindeler-client-core",
  "xindeler-common",
+ "xindeler-common-net",
  "xindeler-dimensions",
  "xindeler-oracle-host",
  "xindeler-protocol",

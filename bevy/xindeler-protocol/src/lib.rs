@@ -19,6 +19,7 @@ pub mod aurora_overlay;
 pub mod dimension_id;
 pub mod interest;
 pub mod login;
+pub mod map;
 pub mod narrative;
 pub mod visibility;
 
@@ -39,6 +40,7 @@ pub use crate::{
     dimension_id::DimensionId,
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
+    map::{NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     visibility::{ClientVisibleRegions, RegionKey, region_key_for_pos},
 };
@@ -728,6 +730,14 @@ impl Plugin for XindelerProtocolPlugin {
         // avoid.
         app.add_server_message::<NetFarTerrain>(XindelerChannel::Terrain.delivery())
             .make_message_independent::<NetFarTerrain>();
+        // BL-82 EM-5.5: the one-shot world map broadcast (background image +
+        // site/POI markers). Same one-shot timing + channel choice as
+        // `NetFarTerrain` above (a multi-KB image blob belongs on the
+        // Unordered/reliable `Terrain` lane, not `Events`, for the exact same
+        // head-of-line-blocking reason documented there) — see `map.rs`'s
+        // module doc comment.
+        app.add_server_message::<map::NetMapData>(XindelerChannel::Terrain.delivery())
+            .make_message_independent::<map::NetMapData>();
 
         // BL-82 EM-4.2c: the login/session handshake reply. Carries no
         // entity references (like TerrainAnchor/NetFarTerrain above), so it
