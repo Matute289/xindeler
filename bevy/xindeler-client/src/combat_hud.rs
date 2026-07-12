@@ -118,12 +118,21 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         22.0,
         BarValue::new(1.0, 1.0),
     );
-    commands.entity(health_bar).insert((HealthBarTag, Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(16.0),
-        left: Val::Px(16.0),
-        ..Default::default()
-    }));
+    // NOTE (regression fix): `.entry::<Node>().and_modify(..)` mutates the
+    // EXISTING `Node` `spawn_bar` just inserted, instead of a second
+    // `insert(Node { .. })` that would REPLACE it wholesale and silently
+    // discard its width/height/overflow/border_radius — see this module's
+    // `spawn_combat_hud_keeps_every_bars_sizing_from_spawn_bar_intact` test
+    // for the full story and the exact symptom this regressed to.
+    commands
+        .entity(health_bar)
+        .insert(HealthBarTag)
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.position_type = PositionType::Absolute;
+            node.top = Val::Px(16.0);
+            node.left = Val::Px(16.0);
+        });
 
     let energy_bar = spawn_bar(
         &mut commands,
@@ -134,12 +143,15 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         14.0,
         BarValue::new(1.0, 1.0),
     );
-    commands.entity(energy_bar).insert((EnergyBarTag, Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(42.0),
-        left: Val::Px(16.0),
-        ..Default::default()
-    }));
+    commands
+        .entity(energy_bar)
+        .insert(EnergyBarTag)
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.position_type = PositionType::Absolute;
+            node.top = Val::Px(42.0);
+            node.left = Val::Px(16.0);
+        });
 
     let poise_bar = spawn_bar(
         &mut commands,
@@ -150,12 +162,15 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         8.0,
         BarValue::new(1.0, 1.0),
     );
-    commands.entity(poise_bar).insert((PoiseBarTag, Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(60.0),
-        left: Val::Px(16.0),
-        ..Default::default()
-    }));
+    commands
+        .entity(poise_bar)
+        .insert(PoiseBarTag)
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.position_type = PositionType::Absolute;
+            node.top = Val::Px(60.0);
+            node.left = Val::Px(16.0);
+        });
 
     let xp_bar = spawn_bar(
         &mut commands,
@@ -166,13 +181,16 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         6.0,
         BarValue::new(0.0, 1.0),
     );
-    commands.entity(xp_bar).insert((XpBarTag, Node {
-        position_type: PositionType::Absolute,
-        bottom: Val::Px(0.0),
-        left: Val::Px(0.0),
-        width: Val::Percent(100.0),
-        ..Default::default()
-    }));
+    commands
+        .entity(xp_bar)
+        .insert(XpBarTag)
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.position_type = PositionType::Absolute;
+            node.bottom = Val::Px(0.0);
+            node.left = Val::Px(0.0);
+            node.width = Val::Percent(100.0);
+        });
 
     // Combo counter + level readout (top-right).
     commands.spawn((
@@ -583,6 +601,91 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.insert_resource(HudTheme::default());
         app
+    }
+
+    /// Regression test for the bug a real play session hit (Matías, BL-82
+    /// Phase 5 follow-up): only "Lv. 1" and one EMPTY gray rounded panel were
+    /// visible — no health/energy/poise/XP fill, no crosshair content. Root
+    /// cause: `spawn_combat_hud` did
+    /// `commands.entity(bar).insert((Tag, Node { position_type, top, left,
+    /// ..Default::default() }))` on an entity [`bar::spawn_bar`] had ALREADY
+    /// given a real `Node` (explicit width/height/`Overflow::clip()`/
+    /// `border_radius`) — a second `insert` of the SAME component type
+    /// REPLACES it wholesale (`Node` isn't merged field-by-field), so the
+    /// `..Default::default()` silently discarded the bar's sizing, collapsing
+    /// every stat bar to a zero/auto-sized, invisible box while its sibling
+    /// `BackgroundColor` panel-ish container was the only thing left visibly
+    /// standing. This is exactly the "spawned but never actually renders"
+    /// class of bug the EM-5.1/5.2 PR's own reviewers already caught ONCE
+    /// (tooltip/notification widgets) — this was a second, unnoticed instance
+    /// in the very next module, because NONE of this module's other tests
+    /// call the real [`spawn_combat_hud`] (they all hand-build their own
+    /// fixture entities, bypassing the buggy code path entirely). This test
+    /// closes that gap: it calls `spawn_combat_hud` itself and asserts every
+    /// stat bar kept `spawn_bar`'s sizing/overflow/radius intact alongside
+    /// its position override.
+    #[test]
+    fn spawn_combat_hud_keeps_every_bars_sizing_from_spawn_bar_intact() {
+        let mut app = new_app();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_combat_hud)
+            .expect("spawn_combat_hud runs");
+
+        fn node_of<T: bevy::ecs::component::Component>(world: &mut World) -> Node {
+            world
+                .query_filtered::<&Node, With<T>>()
+                .single(world)
+                .expect("the tagged bar entity exists")
+                .clone()
+        }
+
+        let clip = bevy::ui::Overflow::clip();
+        let non_zero_radius = bevy::ui::BorderRadius::all(Val::Px(HudTheme::default().radius.sm));
+
+        let health = node_of::<HealthBarTag>(app.world_mut());
+        assert_eq!(
+            health.width,
+            Val::Px(220.0),
+            "health bar must keep spawn_bar's width, not collapse to Auto"
+        );
+        assert_eq!(health.height, Val::Px(22.0));
+        assert_eq!(health.overflow, clip);
+        assert_eq!(health.border_radius, non_zero_radius);
+        assert_eq!(health.position_type, PositionType::Absolute);
+        assert_eq!(health.top, Val::Px(16.0));
+        assert_eq!(health.left, Val::Px(16.0));
+
+        let energy = node_of::<EnergyBarTag>(app.world_mut());
+        assert_eq!(energy.width, Val::Px(220.0));
+        assert_eq!(energy.height, Val::Px(14.0));
+        assert_eq!(energy.overflow, clip);
+        assert_eq!(energy.border_radius, non_zero_radius);
+        assert_eq!(energy.top, Val::Px(42.0));
+        assert_eq!(energy.left, Val::Px(16.0));
+
+        let poise = node_of::<PoiseBarTag>(app.world_mut());
+        assert_eq!(poise.width, Val::Px(220.0));
+        assert_eq!(poise.height, Val::Px(8.0));
+        assert_eq!(poise.overflow, clip);
+        assert_eq!(poise.border_radius, non_zero_radius);
+        assert_eq!(poise.top, Val::Px(60.0));
+        assert_eq!(poise.left, Val::Px(16.0));
+
+        let xp = node_of::<XpBarTag>(app.world_mut());
+        // The XP bar's width is DELIBERATELY overridden to fill the screen
+        // (unlike the other three) — but its height/overflow/radius must
+        // still survive from `spawn_bar`.
+        assert_eq!(xp.width, Val::Percent(100.0));
+        assert_eq!(xp.height, Val::Px(6.0));
+        assert_eq!(xp.overflow, clip);
+        assert_eq!(xp.border_radius, non_zero_radius);
+        assert_eq!(xp.bottom, Val::Px(0.0));
+        assert_eq!(xp.left, Val::Px(0.0));
     }
 
     /// The EM-5.2 acceptance bar (spec §6): spawning a `NetLocalPlayer`

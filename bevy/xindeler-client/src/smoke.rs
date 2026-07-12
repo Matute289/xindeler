@@ -137,6 +137,19 @@ fn profile_disk_path() -> PathBuf { assets_root().join(PROFILE_ASSET_PATH) }
 
 /// Points the main camera at an offscreen image so captures are independent
 /// of OS window compositing (see module docs). Returns the target handle.
+///
+/// Also tags the retargeted camera [`IsDefaultUiCamera`] — found via this
+/// exact HUD investigation (BL-82 Phase 5 follow-up): `bevy_ui`'s
+/// `DefaultUiCamera::get()` only falls back to "the highest-order camera
+/// targeting the PRIMARY WINDOW" when no camera carries that marker
+/// (`bevy_ui::ui_node::DefaultUiCamera`). Once this function retargets the
+/// (only) camera's `RenderTarget` away from a window to this offscreen
+/// `Image`, that fallback matches NOTHING — every root `bevy_ui` node (the
+/// whole combat HUD included) silently has no camera to render to at all, so
+/// a `--smoke-screenshot` capture could never have shown the HUD, live claims
+/// notwithstanding. Marking the camera `IsDefaultUiCamera` explicitly (which
+/// takes priority over the window-target fallback, per its own doc comment)
+/// keeps UI rendering into the SAME offscreen target as the 3D scene.
 fn retarget_camera_to_image(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -150,9 +163,10 @@ fn retarget_camera_to_image(
     );
     let handle = images.add(image);
     for camera in cameras {
-        commands
-            .entity(camera)
-            .insert(RenderTarget::Image(handle.clone().into()));
+        commands.entity(camera).insert((
+            RenderTarget::Image(handle.clone().into()),
+            IsDefaultUiCamera,
+        ));
     }
     handle
 }
@@ -819,7 +833,51 @@ fn drive_smoke_perf_run(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
+
+    /// Regression test (found live: this exact bug is why a `--smoke-
+    /// screenshot` capture of the combat HUD showed NOTHING at all — not
+    /// even the always-on elements — while the same code rendered SOME of
+    /// the HUD in a real windowed session). `bevy_ui`'s `DefaultUiCamera`
+    /// only falls back to "highest-order camera targeting the PRIMARY
+    /// WINDOW" when no camera carries `IsDefaultUiCamera`
+    /// (`bevy_ui::ui_node::DefaultUiCamera::get`); once
+    /// `retarget_camera_to_image` points the app's only camera at an
+    /// offscreen `Image` instead of a window, that fallback matches nothing
+    /// and every root `bevy_ui` node loses its render target. This asserts
+    /// the retargeted camera keeps (or gains) `IsDefaultUiCamera` so UI stays
+    /// attached to the same offscreen target the 3D scene renders to.
+    #[test]
+    fn retargeted_camera_keeps_a_default_ui_camera() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        let camera = world.spawn(Camera3d::default()).id();
+
+        world
+            .run_system_once(
+                |mut commands: Commands,
+                 mut images: ResMut<Assets<Image>>,
+                 cameras: Query<Entity, With<Camera3d>>| {
+                    retarget_camera_to_image(&mut commands, &mut images, &cameras);
+                },
+            )
+            .expect("retarget_camera_to_image runs");
+
+        assert!(
+            world.get::<IsDefaultUiCamera>(camera).is_some(),
+            "the retargeted camera must stay eligible as the default UI camera, or every root \
+             bevy_ui node (the whole combat HUD included) silently has no camera to render to"
+        );
+        assert!(
+            matches!(
+                world.get::<RenderTarget>(camera),
+                Some(RenderTarget::Image(_))
+            ),
+            "the camera must still be retargeted to the offscreen image"
+        );
+    }
 
     #[test]
     fn extreme_profile_parses_and_differs_from_default() {
