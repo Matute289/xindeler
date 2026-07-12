@@ -1830,9 +1830,12 @@ fn mirror_sim_entities(
         // the wire type stays serde-simple).
         let net_uid = uid.map(|u| NetUid(u.0.get()));
         // BL-82 EM-4.9 (fixed misattribution race): decide THIS entity's
-        // dimension once — reused on every later tick via `entity_dims`,
-        // never revisited (no dimension-transfer path exists yet). A
-        // brand-new (not-yet-decided) entity that carries a
+        // dimension the first tick it's seen — reused on every later tick via
+        // `entity_dims`, UNLESS a later `player_transfer::
+        // apply_player_dimension_transfers` call revisits it (BL-82 EM-4.9
+        // follow-up: the player-dimension-transfer mechanism; see
+        // `SimEntityDimension`'s own doc comment). A brand-new (not-yet-
+        // decided) entity that carries a
         // `SpawnCorrelation` tag (only entities `apply_pending_entity_
         // template_spawns` itself created ever do — see that component's own
         // doc comment) looks its EXACT id up in the pending attribution map;
