@@ -47,8 +47,8 @@ pub use crate::{
     chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
     dimension_id::DimensionId,
     hotbar::{
-        AssignHotbarSlot, LocalAssignHotbarSlot, NetAbilities, NetAuxiliaryAbility,
-        NetCooldownEntry, NetCooldowns, NetHotbarSlot,
+        AssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldownEntry, NetCooldowns,
+        NetHotbarSlot,
     },
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     inventory::{
@@ -740,15 +740,13 @@ impl Plugin for XindelerProtocolPlugin {
         // one-shot discrete request like LoginRequest, not a per-tick state
         // sample.
         app.add_client_message::<ChatSendRequest>(XindelerChannel::Events.delivery());
-        // BL-82 EM-5.3: hotbar drag-to-assign — the real wire shape for a
-        // future genuinely-remote client (dormant today, same posture as
-        // EM-5.4's `ChatSendRequest`/EM-5.8's `GroupActionRequest`: no
-        // server-side handler exists for `FromClient<AssignHotbarSlot>` yet).
+        // BL-82 EM-5.3 (follow-up): hotbar drag-to-assign — a discrete,
+        // infrequent gameplay-intent request like `InventoryActionRequest`
+        // below, handled server-side by `xindeler-sim-bridge::hotbar::
+        // apply_hotbar_assignment_requests` for both a genuinely-remote
+        // client and the listen-server's own local echo (`hotbar`'s own doc
+        // comment).
         app.add_client_message::<hotbar::AssignHotbarSlot>(XindelerChannel::Events.delivery());
-        // The listen-server in-process counterpart (see `hotbar`'s own doc
-        // comment) — a plain Bevy message, not a replicon message; it never
-        // crosses a socket.
-        app.add_message::<hotbar::LocalAssignHotbarSlot>();
         // BL-82 EM-5.6: discrete, infrequent gameplay-intent requests
         // (inventory moves, trade invites/actions) — the Events lane
         // (ordered/reliable), same class as LoginRequest above, not the

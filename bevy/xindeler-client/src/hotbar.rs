@@ -18,10 +18,15 @@
 //! ## Real drag-to-assign, todays scope
 //! The `xindeler-ui::slot` drag-drop primitive is wired end-to-end: dragging
 //! one hotbar slot onto another swaps their bindings via TWO
-//! `LocalAssignHotbarSlot` messages (drained by `xindeler-sim-bridge::
-//! hotbar::apply_local_hotbar_assignment`, which calls the embedded player's
-//! REAL `client::Client::change_ability` — a genuine network send, never a
-//! direct ECS write). Today the only drag SOURCE is another hotbar slot
+//! `AssignHotbarSlot` client messages (the real replicon wire message,
+//! consumed server-side by `xindeler-sim-bridge::hotbar::
+//! apply_hotbar_assignment_requests` — BL-82 EM-5.3 follow-up: this used to
+//! write a listen-server-only `LocalAssignHotbarSlot` shortcut instead,
+//! which silently dropped every real remote client's rebind request on a
+//! dedicated server; writing the real client message here works
+//! identically for both a listen-server's own embedded player, via
+//! `bevy_replicon`'s local echo, AND a genuinely-remote client). Today the
+//! only drag SOURCE is another hotbar slot
 //! (EM-5.6's inventory/EM-5.7's diary — the item/ability sources the spec
 //! names — haven't landed yet); a drop whose `from`/`to` groups don't both
 //! equal [`HOTBAR_GROUP`] is ignored, not silently mis-applied. Once those
@@ -56,7 +61,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use xindeler_input::{GameInput, KeyMap};
-use xindeler_protocol::{LocalAssignHotbarSlot, NetAbilities, NetCooldowns, NetLocalPlayer};
+use xindeler_protocol::{AssignHotbarSlot, NetAbilities, NetCooldowns, NetLocalPlayer};
 use xindeler_ui::{
     slot::{SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
@@ -108,6 +113,11 @@ impl Plugin for HotbarViewPlugin {
         if !app.is_plugin_added::<xindeler_ui::XindelerUiPlugin>() {
             app.add_plugins(xindeler_ui::XindelerUiPlugin);
         }
+        // Registered here too (idempotent alongside `XindelerProtocolPlugin`'s
+        // own `add_client_message` registration) so this plugin's own tests
+        // don't need the whole protocol plugin — the same convention
+        // `chat.rs`'s `ChatViewPlugin` already follows for `ChatSendRequest`.
+        app.add_message::<AssignHotbarSlot>();
         app.init_resource::<HotbarSlotEntities>()
             .add_systems(Startup, spawn_hotbar.after(xindeler_ui::theme::init_theme))
             .add_systems(
@@ -485,14 +495,14 @@ fn sync_cooldown_overlays(
 
 /// Drains [`SlotDropped`] and, for a drag ENTIRELY within the hotbar
 /// (`from`/`to` both [`HOTBAR_GROUP`]), swaps the two slots' bindings via
-/// TWO [`LocalAssignHotbarSlot`] messages — the module doc comment's "real
+/// TWO [`AssignHotbarSlot`] client messages — the module doc comment's "real
 /// drag-to-assign, today's scope" contract. A drop involving any other
 /// group (a future inventory/diary drag source) is silently ignored HERE —
 /// not mis-applied — until that screen's own handler exists.
 fn handle_hotbar_drag_drop(
     mut drops: MessageReader<SlotDropped>,
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
-    mut assign: MessageWriter<LocalAssignHotbarSlot>,
+    mut assign: MessageWriter<AssignHotbarSlot>,
 ) {
     let Ok(abilities) = abilities.single() else {
         return;
@@ -517,11 +527,11 @@ fn handle_hotbar_drag_drop(
             reason = "hotbar slot indices are a handful, never near u32::MAX"
         )]
         {
-            assign.write(LocalAssignHotbarSlot {
+            assign.write(AssignHotbarSlot {
                 slot: to_index as u32,
                 ability: from_slot.aux,
             });
-            assign.write(LocalAssignHotbarSlot {
+            assign.write(AssignHotbarSlot {
                 slot: from_index as u32,
                 ability: to_slot.aux,
             });
@@ -645,13 +655,13 @@ mod tests {
     }
 
     /// A [`SlotDropped`] entirely within the hotbar group swaps the two
-    /// slots' `aux` values via two `LocalAssignHotbarSlot` messages — the
+    /// slots' `aux` values via two `AssignHotbarSlot` client messages — the
     /// literal EM-5.3 drag-to-assign acceptance bar.
     #[test]
-    fn hotbar_internal_drag_drop_swaps_via_two_local_assign_messages() {
+    fn hotbar_internal_drag_drop_swaps_via_two_assign_messages() {
         let mut app = new_app();
         app.add_message::<SlotDropped>();
-        app.add_message::<LocalAssignHotbarSlot>();
+        app.add_message::<AssignHotbarSlot>();
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
             primary: None,
             secondary: None,
@@ -679,15 +689,15 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<Messages<LocalAssignHotbarSlot>>()
+            .resource_mut::<Messages<AssignHotbarSlot>>()
             .drain()
             .collect();
         assert_eq!(sent.len(), 2);
-        assert!(sent.contains(&LocalAssignHotbarSlot {
+        assert!(sent.contains(&AssignHotbarSlot {
             slot: 1,
             ability: NetAuxiliaryAbility::MainWeapon(0),
         }));
-        assert!(sent.contains(&LocalAssignHotbarSlot {
+        assert!(sent.contains(&AssignHotbarSlot {
             slot: 0,
             ability: NetAuxiliaryAbility::Innate(2),
         }));
@@ -700,7 +710,7 @@ mod tests {
     fn cross_group_drop_is_ignored() {
         let mut app = new_app();
         app.add_message::<SlotDropped>();
-        app.add_message::<LocalAssignHotbarSlot>();
+        app.add_message::<AssignHotbarSlot>();
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
             primary: None,
             secondary: None,
@@ -719,7 +729,7 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<Messages<LocalAssignHotbarSlot>>()
+            .resource_mut::<Messages<AssignHotbarSlot>>()
             .drain()
             .collect();
         assert!(sent.is_empty());

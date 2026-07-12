@@ -270,12 +270,16 @@ impl Plugin for SimServerPlugin {
 
         // BL-82 EM-5.3: the skillbar/hotbar mirror (resolved ability-pool/
         // slot bindings + per-ability cooldowns) — same reasoning as
-        // `CombatHudMirrorPlugin` above. `apply_local_hotbar_assignment`
-        // (part of this plugin) degrades clean here: this shell has no
-        // `EmbeddedPlayer` (a dedicated server serves only real remote
-        // clients), so that system's `Option<NonSendMut<EmbeddedPlayer>>`
-        // simply never fires — same posture `ensure_terrain_anchor`'s own
-        // `Option<NonSend<EmbeddedPlayer>>` already established.
+        // `CombatHudMirrorPlugin` above. `apply_hotbar_assignment_requests`
+        // (part of this plugin, EM-5.3 follow-up: was `apply_local_hotbar_
+        // assignment`, which resolved every rebind via the embedded-player
+        // shortcut and so silently dropped every real client's request on
+        // THIS shell — fixed to resolve via `PlayerDimensionSession`, the
+        // SAME pattern `InventoryMirrorPlugin`/`TradeMirrorPlugin` above
+        // already use) degrades clean when there is no `EmbeddedPlayer`
+        // (a dedicated server serves only real remote clients) — its
+        // fallback path simply never fires here, but the real-connection
+        // path (the one that matters on THIS shell) does.
         app.add_plugins(HotbarMirrorPlugin);
 
         // EM-4.2b: the transport seam — this crate names ONLY
