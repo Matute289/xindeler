@@ -47,9 +47,9 @@ use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
-    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hud_toast::HudToastViewPlugin,
-    lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
+    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, palette_material::PaletteMaterialPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -130,6 +130,13 @@ impl Plugin for NetClientPlugin {
             // queues a `ChatSendRequest` nobody answers yet, degrading
             // clean rather than panicking.
             ChatViewPlugin,
+            // BL-82 EM-5.3: the skillbar/hotbar screen — verbatim reuse, same
+            // as every other consumer plugin in this list. This mode has no
+            // embedded/controllable local player yet (module doc comment,
+            // "Scope: spectator-only (v1)"), so every one of its systems
+            // degrades clean (no `NetLocalPlayer` entity to query) exactly
+            // like `CombatHudViewPlugin` already does here.
+            HotbarViewPlugin,
         ));
     }
 }

@@ -1,0 +1,549 @@
+//! BL-82 EM-5.6 — the drag-drop item-slot primitive (spec §2 EM-5.1's own
+//! "Deferred to the first screen that needs them" list named this: "the
+//! drag-drop slot (needed by EM-5.3/5.6/5.7/5.15 — lands with whichever of
+//! those is first)" — EM-5.6 is that screen).
+//!
+//! ## API shape (siblings build on this)
+//! A slot is a plain `bevy_ui` node carrying [`HudSlot`] + [`SlotGroup`] +
+//! [`SlotAddress`] (+ optionally [`SlotContents`] once it holds something).
+//! [`SlotGroup`]/[`SlotAddress`] are OPAQUE `u32`/`u64` keys this primitive
+//! never interprets — the caller (a bag screen, a trade offer grid, a future
+//! hotbar/crafting screen) picks whatever encoding makes sense for its own
+//! domain (e.g. EM-5.6 packs `InvSlotId`/`EquipSlot`/a trade-offer index into
+//! [`SlotAddress`] via `SlotAddress::from_inv_slot_idx`/friends; a future
+//! hotbar screen would use its own 0..10 slot index). Dragging one slot onto
+//! another fires [`SlotDropped`] carrying BOTH ends' `(group, address)` pair
+//! — the screen (never this primitive) decides what the move MEANS (an
+//! inventory swap, an equip, adding to a trade offer, binding a hotbar
+//! ability, …) and issues whatever client→server request follows.
+//!
+//! ## What this primitive owns
+//! - [`slot_bundle`]: spawns a themed square slot (background, border,
+//!   hover-highlight, an icon-text label placeholder — see EM-5.1's own note
+//!   that the real `.vox`-icon-as-UI-icon path is deferred to whichever screen
+//!   needs it first; this v1 uses a short text glyph + a quantity badge
+//!   instead, the SAME "themed placeholder, reviewer-approved for v1" posture
+//!   EM-5.2's buff-strip colour swatches established) + a
+//!   [`crate::tooltip::Tooltip`] hook.
+//! - [`SlotContents`]: what a slot currently displays; [`update_slot_visuals`]
+//!   is the one system that turns a `Changed<SlotContents>` into the actual
+//!   icon-text/quantity-badge/tooltip nodes.
+//! - Drag/drop via `bevy_picking`'s stock `Pointer<DragStart>`/`Pointer<Drag>`/
+//!   `Pointer<DragEnd>`/`Pointer<DragEnter>`/`Pointer<DragLeave>`/
+//!   `Pointer<DragDrop>` events, observed GLOBALLY (`App::add_observer`, not
+//!   per-entity `.observe()` — every slot in the app is drag-drop-capable the
+//!   moment it carries [`HudSlot`], no per-spawn wiring needed): a slot dims
+//!   while being dragged, a valid drop target highlights while
+//!   hovered-with-a-drag, and dropping fires [`SlotDropped`].
+//!
+//! ## v1 simplification (documented, not silently skipped)
+//! No floating "ghost" icon follows the cursor during a drag (Bevy 0.19 has
+//! no first-party drag-ghost widget) — the dimmed source + highlighted
+//! target already gives clear feedback for a grid of same-sized slots; a
+//! cursor-following ghost sprite is a pure-polish follow-up once a screen
+//! needs finer-grained visual feedback (e.g. dragging between distant
+//! windows).
+
+use bevy::{
+    ecs::{
+        bundle::Bundle,
+        component::Component,
+        entity::Entity,
+        hierarchy::Children,
+        message::{Message, MessageWriter},
+        observer::On,
+        query::{Changed, With},
+        system::{Commands, Query, Res},
+    },
+    picking::{
+        events::{DragDrop, DragEnd, DragEnter, DragLeave, DragStart, Pointer},
+        hover::Hovered,
+    },
+    prelude::{
+        BackgroundColor, BorderColor, BorderRadius, Node, PositionType, Text, TextColor, TextFont,
+        UiRect, Val, Visibility,
+    },
+    text::{FontSize, FontSource},
+};
+
+use crate::theme::{HudFonts, HudTheme};
+
+/// Which drag-drop group a slot belongs to. Drops are reported regardless of
+/// whether the two ends share a group — screens that need to REJECT
+/// cross-group drops (e.g. "you can't drag a trade-offer slot into your
+/// bag") check `from_group == to_group` (or whatever rule they need)
+/// themselves when handling [`SlotDropped`]; this primitive stays opinion-free.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SlotGroup(pub u32);
+
+/// The caller-defined address this slot represents — opaque to this
+/// primitive. Two convenience constructors below cover EM-5.6's own two
+/// domains (bag slots, equip slots); a screen with a different domain (a
+/// future hotbar's 0..10 index, a trade-offer index) just picks its own
+/// encoding.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SlotAddress(pub u64);
+
+impl SlotAddress {
+    /// Packs a `common::comp::inventory::slot::InvSlotId` (loadout_idx <<
+    /// 16 | slot_idx, already exposed as `InvSlotId::idx() -> u32`) into a
+    /// tagged address — high bit clear distinguishes it from
+    /// [`Self::from_equip_slot_discriminant`]'s tagged range.
+    #[must_use]
+    pub fn from_inv_slot_idx(idx: u32) -> Self { Self(u64::from(idx)) }
+
+    /// Packs an equip-slot's small integer discriminant (the caller resolves
+    /// `EquipSlot` ↔ discriminant — this primitive doesn't know the
+    /// `EquipSlot` enum) into a tagged address in the high half, so bag and
+    /// equip addresses never collide.
+    #[must_use]
+    pub fn from_equip_slot_discriminant(discriminant: u32) -> Self {
+        Self((1u64 << 32) | u64::from(discriminant))
+    }
+
+    /// The raw packed value, for a caller that needs to unpack it back.
+    #[must_use]
+    pub fn raw(self) -> u64 { self.0 }
+}
+
+/// What (if anything) a slot currently displays. The caller writes this
+/// (typically driven by a `Net*` mirror, e.g. EM-5.6's `NetInventory`);
+/// [`update_slot_visuals`] is the only system that reads it.
+#[derive(Component, Clone, Debug, Default, PartialEq)]
+pub struct SlotContents {
+    /// Short placeholder glyph text shown in the slot (real `.vox`-icon
+    /// rendering is a documented follow-up — see module doc comment).
+    pub icon_text: String,
+    /// Stack count badge; `None`/`Some(1)` both render as no badge (a
+    /// singleton item doesn't need a "×1").
+    pub quantity: Option<u32>,
+    /// Hover tooltip text (already resolved by the caller — this primitive
+    /// does no i18n/lookup itself, matching [`crate::tooltip::Tooltip`]'s own
+    /// convention).
+    pub tooltip: String,
+}
+
+/// Marks a spawned drag-drop slot root.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct HudSlot;
+
+/// Marks a slot's icon-text child (the node [`update_slot_visuals`] retexts).
+/// `pub(crate)` (not private): `update_slot_visuals` is itself `pub(crate)`
+/// (called from `crate::XindelerUiPlugin` in `lib.rs`), and a query type
+/// parameter naming this marker makes it part of that function's effective
+/// signature — Rust's privacy check requires the marker be at least as
+/// visible as the function that names it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct SlotIconText;
+/// Marks a slot's quantity-badge child. `pub(crate)` — see [`SlotIconText`]'s
+/// doc comment for why.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct SlotQuantityBadge;
+
+/// Fired when a drag ending over a slot completes — see the module doc
+/// comment for the full contract. `from`/`to` are `(group, address)` pairs;
+/// this primitive never inspects the semantic meaning of either.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct SlotDropped {
+    pub from_group: SlotGroup,
+    pub from_address: SlotAddress,
+    pub to_group: SlotGroup,
+    pub to_address: SlotAddress,
+}
+
+/// Spawns a themed, empty, drag-drop-capable slot (square, `size_px` on a
+/// side) at the given `(group, address)`, carrying a DEFAULT (empty)
+/// [`SlotContents`] from the start — so a caller's own `Query<&mut
+/// SlotContents>` always matches every spawned slot immediately (no
+/// "insert it yourself or nothing renders" trap), and
+/// [`update_slot_visuals`]'s `Changed<SlotContents>` gate fires correctly the
+/// first time a caller updates it. The caller updates [`SlotContents`] on
+/// the returned entity (via `Commands`/a `Query<&mut SlotContents>`)
+/// whenever the underlying data changes; never spawn the icon/quantity/
+/// tooltip children directly — [`update_slot_visuals`] owns them.
+#[must_use]
+pub fn slot_bundle(
+    theme: &HudTheme,
+    group: SlotGroup,
+    address: SlotAddress,
+    size_px: f32,
+) -> impl Bundle {
+    (
+        HudSlot,
+        group,
+        address,
+        SlotContents::default(),
+        Hovered(false),
+        bevy::picking::Pickable::default(),
+        Node {
+            width: Val::Px(size_px),
+            height: Val::Px(size_px),
+            border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+            ..Default::default()
+        },
+        BackgroundColor(theme.palette.panel_bg),
+        BorderColor::all(theme.palette.panel_border),
+    )
+}
+
+/// Reconciles every [`HudSlot`]'s icon-text/quantity-badge children against
+/// its current [`SlotContents`] — `Changed<SlotContents>`-gated, and further
+/// gated on the CONTENT actually needing a (re)spawn (children are reused,
+/// not despawned/respawned every change, unlike [`crate::notification`]'s
+/// deliberately-simple rebuild-every-time strategy — a bag can have dozens
+/// of slots changing per network tick, so this one is worth the extra care).
+pub(crate) fn update_slot_visuals(
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    mut commands: Commands,
+    slots: Query<(Entity, &SlotContents, Option<&Children>), Changed<SlotContents>>,
+    mut icon_texts: Query<
+        &mut Text,
+        (
+            With<SlotIconText>,
+            bevy::ecs::query::Without<SlotQuantityBadge>,
+        ),
+    >,
+    mut quantity_badges: Query<
+        (&mut Text, &mut Visibility),
+        (
+            With<SlotQuantityBadge>,
+            bevy::ecs::query::Without<SlotIconText>,
+        ),
+    >,
+) {
+    for (slot_entity, contents, children) in &slots {
+        let existing_icon = children.and_then(|kids| {
+            kids.iter()
+                .find(|&&child| icon_texts.get(child).is_ok())
+                .copied()
+        });
+        let existing_badge = children.and_then(|kids| {
+            kids.iter()
+                .find(|&&child| quantity_badges.get(child).is_ok())
+                .copied()
+        });
+
+        if let Some(icon_entity) = existing_icon {
+            if let Ok(mut text) = icon_texts.get_mut(icon_entity) {
+                text.0.clone_from(&contents.icon_text);
+            }
+        } else {
+            commands.entity(slot_entity).with_children(|parent| {
+                parent.spawn((
+                    SlotIconText,
+                    Text(contents.icon_text.clone()),
+                    TextFont {
+                        font: FontSource::Handle(fonts.body.clone()),
+                        font_size: FontSize::Px(14.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+            });
+        }
+
+        let badge_text = match contents.quantity {
+            Some(qty) if qty > 1 => format!("×{qty}"),
+            _ => String::new(),
+        };
+        let badge_visible = !badge_text.is_empty();
+        if let Some(badge_entity) = existing_badge {
+            if let Ok((mut text, mut visibility)) = quantity_badges.get_mut(badge_entity) {
+                text.0.clone_from(&badge_text);
+                *visibility = if badge_visible {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+            }
+        } else {
+            commands.entity(slot_entity).with_children(|parent| {
+                parent.spawn((
+                    SlotQuantityBadge,
+                    Text(badge_text),
+                    TextFont {
+                        font: FontSource::Handle(fonts.body.clone()),
+                        font_size: FontSize::Px(11.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text_muted),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        bottom: Val::Px(1.0),
+                        right: Val::Px(2.0),
+                        ..Default::default()
+                    },
+                    if badge_visible {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                ));
+            });
+        }
+
+        commands
+            .entity(slot_entity)
+            .insert(crate::tooltip::Tooltip {
+                text: contents.tooltip.clone(),
+            });
+    }
+}
+
+/// Dims a slot while it's being dragged (the "this is the thing you're
+/// moving" cue) — restored by [`on_drag_end`].
+fn on_drag_start(
+    trigger: On<Pointer<DragStart>>,
+    mut backgrounds: Query<&mut BackgroundColor, With<HudSlot>>,
+    theme: Res<HudTheme>,
+) {
+    if let Ok(mut bg) = backgrounds.get_mut(trigger.entity) {
+        let mut faded = theme.palette.panel_bg.to_srgba();
+        faded.alpha *= 0.4;
+        bg.0 = bevy::color::Color::Srgba(faded);
+    }
+}
+
+/// Restores a slot's normal background once the drag ends (whether or not it
+/// landed on a valid target — [`on_drag_drop`] handles the actual move).
+fn on_drag_end(
+    trigger: On<Pointer<DragEnd>>,
+    mut backgrounds: Query<&mut BackgroundColor, With<HudSlot>>,
+    theme: Res<HudTheme>,
+) {
+    if let Ok(mut bg) = backgrounds.get_mut(trigger.entity) {
+        bg.0 = theme.palette.panel_bg;
+    }
+}
+
+/// Highlights a slot while a drag is hovering over it (a valid drop target
+/// cue).
+fn on_drag_enter(
+    trigger: On<Pointer<DragEnter>>,
+    mut borders: Query<&mut BorderColor, With<HudSlot>>,
+    theme: Res<HudTheme>,
+) {
+    if let Ok(mut border) = borders.get_mut(trigger.entity) {
+        *border = BorderColor::all(theme.palette.accent);
+    }
+}
+
+/// Restores a slot's normal border once a drag leaves it without dropping.
+fn on_drag_leave(
+    trigger: On<Pointer<DragLeave>>,
+    mut borders: Query<&mut BorderColor, With<HudSlot>>,
+    theme: Res<HudTheme>,
+) {
+    if let Ok(mut border) = borders.get_mut(trigger.entity) {
+        *border = BorderColor::all(theme.palette.panel_border);
+    }
+}
+
+/// The pure "did a real drop between two slots happen, and what does it
+/// mean" logic, split out from [`on_drag_drop`] so it's unit-testable
+/// without constructing a real `bevy_picking` event (the observer plumbing
+/// itself is exercised structurally by [`install_observers`] being callable
+/// at all + registered against the real `Pointer<DragDrop>` type; the
+/// SEMANTIC contract — "both ends must be real slots, else ignore" — is what
+/// this function isolates for a direct test).
+fn resolve_drop(
+    to: Option<(&SlotGroup, &SlotAddress)>,
+    from: Option<(&SlotGroup, &SlotAddress)>,
+) -> Option<SlotDropped> {
+    let (to_group, to_address) = to?;
+    let (from_group, from_address) = from?;
+    Some(SlotDropped {
+        from_group: *from_group,
+        from_address: *from_address,
+        to_group: *to_group,
+        to_address: *to_address,
+    })
+}
+
+/// The one place a completed drag turns into [`SlotDropped`]: reads BOTH
+/// ends' `(SlotGroup, SlotAddress)` (via [`resolve_drop`]) and writes the
+/// message — see the module doc comment for the full contract. A drop onto
+/// (or from) an entity missing either component (not a real slot) is
+/// silently ignored.
+fn on_drag_drop(
+    trigger: On<Pointer<DragDrop>>,
+    slots: Query<(&SlotGroup, &SlotAddress), With<HudSlot>>,
+    mut borders: Query<&mut BorderColor, With<HudSlot>>,
+    theme: Res<HudTheme>,
+    mut writer: MessageWriter<SlotDropped>,
+) {
+    let to_entity = trigger.entity;
+    let dropped_entity = trigger.event.dropped;
+
+    if let Ok(mut border) = borders.get_mut(to_entity) {
+        *border = BorderColor::all(theme.palette.panel_border);
+    }
+
+    if let Some(dropped) = resolve_drop(slots.get(to_entity).ok(), slots.get(dropped_entity).ok()) {
+        writer.write(dropped);
+    }
+}
+
+/// Registers the slot's global drag/drop observers + [`update_slot_visuals`].
+/// Added by [`crate::XindelerUiPlugin`].
+pub(crate) fn install_observers(app: &mut bevy::app::App) {
+    app.add_message::<SlotDropped>();
+    app.add_observer(on_drag_start);
+    app.add_observer(on_drag_end);
+    app.add_observer(on_drag_enter);
+    app.add_observer(on_drag_leave);
+    app.add_observer(on_drag_drop);
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::{app::App, prelude::*};
+
+    use super::*;
+
+    fn new_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app
+    }
+
+    /// `slot_bundle` spawns a real `HudSlot` carrying the given group/address
+    /// and the theme's background — the T56.19 "widget primitive exists"
+    /// acceptance bar.
+    #[test]
+    fn slot_bundle_spawns_with_group_and_address() {
+        let mut app = new_app();
+        let theme = HudTheme::default();
+        let entity = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(1), SlotAddress(42), 48.0))
+            .id();
+
+        assert!(app.world().get::<HudSlot>(entity).is_some());
+        assert_eq!(*app.world().get::<SlotGroup>(entity).unwrap(), SlotGroup(1));
+        assert_eq!(
+            *app.world().get::<SlotAddress>(entity).unwrap(),
+            SlotAddress(42)
+        );
+    }
+
+    /// `SlotAddress`'s two packing helpers never collide (bag vs. equip
+    /// addressing stay in disjoint ranges) — the invariant `xindeler-client`'s
+    /// screens rely on to tell "was this an equip slot or a bag slot" apart
+    /// purely from the raw value if ever needed.
+    #[test]
+    fn inv_slot_and_equip_slot_addresses_never_collide() {
+        for idx in 0..64u32 {
+            assert_ne!(
+                SlotAddress::from_inv_slot_idx(idx).raw(),
+                SlotAddress::from_equip_slot_discriminant(idx).raw()
+            );
+        }
+    }
+
+    /// Setting a slot's [`SlotContents`] spawns real icon-text/quantity-badge
+    /// children reflecting it; a LATER content change updates the SAME
+    /// children in place (not a fresh despawn/respawn pair) — the T56.19
+    /// acceptance bar for the reconciliation half of this primitive.
+    #[test]
+    fn slot_contents_drive_icon_and_quantity_children() {
+        let mut app = new_app();
+        app.add_systems(Update, update_slot_visuals);
+        let theme = HudTheme::default();
+
+        // `slot_bundle` already carries a DEFAULT `SlotContents` — set the
+        // real one via a follow-up `insert` (the production usage pattern),
+        // not by double-including the component in one spawn tuple.
+        let slot = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(1), 48.0))
+            .id();
+        app.world_mut().entity_mut(slot).insert(SlotContents {
+            icon_text: "Pot".to_owned(),
+            quantity: Some(5),
+            tooltip: "Minor Potion".to_owned(),
+        });
+        app.update();
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(slot)
+            .expect("icon/badge children spawned")
+            .iter()
+            .collect();
+        let icon = children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<SlotIconText>(e).is_some())
+            .expect("icon child exists");
+        let badge = children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<SlotQuantityBadge>(e).is_some())
+            .expect("badge child exists");
+        assert_eq!(app.world().get::<Text>(icon).unwrap().0, "Pot");
+        assert_eq!(app.world().get::<Text>(badge).unwrap().0, "×5");
+
+        // Change the contents; the SAME children update, no new ones spawn.
+        app.world_mut().entity_mut(slot).insert(SlotContents {
+            icon_text: "Ax".to_owned(),
+            quantity: None,
+            tooltip: "Axe".to_owned(),
+        });
+        app.update();
+
+        let children_after: Vec<Entity> =
+            app.world().get::<Children>(slot).unwrap().iter().collect();
+        assert_eq!(
+            children_after.len(),
+            children.len(),
+            "content changes must reuse existing children, not grow the child list"
+        );
+        assert_eq!(app.world().get::<Text>(icon).unwrap().0, "Ax");
+        assert_eq!(app.world().get::<Text>(badge).unwrap().0, "");
+    }
+
+    /// [`resolve_drop`] (the semantic core [`on_drag_drop`] delegates to)
+    /// builds a [`SlotDropped`] from two real slots' group/address — the
+    /// T56.19 end-to-end acceptance bar for "what a completed drag/drop
+    /// MEANS", independent of `bevy_picking`'s own event-dispatch plumbing
+    /// (which is registered, not reimplemented, by [`install_observers`]).
+    #[test]
+    fn resolve_drop_builds_slot_dropped_from_both_ends() {
+        let from = (SlotGroup(0), SlotAddress(1));
+        let to = (SlotGroup(0), SlotAddress(2));
+        let dropped = resolve_drop(Some((&to.0, &to.1)), Some((&from.0, &from.1)))
+            .expect("both ends are real slots");
+        assert_eq!(dropped.from_address, SlotAddress(1));
+        assert_eq!(dropped.to_address, SlotAddress(2));
+    }
+
+    /// A drop where either end isn't a real slot (missing group/address —
+    /// e.g. dropped outside any slot) is silently ignored, not a panic.
+    #[test]
+    fn resolve_drop_ignores_a_non_slot_end() {
+        let to = (SlotGroup(0), SlotAddress(2));
+        assert!(resolve_drop(Some((&to.0, &to.1)), None).is_none());
+        assert!(resolve_drop(None, Some((&to.0, &to.1))).is_none());
+    }
+
+    /// [`install_observers`] registers the drag/drop observer set + the
+    /// [`SlotDropped`] message type without panicking — the structural half
+    /// of the acceptance bar (the real `bevy_picking` dispatch machinery
+    /// that would actually fire these observers is `bevy_picking`'s own
+    /// tested responsibility, not reimplemented here).
+    #[test]
+    fn install_observers_registers_without_panicking() {
+        let mut app = new_app();
+        app.add_plugins(bevy::picking::PickingPlugin);
+        install_observers(&mut app);
+        app.update();
+    }
+}

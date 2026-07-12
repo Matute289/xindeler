@@ -346,6 +346,19 @@ impl EmbeddedPlayer {
             self.client.send_command(name, args);
         }
     }
+
+    /// Applies a client-side hotbar drag-drop assignment through the
+    /// embedded player's real network `change_ability` send (BL-82 EM-5.3) —
+    /// a genuine client->server request over the loopback socket, never a
+    /// direct ECS write (isolation-law rule 4), matching every other
+    /// `EmbeddedPlayer` pass-through's "guard on `is_in_game`, then call the
+    /// matching `Client` method" idiom (see e.g. `position`/`velocity`
+    /// above). A no-op before the player is in game (nothing to bind yet).
+    pub fn assign_hotbar_slot(&mut self, slot: usize, ability: comp::ability::AuxiliaryAbility) {
+        if self.is_in_game() {
+            self.client.change_ability(slot, ability);
+        }
+    }
 }
 
 /// Pure decision logic for [`EmbeddedPlayer::send_chat_request`] (BL-82

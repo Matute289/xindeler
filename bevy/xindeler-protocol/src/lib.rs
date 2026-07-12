@@ -18,6 +18,7 @@ pub mod ai_mode;
 pub mod aurora_overlay;
 pub mod chat;
 pub mod dimension_id;
+pub mod hotbar;
 pub mod interest;
 pub mod login;
 pub mod narrative;
@@ -39,6 +40,10 @@ pub use crate::{
     aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
     chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
     dimension_id::DimensionId,
+    hotbar::{
+        AssignHotbarSlot, LocalAssignHotbarSlot, NetAbilities, NetAuxiliaryAbility,
+        NetCooldownEntry, NetCooldowns, NetHotbarSlot,
+    },
     interest::{ClientInterestPlugin, ClientViewpoint, chunk_fuzz},
     login::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
@@ -684,6 +689,10 @@ impl Plugin for XindelerProtocolPlugin {
             .replicate::<NetCombo>()
             .replicate::<NetXp>()
             .replicate::<NetBuffs>()
+            // BL-82 EM-5.3: the skillbar/hotbar mirror — resolved
+            // ability-pool/slot-binding projection + per-ability cooldowns.
+            .replicate::<NetAbilities>()
+            .replicate::<NetCooldowns>()
             // EM-3.7b: the local-player marker on the mirror entity so the
             // client's third-person camera knows which capsule to follow.
             .replicate::<NetLocalPlayer>()
@@ -704,6 +713,15 @@ impl Plugin for XindelerProtocolPlugin {
         // one-shot discrete request like LoginRequest, not a per-tick state
         // sample.
         app.add_client_message::<ChatSendRequest>(XindelerChannel::Events.delivery());
+        // BL-82 EM-5.3: hotbar drag-to-assign — the real wire shape for a
+        // future genuinely-remote client (dormant today, same posture as
+        // EM-5.4's `ChatSendRequest`/EM-5.8's `GroupActionRequest`: no
+        // server-side handler exists for `FromClient<AssignHotbarSlot>` yet).
+        app.add_client_message::<hotbar::AssignHotbarSlot>(XindelerChannel::Events.delivery());
+        // The listen-server in-process counterpart (see `hotbar`'s own doc
+        // comment) — a plain Bevy message, not a replicon message; it never
+        // crosses a socket.
+        app.add_message::<hotbar::LocalAssignHotbarSlot>();
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients

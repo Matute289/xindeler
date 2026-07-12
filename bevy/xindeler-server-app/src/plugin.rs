@@ -22,8 +22,8 @@ use xindeler_dimensions::{
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    CombatHudMirrorPlugin, PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin,
-    SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
+    CombatHudMirrorPlugin, HotbarMirrorPlugin, PlayerTransferPlugin, SIM_TICK_HZ,
+    ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -262,6 +262,16 @@ impl Plugin for SimServerPlugin {
         // trait impls support (same reason `AtmosphereSyncMessagePlugin`
         // above was already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+
+        // BL-82 EM-5.3: the skillbar/hotbar mirror (resolved ability-pool/
+        // slot bindings + per-ability cooldowns) — same reasoning as
+        // `CombatHudMirrorPlugin` above. `apply_local_hotbar_assignment`
+        // (part of this plugin) degrades clean here: this shell has no
+        // `EmbeddedPlayer` (a dedicated server serves only real remote
+        // clients), so that system's `Option<NonSendMut<EmbeddedPlayer>>`
+        // simply never fires — same posture `ensure_terrain_anchor`'s own
+        // `Option<NonSend<EmbeddedPlayer>>` already established.
+        app.add_plugins(HotbarMirrorPlugin);
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,

@@ -41,6 +41,7 @@ pub mod notification;
 pub mod panel;
 pub mod scale;
 pub mod scroll;
+pub mod slot;
 pub mod theme;
 pub mod tooltip;
 
@@ -92,7 +93,12 @@ impl Plugin for XindelerUiPlugin {
                     button::update_button_visuals,
                     tooltip::update_tooltip,
                     notification::advance_notifications,
+                    slot::update_slot_visuals,
                 ),
             );
+        // BL-82 EM-5.3: the drag-drop slot primitive's global observers (not
+        // per-entity — every `HudSlot` anywhere in the app is drag-drop-
+        // capable the moment it's spawned).
+        slot::install_observers(app);
     }
 }
