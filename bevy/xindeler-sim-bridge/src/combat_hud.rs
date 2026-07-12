@@ -25,12 +25,15 @@
 //! not the sim's full `Buff` (effects/source/category bookkeeping stays
 //! server-side).
 
+use std::collections::HashMap;
+
 use bevy::{
     app::{App, FixedUpdate, Plugin},
     ecs::{
         change_detection::NonSendMut,
+        resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res},
+        system::{Commands, Res, ResMut},
     },
 };
 use common::{comp, comp::skillset::total_exp_for_level, resources::Time as SimTime};
@@ -38,6 +41,24 @@ use specs::WorldExt;
 use xindeler_protocol::{NetBuffEntry, NetBuffs, NetCombo, NetEnergy, NetPoise, NetXp};
 
 use crate::{SimMirror, SimServer, mirror_sim_entities, tick_sim};
+
+/// Last-mirrored `NetCombo`/`NetXp`/`NetBuffs` per sim entity — the SAME
+/// dedup shape `mirror_sim_entities` already uses for `NetLoadout`/`RegionKey`
+/// (`SimLoadoutCache`/`SimRegionCache`): re-inserting an UNCHANGED value every
+/// tick would still force replicon to treat the component as mutated (a real
+/// bandwidth cost for `NetBuffs`, which is `Vec`-shaped like `NetLoadout`, not
+/// two floats like `NetHealth`/`NetEnergy`/`NetPoise`). Those three stay on
+/// the always-overwrite path deliberately — they legitimately change most
+/// ticks, exactly like `NetHealth` does. Entries are pruned here (not by
+/// `mirror_sim_entities`) whenever a sim entity drops out of [`SimMirror`],
+/// mirroring that struct's own per-tick prune shape without adding a new
+/// cross-module removal hook.
+#[derive(Resource, Default, Debug)]
+pub struct CombatHudMirrorCache {
+    combo: HashMap<specs::Entity, NetCombo>,
+    xp: HashMap<specs::Entity, NetXp>,
+    buffs: HashMap<specs::Entity, NetBuffs>,
+}
 
 /// Reads the sim's `Energy`/`Poise`/`Combo`/`SkillSet`/`Buffs` for every
 /// currently-mirrored entity ([`SimMirror`]) and UPSERTs the corresponding
@@ -51,9 +72,23 @@ use crate::{SimMirror, SimServer, mirror_sim_entities, tick_sim};
 pub fn mirror_combat_hud_state(
     sim: Option<NonSendMut<SimServer>>,
     mirror: Res<SimMirror>,
+    mut cache: ResMut<CombatHudMirrorCache>,
     mut commands: Commands,
 ) {
     let Some(sim) = sim else { return };
+
+    // Prune cache entries for sim entities no longer mirrored at all — same
+    // "one resource, cleared not left to grow unbounded" posture
+    // `SimLoadoutCache`/`SimRegionCache` follow, just scoped to this module
+    // instead of `mirror_sim_entities`'s own despawn arm.
+    cache
+        .combo
+        .retain(|entity, _| mirror.0.contains_key(entity));
+    cache.xp.retain(|entity, _| mirror.0.contains_key(entity));
+    cache
+        .buffs
+        .retain(|entity, _| mirror.0.contains_key(entity));
+
     let ecs = sim.server.state().ecs();
     let now = *ecs.read_resource::<SimTime>();
 
@@ -66,6 +101,8 @@ pub fn mirror_combat_hud_state(
     for (&sim_entity, &bevy_entity) in mirror.0.iter() {
         let mut ec = commands.entity(bevy_entity);
 
+        // NetEnergy/NetPoise stay on the always-overwrite path (like
+        // NetHealth) — they legitimately change most ticks.
         match energies.get(sim_entity) {
             Some(energy) => {
                 ec.insert(NetEnergy {
@@ -92,12 +129,17 @@ pub fn mirror_combat_hud_state(
 
         match combos.get(sim_entity) {
             Some(combo) => {
-                ec.insert(NetCombo {
+                let net_combo = NetCombo {
                     counter: combo.counter(),
-                });
+                };
+                if cache.combo.get(&sim_entity) != Some(&net_combo) {
+                    ec.insert(net_combo);
+                    cache.combo.insert(sim_entity, net_combo);
+                }
             },
             None => {
                 ec.remove::<NetCombo>();
+                cache.combo.remove(&sim_entity);
             },
         }
 
@@ -107,14 +149,19 @@ pub fn mirror_combat_hud_state(
                 let total_exp = skill_set.total_earned_exp();
                 let level_floor = total_exp_for_level(level);
                 let next_floor = total_exp_for_level(level.saturating_add(1));
-                ec.insert(NetXp {
+                let net_xp = NetXp {
                     level,
                     xp_into_level: total_exp.saturating_sub(level_floor),
                     xp_for_level: next_floor.saturating_sub(level_floor),
-                });
+                };
+                if cache.xp.get(&sim_entity) != Some(&net_xp) {
+                    ec.insert(net_xp);
+                    cache.xp.insert(sim_entity, net_xp);
+                }
             },
             None => {
                 ec.remove::<NetXp>();
+                cache.xp.remove(&sim_entity);
             },
         }
 
@@ -139,10 +186,15 @@ pub fn mirror_combat_hud_state(
                         stacks,
                     });
                 }
-                ec.insert(NetBuffs(entries));
+                let net_buffs = NetBuffs(entries);
+                if cache.buffs.get(&sim_entity) != Some(&net_buffs) {
+                    ec.insert(net_buffs.clone());
+                    cache.buffs.insert(sim_entity, net_buffs);
+                }
             },
             None => {
                 ec.remove::<NetBuffs>();
+                cache.buffs.remove(&sim_entity);
             },
         }
     }
@@ -160,7 +212,7 @@ pub struct CombatHudMirrorPlugin;
 
 impl Plugin for CombatHudMirrorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<CombatHudMirrorCache>().add_systems(
             FixedUpdate,
             mirror_combat_hud_state
                 .after(tick_sim)
@@ -188,6 +240,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.init_resource::<SimMirror>();
+        app.init_resource::<CombatHudMirrorCache>();
         app.insert_non_send(sim);
         app
     }
@@ -290,5 +343,133 @@ mod tests {
         );
         assert_eq!(buffs.0[0].kind, BuffKind::Regeneration);
         assert_eq!(buffs.0[0].stacks, 1);
+    }
+
+    /// A `BuffKind` that permits multiple simultaneous instances
+    /// (`BuffKind::stacks() == true`, e.g. `Resilience`) mirrors as ONE
+    /// `NetBuffEntry` with `stacks` counting every live instance — the
+    /// ecs-design-reviewer's flagged gap: the single-buff test above can't
+    /// tell "stacks == 1 because there's one buff" from "stacks == 1 because
+    /// counting is broken".
+    #[test]
+    fn multiple_stacked_instances_of_the_same_kind_report_the_real_stack_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let now = *ecs.read_resource::<Time>();
+
+            let mut buffs = comp::Buffs::default();
+            for _ in 0..3 {
+                buffs.insert(
+                    comp::Buff::new(
+                        BuffKind::Resilience,
+                        comp::BuffData::new(1.0, Some(common::resources::Secs(10.0))),
+                        Vec::new(),
+                        comp::BuffSource::World,
+                        now,
+                        comp::buff::DestInfo {
+                            stats: None,
+                            mass: None,
+                        },
+                        None,
+                    ),
+                    now,
+                );
+            }
+
+            ecs.create_entity().with(buffs).build()
+        };
+
+        let bevy_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(sim_entity, bevy_entity);
+
+        app.world_mut()
+            .run_system_once(mirror_combat_hud_state)
+            .expect("system runs");
+        app.update();
+
+        let buffs = app
+            .world()
+            .get::<NetBuffs>(bevy_entity)
+            .expect("NetBuffs must be mirrored");
+        assert_eq!(
+            buffs.0.len(),
+            1,
+            "one entry per DISTINCT kind, not per instance"
+        );
+        assert_eq!(buffs.0[0].kind, BuffKind::Resilience);
+        assert_eq!(
+            buffs.0[0].stacks, 3,
+            "stacks must count all 3 live instances of the stacking kind"
+        );
+    }
+
+    /// An entity that LOSES its sim-side `Buffs`/`Energy`/`Poise`/`SkillSet`
+    /// components (not just an empty `Buffs`, but the component removed
+    /// outright) has its corresponding `Net*` mirror component removed too —
+    /// the `None => ec.remove::<NetX>()` arms, which the single-entity
+    /// insert-path tests above never exercised (ecs-design-reviewer finding).
+    #[test]
+    fn removing_a_sim_component_removes_its_net_mirror_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let body = comp::Body::Humanoid(comp::humanoid::Body::random());
+            ecs.create_entity()
+                .with(comp::Energy::new(body))
+                .with(comp::SkillSet::default())
+                .build()
+        };
+
+        let bevy_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(sim_entity, bevy_entity);
+
+        app.world_mut()
+            .run_system_once(mirror_combat_hud_state)
+            .expect("first run mirrors NetEnergy/NetXp");
+        app.update();
+        assert!(app.world().get::<NetEnergy>(bevy_entity).is_some());
+        assert!(
+            app.world()
+                .get::<xindeler_protocol::NetXp>(bevy_entity)
+                .is_some()
+        );
+
+        // Remove the sim-side components (as if the entity, e.g., turned into
+        // a pure prop/corpse that no longer has energy or a skillset).
+        {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            ecs.write_storage::<comp::Energy>().remove(sim_entity);
+            ecs.write_storage::<comp::SkillSet>().remove(sim_entity);
+        }
+
+        app.world_mut()
+            .run_system_once(mirror_combat_hud_state)
+            .expect("second run must remove the now-stale mirrors");
+        app.update();
+
+        assert!(
+            app.world().get::<NetEnergy>(bevy_entity).is_none(),
+            "NetEnergy must be removed once the sim-side Energy is gone"
+        );
+        assert!(
+            app.world()
+                .get::<xindeler_protocol::NetXp>(bevy_entity)
+                .is_none(),
+            "NetXp must be removed once the sim-side SkillSet is gone"
+        );
     }
 }

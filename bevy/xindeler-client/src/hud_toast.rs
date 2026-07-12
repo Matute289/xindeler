@@ -1,14 +1,18 @@
 //! BL-82 EM-4.8 (task board T47.10, worksheet [Q3]=A) — the client-side half
-//! of the `on_enter_message -> HudToast` narrative hook: a MINIMAL `bevy_ui`
-//! timed-fade toast.
+//! of the `on_enter_message -> HudToast` narrative hook.
 //!
-//! Deliberately NOT Phase 5's real HUD/notification system — just enough to
-//! prove the server-side hook (`xindeler_protocol::narrative`) fires
-//! end-to-end and renders as something visible. Phase 5 can replace this
-//! rendering later without touching the hook: it only ever reads the plain
-//! [`xindeler_protocol::HudToast`] message, exactly like every other
-//! consumer module in this crate (`entity_view`, `terrain_stream`, ...)
-//! reads its own server message.
+//! BL-82 EM-5.1 T56.5: this module now ONLY bridges — it reads
+//! [`xindeler_protocol::HudToast`] messages and pushes their text into
+//! [`xindeler_ui::notification::NotificationQueue`], the real queued
+//! notification widget (`XindelerUiPlugin`, added alongside
+//! `combat_hud::CombatHudViewPlugin` in every shell that also adds this
+//! plugin). The throwaway single-slot "last write wins" rendering EM-4.8
+//! shipped (a one-off `HudToastRoot`/`HudToastText`/fade-timer) is GONE —
+//! `xindeler-ui`'s widget now owns rendering/queueing/fading. This module
+//! never touches the [`HudToast`] message type or the server-side
+//! `xindeler_protocol::narrative` hook — exactly the seam EM-4.8's own
+//! original doc comment said Phase 5 would use ("Phase 5 can replace this
+//! rendering later without touching the hook").
 //!
 //! Compiled only under the `listen-server`/`net-client` cargo features (the
 //! only modes where `xindeler-protocol`/`HudToast` are even linked — see
@@ -16,116 +20,32 @@
 
 use bevy::prelude::*;
 use xindeler_protocol::HudToast;
+use xindeler_ui::notification::NotificationQueue;
 
-/// Total on-screen time (seconds) once a toast starts showing, INCLUDING the
-/// fade-out — deliberately a small, hardcoded constant (not data-driven):
-/// this is scaffolding, not a tuned UX value (see module doc comment).
-const TOAST_DURATION_SECS: f32 = 6.0;
-/// How much of [`TOAST_DURATION_SECS`], at the end, is spent fading to
-/// transparent rather than shown at full opacity.
-const TOAST_FADE_SECS: f32 = 1.5;
-
-/// Marks the toast's root UI node (the one whose [`Visibility`] toggles).
-#[derive(Component)]
-struct HudToastRoot;
-
-/// Marks the toast's text node (the one whose content/alpha get updated).
-#[derive(Component)]
-struct HudToastText;
-
-/// Seconds remaining until the current toast fully hides. `0.0` (the
-/// default) means "nothing showing".
-#[derive(Resource, Default)]
-struct ActiveToast {
-    remaining_secs: f32,
-}
-
-/// Installs the minimal toast UI + the systems that show/fade it on
-/// [`HudToast`] arrival.
+/// Bridges [`HudToast`] arrivals into the shared [`NotificationQueue`].
+/// `Option<ResMut<NotificationQueue>>` (not a bare `ResMut`) so this system
+/// degrades clean (silently drops the toast) rather than panicking on a
+/// shell that, for whatever future reason, adds this plugin without also
+/// adding `xindeler_ui::XindelerUiPlugin` — every shell that adds this
+/// plugin today also adds `combat_hud::CombatHudViewPlugin` (which does),
+/// but this system does not hard-depend on that co-registration ordering.
 pub struct HudToastViewPlugin;
 
 impl Plugin for HudToastViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ActiveToast>()
-            .add_systems(Startup, spawn_toast_ui)
-            .add_systems(Update, (receive_toasts, fade_toast).chain());
+        app.add_systems(Update, bridge_hud_toasts_to_notification_queue);
     }
 }
 
-/// Spawns a single, initially-invisible, top-centred text node — the whole
-/// UI surface this module owns. `position_type: Absolute` + a full-width
-/// parent with `justify_content: Center` centres the text without any
-/// manual pixel-offset math.
-fn spawn_toast_ui(mut commands: Commands) {
-    commands
-        .spawn((
-            HudToastRoot,
-            Node {
-                display: Display::Flex,
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                top: Val::Px(24.0),
-                justify_content: JustifyContent::Center,
-                padding: UiRect::horizontal(Val::Px(16.0)),
-                ..default()
-            },
-            Visibility::Hidden,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                HudToastText,
-                Text(String::new()),
-                TextFont::from_font_size(22.0),
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.0)),
-            ));
-        });
-}
-
-/// On every [`HudToast`] arrival: sets the toast's text, resets the fade
-/// timer to the full [`TOAST_DURATION_SECS`], and makes the root visible.
-/// Multiple toasts arriving in quick succession simply restart the timer
-/// with the LATEST text — v1 has no queueing (deliberately minimal, see
-/// module doc comment).
-fn receive_toasts(
+fn bridge_hud_toasts_to_notification_queue(
     mut events: MessageReader<HudToast>,
-    mut active: ResMut<ActiveToast>,
-    mut roots: Query<&mut Visibility, With<HudToastRoot>>,
-    mut texts: Query<&mut Text, With<HudToastText>>,
+    queue: Option<ResMut<NotificationQueue>>,
 ) {
-    for toast in events.read() {
-        active.remaining_secs = TOAST_DURATION_SECS;
-        for mut visibility in &mut roots {
-            *visibility = Visibility::Visible;
-        }
-        for mut text in &mut texts {
-            text.0.clone_from(&toast.text);
-        }
-    }
-}
-
-/// Counts [`ActiveToast::remaining_secs`] down every frame; during the last
-/// [`TOAST_FADE_SECS`] the text's alpha eases linearly to zero, and once it
-/// hits zero the root goes back to [`Visibility::Hidden`].
-fn fade_toast(
-    time: Res<Time>,
-    mut active: ResMut<ActiveToast>,
-    mut roots: Query<&mut Visibility, With<HudToastRoot>>,
-    mut colors: Query<&mut TextColor, With<HudToastText>>,
-) {
-    if active.remaining_secs <= 0.0 {
+    let Some(mut queue) = queue else {
         return;
-    }
-
-    active.remaining_secs = (active.remaining_secs - time.delta_secs()).max(0.0);
-    let alpha = (active.remaining_secs / TOAST_FADE_SECS).clamp(0.0, 1.0);
-    for mut color in &mut colors {
-        color.0.set_alpha(alpha);
-    }
-
-    if active.remaining_secs <= 0.0 {
-        for mut visibility in &mut roots {
-            *visibility = Visibility::Hidden;
-        }
+    };
+    for toast in events.read() {
+        queue.push(toast.text.clone());
     }
 }
 
@@ -137,76 +57,75 @@ mod tests {
 
     fn new_app() -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .add_plugins(HudToastViewPlugin);
+        app.add_plugins(MinimalPlugins);
         app.add_message::<HudToast>();
-        // Runs `Startup` (spawns the toast UI) once. `MinimalPlugins`'
-        // real-clock `time_system` also runs here, but only the FIRST time —
-        // every later time-sensitive assertion below drives `Time` directly
-        // via `advance_by` + a directly-invoked system (never a second
-        // `app.update()`), so it never gets silently overwritten by a
-        // real-wall-clock delta.
-        app.update();
+        app.init_resource::<NotificationQueue>();
         app
     }
 
-    /// Receiving a `HudToast` makes the root visible and sets the text.
+    /// Receiving a `HudToast` pushes its text into the shared queue — the
+    /// real acceptance bar for T56.5's "subsumes EM-4.8" claim (the queue
+    /// itself is tested generically in `xindeler-ui`; this test is the
+    /// BRIDGE proof). Asserts on `pending_len()` (not `current()`): actually
+    /// promoting a pending entry to "current" is `xindeler_ui::notification::
+    /// advance_notifications`'s job, a `pub(crate)` system this crate has no
+    /// access to run directly — the bridge's own contract ends at "the text
+    /// reached the queue", which `pending_len()` proves.
     #[test]
-    fn receiving_a_toast_shows_it() {
+    fn a_hud_toast_arrival_is_pushed_into_the_notification_queue() {
         let mut app = new_app();
         app.world_mut().write_message(HudToast {
             text: "Welcome to the mist-shrouded manor.".to_owned(),
         });
         app.world_mut()
-            .run_system_once(receive_toasts)
-            .expect("receive_toasts runs");
+            .run_system_once(bridge_hud_toasts_to_notification_queue)
+            .expect("bridge system runs");
 
-        let mut roots = app.world_mut().query::<(&Visibility, &HudToastRoot)>();
-        let (visibility, _) = roots.single(app.world()).expect("exactly one toast root");
-        assert_eq!(*visibility, Visibility::Visible);
-
-        let mut texts = app.world_mut().query::<(&Text, &HudToastText)>();
-        let (text, _) = texts.single(app.world()).expect("exactly one toast text");
-        assert_eq!(text.0, "Welcome to the mist-shrouded manor.");
-
-        let active = app.world().resource::<ActiveToast>();
-        assert!(active.remaining_secs > 0.0);
+        let queue = app.world().resource::<NotificationQueue>();
+        assert_eq!(
+            queue.pending_len(),
+            1,
+            "the toast's text must reach the shared queue"
+        );
     }
 
-    /// After enough elapsed time, the toast fades out and hides again.
+    /// Several toasts arriving in the same frame all queue (FIFO), unlike
+    /// the retired EM-4.8 rendering's "last write wins" behaviour.
     #[test]
-    fn toast_hides_after_its_duration_elapses() {
+    fn several_toasts_in_one_frame_all_queue_in_order() {
         let mut app = new_app();
         app.world_mut().write_message(HudToast {
-            text: "brief notice".to_owned(),
+            text: "first".to_owned(),
+        });
+        app.world_mut().write_message(HudToast {
+            text: "second".to_owned(),
         });
         app.world_mut()
-            .run_system_once(receive_toasts)
-            .expect("receive_toasts runs");
+            .run_system_once(bridge_hud_toasts_to_notification_queue)
+            .expect("bridge system runs");
 
-        // Advance the generic `Time` resource directly and invoke
-        // `fade_toast` directly (never a second `app.update()`, which would
-        // let `MinimalPlugins`' real-clock `time_system` recompute the delta
-        // from wall-clock `Instant::now()` and clobber this controlled
-        // jump).
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(
-                TOAST_DURATION_SECS + 1.0,
-            ));
-        app.world_mut()
-            .run_system_once(fade_toast)
-            .expect("fade_toast runs");
-
-        let mut roots = app.world_mut().query::<(&Visibility, &HudToastRoot)>();
-        let (visibility, _) = roots.single(app.world()).expect("exactly one toast root");
+        let queue = app.world().resource::<NotificationQueue>();
         assert_eq!(
-            *visibility,
-            Visibility::Hidden,
-            "toast must hide once its duration elapses"
+            queue.pending_len(),
+            2,
+            "both toasts must be queued (nothing has been promoted to 'current' yet — that's \
+             advance_notifications' job)"
         );
+    }
 
-        let active = app.world().resource::<ActiveToast>();
-        assert_eq!(active.remaining_secs, 0.0);
+    /// A shell that somehow never inserted `NotificationQueue` degrades
+    /// clean (the toast is silently dropped) rather than panicking.
+    #[test]
+    fn missing_notification_queue_resource_does_not_panic() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<HudToast>();
+        // Deliberately NOT calling `init_resource::<NotificationQueue>()`.
+        app.world_mut().write_message(HudToast {
+            text: "should be dropped, not panic".to_owned(),
+        });
+        app.world_mut()
+            .run_system_once(bridge_hud_toasts_to_notification_queue)
+            .expect("bridge system runs without the queue resource present");
     }
 }

@@ -13,10 +13,20 @@
 //! [`Tooltip`] content component) is identical, only the anchor math differs.
 
 use bevy::{
-    ecs::{component::Component, entity::Entity, query::Changed, system::Query},
+    ecs::{
+        component::Component,
+        entity::Entity,
+        query::Changed,
+        system::{Commands, Query, Res},
+    },
     picking::hover::Hovered,
-    prelude::{Text, Visibility},
+    prelude::{
+        BackgroundColor, Node, PositionType, Text, TextColor, TextFont, UiRect, Val, Visibility,
+    },
+    text::{FontSize, FontSource},
 };
+
+use crate::theme::{HudFonts, HudTheme};
 
 /// Attach to any hoverable widget entity (which must ALSO carry
 /// `Hovered(false)` — this crate's spawn helpers that support tooltips add it
@@ -33,6 +43,39 @@ pub struct Tooltip {
 /// rather than spawning a new label per hovered widget.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudTooltipLabel;
+
+/// Spawns the ONE shared tooltip label this whole crate's [`update_tooltip`]
+/// system drives, hidden by default. Every screen's hoverable widgets
+/// (a buff icon, an item slot, an ability) just carry [`Hovered`]+[`Tooltip`]
+/// — they never spawn their own label. v1 is screen-anchored at a fixed
+/// position (near the top of the screen, below the always-on combat HUD
+/// bars); cursor-following / world-anchored placement is a documented
+/// follow-up (module doc comment), not this task's job.
+pub(crate) fn spawn_shared_tooltip_label(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+) {
+    commands.spawn((
+        HudTooltipLabel,
+        Text(String::new()),
+        TextFont {
+            font: FontSource::Handle(fonts.body.clone()),
+            font_size: FontSize::Px(16.0),
+            ..Default::default()
+        },
+        TextColor(theme.palette.text),
+        BackgroundColor(theme.palette.panel_bg),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(120.0),
+            left: Val::Px(16.0),
+            padding: UiRect::all(Val::Px(theme.spacing.xs)),
+            ..Default::default()
+        },
+        Visibility::Hidden,
+    ));
+}
 
 /// Shows the shared [`HudTooltipLabel`] with the hovered widget's [`Tooltip`]
 /// text whenever a [`Hovered`] flag flips, and hides it again when nothing is

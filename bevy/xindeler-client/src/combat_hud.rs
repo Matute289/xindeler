@@ -77,14 +77,6 @@ struct BuffIconSlot;
 #[derive(Component)]
 struct BuffStripRoot;
 
-/// Client→intent: fired when the death screen's Respawn button activates.
-/// v1 scope: this event exists and fires correctly (proving the HUD→action
-/// flow), but nothing yet sends a matching client→server respawn REQUEST —
-/// that message doesn't exist on the wire yet (a follow-up alongside a real
-/// death/respawn sim message, out of scope for the UI proof slice).
-#[derive(Message, Debug, Clone, Copy)]
-pub struct RespawnRequested;
-
 /// Installs the whole core combat HUD: spawns the always-on widgets at
 /// `Startup` and keeps them synced to the mirrored [`NetLocalPlayer`] state
 /// every frame.
@@ -93,7 +85,6 @@ pub struct CombatHudViewPlugin;
 impl Plugin for CombatHudViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(xindeler_ui::XindelerUiPlugin)
-            .add_message::<RespawnRequested>()
             .add_systems(
                 Startup,
                 spawn_combat_hud.after(xindeler_ui::theme::init_theme),
@@ -271,8 +262,8 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
             ));
             parent.spawn(respawn_button).observe(
                 |_activate: On<xindeler_ui::button::Activate>,
-                 mut respawn: MessageWriter<RespawnRequested>| {
-                    respawn.write(RespawnRequested);
+                 mut actions: MessageWriter<xindeler_ui::hud_state::HudAction>| {
+                    actions.write(xindeler_ui::hud_state::HudAction::Respawn);
                 },
             );
         });
@@ -483,11 +474,17 @@ fn sync_death_screen_and_vignette(
     }
 }
 
-/// Drains [`RespawnRequested`] (currently just logs — the client→server
-/// respawn wire message is a follow-up, see [`RespawnRequested`]'s doc).
-fn handle_respawn_button(mut events: MessageReader<RespawnRequested>) {
-    for _ in events.read() {
-        info!("combat_hud: respawn requested (client→server respawn message not yet wired)");
+/// Drains [`xindeler_ui::hud_state::HudAction::Respawn`] (currently just
+/// logs — routed through the crate's own generic HUD→action flow, per
+/// bevy-migration-reviewer feedback, rather than a bespoke one-off message:
+/// the client→server respawn WIRE message is a follow-up, see the module doc
+/// comment's "Deliberately not implemented" note). Ignores every other
+/// `HudAction` variant — a future settings/window-toggle screen owns those.
+fn handle_respawn_button(mut events: MessageReader<xindeler_ui::hud_state::HudAction>) {
+    for action in events.read() {
+        if matches!(action, xindeler_ui::hud_state::HudAction::Respawn) {
+            info!("combat_hud: respawn requested (client→server respawn message not yet wired)");
+        }
     }
 }
 

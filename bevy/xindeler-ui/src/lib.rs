@@ -42,7 +42,10 @@ pub mod scale;
 pub mod theme;
 pub mod tooltip;
 
-use bevy::app::{App, Plugin, Startup, Update};
+use bevy::{
+    app::{App, Plugin, Startup, Update},
+    ecs::schedule::IntoScheduleConfigs,
+};
 use bevy_ui_widgets::UiWidgetsPlugins;
 
 /// Installs the whole widget kit: the headless `bevy_ui_widgets` behaviour
@@ -71,6 +74,14 @@ impl Plugin for XindelerUiPlugin {
             .add_message::<hud_state::HudAction>()
             .init_resource::<notification::NotificationQueue>()
             .add_systems(Startup, theme::init_theme)
+            .add_systems(
+                Startup,
+                (
+                    tooltip::spawn_shared_tooltip_label,
+                    notification::spawn_shared_notification_widget,
+                )
+                    .after(theme::init_theme),
+            )
             .add_systems(
                 Update,
                 (

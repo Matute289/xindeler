@@ -19,10 +19,16 @@ use std::collections::VecDeque;
 
 use bevy::{
     color::Alpha as _,
-    ecs::{resource::Resource, system::ResMut},
-    prelude::Visibility,
+    ecs::{
+        resource::Resource,
+        system::{Commands, Res, ResMut},
+    },
+    prelude::{BackgroundColor, Node, PositionType, Text, TextColor, TextFont, Val, Visibility},
+    text::{FontSize, FontSource},
     time::Time,
 };
+
+use crate::theme::{HudFonts, HudTheme};
 
 /// Total on-screen time (seconds) once a notification starts showing,
 /// including its fade-out.
@@ -64,6 +70,42 @@ pub struct HudNotificationLabel;
 /// Marks the toast root (whose [`Visibility`] toggles).
 #[derive(bevy::ecs::component::Component, Debug, Clone, Copy, Default)]
 pub struct HudNotificationRoot;
+
+/// Spawns the ONE shared notification root+label this whole crate's
+/// [`advance_notifications`] system drives, hidden by default (top-centre,
+/// matching EM-4.8's own placement). Every producer (the `HudToast` bridge,
+/// a future loot-pickup feed) just calls [`NotificationQueue::push`] —
+/// nothing else spawns its own toast UI.
+pub(crate) fn spawn_shared_notification_widget(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+) {
+    commands
+        .spawn((
+            HudNotificationRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(24.0),
+                left: Val::Percent(50.0),
+                ..Default::default()
+            },
+            BackgroundColor(theme.palette.panel_bg),
+            Visibility::Hidden,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                HudNotificationLabel,
+                Text(String::new()),
+                TextFont {
+                    font: FontSource::Handle(fonts.title.clone()),
+                    font_size: FontSize::Px(22.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text),
+            ));
+        });
+}
 
 /// Advances the queue: if nothing is currently showing and the queue is
 /// non-empty, pops the front and starts its timer; otherwise counts the
