@@ -31,9 +31,13 @@ mod combat_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod controls_screen;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod cursor;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod diary;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod entity_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod esc_menu;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
