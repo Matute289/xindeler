@@ -36,8 +36,9 @@
 //! that does not exist yet (only creatures/players are mirrored today,
 //! `NetBody`) — a real follow-up, not attempted in this task.
 
-use bevy::prelude::*;
+use bevy::{ecs::schedule::common_conditions::not, prelude::*};
 use common::comp::inventory::slot::{InvSlotId, Slot};
+use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
     InventoryActionRequest, NetInventory, NetLocalPlayer, inventory::ALL_EQUIP_SLOTS,
 };
@@ -47,6 +48,8 @@ use xindeler_ui::{
     slot::{SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::HudTheme,
 };
+
+use crate::chat::text_input_focused;
 
 /// The two [`SlotGroup`]s this screen's slots live in — bag slots can be
 /// dragged onto equip slots (to equip) and vice versa (to unequip), so both
@@ -107,7 +110,15 @@ impl Plugin for InventoryUiPlugin {
             .add_systems(
                 Update,
                 (
-                    toggle_inventory_window,
+                    // Reads `ActionState` — must run after the frame's real
+                    // input resolution (BL-82 EM-5.17 Phase 0, same fix as
+                    // `diary::toggle_diary_window`/`controls_screen::
+                    // toggle_controls_screen`). Also gated on
+                    // `!text_input_focused` so typing "i" in the chat box
+                    // doesn't ALSO open the Inventory.
+                    toggle_inventory_window
+                        .after(xindeler_input::InputResolveSet)
+                        .run_if(not(text_input_focused)),
                     sync_inventory_window_visibility,
                     spawn_bag_grid_once_capacity_known,
                     sync_slot_contents,
@@ -253,10 +264,14 @@ fn force_open_inventory_for_smoke_capture(mut state: ResMut<HudState>) {
     }
 }
 
-/// Toggles [`HudWindow::Inventory`] on the `I` key — the generic
-/// `HudAction::ToggleWindow` flow EM-5.1's state machine already provides.
-fn toggle_inventory_window(keys: Res<ButtonInput<KeyCode>>, mut actions: MessageWriter<HudAction>) {
-    if keys.just_pressed(KeyCode::KeyI) {
+/// Toggles [`HudWindow::Inventory`] on [`GameInput::Inventory`] (`I` by
+/// default, but rebindable — BL-82 EM-5.17 Phase 0: this used to read the
+/// raw, non-rebindable `ButtonInput<KeyCode>` with a hardcoded `KeyCode::
+/// KeyI`, so rebinding `Inventory` away from `I` silently did nothing here)
+/// — the generic `HudAction::ToggleWindow` flow EM-5.1's state machine
+/// already provides.
+fn toggle_inventory_window(action_state: Res<ActionState>, mut actions: MessageWriter<HudAction>) {
+    if action_state.just_pressed(GameInput::Inventory) {
         actions.write(HudAction::ToggleWindow(HudWindow::Inventory));
     }
 }

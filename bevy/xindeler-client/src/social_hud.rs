@@ -42,7 +42,8 @@
 //! Compiled only under the `listen-server`/`net-client` cargo features, same
 //! gate as every other `Net*`-reading module in this crate.
 
-use bevy::prelude::*;
+use bevy::{ecs::schedule::common_conditions::not, prelude::*};
+use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
     GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue, NetGroupState, NetHealth,
     NetLocalPlayer, NetPlayerList, NetUid,
@@ -53,6 +54,8 @@ use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
     theme::{HudFonts, HudTheme},
 };
+
+use crate::chat::text_input_focused;
 
 /// Installs the whole EM-5.8 social/group/dialogue HUD.
 pub struct SocialHudViewPlugin;
@@ -68,7 +71,15 @@ impl Plugin for SocialHudViewPlugin {
             .add_systems(
                 Update,
                 (
-                    toggle_social_window,
+                    // Reads `ActionState` — must run after the frame's real
+                    // input resolution (BL-82 EM-5.17 Phase 0, same fix as
+                    // `diary::toggle_diary_window`/`controls_screen::
+                    // toggle_controls_screen`). Also gated on
+                    // `!text_input_focused` so typing "o" in the chat box
+                    // doesn't ALSO open the Social window.
+                    toggle_social_window
+                        .after(xindeler_input::InputResolveSet)
+                        .run_if(not(text_input_focused)),
                     sync_social_window_visibility,
                     sync_player_list,
                     sync_group_state,
@@ -86,10 +97,12 @@ impl Plugin for SocialHudViewPlugin {
 // Player list (the toggled Social window)
 // ---------------------------------------------------------------------
 
-/// Toggle key for the Social window (player list + group management). A raw
-/// key, not a real keybind — see this module's doc comment.
-const SOCIAL_TOGGLE_KEY: KeyCode = KeyCode::KeyG;
-/// "Talk" key: starts/continues dialogue with the nearest mirrored entity.
+/// "Talk" key: starts/continues dialogue with the nearest mirrored entity. A
+/// raw key, not a real keybind — see this module's doc comment (the Social
+/// window's OWN toggle key was converted to the real, rebindable
+/// [`GameInput::Social`] as part of BL-82 EM-5.17 Phase 0 — see
+/// [`toggle_social_window`] — but `TALK_KEY` stays raw, out of scope for that
+/// fix).
 const TALK_KEY: KeyCode = KeyCode::KeyT;
 /// Only entities within this many world units of the local player answer a
 /// [`TALK_KEY`] press.
@@ -105,8 +118,16 @@ struct PlayerListRow;
 #[derive(Component, Clone, Copy)]
 struct InviteTarget(u64);
 
-fn toggle_social_window(keys: Res<ButtonInput<KeyCode>>, mut actions: MessageWriter<HudAction>) {
-    if keys.just_pressed(SOCIAL_TOGGLE_KEY) {
+/// Toggles [`HudWindow::Social`] on [`GameInput::Social`] (`O` by default,
+/// rebindable). BL-82 EM-5.17 Phase 0: this used to read the raw,
+/// non-rebindable `ButtonInput<KeyCode>` with a hardcoded `KeyCode::KeyG` —
+/// which is a genuine independent bug beyond just being non-rebindable: `G`
+/// is actually bound to `GameInput::ToggleLantern` by default, not Social, so
+/// this system was reading the WRONG key even before rebinding entered the
+/// picture. `GameInput::Social`'s real default binding is `O`
+/// (`xindeler_input::keybind`).
+fn toggle_social_window(action_state: Res<ActionState>, mut actions: MessageWriter<HudAction>) {
+    if action_state.just_pressed(GameInput::Social) {
         actions.write(HudAction::ToggleWindow(HudWindow::Social));
     }
 }
