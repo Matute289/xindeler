@@ -454,6 +454,25 @@ pub struct PlayerInput {
 /// the camera-relative keyboard intent by the client input system — so the
 /// bridge stays a thin applicator and never needs Bevy↔sim axis knowledge for
 /// input.
+///
+/// ## Writers (as of BL-82 EM-5.19 Phase 2) — ordering matters
+///
+/// Three `xindeler-client` systems write this resource, in this frame order:
+///
+/// 1. `player_input::gather_input` (`GameplaySet`) — the baseline write every
+///    frame: movement from `GameInput::MoveForward`/etc., `look` from the
+///    camera's forward vector.
+/// 2. `player_input::smoke_auto_move`/`smoke_rotate_camera` (`.after(
+///    gather_input)`) — smoke-testing overrides, gated on their own env vars,
+///    otherwise no-ops.
+/// 3. `targeting::apply_hard_lock_facing` (`.after(gather_input)`,
+///    `listen-server`-only) — while a hard lock is active, overrides `look` to
+///    point at the locked target instead of the camera forward; a no-op (leaves
+///    `look` alone) whenever no lock is active or the cursor isn't grabbed.
+///
+/// Each later writer is deliberately ordered `.after()` the previous one so
+/// it can override rather than race it. Add new writers here and keep this
+/// list current — it's the one place enumerating all of them.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct LocalPlayerInput {
     /// Horizontal movement intent in sim axes (XY plane), magnitude ≤ 1.

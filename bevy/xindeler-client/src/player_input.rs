@@ -165,7 +165,13 @@ fn toggle_camera_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ThirdPer
 /// and only active while the cursor is grabbed (same gate the fly-cam look
 /// uses) so typing/UI later won't drive the player. Look = the camera's
 /// forward, converted to sim axes.
-fn gather_input(
+///
+/// `pub(crate)`: BL-82 EM-5.19 Phase 2's `crate::targeting::
+/// apply_hard_lock_facing` orders `.after(gather_input)` (so a hard lock
+/// overrides `LocalPlayerInput.look` AFTER this system sets it from the
+/// camera, rather than being clobbered by it) and reuses [`bevy_to_sim`] for
+/// the exact same axis conversion — see that module's doc comment.
+pub(crate) fn gather_input(
     action_state: Res<xindeler_input::ActionState>,
     cursor_options: Query<&CursorOptions, With<PrimaryWindow>>,
     cameras: Query<&Transform, With<FlyCam>>,
@@ -1030,7 +1036,7 @@ fn smoke_force_look_up_from_below(mut cameras: Query<&mut FlyCam>) {
 
 /// Bevy y-up → sim z-up direction: inverse of the converter `(x,y,z)→(x,z,−y)`,
 /// i.e. bevy `(x, y, z)` → sim `(x, −z, y)`.
-fn bevy_to_sim(v: Vec3) -> Vec3 { Vec3::new(v.x, -v.z, v.y) }
+pub(crate) fn bevy_to_sim(v: Vec3) -> Vec3 { Vec3::new(v.x, -v.z, v.y) }
 
 /// Bevy `Vec3` (already holding sim-axis values, post-[`bevy_to_sim`]) → the
 /// `vek::Vec3<f32>` `common`'s `ReadVol::ray`/[`collide_boom`] require. A
