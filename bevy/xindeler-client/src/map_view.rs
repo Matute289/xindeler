@@ -545,30 +545,11 @@ fn spawn_map_screens(
 
     // --- Minimap: top-right, always visible. ---
     //
-    // BL-82 EM-5.17 Phase 3 follow-up (Matías's live-test, record19.mov): the
-    // radial fade itself looked right, but a visible SQUARE frame still
-    // showed around it. Root cause: this root entity kept the standard
-    // `panel.rs`-style windowed-panel chrome (`BackgroundColor(panel_bg)` +
-    // `BorderColor::all(panel_border)` — the exact pattern the full map
-    // screen/chat/social HUD/tooltips all use deliberately) from BEFORE the
-    // Phase 3 rewrite to the frameless `MinimapFadeMaterial`. That opaque
-    // (82%/90%-alpha) fill+border sat directly behind `MinimapViewport`,
-    // showing straight through wherever the shader's radial falloff made the
-    // minimap image transparent (the corners, and the padding/border band
-    // outside the viewport) — exactly the square frame Matías saw. Q6's
-    // locked decision ("no frame asset at all") rules this chrome out for the
-    // minimap specifically, the same way `GroupPanelRoot` (`social_hud.rs`)
-    // is the codebase's other deliberately chrome-less panel root. Layout
-    // (`padding`/`border`/`border_radius`) is left untouched — only the two
-    // explicit RENDER component values are dropped from the spawn — so
-    // `MINIMAP_PANEL_TOTAL_PX`/`OBJECTIVES_TOP_PX`'s geometry (and the
-    // existing layout tests) keep computing the exact same on-screen
-    // footprint. `Node` still REQUIRES a `BackgroundColor`/`BorderColor`
-    // (`bevy_ui`'s own `#[require(...)]` list on `Node`) — they can't be
-    // literally absent — but without an explicit value here they fall back
-    // to `BackgroundColor::DEFAULT`/`BorderColor::DEFAULT`
-    // (`Color::NONE`, fully transparent), which is what actually removes the
-    // visible fill/border.
+    // No explicit `BackgroundColor`/`BorderColor` here (BL-82 EM-5.17 Phase 3
+    // follow-up) — see the module doc above for why: an opaque panel fill
+    // behind the frameless `MinimapFadeMaterial` drew the square frame
+    // Matías reported. Layout (`padding`/`border`/`border_radius`) is
+    // otherwise untouched.
     commands
         .spawn((
             MinimapPanelRoot,
@@ -1400,24 +1381,13 @@ mod tests {
         assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
     }
 
-    /// Regression test for the Phase 3 follow-up (2026-07-16, `record19.mov`
-    /// live-test): [`MinimapPanelRoot`]'s `BackgroundColor`/
-    /// `bevy::ui::BorderColor` must be fully transparent, not the opaque
-    /// `theme.palette.panel_bg`/`panel_border` every OTHER themed panel in
-    /// this codebase uses deliberately (`xindeler_ui::panel`, also the full
-    /// map screen right below this same function). `Node` REQUIRES both
-    /// components (`bevy_ui`'s `#[require(... BackgroundColor, BorderColor
-    /// ...)]` on `Node` — they can't be literally absent), so this asserts
-    /// on VALUE: leaving them at their component defaults
-    /// (`BackgroundColor::DEFAULT`/`BorderColor::DEFAULT`, both
-    /// `Color::NONE`) rather than explicitly setting the opaque panel
-    /// colours is exactly what stopped the square frame — that opaque
-    /// (82%/90%-alpha) fill/border used to sit behind [`MinimapViewport`]
-    /// and show straight through wherever the radial-fade shader made the
-    /// minimap image transparent. Matías's Q6 decision ("no frame asset at
-    /// all") means this root must render nothing beyond the material's own
-    /// quad — the same "no chrome at all" treatment `GroupPanelRoot`
-    /// (`social_hud.rs`) already gets.
+    /// Regression test for the Phase 3 follow-up (see the module doc's
+    /// "square frame still visible" section for the full root-cause
+    /// writeup): [`MinimapPanelRoot`]'s `BackgroundColor`/
+    /// `bevy::ui::BorderColor` must stay fully transparent, not the opaque
+    /// panel colours every other themed panel uses. `Node` requires both
+    /// components to be present, so this asserts on VALUE rather than
+    /// presence.
     #[test]
     fn minimap_panel_root_background_and_border_are_fully_transparent() {
         let mut app = new_phase3_app();
