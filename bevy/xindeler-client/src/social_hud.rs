@@ -14,12 +14,32 @@
 //!
 //! ## Group/party member health+energy: reuse, don't duplicate
 //! [`xindeler_protocol::NetGroupState`] carries only identity (uid + name);
-//! a group member's live health/energy is read by correlating that uid
+//! a group member's live health/energy/level is read by correlating that uid
 //! against any currently-mirrored entity's `xindeler_protocol::NetUid` —
 //! exactly the "reuse the already-mirrored `NetHealth`" pattern EM-5.2's own
 //! overhead health bars use. A member with no currently-mirrored entity
 //! (out of interest range) shows "out of range" (matching legacy
 //! `voxygen`'s own `hud-group-out_of_range` copy).
+//!
+//! ## BL-82 EM-5.17 Phase 4 — HUD-D4 party-frame reskin (spec §3.4)
+//! The group/party panel's member rows are reskinned into the Diablo-style
+//! layout: a 64×64 circular portrait (`HudImageKey::PartyPortraitFrame` over
+//! a neutral placeholder fill — no real portrait render pipeline exists, per
+//! spec §5), a `PartyLevelBadge` at the portrait's bottom edge, a name label,
+//! DUAL horizontal bars, and a voice-chat icon. This is a RENDER-LAYER
+//! reskin of [`SocialMirrorPlugin`]'s already-mirrored data — no new
+//! protocol/mirror work. Three real data gaps, each documented at its call
+//! site rather than silently invented:
+//! - **Voice-chat state**: no protocol field carries a live per-member voice
+//!   state — every row defaults to [`PartyVoiceState::Inactive`] (see that
+//!   enum's own doc comment).
+//! - **Portrait face**: a neutral flat-colour fill sits behind the frame PNG
+//!   (spec §5's documented placeholder-until-render-to-texture-exists).
+//! - **Second ("dual") bar**: the mirrored `NetXp`/`NetHealth`/[`NetEnergy`]
+//!   trio is already correlated by uid the same way health is — the second bar
+//!   reads `NetEnergy` (the mana/energy resource, matching Phase 2's own
+//!   health→angel/poise→stamina/energy→mana orb mapping), not an invented
+//!   field.
 //!
 //! ## Dialogue v1-minimal — what's real vs. deliberately deferred
 //! [`NetDialogue`]/[`LocalDialogueResponse`] carry the REAL
@@ -42,20 +62,81 @@
 //! Compiled only under the `listen-server`/`net-client` cargo features, same
 //! gate as every other `Net*`-reading module in this crate.
 
-use bevy::{ecs::schedule::common_conditions::not, prelude::*};
+use bevy::{
+    ecs::schedule::common_conditions::not,
+    picking::Pickable,
+    prelude::*,
+    ui::{GlobalZIndex, widget::ImageNode},
+};
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
-    GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue, NetGroupState, NetHealth,
-    NetLocalPlayer, NetPlayerList, NetUid,
+    GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue, NetEnergy, NetGroupState,
+    NetHealth, NetLocalPlayer, NetPlayerList, NetUid, NetXp,
 };
 use xindeler_ui::{
     bar::{BarValue, spawn_bar},
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    images::{HudImageKey, HudImages},
     theme::{HudFonts, HudTheme},
+    zlayer,
 };
 
 use crate::chat::text_input_focused;
+
+/// BL-82 EM-5.17 Phase 4 — a party portrait's fixed footprint (spec §3.4:
+/// "a ~64×64 circular portrait").
+const PARTY_PORTRAIT_SIZE_PX: f32 = 64.0;
+/// The level badge sits AT the portrait's bottom edge, slightly overlapping
+/// it (spec §3.4) — half the badge's own size, so it visually straddles the
+/// portrait's bottom rim rather than floating below or fully inside it.
+const PARTY_LEVEL_BADGE_SIZE_PX: f32 = 24.0;
+/// The voice-chat icon size — small, sitting inline next to the name label.
+const PARTY_VOICE_ICON_SIZE_PX: f32 = 16.0;
+/// Each dual bar's footprint (spec §3.4's "a horizontal health bar to its
+/// right" — extended to two, per the "Barras Duales" follow-up).
+const PARTY_BAR_WIDTH_PX: f32 = 120.0;
+const PARTY_BAR_HEIGHT_PX: f32 = 10.0;
+
+/// A neutral placeholder fill behind the portrait frame — spec §5: "Real
+/// rendered portraits (party/self/boss) — placeholder art until a
+/// render-to-texture portrait pipeline exists." No per-character face
+/// texture exists yet, so every portrait shows this same flat tone; a real
+/// portrait pipeline is a documented follow-up, not silently invented here.
+const PARTY_PORTRAIT_PLACEHOLDER_FILL: Color = Color::srgba(0.30, 0.28, 0.26, 1.0);
+
+/// BL-82 EM-5.17 Phase 4 — the three voice-chat icon states (spec §3.4).
+///
+/// **Data gap**: no protocol field (`NetGroupMember` carries only `uid`/
+/// `name`) tells the client a member's live voice-chat state — until one
+/// exists, [`sync_group_panel`] always passes [`Self::Inactive`] for every
+/// row. This enum + [`voice_icon_key`] exist so the STATE→ASSET mapping
+/// itself is real and independently tested, even though the input is
+/// currently a constant rather than real telemetry.
+///
+/// `Active`/`Muted` are only ever constructed by this module's own
+/// `voice_icon_key_maps_every_state_to_its_own_asset` test today (no
+/// production call site passes them yet, per the data-gap note above) —
+/// `#[allow(dead_code)]` documents that as deliberate, not an oversight, so a
+/// non-`--all-targets` clippy run doesn't flag a real, tested mapping as
+/// unused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum PartyVoiceState {
+    Active,
+    Inactive,
+    Muted,
+}
+
+/// Maps a [`PartyVoiceState`] to the [`HudImageKey`] asset that represents it
+/// (spec §3.4's `party_voice_active/inactive/muted.png` trio).
+fn voice_icon_key(state: PartyVoiceState) -> HudImageKey {
+    match state {
+        PartyVoiceState::Active => HudImageKey::PartyVoiceActive,
+        PartyVoiceState::Inactive => HudImageKey::PartyVoiceInactive,
+        PartyVoiceState::Muted => HudImageKey::PartyVoiceMuted,
+    }
+}
 
 /// Installs the whole EM-5.8 social/group/dialogue HUD.
 pub struct SocialHudViewPlugin;
@@ -233,6 +314,26 @@ struct KickTarget(u64);
 #[derive(Component, Clone, Copy)]
 struct AssignLeaderTarget(u64);
 
+/// BL-82 EM-5.17 Phase 4 — marks a party row's portrait-frame `ImageNode`
+/// child (`HudImageKey::PartyPortraitFrame`), so a test/query can find it
+/// without hunting through the whole subtree by `ImageNode` alone (several
+/// sibling nodes in a row also carry an `ImageNode` — the level badge, the
+/// voice icon).
+#[derive(Component)]
+struct PartyPortraitFrameImage;
+/// Marks a party row's level-badge `ImageNode` child
+/// (`HudImageKey::PartyLevelBadge`) — see [`PartyPortraitFrameImage`]'s doc
+/// comment for why a dedicated marker beats a bare `ImageNode` query.
+#[derive(Component)]
+struct PartyLevelBadgeImage;
+/// Marks a party row's voice-chat icon `ImageNode` child — see
+/// [`PartyPortraitFrameImage`]'s doc comment.
+#[derive(Component)]
+struct PartyVoiceIconImage;
+/// Marks a party row's name `Text` label.
+#[derive(Component)]
+struct PartyNameLabel;
+
 #[derive(Component)]
 struct InviteBannerRoot;
 #[derive(Component)]
@@ -258,20 +359,30 @@ fn sync_group_state(
     }
 }
 
-/// Rebuilds the group member rows (name + health/energy bars, resolved by
-/// correlating the member's uid against any currently-mirrored entity's
-/// [`NetUid`] — "out of range" if none is mirrored right now) whenever
-/// [`CurrentGroupState`] changes; hides the whole panel when not in a group.
+/// Rebuilds the group member rows into the HUD-D4 party-frame layout (spec
+/// §3.4, BL-82 EM-5.17 Phase 4): a circular portrait (frame over a
+/// placeholder fill) with a level badge, a name label + voice-chat icon, and
+/// DUAL horizontal bars (health + energy), all resolved by correlating the
+/// member's uid against any currently-mirrored entity's [`NetUid`] — "out of
+/// range" if none is mirrored right now, matching the pre-reskin behaviour.
+/// Runs whenever [`CurrentGroupState`] changes; hides the whole panel when
+/// not in a group.
 #[allow(clippy::too_many_arguments)]
 fn sync_group_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    images: Res<HudImages>,
     state: Res<CurrentGroupState>,
     mut panel_visibility: Query<&mut Visibility, With<GroupPanelRoot>>,
     root: Query<(Entity, Option<&Children>), With<GroupMembersRoot>>,
     rows: Query<Entity, With<GroupMemberRow>>,
-    mirrored: Query<(&NetUid, Option<&NetHealth>)>,
+    mirrored: Query<(
+        &NetUid,
+        Option<&NetHealth>,
+        Option<&NetEnergy>,
+        Option<&NetXp>,
+    )>,
     local_uid: Query<&NetUid, With<NetLocalPlayer>>,
 ) {
     if !state.is_changed() {
@@ -305,14 +416,16 @@ fn sync_group_panel(
     // Built with plain top-level `commands` throughout (never nested inside
     // a `with_children` closure) because [`spawn_bar`] needs a real `&mut
     // Commands` to spawn its bar entity — a `ChildSpawner` closure parameter
-    // doesn't expose one. Each row is spawned standalone then explicitly
+    // doesn't expose one. Each node is spawned standalone then explicitly
     // parented via `add_child`.
     for member in &state.0.members {
         let is_leader = state.0.leader == Some(member.uid);
-        let health = mirrored
-            .iter()
-            .find(|(uid, _)| uid.0 == member.uid)
-            .and_then(|(_, health)| health);
+        let mirrored_entry = mirrored.iter().find(|(uid, ..)| uid.0 == member.uid);
+        let health = mirrored_entry.and_then(|(_, health, _, _)| health);
+        let energy = mirrored_entry.and_then(|(_, _, energy, _)| energy);
+        let level = mirrored_entry
+            .and_then(|(_, _, _, xp)| xp)
+            .map(|xp| xp.level);
 
         let row_entity = commands
             .spawn((GroupMemberRow, Node {
@@ -324,6 +437,112 @@ fn sync_group_panel(
             .id();
         commands.entity(root_entity).add_child(row_entity);
 
+        // --- Portrait stack (spec §3.4: 64×64 circular portrait + level
+        // badge at its bottom edge) ---
+        let portrait_entity = commands
+            .spawn(Node {
+                position_type: PositionType::Relative,
+                width: Val::Px(PARTY_PORTRAIT_SIZE_PX),
+                height: Val::Px(PARTY_PORTRAIT_SIZE_PX),
+                flex_shrink: 0.0,
+                ..Default::default()
+            })
+            .id();
+        commands.entity(row_entity).add_child(portrait_entity);
+
+        let placeholder_fill = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    border_radius: BorderRadius::all(Val::Px(PARTY_PORTRAIT_SIZE_PX / 2.0)),
+                    ..Default::default()
+                },
+                BackgroundColor(PARTY_PORTRAIT_PLACEHOLDER_FILL),
+            ))
+            .id();
+        commands.entity(portrait_entity).add_child(placeholder_fill);
+
+        let frame_entity = commands
+            .spawn((
+                PartyPortraitFrameImage,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(HudImageKey::PartyPortraitFrame)),
+                // Pure decoration over the placeholder fill — must never
+                // intercept pointer events (matches `spawn_orb_bar`'s own
+                // frame-overlay convention).
+                Pickable::IGNORE,
+            ))
+            .id();
+        commands.entity(portrait_entity).add_child(frame_entity);
+
+        let badge_entity = commands
+            .spawn((
+                PartyLevelBadgeImage,
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(-(PARTY_LEVEL_BADGE_SIZE_PX / 2.0)),
+                    left: Val::Percent(50.0),
+                    margin: UiRect::left(Val::Px(-(PARTY_LEVEL_BADGE_SIZE_PX / 2.0))),
+                    width: Val::Px(PARTY_LEVEL_BADGE_SIZE_PX),
+                    height: Val::Px(PARTY_LEVEL_BADGE_SIZE_PX),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(HudImageKey::PartyLevelBadge)),
+            ))
+            .id();
+        commands.entity(portrait_entity).add_child(badge_entity);
+
+        // The badge PNG is the decorative frame; the level NUMBER only
+        // renders when the member is currently mirrored (real data, never a
+        // guessed/default level).
+        if let Some(level) = level {
+            let level_text = commands
+                .spawn((
+                    Text(format!("{level}")),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(11.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ))
+                .id();
+            commands.entity(badge_entity).add_child(level_text);
+        }
+
+        // --- Info column: name + voice icon, then dual bars ---
+        let info_entity = commands
+            .spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: theme.spacing.xs_px(),
+                ..Default::default()
+            })
+            .id();
+        commands.entity(row_entity).add_child(info_entity);
+
+        let name_row_entity = commands
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: theme.spacing.xs_px(),
+                align_items: AlignItems::Center,
+                ..Default::default()
+            })
+            .id();
+        commands.entity(info_entity).add_child(name_row_entity);
+
         let label = if is_leader {
             format!("★ {}", member.name)
         } else {
@@ -331,6 +550,7 @@ fn sync_group_panel(
         };
         let name_entity = commands
             .spawn((
+                PartyNameLabel,
                 Text(label),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
@@ -344,20 +564,61 @@ fn sync_group_panel(
                 }),
             ))
             .id();
-        commands.entity(row_entity).add_child(name_entity);
+        commands.entity(name_row_entity).add_child(name_entity);
 
-        match health {
-            Some(health) => {
-                let bar_entity = spawn_bar(
-                    &mut commands,
-                    &theme,
-                    theme.palette.health,
-                    theme.palette.health_bg,
-                    80.0,
-                    10.0,
-                    BarValue::new(health.current, health.max),
-                );
-                commands.entity(row_entity).add_child(bar_entity);
+        // Voice-chat state has no mirrored data source yet (see
+        // `PartyVoiceState`'s own doc comment) — always Inactive until a
+        // real field lands.
+        let voice_icon_entity = commands
+            .spawn((
+                PartyVoiceIconImage,
+                Node {
+                    width: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    height: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(voice_icon_key(PartyVoiceState::Inactive))),
+            ))
+            .id();
+        commands
+            .entity(name_row_entity)
+            .add_child(voice_icon_entity);
+
+        let bars_row_entity = commands
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: theme.spacing.xs_px(),
+                ..Default::default()
+            })
+            .id();
+        commands.entity(info_entity).add_child(bars_row_entity);
+
+        match mirrored_entry {
+            Some(_) => {
+                if let Some(health) = health {
+                    let bar_entity = spawn_bar(
+                        &mut commands,
+                        &theme,
+                        theme.palette.health,
+                        theme.palette.health_bg,
+                        PARTY_BAR_WIDTH_PX,
+                        PARTY_BAR_HEIGHT_PX,
+                        BarValue::new(health.current, health.max),
+                    );
+                    commands.entity(bars_row_entity).add_child(bar_entity);
+                }
+                if let Some(energy) = energy {
+                    let bar_entity = spawn_bar(
+                        &mut commands,
+                        &theme,
+                        theme.palette.energy,
+                        theme.palette.energy_bg,
+                        PARTY_BAR_WIDTH_PX,
+                        PARTY_BAR_HEIGHT_PX,
+                        BarValue::new(energy.current, energy.max),
+                    );
+                    commands.entity(bars_row_entity).add_child(bar_entity);
+                }
             },
             None => {
                 let out_of_range = commands
@@ -371,7 +632,7 @@ fn sync_group_panel(
                         TextColor(theme.palette.text_muted),
                     ))
                     .id();
-                commands.entity(row_entity).add_child(out_of_range);
+                commands.entity(bars_row_entity).add_child(out_of_range);
             },
         }
 
@@ -678,18 +939,28 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
             }));
         });
 
-    // Group/party panel: always visible while in a group (top-right, below
-    // the Social window's anchor so the two never overlap).
+    // Group/party panel: always visible while in a group. BL-82 EM-5.17
+    // Phase 4: repositioned to spec §3.4's confirmed anchor (top-left column,
+    // `top:100,left:20`, `row_gap:20` between member rows) — was top-right,
+    // which the pre-reskin flat layout used purely to avoid overlapping the
+    // Social window (now at top-right still, so the two remain disjoint).
+    // `GlobalZIndex` per spec §4.4: party frames share the ambient always-on
+    // HUD chrome layer with the orbs/action-bar/minimap.
     commands
-        .spawn((GroupPanelRoot, Visibility::Hidden, Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(16.0),
-            right: Val::Px(320.0),
-            width: Val::Px(220.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: theme.spacing.xs_px(),
-            ..Default::default()
-        }))
+        .spawn((
+            GroupPanelRoot,
+            Visibility::Hidden,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(100.0),
+                left: Val::Px(20.0),
+                width: Val::Px(280.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(20.0),
+                ..Default::default()
+            },
+        ))
         .with_children(|parent| {
             parent
                 .spawn(button_bundle(&theme, &fonts, "Leave Group"))
@@ -701,7 +972,7 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 );
             parent.spawn((GroupMembersRoot, Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: theme.spacing.xs_px(),
+                row_gap: Val::Px(20.0),
                 ..Default::default()
             }));
         });
@@ -815,7 +1086,7 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
 
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::system::RunSystemOnce;
+    use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce};
     use common::rtsim::{Dialogue, DialogueId, DialogueKind, Response};
     use xindeler_protocol::{NetGroupMember, NetInviteKind, NetPendingInvite, NetPlayerListEntry};
 
@@ -824,10 +1095,53 @@ mod tests {
     fn new_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        // BL-82 EM-5.17 Phase 4: `sync_group_panel` now reads `Res<HudImages>`
+        // — `AssetPlugin` gives us a real `AssetServer` to build one via
+        // `HudImages::load` (mirroring `far_terrain.rs`/`sprite_view.rs`'s
+        // own established "AssetPlugin::default() for a real AssetServer in
+        // a headless test" convention); no other test in this module needs
+        // it, but adding it unconditionally here is harmless.
+        app.add_plugins(AssetPlugin::default());
+        // `AssetServer::load::<Image>` panics unless the `Image` asset type
+        // is registered — normally done by `ImagePlugin` (part of
+        // `DefaultPlugins`, unavailable headlessly since it pulls in the
+        // render app). `init_asset` alone is enough for a headless test that
+        // only needs `Handle<Image>` allocation, not real decoding (same
+        // minimal-registration precedent as `orb_material.rs`'s own
+        // `app.init_asset::<OrbLiquidMaterial>()`).
+        app.init_asset::<Image>();
         app.insert_resource(HudTheme::default());
         app.init_resource::<CurrentGroupState>();
         app.init_resource::<ActiveDialogue>();
         app
+    }
+
+    /// Builds a real (test) [`HudImages`] via the app's [`AssetServer`] —
+    /// `HudImages`'s fields are private to `xindeler_ui::images`, so
+    /// `HudImages::load` (the only public constructor) is the one way a
+    /// downstream crate's test can get one.
+    fn insert_hud_images(app: &mut App) {
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+    }
+
+    /// Collects every descendant (children, grandchildren, …) of `root` —
+    /// BL-82 EM-5.17 Phase 4's party row nests its visuals (portrait stack /
+    /// info column / name row / bars row) several levels deep, unlike the
+    /// pre-reskin flat layout where a row's bar/text children were direct
+    /// children of the row itself.
+    fn all_descendants(app: &App, root: Entity) -> Vec<Entity> {
+        let mut result = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Some(children) = app.world().get::<Children>(entity) {
+                for child in children.iter() {
+                    result.push(child);
+                    stack.push(child);
+                }
+            }
+        }
+        result
     }
 
     /// Toggling [`HudState`] into/out of [`HudWindow::Social`] shows/hides
@@ -909,11 +1223,15 @@ mod tests {
     }
 
     /// A group member whose uid correlates to a currently-mirrored entity's
-    /// [`NetUid`] gets a real health bar; a member with no mirrored entity
-    /// gets an "(out of range)" label instead — never a stale/garbage bar.
+    /// [`NetUid`] gets real DUAL health+energy bars (BL-82 EM-5.17 Phase 4's
+    /// "Barras Duales"); a member with no mirrored entity gets an "(out of
+    /// range)" label instead — never a stale/garbage bar. Bars now nest
+    /// several levels below the row (portrait/info-column/bars-row), so this
+    /// searches the whole subtree, not just direct children.
     #[test]
-    fn group_panel_shows_health_bar_when_mirrored_and_out_of_range_text_otherwise() {
+    fn group_panel_shows_dual_bars_when_mirrored_and_out_of_range_text_otherwise() {
         let mut app = new_app();
+        insert_hud_images(&mut app);
         app.world_mut().insert_resource(HudFonts {
             title: Handle::default(),
             body: Handle::default(),
@@ -924,11 +1242,19 @@ mod tests {
             .id();
         let root = app.world_mut().spawn(GroupMembersRoot).id();
 
-        // Member 1 IS currently mirrored (has NetHealth); member 2 is not.
-        app.world_mut().spawn((NetUid(1), NetHealth {
-            current: 40.0,
-            max: 100.0,
-        }));
+        // Member 1 IS currently mirrored (has NetHealth + NetEnergy); member
+        // 2 is not.
+        app.world_mut().spawn((
+            NetUid(1),
+            NetHealth {
+                current: 40.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 20.0,
+                max: 50.0,
+            },
+        ));
 
         app.world_mut().resource_mut::<CurrentGroupState>().0 = NetGroupState {
             group_name: Some("Party".to_owned()),
@@ -966,27 +1292,170 @@ mod tests {
             .collect();
         assert_eq!(member_rows.len(), 2, "one row per group member");
 
-        // Exactly one row's children carry a real BarValue (the mirrored
-        // member); exactly one carry the "(out of range)" text.
-        let mut bar_rows = 0;
+        // Exactly one row's subtree carries two real BarValue entities (the
+        // mirrored member's dual health+energy bars); exactly one carries
+        // the "(out of range)" text and no bars at all.
+        let mut bar_rows_with_two_bars = 0;
         let mut out_of_range_rows = 0;
         for row in &member_rows {
-            let children = app.world().get::<Children>(*row).expect("row has children");
-            for child in children.iter() {
-                if app.world().get::<BarValue>(child).is_some() {
-                    bar_rows += 1;
-                }
-                if let Some(text) = app.world().get::<Text>(child)
-                    && text.0.contains("out of range")
-                {
-                    out_of_range_rows += 1;
-                }
+            let descendants = all_descendants(&app, *row);
+            let bar_count = descendants
+                .iter()
+                .filter(|&&e| app.world().get::<BarValue>(e).is_some())
+                .count();
+            if bar_count == 2 {
+                bar_rows_with_two_bars += 1;
+            }
+            let has_out_of_range = descendants.iter().any(|&e| {
+                app.world()
+                    .get::<Text>(e)
+                    .is_some_and(|text| text.0.contains("out of range"))
+            });
+            if has_out_of_range {
+                out_of_range_rows += 1;
             }
         }
-        assert_eq!(bar_rows, 1, "the mirrored member gets a real health bar");
+        assert_eq!(
+            bar_rows_with_two_bars, 1,
+            "the mirrored member gets real dual health+energy bars"
+        );
         assert_eq!(
             out_of_range_rows, 1,
             "the non-mirrored member gets the out-of-range label"
+        );
+    }
+
+    /// BL-82 EM-5.17 Phase 4's core acceptance bar (spec §3.4): given a fully
+    /// mirrored party member, the rebuilt row carries a portrait-frame
+    /// `ImageNode` keyed to `HudImageKey::PartyPortraitFrame`, a level badge
+    /// showing the member's real mirrored level, the name label, and TWO
+    /// bar entities (health + energy — "Barras Duales").
+    #[test]
+    fn party_row_renders_portrait_frame_level_badge_name_and_dual_bars() {
+        let mut app = new_app();
+        insert_hud_images(&mut app);
+        app.world_mut().insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.world_mut().spawn((GroupPanelRoot, Visibility::Hidden));
+        let root = app.world_mut().spawn(GroupMembersRoot).id();
+
+        app.world_mut().spawn((
+            NetUid(7),
+            NetHealth {
+                current: 80.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 30.0,
+                max: 60.0,
+            },
+            NetXp {
+                level: 12,
+                xp_into_level: 0,
+                xp_for_level: 100,
+            },
+        ));
+
+        app.world_mut().resource_mut::<CurrentGroupState>().0 = NetGroupState {
+            group_name: Some("Party".to_owned()),
+            leader: Some(7),
+            members: vec![NetGroupMember {
+                uid: 7,
+                name: "Ally".to_owned(),
+            }],
+            pending_invite: None,
+        };
+
+        app.world_mut()
+            .run_system_once(sync_group_panel)
+            .expect("system runs");
+        app.update();
+
+        let member_row = app
+            .world()
+            .get::<Children>(root)
+            .expect("member row spawned")
+            .iter()
+            .find(|c| app.world().get::<GroupMemberRow>(*c).is_some())
+            .expect("member row exists");
+        let descendants = all_descendants(&app, member_row);
+
+        let images = app.world().resource::<HudImages>().clone();
+
+        let frame_entity = descendants
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<PartyPortraitFrameImage>(e).is_some())
+            .expect("portrait frame image exists");
+        assert_eq!(
+            app.world().get::<ImageNode>(frame_entity).unwrap().image,
+            images.get(HudImageKey::PartyPortraitFrame),
+            "the portrait frame ImageNode uses the correct HudImageKey"
+        );
+
+        let badge_entity = descendants
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<PartyLevelBadgeImage>(e).is_some())
+            .expect("level badge image exists");
+        assert_eq!(
+            app.world().get::<ImageNode>(badge_entity).unwrap().image,
+            images.get(HudImageKey::PartyLevelBadge),
+            "the level badge ImageNode uses the correct HudImageKey"
+        );
+        let level_text = app
+            .world()
+            .get::<Children>(badge_entity)
+            .expect("badge has a level-number text child")
+            .iter()
+            .find_map(|c| app.world().get::<Text>(c))
+            .expect("level text exists");
+        assert_eq!(
+            level_text.0, "12",
+            "the badge shows the member's real mirrored level"
+        );
+
+        let name_entity = descendants
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<PartyNameLabel>(e).is_some())
+            .expect("name label exists");
+        assert_eq!(
+            app.world().get::<Text>(name_entity).unwrap().0,
+            "★ Ally",
+            "the leader star + name render as before"
+        );
+
+        let bar_count = descendants
+            .iter()
+            .filter(|&&e| app.world().get::<BarValue>(e).is_some())
+            .count();
+        assert_eq!(
+            bar_count, 2,
+            "a fully-mirrored member gets two bar entities (health + energy)"
+        );
+    }
+
+    /// [`voice_icon_key`] maps every [`PartyVoiceState`] to its own, distinct
+    /// [`HudImageKey`] — the STATE→ASSET mapping this phase adds, even
+    /// though every production call site currently only ever passes
+    /// `Inactive` (documented data gap, see `PartyVoiceState`'s own doc
+    /// comment).
+    #[test]
+    fn voice_icon_key_maps_every_state_to_its_own_asset() {
+        assert_eq!(
+            voice_icon_key(PartyVoiceState::Active),
+            HudImageKey::PartyVoiceActive
+        );
+        assert_eq!(
+            voice_icon_key(PartyVoiceState::Inactive),
+            HudImageKey::PartyVoiceInactive
+        );
+        assert_eq!(
+            voice_icon_key(PartyVoiceState::Muted),
+            HudImageKey::PartyVoiceMuted
         );
     }
 
