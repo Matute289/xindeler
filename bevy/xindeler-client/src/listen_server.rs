@@ -317,13 +317,17 @@ impl Plugin for ListenServerPlugin {
         app.add_plugins(crate::diary::DiaryUiPlugin);
         // BL-82 EM-5.17 Phase 5: the boss/target nameplate — panel + bars
         // fully built, reading `NetHealth`/`NetPoise`/`NetXp` off whatever
-        // entity `SelectedTarget` resolves to. No real target-selection
-        // source exists yet (see `boss_nameplate`'s module doc comment: it
-        // would need a new 3D-picking system, not a small resource), so in
-        // real gameplay `SelectedTarget` stays `None` and the panel stays
-        // hidden; `XINDELER_SMOKE_FORCE_TARGET` is the only way to preview
-        // it, for visual smoke-testing only. Pure Bevy.
+        // entity `SelectedTarget` resolves to.
         app.add_plugins(crate::boss_nameplate::BossNameplateViewPlugin);
+        // BL-82 EM-5.18 Phase 1: the hybrid target-selection system's
+        // soft-target scan — a continuous camera-cone scorer that populates
+        // `SelectedTarget` with the nearest `Enemy`-aligned candidate in
+        // front of the player, unblocking the nameplate above (it now
+        // renders during real gameplay, not just under
+        // `XINDELER_SMOKE_FORCE_TARGET`). Pure Bevy; see `targeting`'s
+        // module doc comment for the precedence between this system and the
+        // smoke override.
+        app.add_plugins(crate::targeting::TargetSelectionPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");

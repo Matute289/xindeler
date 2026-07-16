@@ -262,7 +262,11 @@ fn add_presentation(
 /// the snap frame renders with a suppressed (zero) motion vector instead of the
 /// true, extreme one, and Bevy re-seeds it correctly the very next frame —
 /// normal small per-frame motion vectors resume immediately after.
-fn interpolate_entities(
+// `pub(crate)`: BL-82 EM-5.18 P1's `targeting::update_soft_target` orders
+// itself `.after(interpolate_entities)` (same `MirrorSet`) so it reads this
+// frame's eased `Transform`/`Interpolated`, not last frame's — see that
+// system's own doc comment.
+pub(crate) fn interpolate_entities(
     time: Res<Time>,
     mut commands: Commands,
     mut query: Query<(

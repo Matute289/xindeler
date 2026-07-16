@@ -194,12 +194,15 @@ impl Plugin for NetClientPlugin {
         // path). Split into its own call — the tuple above is already at the
         // plugin-tuple arity ceiling `bevy_app`'s `Plugins` impls support.
         app.add_plugins(crate::diary::DiaryUiPlugin);
-        // BL-82 EM-5.17 Phase 5: the boss/target nameplate. No real
-        // target-selection source exists yet in this client (see
-        // `boss_nameplate`'s module doc comment) — `SelectedTarget` is never
-        // set to `Some(_)` in real gameplay, so the panel ships built but
-        // hidden here too, same as every other consumer plugin's
-        // "degrade clean" posture in this list.
+        // BL-82 EM-5.17 Phase 5: the boss/target nameplate.
         app.add_plugins(crate::boss_nameplate::BossNameplateViewPlugin);
+        // BL-82 EM-5.18 Phase 1: the soft-target scan. This mode has no
+        // embedded/controllable local player yet (module doc comment,
+        // "Scope: spectator-only (v1)"), so `update_soft_target` degrades
+        // clean exactly like every other consumer plugin above — its local-
+        // player query simply never matches, leaving `SelectedTarget` at
+        // `None` (the panel stays hidden here, same "degrade clean" posture
+        // as the rest of this list) until this mode gets a real local player.
+        app.add_plugins(crate::targeting::TargetSelectionPlugin);
     }
 }
