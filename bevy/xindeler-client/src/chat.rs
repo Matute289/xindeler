@@ -34,6 +34,7 @@
 //!   (server-side `render_content` fallback covers it — EM-5.16's job).
 
 use bevy::{color::Alpha as _, input_focus::InputFocus, prelude::*, text::EditableText};
+use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
 use xindeler_ui::{
     button::{Activate, button_bundle},
@@ -129,15 +130,27 @@ impl Default for ChatUiState {
 struct ChatPanelRoot;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatScrollArea;
+/// `pub(crate)` (BL-82 EM-5.17 Phase 0): [`text_input_focused`] is called
+/// from other modules (`diary`/`inventory_ui`/`social_hud`/`map_view`) as a
+/// run condition, and its `Query<Entity, With<ChatInputBox>>` parameter type
+/// must be at least as visible as the function itself.
 #[derive(Component, Debug, Clone, Copy, Default)]
-struct ChatInputBox;
+pub(crate) struct ChatInputBox;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatInputPlaceholder;
 /// Tags every element that hides when [`ChatUiState::collapsed`] is `true`
-/// (the tab row + the scrollback) — the minimize BUTTON itself and the input
-/// row are deliberately NOT tagged, so a collapsed panel still shows a way to
-/// restore it and (matching the task's own "collapses to just the input bar"
-/// framing) stays usable for typing while minimized.
+/// (the tab row + the scrollback + the input row) — the minimize BUTTON
+/// itself is deliberately the ONLY thing NOT tagged, so a collapsed panel
+/// still shows a way to restore it (the sole visible/clickable restore
+/// affordance while collapsed).
+///
+/// BL-82 EM-5.17 Phase 0: the input row used to be deliberately excluded too
+/// (a "collapses to just the input bar" framing), but that left a
+/// "collapsed" chat panel still showing (and still typeable into) its input
+/// box + placeholder — reading as "doesn't hide" even though the code did
+/// exactly what it claimed. The input row is now tagged `ChatCollapsible`
+/// alongside the tab row/scrollback, so collapsing genuinely hides the WHOLE
+/// chat body and leaves only the minimize/restore button on screen.
 ///
 /// [`sync_chat_collapsed`] toggles these via `Node::display`
 /// (`Display::None`/`Flex`), NOT `Visibility::Hidden` — a deliberate
@@ -145,11 +158,11 @@ struct ChatInputPlaceholder;
 /// `controls_screen.rs`/`xindeler-ui`'s own widgets all use `Visibility`).
 /// `Visibility::Hidden` stops rendering but leaves an entity's LAYOUT
 /// footprint intact, which would leave the panel's overall height unchanged
-/// while collapsed — defeating "collapses to just the input bar" (the whole
+/// while collapsed — defeating "collapses to just the button" (the whole
 /// point of minimizing). `Node::display = Display::None` removes the tab
-/// row/scrollback from layout entirely, so the panel genuinely shrinks. Do
-/// NOT "fix" this back to `Visibility` to match the rest of the codebase —
-/// it would silently reintroduce the footprint bug.
+/// row/scrollback/input row from layout entirely, so the panel genuinely
+/// shrinks. Do NOT "fix" this back to `Visibility` to match the rest of the
+/// codebase — it would silently reintroduce the footprint bug.
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatCollapsible;
 /// The minimize/restore header button.
@@ -214,6 +227,15 @@ impl Plugin for ChatViewPlugin {
                 update_input_placeholder,
                 handle_chat_submit,
                 chat_smoke_verify,
+                // Reads `ActionState` — must run after the frame's real
+                // input resolution (BL-82 EM-5.17 Phase 0, same fix as
+                // `diary::toggle_diary_window`/`controls_screen::
+                // toggle_controls_screen`).
+                toggle_chat_via_hotkey.after(xindeler_input::InputResolveSet),
+                // The explicit blur path `text_input_focused`'s doc comment
+                // requires — ecs-design-reviewer BLOCKER fix, see
+                // `blur_chat_input_on_escape`'s own doc comment.
+                blur_chat_input_on_escape,
             ),
         );
     }
@@ -361,14 +383,20 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
             .insert((ChatScrollArea, ChatCollapsible));
 
         // Input row: placeholder label (shown only while empty) +
-        // EditableText box.
+        // EditableText box. Tagged `ChatCollapsible` (BL-82 EM-5.17 Phase 0)
+        // — the header row/minimize button stays the ONLY thing outside
+        // `ChatCollapsible` (see that marker's own doc comment); before this
+        // fix, only the tab row + scrollback were tagged, so a "collapsed"
+        // chat panel still showed its input box and could still be typed
+        // into, which read as "doesn't hide" even though the code did
+        // exactly what it claimed to.
         parent
-            .spawn(Node {
+            .spawn((ChatCollapsible, Node {
                 position_type: PositionType::Relative,
                 width: Val::Px(PANEL_WIDTH),
                 margin: UiRect::top(Val::Px(theme.spacing.xs)),
                 ..Default::default()
-            })
+            }))
             .with_children(|row| {
                 row.spawn((
                     ChatInputPlaceholder,
@@ -571,6 +599,82 @@ fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: Re
     }
 }
 
+/// Whether the chat input box currently has keyboard focus
+/// ([`InputFocus`]) — the shared "don't fire a hotkey while the player is
+/// typing" predicate BL-82 EM-5.17 Phase 0 introduces.
+///
+/// Why this exists: legacy `xindeler-old` gates every hotkey handler on `if
+/// !self.typing()` (`Hud::typing()` — a single boolean answering "is a
+/// text-edit widget currently capturing keyboard input") so that typing "i"
+/// while chatting doesn't ALSO open the inventory. The Bevy port had no
+/// equivalent — verified by reading every `HudAction`-emitting toggle system
+/// in this crate (`diary`/`inventory_ui`/`social_hud`/`map_view`/
+/// `controls_screen`), none checked chat focus. Rather than invent a new
+/// focus-tracking mechanism, this reuses the [`InputFocus`] resource
+/// `chat.rs` already maintains for its own Enter/Tab handling
+/// ([`handle_chat_submit`]) together with the [`ChatInputBox`] marker — the
+/// two already say everything "is the player typing" needs to know.
+///
+/// A plain `Fn(..) -> bool` system, composable with
+/// `.run_if(not(crate::chat::text_input_focused))` on any `Update` system
+/// (see `diary::DiaryUiPlugin`/`inventory_ui::InventoryUiPlugin`/
+/// `social_hud::SocialHudViewPlugin`/`map_view::MapViewPlugin` for the
+/// wiring).
+///
+/// **This predicate is only correct alongside a blur path** —
+/// [`blur_chat_input_on_escape`] below. `InputFocus` is only ever SET in
+/// this codebase: automatically, by `bevy_ui_widgets::text_input`'s own
+/// pointer-press observer (vendored library behaviour, not code we wrote)
+/// the first time the player clicks into the chat input box. Nothing
+/// UN-sets it on its own — not `handle_chat_submit` (clears the TEXT on
+/// Enter, never `InputFocus`), not `EditableText`'s own Escape handling
+/// (only collapses the text selection, doesn't blur), not the chat tabs/
+/// minimize button (plain `Button`/`Activate` widgets, same as every other
+/// HUD button — none touch `InputFocus`). An ecs-design-reviewer BLOCKER
+/// finding on an earlier version of this fix: without an explicit blur
+/// path, the FIRST chat message of a session would make this predicate
+/// return `true` forever after, permanently (not intermittently)
+/// suppressing every gated hotkey (P/I/M/O). [`blur_chat_input_on_escape`]
+/// closes that gap — Escape while chat holds focus clears [`InputFocus`],
+/// matching legacy `xindeler-old`'s own `Hud::typing()`/
+/// `focus_widget(None)` precedent this doc comment already cited (the
+/// "gate hotkeys on typing" half was ported first; this is the "give the
+/// player a way out of typing" half).
+pub(crate) fn text_input_focused(
+    focus: Res<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) -> bool {
+    let Ok(input_entity) = inputs.single() else {
+        return false;
+    };
+    focus.get() == Some(input_entity)
+}
+
+/// Clears [`InputFocus`] when Escape is pressed WHILE the chat input box
+/// holds it — the explicit blur path [`text_input_focused`]'s own doc
+/// comment requires (BL-82 EM-5.17 Phase 0, ecs-design-reviewer BLOCKER
+/// fix). Without this, `InputFocus` is only ever set (by `bevy_ui_widgets`'
+/// own click-to-focus behaviour) and never cleared, so the typing-focus
+/// guard would permanently suppress every gated hotkey after the first chat
+/// message of a session, for good. A no-op if the input box isn't currently
+/// focused (Escape then falls through to whatever else reads it, e.g.
+/// `camera.rs`'s cursor-release handling).
+fn blur_chat_input_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    if focus.get() == Some(input_entity) {
+        focus.clear();
+    }
+}
+
 /// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
 /// Deliberately a direct `Activate` observer mutating this screen's own
 /// `Resource` — the SAME shape [`handle_tab_click`] right above already uses
@@ -581,9 +685,20 @@ fn handle_chat_minimize_click(_activate: On<Activate>, mut state: ResMut<ChatUiS
     state.collapsed = !state.collapsed;
 }
 
-/// Hides every [`ChatCollapsible`] element (tab row + scrollback) while
-/// [`ChatUiState::collapsed`] is `true`, and relabels the minimize button
-/// (`"Hide"` <-> `"Chat"`) to reflect which action it will perform next.
+/// [`GameInput::ToggleChat`] (`F5` by default, rebindable) does the SAME
+/// thing as clicking the minimize/restore button — flips
+/// [`ChatUiState::collapsed`]. BL-82 EM-5.17 Phase 0: nothing previously read
+/// `GameInput::ToggleChat` at all despite it existing in the keymap.
+fn toggle_chat_via_hotkey(action_state: Res<ActionState>, mut state: ResMut<ChatUiState>) {
+    if action_state.just_pressed(GameInput::ToggleChat) {
+        state.collapsed = !state.collapsed;
+    }
+}
+
+/// Hides every [`ChatCollapsible`] element (tab row + scrollback + input row)
+/// while [`ChatUiState::collapsed`] is `true`, and relabels the minimize
+/// button (`"Hide"` <-> `"Chat"`) to reflect which action it will perform
+/// next.
 fn sync_chat_collapsed(
     state: Res<ChatUiState>,
     mut collapsible: Query<&mut Node, With<ChatCollapsible>>,
@@ -960,9 +1075,15 @@ mod tests {
     }
 
     /// [`sync_chat_collapsed`]: collapsing hides every [`ChatCollapsible`]
-    /// element (tab row + scrollback) but leaves anything NOT tagged
-    /// (the minimize button itself) untouched, and relabels the button;
-    /// un-collapsing restores both.
+    /// element (tab row + scrollback + input row) but leaves anything NOT
+    /// tagged (the minimize button itself) untouched, and relabels the
+    /// button; un-collapsing restores all three.
+    ///
+    /// BL-82 EM-5.17 Phase 0: `input_row` is new here — before this fix, the
+    /// input row wasn't tagged `ChatCollapsible` at all, so a "collapsed"
+    /// chat panel still showed (and could still be typed into) its input box
+    /// and placeholder, which read as "doesn't hide" even though the code
+    /// did exactly what it claimed to.
     #[test]
     fn sync_chat_collapsed_hides_collapsible_elements_and_relabels_the_button() {
         let mut app = new_app();
@@ -973,6 +1094,10 @@ mod tests {
         let scroll_area = app
             .world_mut()
             .spawn((ChatCollapsible, ChatScrollArea, Node::default()))
+            .id();
+        let input_row = app
+            .world_mut()
+            .spawn((ChatCollapsible, Node::default()))
             .id();
         let label = app
             .world_mut()
@@ -996,6 +1121,12 @@ mod tests {
             "the scrollback must hide while collapsed"
         );
         assert_eq!(
+            app.world().get::<Node>(input_row).unwrap().display,
+            Display::None,
+            "the input row must ALSO hide while collapsed — only the minimize/restore button \
+             stays visible"
+        );
+        assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
             CHAT_RESTORE_LABEL,
             "the button must relabel to the restore action"
@@ -1016,8 +1147,130 @@ mod tests {
             Display::Flex
         );
         assert_eq!(
+            app.world().get::<Node>(input_row).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
             CHAT_MINIMIZE_LABEL
+        );
+    }
+
+    /// [`toggle_chat_via_hotkey`]: [`GameInput::ToggleChat`] (`F5` by
+    /// default) flips [`ChatUiState::collapsed`] — the same effect as
+    /// clicking the minimize button, but from the keyboard (BL-82 EM-5.17
+    /// Phase 0: nothing previously read this `GameInput` at all). Driven
+    /// through the REAL `xindeler_input::action_state::update_action_state`
+    /// resolver (not a hand-built `ActionState`, whose fields are private) —
+    /// the same "real input → real resolver → real system" shape
+    /// `controls_screen.rs`'s own
+    /// `end_to_end_rebind_persists_to_disk_and_flags_a_conflict` test uses.
+    #[test]
+    fn toggle_chat_via_hotkey_flips_collapsed() {
+        use bevy::input::keyboard::KeyCode;
+        use xindeler_input::{KeyMap, action_state::update_action_state};
+
+        let mut app = new_app();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        // `new_app()` already inits `ButtonInput<KeyCode>` (for
+        // `handle_chat_submit`'s own tests); `update_action_state` also
+        // reads mouse buttons, which nothing else in this test module needs.
+        app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+        app.add_systems(
+            Update,
+            (update_action_state, toggle_chat_via_hotkey).chain(),
+        );
+
+        assert!(!app.world().resource::<ChatUiState>().collapsed);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F5);
+        app.update();
+        assert!(
+            app.world().resource::<ChatUiState>().collapsed,
+            "F5 (ToggleChat) must collapse the chat panel"
+        );
+
+        // Fresh press edge for the second toggle (a still-held key has no
+        // NEW `just_pressed` edge next frame).
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset(KeyCode::F5);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F5);
+        app.update();
+        assert!(
+            !app.world().resource::<ChatUiState>().collapsed,
+            "a second F5 press must restore it"
+        );
+    }
+
+    /// BL-82 EM-5.17 Phase 0 regression (ecs-design-reviewer BLOCKER): once
+    /// the chat input box gains [`InputFocus`], [`text_input_focused`] must
+    /// stay `true` forever UNLESS something explicitly blurs it —
+    /// [`blur_chat_input_on_escape`] is that path. Unlike the other new
+    /// tests in this module (which hand-insert focus and never simulate
+    /// "focus, then look away"), this one drives the full
+    /// focus → suppressed → Escape → un-suppressed lifecycle the reviewer
+    /// found nothing previously covered.
+    #[test]
+    fn escape_blurs_the_chat_input_and_lifts_the_typing_guard() {
+        let mut app = new_app();
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.insert_resource(InputFocus::from_entity(input));
+
+        assert!(
+            app.world_mut()
+                .run_system_once(text_input_focused)
+                .expect("condition runs"),
+            "text_input_focused must be true while the chat input holds focus"
+        );
+
+        // Escape, while chat holds focus, must blur it.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_escape)
+            .expect("system runs");
+
+        assert!(
+            !app.world_mut()
+                .run_system_once(text_input_focused)
+                .expect("condition runs"),
+            "Escape must clear InputFocus, lifting the typing guard so gated hotkeys \
+             (Diary/Inventory/Map/Social) fire again — without this, the FIRST chat message of a \
+             session would suppress them permanently"
+        );
+    }
+
+    /// [`blur_chat_input_on_escape`] must be a no-op when the chat input
+    /// does NOT currently hold focus — it must not clear an unrelated
+    /// widget's focus, nor panic when nothing is focused at all.
+    #[test]
+    fn escape_without_chat_focus_does_not_clear_an_unrelated_focus() {
+        let mut app = new_app();
+        app.world_mut().spawn((ChatInputBox, EditableText::new("")));
+        let other = app.world_mut().spawn_empty().id();
+        app.insert_resource(InputFocus::from_entity(other));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_escape)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(other),
+            "Escape must only blur the CHAT input, not whatever else happens to be focused"
         );
     }
 
