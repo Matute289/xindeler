@@ -96,6 +96,27 @@ pub struct NetItemStack {
     pub name: String,
     pub amount: u32,
     pub quality: Quality,
+    /// BL-82 EM-5.17 T57.15 — whether this item is a two-handed weapon
+    /// (`ItemKind::Tool` with `tool.hands == Hands::Two`). A small, additive
+    /// mirror field (the SAME kind of addition `quality` itself already was,
+    /// EM-5.6) rather than new architecture: the Phase 7 equipment panel
+    /// needs to know, client-side, whether a Mainhand's item should visually
+    /// disable its paired Offhand slot (`common::comp::inventory::slot::
+    /// EquipSlot::can_hold` already ENFORCES this server/client-logic-side —
+    /// this field only lets the HUD REFLECT that existing state, per that
+    /// function's own doc comment: "Phase 7 must NOT re-implement this
+    /// enforcement, only read the paired Mainhand's current item's `Hands`").
+    /// Chosen over a client-side item-definition lookup because no such
+    /// lookup crosses the logic/shell isolation boundary today (the client
+    /// only ever sees already-projected `Net*` mirrors, never raw
+    /// `ItemDefinitionId` → `ItemDef` resolution machinery — that machinery
+    /// lives in `common`/`common-assets` behind `Inventory`'s own
+    /// `AbilityMap`/`MaterialStatManifest` dependencies, which is exactly
+    /// what this module's own doc comment says `NetInventory` deliberately
+    /// does NOT expose to the client: "project, don't dump"). `false` for
+    /// every non-`Tool` item (armor, consumables, …), matching
+    /// `EquipSlot::can_hold`'s own `Hands::One` default posture.
+    pub is_two_handed: bool,
 }
 
 /// One bag slot, projected for the bag-grid UI (EM-5.6 T56.19) — EVERY
@@ -182,6 +203,7 @@ mod tests {
                 name: "Starter Sword".to_owned(),
                 amount: 1,
                 quality: Quality::Common,
+                is_two_handed: false,
             }),
         };
         // Round-trips through bincode the same way every other Net* payload
@@ -208,6 +230,32 @@ mod tests {
                 .expect("deserializes");
         assert_eq!(decoded, slot);
         assert!(decoded.item.is_none());
+    }
+
+    /// BL-82 EM-5.17 T57.15 — `is_two_handed: true` round-trips through
+    /// bincode too, not just the `false` default this file's other fixture
+    /// happens to use.
+    #[test]
+    fn a_two_handed_item_stack_round_trips_true() {
+        let slot = NetInventorySlot {
+            slot: InvSlotId::new(0, 4),
+            item: Some(NetItemStack {
+                item_id: ItemDefinitionIdOwned::Simple(
+                    "common.items.weapons.greatsword.starter".to_owned(),
+                ),
+                name: "Starter Greatsword".to_owned(),
+                amount: 1,
+                quality: Quality::Common,
+                is_two_handed: true,
+            }),
+        };
+        let bytes =
+            bincode::serde::encode_to_vec(&slot, bincode::config::legacy()).expect("serializes");
+        let (decoded, _): (NetInventorySlot, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
+                .expect("deserializes");
+        assert_eq!(decoded, slot);
+        assert!(decoded.item.expect("item present").is_two_handed);
     }
 
     #[test]

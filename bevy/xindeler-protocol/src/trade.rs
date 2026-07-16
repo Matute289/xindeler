@@ -155,6 +155,7 @@ mod tests {
                 name: "Coins".to_owned(),
                 quality: Quality::Common,
                 amount: 20,
+                is_two_handed: false,
             },
             offered: 5,
             owned: 20,

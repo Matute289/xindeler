@@ -85,7 +85,7 @@ use xindeler_ui::{
     scroll::scroll_view_bundle,
     slot::{SlotAddress, SlotContents, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
-    tooltip::Tooltip,
+    tooltip::{Tooltip, TooltipBackground},
     zlayer,
 };
 
@@ -1041,6 +1041,11 @@ fn sync_skill_tree_content(
                 node_entity.insert((
                     BorderColor::all(border),
                     Tooltip { text: tooltip },
+                    // BL-82 EM-5.17 T57.16 — reskins this skill node's hover
+                    // tooltip with the themed `skill_tooltip_bg.png` frame
+                    // (see `xindeler_ui::tooltip`'s module doc comment for
+                    // the opt-in `TooltipBackground` contract).
+                    TooltipBackground(HudImageKey::SkillTooltipBg),
                     SkillNodeTarget(skill),
                 ));
                 node_entity.observe(handle_skill_node_activate);

@@ -63,6 +63,22 @@ pub struct InventoryMirrorCache {
 #[allow(deprecated)]
 pub(crate) fn item_name(item: &comp::Item) -> String { item.legacy_name().into_owned() }
 
+/// BL-82 EM-5.17 T57.15 — whether `item` is a two-handed weapon
+/// (`ItemKind::Tool` with `tool.hands == Hands::Two`). Populates
+/// [`xindeler_protocol::NetItemStack::is_two_handed`] — see that field's own
+/// doc comment for why this is the chosen resolution of T57.15's data gap
+/// (a small additive mirror field, not a client-side item-definition lookup).
+/// `pub(crate)` (not private): `crate::trade`'s own `NetItemStack`
+/// construction site (`resolve_offer`) reuses this exact helper, the same
+/// way it already reuses [`item_name`].
+pub(crate) fn item_is_two_handed(item: &comp::Item) -> bool {
+    matches!(
+        &*item.kind(),
+        comp::inventory::item::ItemKind::Tool(tool)
+            if tool.hands == comp::inventory::item::tool::Hands::Two
+    )
+}
+
 /// Reads the sim's `comp::Inventory` for every currently-mirrored entity and
 /// UPSERTs [`NetInventory`] (+ tags [`NetOwnerOnly`] with the entity's own
 /// `Uid`, for the per-owner visibility scoping — see
@@ -133,6 +149,7 @@ pub fn mirror_inventory_state(
                             name: item_name(item),
                             amount: item.amount(),
                             quality: item.quality(),
+                            is_two_handed: item_is_two_handed(item),
                         }),
                     })
                     .collect::<Vec<_>>();
@@ -149,6 +166,7 @@ pub fn mirror_inventory_state(
                                 name: item_name(item),
                                 amount: item.amount(),
                                 quality: item.quality(),
+                                is_two_handed: item_is_two_handed(item),
                             }
                         }),
                     })
@@ -371,6 +389,74 @@ mod tests {
                 .iter()
                 .all(|slot| slot.item.is_none()),
             "nothing was equipped in this fixture"
+        );
+    }
+
+    /// BL-82 EM-5.17 T57.15 — a two-handed weapon (`common.items.weapons.
+    /// sword.starter`, `hands: Two` per its own RON) mirrors with
+    /// `is_two_handed: true`; a one-handed weapon (`common.items.weapons.
+    /// dagger.starter_dagger`, `hands: One`) mirrors `false`. This is the
+    /// data T57.15's paired-Offhand-disable visual reads client-side.
+    #[test]
+    fn mirrors_is_two_handed_from_the_real_item_definition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let mut inventory = Inventory::with_empty();
+            inventory
+                .push(common::comp::Item::new_from_asset_expect(
+                    "common.items.weapons.sword.starter",
+                ))
+                .expect("space for the two-handed sword");
+            inventory
+                .push(common::comp::Item::new_from_asset_expect(
+                    "common.items.weapons.dagger.starter_dagger",
+                ))
+                .expect("space for the one-handed dagger");
+            let entity = ecs.create_entity().with(inventory).build();
+            let mut uids = ecs.write_storage::<Uid>();
+            let mut id_maps = ecs.write_resource::<common::uid::IdMaps>();
+            uids.insert(entity, id_maps.allocate(entity)).unwrap();
+            drop(uids);
+            drop(id_maps);
+            entity
+        };
+
+        let bevy_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(sim_entity, bevy_entity);
+
+        app.world_mut()
+            .run_system_once(mirror_inventory_state)
+            .expect("system runs");
+        app.update();
+
+        let net_inventory = app
+            .world()
+            .get::<NetInventory>(bevy_entity)
+            .expect("NetInventory must be mirrored");
+        let occupied: Vec<_> = net_inventory
+            .slots
+            .iter()
+            .filter_map(|slot| slot.item.as_ref())
+            .collect();
+        assert_eq!(occupied.len(), 2, "both items are in the bag");
+        assert!(
+            occupied
+                .iter()
+                .any(|item| item.name.contains("Greatsword") && item.is_two_handed),
+            "the two-handed sword must mirror is_two_handed: true"
+        );
+        assert!(
+            occupied
+                .iter()
+                .any(|item| item.name.contains("Dagger") && !item.is_two_handed),
+            "the one-handed dagger must mirror is_two_handed: false"
         );
     }
 
