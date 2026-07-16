@@ -60,6 +60,26 @@ pub struct HudPalette {
     pub buff_bad: Color,
     /// Low-health danger tint (vignette, globe flash).
     pub danger: Color,
+    /// The hotbar's cooldown "sweep" veil (`hotbar.rs`'s
+    /// `HotbarCooldownOverlay`). BL-82 EM-5.17 Phase 2 follow-up bugfix: this
+    /// used to be a raw `Color::srgba(0.0, 0.0, 0.0, 0.7)` literal in
+    /// `hotbar.rs` itself, which read fine in isolation but became genuinely
+    /// invisible ("no se ven") once that same phase layered
+    /// `skill_slot_border.png` underneath it in every slot — that PNG's
+    /// "cutout" centre (meant to show the icon through, per the design spec)
+    /// is actually fully opaque near-black on disk (sampled average RGB
+    /// ~(19, 18, 16)/255, confirmed directly against the real asset, not
+    /// assumed), so a black veil composited on top of it stays
+    /// indistinguishably black at any alpha or sweep height — not a z-order
+    /// bug (the overlay already spawns and draws correctly ABOVE that
+    /// border art). This role is deliberately non-black/higher-luminance so
+    /// it keeps reading over that near-black slot art regardless (see
+    /// `cooldown_overlay_colour_has_enough_luminance_to_read_over_a_near_black_background`
+    /// below, which pins that property) and deliberately a cool steel-blue
+    /// rather than reusing `accent`'s near-identical warm amber/gold — a
+    /// future selection/focus highlight on a hotbar slot using `accent`
+    /// would otherwise visually blend with an active cooldown sweep.
+    pub cooldown_overlay: Color,
 }
 
 impl Default for HudPalette {
@@ -82,6 +102,7 @@ impl Default for HudPalette {
             buff_good: Color::srgba(0.30, 0.80, 0.35, 1.0),
             buff_bad: Color::srgba(0.80, 0.25, 0.25, 1.0),
             danger: Color::srgba(0.85, 0.10, 0.10, 0.55),
+            cooldown_overlay: Color::srgba(0.35, 0.55, 0.75, 0.6),
         }
     }
 }
@@ -209,5 +230,35 @@ mod tests {
     fn spacing_tokens_resolve_to_px() {
         let spacing = HudSpacing::default();
         assert_eq!(spacing.md_px(), Val::Px(spacing.md));
+    }
+
+    /// BL-82 EM-5.17 Phase 2 follow-up (the reported "cooldown sweep doesn't
+    /// show" bug): `cooldown_overlay` must remain visible once ACTUALLY
+    /// composited over a near-black background — the real on-disk
+    /// `skill_slot_border.png` this colour is layered on top of in
+    /// `hotbar.rs` samples at an average RGB of roughly (19, 18, 16)/255,
+    /// luma ~0.075 (confirmed directly, not assumed). This test composites
+    /// the palette colour over that same near-black luma via the standard
+    /// alpha-over formula, not just a raw luma check on the foreground
+    /// colour alone — a colour with bright RGB channels but a near-zero
+    /// alpha would be exactly as invisible as the original bug's
+    /// `Color::srgba(0.0, 0.0, 0.0, 0.7)` literal (alpha was never the
+    /// problem there, but a future retune could make it one), so both
+    /// channels must be covered for this guard to be worth anything.
+    #[test]
+    fn cooldown_overlay_colour_has_enough_luminance_to_read_over_a_near_black_background() {
+        let color = HudPalette::default().cooldown_overlay.to_srgba();
+        // Rec. 601 luma approximation is plenty precise for a UI-contrast guard.
+        let fg_luma = 0.299 * color.red + 0.587 * color.green + 0.114 * color.blue;
+        // The real background this colour composites over in-game (see the
+        // field's own doc comment for the sampled value this approximates).
+        const NEAR_BLACK_BG_LUMA: f32 = 0.075;
+        let composited_luma = color.alpha * fg_luma + (1.0 - color.alpha) * NEAR_BLACK_BG_LUMA;
+        assert!(
+            composited_luma > 0.2,
+            "cooldown overlay colour is too dark/transparent to read over the hotbar's near-black \
+             slot-border art once actually composited: {color:?} (composited luma \
+             {composited_luma})"
+        );
     }
 }

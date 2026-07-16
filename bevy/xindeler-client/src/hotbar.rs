@@ -45,6 +45,29 @@
 //! of scope for v1) is a genuine, if self-correcting-on-first-use,
 //! proportion rather than a guess.
 //!
+//! ### Bugfix: the veil was invisible against the Phase 2 slot art
+//! Matías's own in-game smoke of EM-5.17 Phase 2 reported the sweep never
+//! visibly appears at all. The sweep LOGIC itself (the height/fraction math
+//! above) was already correct and covered by
+//! [`tests::cooldown_overlay_tracks_remaining_over_inferred_total`] — and the
+//! draw ORDER was already correct too ([`SkillSlotBorderOverlay`] spawns
+//! first/under, [`HotbarCooldownOverlay`] spawns after/above it). The actual
+//! bug was colour: [`HotbarCooldownOverlay`] used to fill with a raw
+//! `Color::srgba(0.0, 0.0, 0.0, 0.7)` literal, but Phase 2's own
+//! `skill_slot_border.png` (spawned as [`SkillSlotBorderOverlay`], directly
+//! underneath it in the same slot) is fully opaque near-black across its
+//! entire area on disk — including the "cutout" centre that was meant to
+//! stay alpha-transparent (`hud_layout`'s own module doc comment already
+//! flagged this exact asset gap for the orb frames; confirmed here too by
+//! directly sampling `skill_slot_border.png`, average RGB ~(19, 18,
+//! 16)/255). A black veil composited on top of an already near-black
+//! background stays indistinguishably black at ANY alpha or sweep height —
+//! so the overlay was always drawing, just never visibly. The fix routes
+//! this fill through [`HudTheme::palette`]'s new `cooldown_overlay` role (a
+//! deliberately non-black, higher-luminance colour) instead of a hardcoded
+//! literal — see that field's own doc comment in `xindeler-ui::theme` for the
+//! luminance-floor regression test that pins this.
+//!
 //! Compiled only under `listen-server`/`net-client` — same posture as every
 //! other `xindeler_protocol`-consuming module in this crate.
 //!
@@ -383,7 +406,12 @@ fn sync_hotbar_slots(
                     height: Val::Percent(0.0),
                     ..Default::default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                // BL-82 EM-5.17 Phase 2 bugfix: was a raw
+                // `Color::srgba(0.0, 0.0, 0.0, 0.7)` literal — invisible once
+                // composited over `SkillSlotBorderOverlay`'s near-black
+                // `skill_slot_border.png` (see the module doc comment's
+                // "Bugfix" section for the full root-cause writeup).
+                BackgroundColor(theme.palette.cooldown_overlay),
             ));
             parent.spawn((
                 HotbarCooldownText,
@@ -1022,6 +1050,57 @@ mod tests {
             app.world().get::<Node>(overlay).unwrap().height,
             Val::Percent(0.0)
         );
+    }
+
+    /// BL-82 EM-5.17 Phase 2 bugfix regression guard:
+    /// [`HotbarCooldownOverlay`]'s `BackgroundColor` must be SOURCED from
+    /// [`HudTheme::palette`]'s `cooldown_overlay` role, not a hardcoded
+    /// literal — the module doc comment's "Bugfix" section explains why a
+    /// raw `Color::srgba(0.0, 0.0, 0.0, 0.7)` literal here was the actual
+    /// root cause of the reported "sweep never shows" bug (it composited
+    /// invisibly over Phase 2's near-black `skill_slot_border.png`, not a
+    /// z-order or logic problem — both of those were already correct and
+    /// already covered by
+    /// [`cooldown_overlay_tracks_remaining_over_inferred_total`] above). This
+    /// test uses a deliberately non-default theme colour so it can't pass by
+    /// coincidentally matching a default; it guards against a future
+    /// refactor silently reintroducing a hardcoded literal that bypasses the
+    /// theme (and, with it, the luminance-floor regression test on
+    /// `HudPalette::cooldown_overlay` in `xindeler-ui::theme`).
+    #[test]
+    fn cooldown_overlay_background_colour_comes_from_the_theme() {
+        let mut app = new_app();
+        let mut theme = HudTheme::default();
+        theme.palette.cooldown_overlay = Color::srgba(0.1, 0.9, 0.1, 0.5);
+        app.insert_resource(theme);
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot {
+                aux: NetAuxiliaryAbility::Innate(0),
+                ability_id: Some("class.warrior.rally".to_owned()),
+            }],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("spawn the slot entity");
+        app.update();
+
+        let slot_entity = app.world().resource::<HotbarSlotEntities>().0[0];
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(slot_entity)
+            .unwrap()
+            .iter()
+            .collect();
+        let overlay = children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<HotbarCooldownOverlay>(e).is_some())
+            .expect("overlay child exists");
+        let background = app.world().get::<BackgroundColor>(overlay).unwrap();
+        assert_eq!(background.0, Color::srgba(0.1, 0.9, 0.1, 0.5));
     }
 
     /// BL-82 EM-5.17 Phase 2 (T57 action-bar split): with an odd slot count,
