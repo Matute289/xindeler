@@ -279,4 +279,76 @@ mod tests {
         let request = InventoryActionRequest(manip.clone());
         assert_eq!(request.0, manip);
     }
+
+    /// BL-82 EM-5.18 (T58.7 follow-up, both PR reviewers) — upstream-merge
+    /// guard. `ALL_EQUIP_SLOTS` is a hand-maintained list (`common`'s
+    /// `EquipSlot` has no `EnumIter`/`Sequence` derive), and EM-5.18's
+    /// equip-picker now treats it as the authority for which slots exist. If a
+    /// monthly Veloren merge adds an `EquipSlot`/`ArmorSlot` variant, the
+    /// wildcard-free `match` below stops COMPILING — forcing whoever does the
+    /// merge to extend `ALL_EQUIP_SLOTS` too, rather than the picker silently
+    /// never offering the new slot. The `contains` assertions then verify each
+    /// enumerated variant is actually present in the constant.
+    #[test]
+    fn all_equip_slots_is_exhaustive() {
+        let every_variant = [
+            EquipSlot::Armor(ArmorSlot::Head),
+            EquipSlot::Armor(ArmorSlot::Neck),
+            EquipSlot::Armor(ArmorSlot::Shoulders),
+            EquipSlot::Armor(ArmorSlot::Chest),
+            EquipSlot::Armor(ArmorSlot::Hands),
+            EquipSlot::Armor(ArmorSlot::Ring1),
+            EquipSlot::Armor(ArmorSlot::Ring2),
+            EquipSlot::Armor(ArmorSlot::Back),
+            EquipSlot::Armor(ArmorSlot::Belt),
+            EquipSlot::Armor(ArmorSlot::Legs),
+            EquipSlot::Armor(ArmorSlot::Feet),
+            EquipSlot::Armor(ArmorSlot::Tabard),
+            EquipSlot::Armor(ArmorSlot::Bag1),
+            EquipSlot::Armor(ArmorSlot::Bag2),
+            EquipSlot::Armor(ArmorSlot::Bag3),
+            EquipSlot::Armor(ArmorSlot::Bag4),
+            EquipSlot::ActiveMainhand,
+            EquipSlot::ActiveOffhand,
+            EquipSlot::InactiveMainhand,
+            EquipSlot::InactiveOffhand,
+            EquipSlot::Lantern,
+            EquipSlot::Glider,
+        ];
+        // Wildcard-free exhaustiveness check: the compiler rejects this match
+        // if a new variant appears, which is the whole point of the guard.
+        for slot in every_variant {
+            match slot {
+                EquipSlot::Armor(armor) => match armor {
+                    ArmorSlot::Head
+                    | ArmorSlot::Neck
+                    | ArmorSlot::Shoulders
+                    | ArmorSlot::Chest
+                    | ArmorSlot::Hands
+                    | ArmorSlot::Ring1
+                    | ArmorSlot::Ring2
+                    | ArmorSlot::Back
+                    | ArmorSlot::Belt
+                    | ArmorSlot::Legs
+                    | ArmorSlot::Feet
+                    | ArmorSlot::Tabard
+                    | ArmorSlot::Bag1
+                    | ArmorSlot::Bag2
+                    | ArmorSlot::Bag3
+                    | ArmorSlot::Bag4 => {},
+                },
+                EquipSlot::ActiveMainhand
+                | EquipSlot::ActiveOffhand
+                | EquipSlot::InactiveMainhand
+                | EquipSlot::InactiveOffhand
+                | EquipSlot::Lantern
+                | EquipSlot::Glider => {},
+            }
+            assert!(
+                ALL_EQUIP_SLOTS.contains(&slot),
+                "ALL_EQUIP_SLOTS is missing {slot:?}"
+            );
+        }
+        assert_eq!(ALL_EQUIP_SLOTS.len(), every_variant.len());
+    }
 }

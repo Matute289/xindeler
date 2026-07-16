@@ -1133,11 +1133,22 @@ fn rebuild_equip_picker_contents(
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
     picker: Res<EquipPickerState>,
-    player: Query<&NetInventory, With<NetLocalPlayer>>,
+    player: Query<Ref<NetInventory>, With<NetLocalPlayer>>,
     content_root: Query<Entity, With<EquipPickerContentRoot>>,
     children_query: Query<&Children>,
 ) {
-    if !picker.is_changed() {
+    let inventory = player.single().ok();
+    // Rebuild when the open slot changes, OR when the local player's bag
+    // mutates while the picker is open: a loot pickup / trade / external swap
+    // can add or remove a compatible item, or free/occupy the `free_bag_slot`
+    // the Unequip row targets. Gating solely on `picker.is_changed()` left the
+    // candidate list (and the cached free-slot) stale — flagged by both the
+    // bevy-migration and ecs-design reviewers of this PR.
+    let inventory_changed = inventory
+        .as_ref()
+        .map(|inv| inv.is_changed())
+        .unwrap_or(false);
+    if !picker.is_changed() && !(picker.open_slot.is_some() && inventory_changed) {
         return;
     }
     let Ok(root_entity) = content_root.single() else {
@@ -1149,7 +1160,7 @@ fn rebuild_equip_picker_contents(
         return;
     };
 
-    let Ok(inventory) = player.single() else {
+    let Some(inventory) = inventory else {
         rebuild_children(&mut commands, root_entity, &children_query, |_parent| {});
         return;
     };
