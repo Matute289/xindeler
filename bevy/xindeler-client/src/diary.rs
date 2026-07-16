@@ -47,6 +47,19 @@
 //! [`DIARY_ABILITY_GROUP`] — no new drop-consumption code lives in this
 //! module, only the drag SOURCE.
 //!
+//! ## HUD-D4 reskin (BL-82 EM-5.17 Phase 6, spec §3.6/§4.3)
+//! The spec's own explicit synthesis point: the Notion HUD-D4 doc's own
+//! illustrative `SkillId`/`SkillNode`/`PlayerSkillTree` example (a fixed
+//! 15-node teaching example) is NOT ported here — it predates and is
+//! materially simpler than the real, already-shipped [`SkillTreeShape`]/
+//! tier/prerequisite machinery above; using it would be a regression. Phase
+//! 6 reskins ONLY the render layer: [`spawn_diary_window`] swaps the flat
+//! panel background for the "Path of Ascension" parchment (T57.11), and
+//! [`sync_skill_tree_content`] gained a connector-line pass between the
+//! SAME already-computed node positions (T57.12, see [`connector_segment`]/
+//! [`spawn_connector_line`]). No new data model, no change to the
+//! tier/prerequisite/unlock logic above.
+//!
 //! Compiled only under `listen-server`/`net-client` — same posture as every
 //! other `xindeler_protocol`-consuming module in this crate.
 
@@ -67,12 +80,13 @@ use crate::chat::text_input_focused;
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
-    images::HudImageKey,
-    panel::panel_bundle,
+    images::{HudImageKey, HudImages},
+    panel::image_panel_bundle,
     scroll::scroll_view_bundle,
     slot::{SlotAddress, SlotContents, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
     tooltip::{Tooltip, TooltipBackground},
+    zlayer,
 };
 
 /// The drag-drop group the Abilities tab's slots live in (BL-82 EM-5.7) — a
@@ -213,6 +227,23 @@ impl SkillTreeShape {
             None => true,
         }
     }
+
+    /// The DIRECT prerequisite skills for `skill` — the union of `All`'s/
+    /// `Any`'s key set, prerequisite LEVEL discarded (BL-82 EM-5.17 Phase 6,
+    /// T57.12: the connector-line renderer only needs to know WHICH nodes
+    /// are linked; [`Self::prerequisites_met`] already does the
+    /// level-aware check separately, for a different purpose). Returns a
+    /// `Vec` rather than an iterator since callers need to look each entry
+    /// up in a position table; the prerequisite set is always small (a
+    /// handful of entries), never a hot-path allocation.
+    fn direct_prerequisites(&self, skill: Skill) -> Vec<Skill> {
+        match self.prerequisites.get(&skill) {
+            Some(SkillPrerequisite::All(map) | SkillPrerequisite::Any(map)) => {
+                map.keys().copied().collect()
+            },
+            None => Vec::new(),
+        }
+    }
 }
 
 fn load_skill_tree_shape(mut commands: Commands) {
@@ -253,7 +284,15 @@ impl Plugin for DiaryUiPlugin {
                 Startup,
                 (
                     load_skill_tree_shape,
-                    spawn_diary_window.after(xindeler_ui::theme::init_theme),
+                    // BL-82 EM-5.17 Phase 6: reads `Res<HudImages>` (the
+                    // "Path of Ascension" parchment background) alongside
+                    // `Res<HudTheme>` — ordered after BOTH `Startup`
+                    // resource-inserting systems, mirroring the existing
+                    // `.after(theme::init_theme)` convention this system
+                    // already followed.
+                    spawn_diary_window
+                        .after(xindeler_ui::theme::init_theme)
+                        .after(xindeler_ui::images::init_images),
                     force_open_diary_for_smoke_capture,
                 ),
             )
@@ -338,11 +377,31 @@ fn force_select_abilities_tab_for_smoke_capture(mut selected: ResMut<DiaryTab>) 
 /// Spawns the (initially hidden) diary window skeleton: a tab-bar column +
 /// three content containers (Stats/Tree/Abilities), all empty — the sync
 /// systems below fill them in once real mirrored data exists.
-fn spawn_diary_window(mut commands: Commands, theme: Res<HudTheme>) {
+///
+/// BL-82 EM-5.17 Phase 6 (T57.11, spec §3.6): the panel's flat
+/// `panel_bundle` background is swapped for [`image_panel_bundle`] rendering
+/// [`HudImageKey::SkillTreeBg`] (the "SKILL TREE — PATH OF ASCENSION"
+/// parchment) — a render-layer-only change, everything below this point
+/// (tab bar, the three content containers, their `Visibility`/`Display`
+/// gating) is untouched. **`SkillTreeBg`, not `OtherSkillTreeBg`, for every
+/// tab** (Stats/Abilities/every `Group`, not just `Class`): the spec's own
+/// §6 Q5 resolution picks `skill_tree_bg.png` as Phase 6's default (the one
+/// asset the Notion doc's own reference code uses), and this window has
+/// exactly ONE shared panel background across all tabs — swapping it
+/// per-tab would need new per-tab-change tracking for a visual-only nuance
+/// the spec explicitly left non-blocking; `OtherSkillTreeBg` stays wired
+/// into [`HudImageKey`] for a later phase to pick up if Matías wants a
+/// per-group-kind variant. The whole window also gets
+/// [`zlayer::MODAL_WINDOWS`] (spec §4.4) — the FIRST `GlobalZIndex` applied
+/// anywhere in this HUD (spec §1.1's "no `ZIndex`/`GlobalZIndex` anywhere"
+/// gap), since the diary is exactly the kind of modal window that scheme
+/// exists for.
+fn spawn_diary_window(mut commands: Commands, theme: Res<HudTheme>, hud_images: Res<HudImages>) {
     commands
         .spawn((
             DiaryWindowRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
@@ -354,7 +413,10 @@ fn spawn_diary_window(mut commands: Commands, theme: Res<HudTheme>) {
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         ))
         .with_children(|backdrop| {
-            let mut panel_entity = backdrop.spawn(panel_bundle(&theme));
+            let mut panel_entity = backdrop.spawn(image_panel_bundle(
+                &theme,
+                hud_images.get(HudImageKey::SkillTreeBg),
+            ));
             let column_gap = Val::Px(theme.spacing.lg);
             panel_entity.entry::<Node>().and_modify(move |mut node| {
                 node.flex_direction = FlexDirection::Row;
@@ -717,16 +779,116 @@ fn handle_skill_node_activate(
     }
 }
 
+/// The connector line `Node`'s fixed height in pixels (BL-82 EM-5.17 Phase
+/// 6, T57.12) — `skill_line_active.png`/`skill_line_locked.png` are both a
+/// horizontal chain motif on a near-square canvas with black padding above/
+/// below (verified directly: `skill_line_active.png` is 711×692px,
+/// `skill_line_locked.png` 699×606px, chain content only in the vertical
+/// middle band); stretching the whole canvas down to this thickness (rather
+/// than cropping) keeps the chain-link art intact while collapsing the
+/// black padding. Tunable once seen live (matches this module's own
+/// `TREE_*` constants' "tunable for visual polish" precedent).
+const CONNECTOR_THICKNESS_PX: f32 = 28.0;
+
+/// A connector segment between two node centers — the pure geometry behind
+/// a connector `Node` sized to the segment length with a [`UiTransform`]
+/// rotation (BL-82 EM-5.17 Phase 6, spec §3.6/§4.3). Factored out as a pure
+/// fn (no ECS/asset access) so the geometry itself is unit-testable without
+/// a running `App` — the SAME "compute geometry as a pure fn, test it
+/// directly" pattern `map_view::heading_from_forward`/`wpos_to_screen_uv`
+/// already establish in this crate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ConnectorSegment {
+    /// The segment's midpoint, in the SAME `TreeRoot`-local pixel space the
+    /// node-spawn loop's `x`/`y` already use.
+    midpoint: Vec2,
+    /// The segment's length in pixels — the connector `Node`'s `width`.
+    length: f32,
+    /// Radians, clockwise from the local +x axis — [`UiTransform::rotation`]'s
+    /// documented "rotate clockwise" convention. Screen space is y-down, so
+    /// `dy.atan2(dx)` directly yields that clockwise angle — the SAME sign
+    /// convention `map_view::sync_minimap`'s own `Rot2::radians(heading)`
+    /// already relies on for the player-arrow icon.
+    angle: f32,
+}
+
+/// Computes the [`ConnectorSegment`] between two node centers `a`/`b`.
+fn connector_segment(a: Vec2, b: Vec2) -> ConnectorSegment {
+    let delta = b - a;
+    ConnectorSegment {
+        midpoint: (a + b) * 0.5,
+        length: delta.length(),
+        angle: delta.y.atan2(delta.x),
+    }
+}
+
+/// `SkillLineActive` (the "glowing molten chain, unlocked/invested" asset,
+/// spec §3.6) if the edge's target (child) skill has at least one level
+/// invested, else `SkillLineLocked` ("dull rusted chain, locked"). A pure fn
+/// (no [`HudImages`] access) so the glow/dull DECISION is independently
+/// unit-testable from the real asset lookup.
+fn connector_image_key(target_unlocked: bool) -> HudImageKey {
+    if target_unlocked {
+        HudImageKey::SkillLineActive
+    } else {
+        HudImageKey::SkillLineLocked
+    }
+}
+
+/// Spawns one connector-line `Node`: sized to the segment length, positioned
+/// so its (unrotated) box is centred on the segment midpoint, then rotated
+/// via [`UiTransform`] to the segment's angle. `bevy_ui`'s layout system
+/// rotates a node around its OWN computed center (confirmed against
+/// `bevy_ui` 0.19's `ui_layout_system`, which adds the node's local center
+/// to the `UiTransform`-derived affine transform) — the SAME "position the
+/// box centred on the target point, then rotate in place" idiom
+/// `map_view`'s minimap player-arrow already uses for its own `UiTransform`.
+fn spawn_connector_line(
+    parent: &mut ChildSpawnerCommands,
+    hud_images: &HudImages,
+    from: Vec2,
+    to: Vec2,
+    target_unlocked: bool,
+) {
+    let segment = connector_segment(from, to);
+    parent.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(segment.midpoint.x - segment.length / 2.0),
+            top: Val::Px(segment.midpoint.y - CONNECTOR_THICKNESS_PX / 2.0),
+            width: Val::Px(segment.length),
+            height: Val::Px(CONNECTOR_THICKNESS_PX),
+            ..Default::default()
+        },
+        UiTransform::from_rotation(Rot2::radians(segment.angle)),
+        ImageNode {
+            image: hud_images.get(connector_image_key(target_unlocked)),
+            image_mode: NodeImageMode::Stretch,
+            ..Default::default()
+        },
+    ));
+}
+
 /// Rebuilds the tree grid for the currently-selected [`DiaryTab::Group`]
 /// whenever the selection OR the local player's [`NetSkillSet`] changes — the
 /// ONE generic renderer BL-06 established, now covering every group instead
 /// of just Class. *Verify (T56.23):* spend an SP -> the passive/ability
 /// applies server-side and this tab's border colour flips from "available"
 /// to a level-appropriate shade next mirror tick.
+///
+/// BL-82 EM-5.17 Phase 6 (T57.12, spec §3.6/§4.3): also renders a connector
+/// line for every prerequisite edge in the CURRENTLY VISIBLE tab (both
+/// endpoints must have a node in `positions` — a prerequisite living in a
+/// different group, e.g. a `Skill::UnlockGroup` gate, has no node here to
+/// draw a line to, and is simply skipped) — see [`connector_segment`] and
+/// [`spawn_connector_line`]'s own doc comments for the geometry/asset-key
+/// decisions. The tree's own tier/row/prerequisite DATA MODEL is completely
+/// unchanged; only this rendering pass gained the connector lines.
 fn sync_skill_tree_content(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    hud_images: Res<HudImages>,
     shape: Res<SkillTreeShape>,
     selected: Res<DiaryTab>,
     player: Query<&NetSkillSet, With<NetLocalPlayer>>,
@@ -772,24 +934,74 @@ fn sync_skill_tree_content(
         rows[usize::from(tier)].push(idx);
     }
 
-    rebuild_children(&mut commands, root_entity, &children_query, |parent| {
-        for (tier_idx, row_indices) in rows.iter().enumerate() {
-            let row_count = row_indices.len();
-            let total_row_w = (row_count as f32 - 1.0).max(0.0) * TREE_COL_W;
-            let row_x_start = ((TREE_W - total_row_w) / 2.0).max(0.0);
+    // BL-82 EM-5.17 Phase 6 (T57.12): each visible skill's node-CENTER
+    // position, in the SAME `TreeRoot`-local pixel space the node-spawn loop
+    // below computes `x`/`y` in (top-left of the node box; `+
+    // TREE_NODE_SIZE / 2.0` gets the center) — computed as its OWN pass, no
+    // ECS access, purely so the connector-line pass below can look a
+    // prerequisite's position up before that prerequisite's node entity has
+    // even been spawned yet this rebuild.
+    let mut positions: HashMap<Skill, Vec2> = HashMap::with_capacity(skills.len());
+    for (tier_idx, row_indices) in rows.iter().enumerate() {
+        let row_count = row_indices.len();
+        let total_row_w = (row_count as f32 - 1.0).max(0.0) * TREE_COL_W;
+        let row_x_start = ((TREE_W - total_row_w) / 2.0).max(0.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "tier index is a handful of rows, never near f32's precision limit"
+        )]
+        let y = TREE_TOP_MARGIN + tier_idx as f32 * TREE_ROW_H;
+        for (col, &skill_idx) in row_indices.iter().enumerate() {
             #[expect(
                 clippy::cast_precision_loss,
-                reason = "tier index is a handful of rows, never near f32's precision limit"
+                reason = "column index is a handful per row"
             )]
-            let y = TREE_TOP_MARGIN + tier_idx as f32 * TREE_ROW_H;
+            let x = row_x_start + col as f32 * TREE_COL_W;
+            let center = Vec2::new(x + TREE_NODE_SIZE / 2.0, y + TREE_NODE_SIZE / 2.0);
+            positions.insert(skills[skill_idx], center);
+        }
+    }
 
-            for (col, &skill_idx) in row_indices.iter().enumerate() {
+    rebuild_children(&mut commands, root_entity, &children_query, |parent| {
+        // Connector lines FIRST (BL-82 EM-5.17 Phase 6, spec §3.6: "draw the
+        // lines BEHIND the node icons") — spawned before any node button
+        // below, so they sit behind every node in this container's
+        // paint/pick order (`bevy_ui` paints/picks siblings in child-spawn
+        // order at equal z-index; `TreeRoot`'s children carry no per-node
+        // `GlobalZIndex`, so plain spawn order is what decides this here).
+        for &skill in &skills {
+            let Some(&target_pos) = positions.get(&skill) else {
+                continue;
+            };
+            for prereq in shape.direct_prerequisites(skill) {
+                let Some(&prereq_pos) = positions.get(&prereq) else {
+                    // The prerequisite has no node in THIS tab's visible
+                    // list (e.g. a cross-group `UnlockGroup` gate) — nothing
+                    // to draw a line to.
+                    continue;
+                };
+                let target_unlocked = unlocked.get(&skill).copied().unwrap_or(0) > 0;
+                spawn_connector_line(parent, &hud_images, prereq_pos, target_pos, target_unlocked);
+            }
+        }
+
+        for row_indices in &rows {
+            for &skill_idx in row_indices {
                 let skill = skills[skill_idx];
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "column index is a handful per row"
-                )]
-                let x = row_x_start + col as f32 * TREE_COL_W;
+                // Reuse the SAME center this pass's connector-line loop
+                // above already computed (`positions`), rather than
+                // recomputing `total_row_w`/`row_x_start`/`x`/`y` a second
+                // time from scratch — two textually-independent copies of
+                // that arithmetic could silently drift apart (e.g. a future
+                // centering/margin tweak to one and not the other), which
+                // would misalign connector lines from the nodes they
+                // connect with no test able to catch it. Deriving both from
+                // one source makes that drift structurally impossible.
+                let Some(&center) = positions.get(&skill) else {
+                    continue;
+                };
+                let x = center.x - TREE_NODE_SIZE / 2.0;
+                let y = center.y - TREE_NODE_SIZE / 2.0;
 
                 let level = unlocked.get(&skill).copied().unwrap_or(0);
                 let max = shape.max_level(skill);
@@ -1102,9 +1314,7 @@ mod tests {
     fn diary_content_panels_spawn_inherited_not_visible() {
         use bevy::ecs::system::RunSystemOnce;
 
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins);
-        app.insert_resource(HudTheme::default());
+        let mut app = diary_window_test_app();
 
         app.world_mut()
             .run_system_once(spawn_diary_window)
@@ -1130,6 +1340,142 @@ mod tests {
         assert_eq!(
             visibility_of::<AbilitiesPanelRoot>(app.world_mut()),
             Visibility::Inherited
+        );
+    }
+
+    /// A headless test `App` with a real (headless) `AssetServer` wired up —
+    /// [`spawn_diary_window`] now reads `Res<HudImages>` (BL-82 EM-5.17 Phase
+    /// 6, T57.11), and `HudImages::load` needs a real `AssetServer` to build
+    /// (its `handles` field is private, so a fake instance can't be
+    /// hand-constructed from this crate — see `xindeler-ui::images`'s own
+    /// module doc comment). Mirrors `sprite_view.rs`'s established
+    /// `MinimalPlugins` + `AssetPlugin::default()` + `init_asset::<T>()`
+    /// headless-asset-server recipe (that test seeds `Mesh`; this one needs
+    /// `Image`). No file on disk is ever actually read by these tests — a
+    /// `Handle<Image>` from `asset_server.load(path)` is real and usable
+    /// (comparable, clonable) the instant it's requested, whether or not the
+    /// asset loader ever resolves it.
+    fn diary_window_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.insert_resource(HudTheme::default());
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+        app.finish();
+        app
+    }
+
+    /// BL-82 EM-5.17 Phase 6 (T57.11) acceptance: the diary's shared panel
+    /// carries an [`ImageNode`] for [`HudImageKey::SkillTreeBg`] (the "Path
+    /// of Ascension" parchment — NOT `OtherSkillTreeBg`, see
+    /// `spawn_diary_window`'s own doc comment for why this phase always uses
+    /// the ONE background regardless of tab), and the whole window carries
+    /// [`zlayer::MODAL_WINDOWS`] as its [`GlobalZIndex`] — the first
+    /// `GlobalZIndex` anywhere in this HUD (spec §1.1/§4.4).
+    #[test]
+    fn spawn_diary_window_uses_skill_tree_bg_and_modal_z_index() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = diary_window_test_app();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let expected_bg = HudImages::load(&asset_server).get(HudImageKey::SkillTreeBg);
+
+        app.world_mut()
+            .run_system_once(spawn_diary_window)
+            .expect("spawn_diary_window runs");
+
+        let world = app.world_mut();
+        let root = world
+            .query_filtered::<Entity, With<DiaryWindowRoot>>()
+            .single(world)
+            .expect("DiaryWindowRoot exists");
+        let z_index = world
+            .get::<GlobalZIndex>(root)
+            .expect("DiaryWindowRoot carries a GlobalZIndex");
+        assert_eq!(z_index.0, zlayer::MODAL_WINDOWS);
+
+        let panel = world
+            .query_filtered::<Entity, With<xindeler_ui::panel::HudPanel>>()
+            .single(world)
+            .expect("the diary's shared HudPanel exists");
+        let image_node = world
+            .get::<ImageNode>(panel)
+            .expect("the panel carries an ImageNode");
+        assert_eq!(image_node.image, expected_bg);
+    }
+
+    /// [`connector_segment`] between two horizontally-offset centers: the
+    /// midpoint is the arithmetic mean, the length is the plain distance,
+    /// and a purely horizontal segment (pointing along +x) has a ZERO
+    /// rotation angle.
+    #[test]
+    fn connector_segment_horizontal() {
+        let seg = connector_segment(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0));
+        assert_eq!(seg.midpoint, Vec2::new(5.0, 0.0));
+        assert!((seg.length - 10.0).abs() < 1e-5);
+        assert!(seg.angle.abs() < 1e-6, "a horizontal segment has angle 0");
+    }
+
+    /// A segment pointing straight "down" the screen (increasing y, `bevy_ui`
+    /// screen space is y-down) has a clockwise rotation of +90° (π/2
+    /// radians) from the local +x axis — matches [`UiTransform::rotation`]'s
+    /// documented "rotate clockwise" convention (the SAME sign
+    /// `map_view::sync_minimap`'s `Rot2::radians(heading)` already relies on).
+    #[test]
+    fn connector_segment_vertical_is_a_quarter_turn() {
+        let seg = connector_segment(Vec2::new(0.0, 0.0), Vec2::new(0.0, 10.0));
+        assert!((seg.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    /// A 3-4-5-triangle-shaped diagonal segment (scaled ×10): length is the
+    /// Euclidean distance (50, not 30+40), midpoint is the arithmetic mean,
+    /// and the angle is the plain `atan2` of the offset — a non-axis-aligned
+    /// case the two axis-aligned tests above don't cover.
+    #[test]
+    fn connector_segment_diagonal() {
+        let seg = connector_segment(Vec2::new(0.0, 0.0), Vec2::new(30.0, 40.0));
+        assert_eq!(seg.midpoint, Vec2::new(15.0, 20.0));
+        assert!((seg.length - 50.0).abs() < 1e-3);
+        let expected_angle = 40.0_f32.atan2(30.0);
+        assert!((seg.angle - expected_angle).abs() < 1e-6);
+    }
+
+    /// [`connector_image_key`]: `SkillLineActive` when the edge's target
+    /// (child) skill is unlocked, `SkillLineLocked` when it isn't — the
+    /// spec §3.6 "glowing molten chain, unlocked/invested" vs "dull rusted
+    /// chain, locked" distinction.
+    #[test]
+    fn connector_image_key_is_active_only_when_target_unlocked() {
+        assert_eq!(connector_image_key(true), HudImageKey::SkillLineActive);
+        assert_eq!(connector_image_key(false), HudImageKey::SkillLineLocked);
+    }
+
+    /// [`SkillTreeShape::direct_prerequisites`] returns the union of an
+    /// `All`/`Any` prerequisite's key set (level requirement discarded), and
+    /// an empty `Vec` for a skill with no prerequisite entry at all (a tier-0
+    /// root).
+    #[test]
+    fn direct_prerequisites_returns_the_key_set_of_all_or_any() {
+        let root = Skill::UnlockGroup(SkillGroupKind::General);
+        let leaf_a = Skill::Warrior(WarriorSkill::Rally);
+        let leaf_b = Skill::Warrior(WarriorSkill::Onslaught);
+        let target = Skill::Warrior(WarriorSkill::BrutalEdge);
+        let shape = shape_with(&[], &[(
+            target,
+            SkillPrerequisite::All(PrereqMap::from([(root, 1), (leaf_a, 1)])),
+        )]);
+
+        let mut prereqs = shape.direct_prerequisites(target);
+        prereqs.sort_by_key(|s| format!("{s:?}"));
+        let mut expected = vec![root, leaf_a];
+        expected.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(prereqs, expected);
+
+        assert!(
+            shape.direct_prerequisites(leaf_b).is_empty(),
+            "a skill absent from the prerequisite manifest has no direct prerequisites"
         );
     }
 }

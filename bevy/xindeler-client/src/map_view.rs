@@ -36,6 +36,34 @@
 //! only modes where `xindeler-protocol`'s `Net*` types are even linked — see
 //! `main.rs`'s `#[cfg]`-gated module list), matching every other consumer
 //! module in this crate.
+//!
+//! ## BL-82 EM-5.17 Phase 3 (HUD-D4 minimap + objectives)
+//! Three changes, per the Phase 3 brief (which explicitly overrides spec
+//! §3.3's own text on the frame question — see below):
+//! - **Repositioned top-right** (`right:20, top:20`, was bottom-right
+//!   `right:16, bottom:16`) — a real, intentional layout change for this phase
+//!   (the prior EM-5.5 placement predates the HUD-D4 design), tagged
+//!   [`GlobalZIndex`](bevy::ui::GlobalZIndex) with `xindeler_ui::zlayer::
+//!   ORBS_ACTION_BAR_PARTY_MINIMAP`.
+//! - **Soft radial alpha-feather edge**, not a hard clip or any frame PNG.
+//!   Matías's explicit override (2026-07-15) of spec §3.3's "reuse
+//!   `party_portrait_frame.png`'s ring style, or wait for a dedicated
+//!   `minimap_gothic_frame.png`": no frame asset at all. [`MinimapImage`] is
+//!   now a `MaterialNode<MinimapFadeMaterial>` (see
+//!   `xindeler_ui::minimap_material` for the shader + falloff constants)
+//!   instead of a plain `ImageNode` — [`sync_minimap`] writes the decoded
+//!   texture + the per-frame UV crop straight onto the material asset
+//!   (`Assets<MinimapFadeMaterial>::get_mut`), the same "caller owns the value"
+//!   split `OrbLiquidMaterial::fill_fraction` already establishes.
+//!   [`MinimapArrow`] stays a plain `ImageNode` on top, unaffected by the fade.
+//! - **An objectives column** ([`ObjectivesRoot`]/[`ObjectivesContainer`])
+//!   directly below the minimap: a title row ("OBJECTIVES", `HudTheme`'s accent
+//!   colour, no dedicated icon asset per the brief) then an intentionally EMPTY
+//!   container. Xindeler has no quest/objective data system yet (spec §5
+//!   non-goal, confirmed) — this ships the frame/row layout only; a future
+//!   system owning real objective data appends one row (label +
+//!   `HudImageKey::ObjectiveBullet`/`NonObjectiveBullet` icon) per objective
+//!   into [`ObjectivesContainer`], never hardcoded fake rows.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -53,13 +81,40 @@ use xindeler_protocol::{
 };
 use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
+    minimap_material::MinimapFadeMaterial,
     theme::{HudFonts, HudTheme},
     tooltip::Tooltip,
+    zlayer,
 };
 
 use crate::chat::text_input_focused;
 
 const MINIMAP_PANEL_PX: f32 = 160.0;
+/// The minimap panel's own padding/border (px) — pulled out as consts (were
+/// inline literals pre-Phase-3) so [`OBJECTIVES_TOP_PX`] can compute the
+/// panel's real on-screen footprint instead of a second hand-tuned magic
+/// number that could silently drift out of sync with the actual spawn.
+const MINIMAP_PANEL_PADDING_PX: f32 = 4.0;
+const MINIMAP_PANEL_BORDER_PX: f32 = 2.0;
+/// BL-82 EM-5.17 Phase 3: top-right placement (spec §3.3's `right:20,
+/// top:20`), replacing the pre-Phase-3 bottom-right `right:16, bottom:16` —
+/// see this module's own Phase 3 doc-comment section above.
+const MINIMAP_TOP_PX: f32 = 20.0;
+const MINIMAP_RIGHT_PX: f32 = 20.0;
+/// Vertical gap (px) between the minimap panel's bottom edge and the
+/// objectives column below it.
+const OBJECTIVES_GAP_PX: f32 = 8.0;
+/// The minimap panel's total on-screen height: the square viewport plus
+/// padding and border on both edges (matches exactly what `spawn_map_screens`
+/// actually spawns — kept as one computed const specifically so it can't
+/// silently drift from the real spawn geometry the way a second hand-picked
+/// literal could).
+const MINIMAP_PANEL_TOTAL_PX: f32 =
+    MINIMAP_PANEL_PX + 2.0 * MINIMAP_PANEL_PADDING_PX + 2.0 * MINIMAP_PANEL_BORDER_PX;
+/// Where the objectives column's `top` sits: directly below the minimap
+/// panel's own bottom edge, plus [`OBJECTIVES_GAP_PX`] — computed, not a
+/// second hand-tuned literal (see [`MINIMAP_PANEL_TOTAL_PX`]'s own comment).
+const OBJECTIVES_TOP_PX: f32 = MINIMAP_TOP_PX + MINIMAP_PANEL_TOTAL_PX + OBJECTIVES_GAP_PX;
 /// Fixed UV half-extent the minimap shows around the player (v1 has no zoom
 /// control on the minimap — a follow-up, matching EM-5.1's own precedent of
 /// deferring some interactive knobs).
@@ -174,12 +229,30 @@ impl Default for FullMapView {
     }
 }
 
+/// The minimap panel's outer root (padding/border/background) — tagged
+/// (BL-82 EM-5.17 Phase 3, was untagged before) so both the top-right
+/// reposition and its [`bevy::ui::GlobalZIndex`] are queryable/testable, and
+/// so [`OBJECTIVES_TOP_PX`] has a concrete, named entity it's positioned
+/// relative to.
+#[derive(Component)]
+struct MinimapPanelRoot;
 #[derive(Component)]
 struct MinimapViewport;
 #[derive(Component)]
 struct MinimapImage;
 #[derive(Component)]
 struct MinimapArrow;
+
+/// The objectives column's outer root (BL-82 EM-5.17 Phase 3) — positioned
+/// directly below [`MinimapPanelRoot`], same right-aligned column.
+#[derive(Component)]
+struct ObjectivesRoot;
+/// The objectives list itself — deliberately spawned with ZERO children
+/// (see this module's own Phase 3 doc-comment section: Xindeler has no
+/// quest/objective data system yet). A future system owning real objective
+/// data appends rows here; this phase never hardcodes fake ones.
+#[derive(Component)]
+struct ObjectivesContainer;
 
 #[derive(Component)]
 struct FullMapRoot;
@@ -432,18 +505,36 @@ fn marker_dot_color(theme: &HudTheme, kind: &common::map::MarkerKind) -> Color {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Spawns the always-on minimap (bottom-right) + the initially-hidden full
-/// map overlay (centered).
-fn spawn_map_screens(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
-    // --- Minimap: bottom-right, always visible. ---
+/// Spawns the always-on minimap (top-right, BL-82 EM-5.17 Phase 3 — was
+/// bottom-right pre-Phase-3) + the objectives column below it + the
+/// initially-hidden full map overlay (centered).
+fn spawn_map_screens(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    mut minimap_materials: ResMut<Assets<MinimapFadeMaterial>>,
+) {
+    // The material starts pointing at no texture (a default/placeholder
+    // handle) with a full [0,1]^2 crop — `sync_minimap` overwrites both the
+    // instant real `NetMapData` arrives, same "degrades clean until real
+    // data arrives" contract every other field in this module follows.
+    let minimap_material = minimap_materials.add(MinimapFadeMaterial::new(
+        Handle::default(),
+        Vec2::ZERO,
+        Vec2::ONE,
+    ));
+
+    // --- Minimap: top-right, always visible. ---
     commands
         .spawn((
+            MinimapPanelRoot,
+            bevy::ui::GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(16.0),
-                bottom: Val::Px(16.0),
-                padding: UiRect::all(Val::Px(4.0)),
-                border: UiRect::all(Val::Px(2.0)),
+                right: Val::Px(MINIMAP_RIGHT_PX),
+                top: Val::Px(MINIMAP_TOP_PX),
+                padding: UiRect::all(Val::Px(MINIMAP_PANEL_PADDING_PX)),
+                border: UiRect::all(Val::Px(MINIMAP_PANEL_BORDER_PX)),
                 border_radius: BorderRadius::all(Val::Px(theme.radius.md)),
                 ..Default::default()
             },
@@ -459,22 +550,14 @@ fn spawn_map_screens(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hu
                     ..Default::default()
                 }))
                 .with_children(|viewport| {
-                    viewport.spawn((
-                        MinimapImage,
-                        ImageNode {
-                            // See `FullMapImage`'s own comment: fill the
-                            // (square) viewport exactly, ignoring the
-                            // source texture's own aspect.
-                            image_mode: NodeImageMode::Stretch,
-                            ..Default::default()
-                        },
-                        Node {
+                    viewport.spawn(
+                        (MinimapImage, MaterialNode(minimap_material.clone()), Node {
                             position_type: PositionType::Absolute,
                             width: Val::Px(MINIMAP_PANEL_PX),
                             height: Val::Px(MINIMAP_PANEL_PX),
                             ..Default::default()
-                        },
-                    ));
+                        }),
+                    );
                     viewport.spawn((
                         MinimapArrow,
                         ImageNode::default(),
@@ -489,6 +572,43 @@ fn spawn_map_screens(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hu
                         UiTransform::IDENTITY,
                     ));
                 });
+        });
+
+    // --- Objectives: directly below the minimap, same right-aligned column
+    // (spec §3.3). Xindeler has no quest/objective data system yet (spec §5
+    // non-goal, confirmed) — ships the title row + an EMPTY container ready
+    // for a future system to append rows into, never hardcoded placeholder
+    // objectives.
+    commands
+        .spawn((
+            ObjectivesRoot,
+            bevy::ui::GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(MINIMAP_RIGHT_PX),
+                top: Val::Px(OBJECTIVES_TOP_PX),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(theme.spacing.xs),
+                ..Default::default()
+            },
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Text("OBJECTIVES".to_owned()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.title.clone()),
+                    font_size: bevy::text::FontSize::Px(14.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.accent),
+            ));
+            root.spawn((ObjectivesContainer, Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(theme.spacing.xs),
+                ..Default::default()
+            }));
         });
 
     // --- Full map: centered overlay, hidden until toggled. ---
@@ -809,13 +929,23 @@ fn recenter_full_map_on_open(
 /// the local player's real mirrored `NetPos`/`NetOri`. Degrades clean (spec
 /// §3.2): with no map texture yet, or no local player mirrored yet, this is a
 /// harmless no-op — the minimap just stays empty.
+///
+/// BL-82 EM-5.17 Phase 3: [`MinimapImage`] is now a `MaterialNode<
+/// MinimapFadeMaterial>`, not a plain `ImageNode` — there's no `rect` field
+/// to crop against anymore, so the UV crop is written straight onto the
+/// material asset (`crop_min`/`crop_size`, sampled in-shader — see
+/// `xindeler_ui::minimap_material`'s module doc comment) via
+/// `Assets<MinimapFadeMaterial>::get_mut`, the same "caller owns the value"
+/// split `OrbLiquidMaterial::fill_fraction` already establishes.
+#[allow(clippy::too_many_arguments)]
 fn sync_minimap(
     data: Res<MapData>,
     player: Query<(&NetPos, Option<&NetOri>), With<NetLocalPlayer>>,
     mut arrow_handle: Local<Option<Handle<Image>>>,
     theme: Option<Res<HudTheme>>,
     mut assets: ResMut<Assets<Image>>,
-    mut minimap_image: Query<&mut ImageNode, (With<MinimapImage>, Without<MinimapArrow>)>,
+    minimap_material_node: Query<&MaterialNode<MinimapFadeMaterial>, With<MinimapImage>>,
+    mut minimap_materials: ResMut<Assets<MinimapFadeMaterial>>,
     mut minimap_arrow: Query<
         (&mut ImageNode, &mut UiTransform, &mut Visibility),
         With<MinimapArrow>,
@@ -831,13 +961,29 @@ fn sync_minimap(
     let center_uv = wpos_to_screen_uv(sim_xy, data.world_size_chunks, data.chunk_size_blocks);
     let extent = Vec2::splat(MINIMAP_HALF_EXTENT);
     let rect = crop_rect_uv(center_uv, extent);
+    let previous_rect = crop.0;
     crop.0 = rect;
 
+    // Gate the material write behind a real-change check: `Assets::get_mut`
+    // unconditionally marks the asset `Modified` on ANY field write (Bevy
+    // 0.19's `AssetMut::DerefMut` doesn't diff old vs. new), which would
+    // otherwise force a GPU re-extract/re-prepare of this material's uniform
+    // bind group every single frame — even while the player stands still and
+    // nothing visually changes. Comparing against the crop this system
+    // itself published last frame (`MinimapCropRes`) plus the texture handle
+    // keeps this system as cheap as the old plain-`ImageNode` code it
+    // replaced.
     if let Some(texture) = &data.texture
-        && let Ok(mut node) = minimap_image.single_mut()
+        && let Ok(material_node) = minimap_material_node.single()
+        && (rect != previous_rect
+            || minimap_materials
+                .get(material_node)
+                .is_none_or(|m| &m.minimap_texture != texture))
+        && let Some(mut material) = minimap_materials.get_mut(material_node)
     {
-        node.image = texture.clone();
-        node.rect = Some(crop_to_pixel_rect(rect, data.image_size));
+        material.minimap_texture = texture.clone();
+        material.crop_min = rect.min;
+        material.crop_size = rect.max - rect.min;
     }
 
     if let Ok((mut node, mut transform, mut visibility)) = minimap_arrow.single_mut() {
@@ -1131,5 +1277,162 @@ mod tests {
     #[test]
     fn identity_net_ori_faces_north() {
         assert!((heading_from_net_ori(Quat::IDENTITY) - 0.0).abs() < 1e-5);
+    }
+
+    // -----------------------------------------------------------------------
+    // BL-82 EM-5.17 Phase 3: minimap reposition + fade material + objectives
+    // -----------------------------------------------------------------------
+
+    use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce};
+
+    fn new_phase3_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(AssetPlugin::default());
+        app.init_asset::<MinimapFadeMaterial>();
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app
+    }
+
+    fn node_of<T: bevy::ecs::component::Component>(world: &mut World) -> Node {
+        world
+            .query_filtered::<&Node, With<T>>()
+            .single(world)
+            .expect("the tagged entity exists")
+            .clone()
+    }
+
+    /// Regression test for the top-right reposition (spec §3.3): the
+    /// minimap panel's `Node` must use `top`/`right`, not the pre-Phase-3
+    /// `bottom`/`right` — a real, intentional layout change this phase makes
+    /// (module doc comment), pinned so it can't silently regress back to
+    /// bottom-right.
+    #[test]
+    fn minimap_panel_is_pinned_top_right_not_bottom() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let node = node_of::<MinimapPanelRoot>(app.world_mut());
+
+        assert_eq!(
+            node.top,
+            Val::Px(MINIMAP_TOP_PX),
+            "must be pinned via `top`"
+        );
+        assert_eq!(
+            node.right,
+            Val::Px(MINIMAP_RIGHT_PX),
+            "must be pinned via `right`"
+        );
+        assert_eq!(
+            node.bottom,
+            Val::Auto,
+            "must NOT still be pinned via `bottom` (the pre-Phase-3 bottom-right placement)"
+        );
+    }
+
+    /// The minimap panel root carries the shared ambient-chrome
+    /// `GlobalZIndex` (spec §4.4) — pins the requirement from this phase's
+    /// brief.
+    #[test]
+    fn minimap_panel_carries_the_ambient_chrome_z_index() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&bevy::ui::GlobalZIndex, With<MinimapPanelRoot>>()
+            .single(world)
+            .expect("the minimap panel root exists")
+            .0;
+        assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+    }
+
+    /// [`MinimapImage`] must be a `MaterialNode<MinimapFadeMaterial>` (the
+    /// radial-fade shader path), not a plain `ImageNode` — the structural
+    /// half of "the minimap edge reads as a soft fade, not a hard clip".
+    #[test]
+    fn minimap_image_uses_the_fade_material_not_a_plain_image_node() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let world = app.world_mut();
+        let material_node_count = world
+            .query_filtered::<&MaterialNode<MinimapFadeMaterial>, With<MinimapImage>>()
+            .iter(world)
+            .count();
+        assert_eq!(
+            material_node_count, 1,
+            "MinimapImage must carry exactly one MaterialNode<MinimapFadeMaterial>"
+        );
+
+        // And it must NOT also carry a plain ImageNode (that would mean both
+        // render paths are present at once, an ambiguous double-spawn).
+        let plain_image_node_count = world
+            .query_filtered::<&ImageNode, With<MinimapImage>>()
+            .iter(world)
+            .count();
+        assert_eq!(
+            plain_image_node_count, 0,
+            "MinimapImage must not ALSO carry a plain ImageNode"
+        );
+    }
+
+    /// The objectives container spawns with ZERO children right after
+    /// [`spawn_map_screens`] — Xindeler has no quest/objective data system
+    /// yet (spec §5 non-goal), so this phase must never hardcode fake rows.
+    #[test]
+    fn objectives_container_spawns_empty() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let world = app.world_mut();
+        let container = world
+            .query_filtered::<Entity, With<ObjectivesContainer>>()
+            .single(world)
+            .expect("the objectives container exists");
+        let children = world
+            .get::<Children>(container)
+            .map_or(0, |children| children.len());
+        assert_eq!(
+            children, 0,
+            "the objectives container must spawn with no rows (no quest data system exists yet)"
+        );
+    }
+
+    /// [`radial_falloff_alpha`] (re-exported here via `MinimapFadeMaterial`'s
+    /// own module) mirrors the WGSL fragment shader's formula exactly — this
+    /// test exercises it through `xindeler_ui::minimap_material`'s public
+    /// constants directly, pinning the acceptance bar this phase's brief
+    /// states: 1.0 near center, 0.0 at/beyond the outer radius. The WGSL
+    /// itself isn't exercised by this test (no GPU/window in this crate's
+    /// test harness); `xindeler-ui`'s own crate tests cover the Rust-side
+    /// formula in more depth.
+    #[test]
+    fn radial_falloff_matches_the_documented_acceptance_bar() {
+        use xindeler_ui::minimap_material::{
+            INNER_RADIUS_UV, OUTER_RADIUS_UV, radial_falloff_alpha,
+        };
+
+        let center = radial_falloff_alpha(Vec2::splat(0.5), INNER_RADIUS_UV, OUTER_RADIUS_UV);
+        assert!((center - 1.0).abs() < 1e-6, "center must read fully opaque");
+
+        let corner = radial_falloff_alpha(Vec2::new(1.0, 1.0), INNER_RADIUS_UV, OUTER_RADIUS_UV);
+        assert!(
+            corner.abs() < 1e-6,
+            "the square panel's corner must read fully transparent"
+        );
     }
 }

@@ -59,17 +59,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bevy::prelude::*;
+use bevy::{prelude::*, ui::GlobalZIndex};
 use xindeler_input::{GameInput, KeyMap};
 use xindeler_protocol::{
     AssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldowns, NetLocalPlayer,
 };
 use xindeler_ui::{
+    images::{HudImageKey, HudImages},
     slot::{SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
+    zlayer,
 };
 
-use crate::controls_screen::key_label;
+use crate::{controls_screen::key_label, hud_layout};
 
 /// The one drag-drop group this screen's slots live in — an internal detail
 /// (never interpreted by `xindeler_ui::slot`, which stays opinion-free about
@@ -121,11 +123,17 @@ impl Plugin for HotbarViewPlugin {
         // `chat.rs`'s `ChatViewPlugin` already follows for `ChatSendRequest`.
         app.add_message::<AssignHotbarSlot>();
         app.init_resource::<HotbarSlotEntities>()
-            .add_systems(Startup, spawn_hotbar.after(xindeler_ui::theme::init_theme))
+            .add_systems(
+                Startup,
+                spawn_hotbar
+                    .after(xindeler_ui::theme::init_theme)
+                    .after(xindeler_ui::images::init_images),
+            )
             .add_systems(
                 Update,
                 (
                     sync_hotbar_slots,
+                    sync_slot_half_parenting.after(sync_hotbar_slots),
                     sync_primary_secondary_indicators,
                     sync_keybind_labels,
                     sync_cooldown_overlays.after(sync_hotbar_slots),
@@ -140,8 +148,23 @@ impl Plugin for HotbarViewPlugin {
 #[derive(Resource, Default)]
 struct HotbarSlotEntities(Vec<Entity>);
 
+/// BL-82 EM-5.17 Phase 2: the LEFT half of the 2-piece action-bar background
+/// (`action_bar_bg_left.png`), the parent for the first half of the ability
+/// slots (spec §3.1). Replaces the old single full-width `HotbarSlotRow`.
 #[derive(Component)]
-struct HotbarSlotRow;
+struct HotbarLeftHalf;
+/// The RIGHT half (`action_bar_bg_right.png`) — the parent for the
+/// remaining ability slots.
+#[derive(Component)]
+struct HotbarRightHalf;
+/// Marks a per-slot `skill_slot_border.png` overlay child (BL-82 EM-5.17
+/// Phase 2) — spawned FIRST among a slot's children (i.e. UNDER the keybind
+/// label/cooldown veil/countdown text in draw order) so those still read
+/// correctly; see `hud_layout`'s module doc comment for why this pack's
+/// "overlay" art is actually fully opaque on disk, not alpha-cut, which is
+/// what forces this ordering choice.
+#[derive(Component)]
+struct SkillSlotBorderOverlay;
 #[derive(Component)]
 struct HotbarPrimaryText;
 #[derive(Component)]
@@ -168,18 +191,62 @@ fn short_glyph(ability_id: &str) -> String {
     glyph
 }
 
-fn spawn_hotbar(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
-    commands.spawn((HotbarSlotRow, Node {
-        position_type: PositionType::Absolute,
-        bottom: Val::Px(24.0),
-        left: Val::Px(0.0),
-        width: Val::Percent(100.0),
-        flex_direction: FlexDirection::Row,
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        column_gap: Val::Px(theme.spacing.xs),
-        ..Default::default()
-    }));
+/// Spawns the two `action_bar_bg_left.png`/`action_bar_bg_right.png`-backed
+/// halves flanking the centre Stamina orb (spec §3.1, BL-82 EM-5.17 Phase 2 —
+/// replaces the old single full-width `HotbarSlotRow` flat band). Each half
+/// is itself the flex-row PARENT its own share of ability slots get
+/// `add_child`ed into (by [`sync_hotbar_slots`]/[`sync_slot_half_parenting`]),
+/// positioned per `crate::hud_layout::CLUSTER` — the SAME arithmetic
+/// `combat_hud.rs`'s orbs use, so the two independently-`Startup`-spawned
+/// plugins line up into one contiguous row.
+fn spawn_action_bar_half(
+    commands: &mut Commands,
+    theme: &HudTheme,
+    background: Handle<Image>,
+    left_offset_px: f32,
+) -> Entity {
+    commands
+        .spawn((
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+            ImageNode::new(background),
+            Node {
+                position_type: PositionType::Absolute,
+                left: hud_layout::CENTER_LEFT,
+                bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX),
+                margin: UiRect::left(Val::Px(left_offset_px)),
+                width: Val::Px(hud_layout::ACTION_BAR_HALF_WIDTH_PX),
+                height: Val::Px(hud_layout::ACTION_BAR_HALF_HEIGHT_PX),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(theme.spacing.xs),
+                ..Default::default()
+            },
+        ))
+        .id()
+}
+
+fn spawn_hotbar(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    images: Res<HudImages>,
+) {
+    let left_half = spawn_action_bar_half(
+        &mut commands,
+        &theme,
+        images.get(HudImageKey::ActionBarBgLeft),
+        hud_layout::CLUSTER.action_bar_left_half_left,
+    );
+    commands.entity(left_half).insert(HotbarLeftHalf);
+
+    let right_half = spawn_action_bar_half(
+        &mut commands,
+        &theme,
+        images.get(HudImageKey::ActionBarBgRight),
+        hud_layout::CLUSTER.action_bar_right_half_left,
+    );
+    commands.entity(right_half).insert(HotbarRightHalf);
 
     let text_font = |font: Handle<bevy::text::Font>| TextFont {
         font: bevy::text::FontSource::Handle(font),
@@ -238,15 +305,12 @@ fn sync_hotbar_slots(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    images: Res<HudImages>,
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
-    row: Query<Entity, With<HotbarSlotRow>>,
     mut slot_entities: ResMut<HotbarSlotEntities>,
     mut contents: Query<&mut SlotContents>,
 ) {
     let Ok(abilities) = abilities.single() else {
-        return;
-    };
-    let Ok(row_entity) = row.single() else {
         return;
     };
 
@@ -273,6 +337,24 @@ fn sync_hotbar_slots(
             ))
             .id();
         commands.entity(slot_entity).with_children(|parent| {
+            // BL-82 EM-5.17 Phase 2: `skill_slot_border.png` overlay — spawned
+            // FIRST (i.e. rendered UNDER the keybind label/cooldown veil/
+            // countdown text below) so those stay legible; see
+            // `SkillSlotBorderOverlay`'s own doc comment for why this pack's
+            // "overlay" art can't safely go on TOP without hiding everything.
+            parent.spawn((
+                SkillSlotBorderOverlay,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(HudImageKey::SkillSlotBorder)),
+                bevy::picking::Pickable::IGNORE,
+            ));
             if let Some(&input) = SLOT_INPUTS.get(index) {
                 parent.spawn((
                     HotbarKeybindLabel(input),
@@ -320,7 +402,9 @@ fn sync_hotbar_slots(
                 },
             ));
         });
-        commands.entity(row_entity).add_child(slot_entity);
+        // Parenting into the correct action-bar HALF is `sync_slot_half_parenting`'s
+        // job (ordered right after this system) — see its own doc comment
+        // for why a freshly-spawned slot isn't parented here directly.
         slot_entities.0.push(slot_entity);
     }
     while slot_entities.0.len() > abilities.slots.len() {
@@ -366,6 +450,52 @@ fn sync_hotbar_slots(
             // again).
             commands.entity(entity).insert(new_contents);
         }
+    }
+}
+
+/// BL-82 EM-5.17 Phase 2: (re-)parents every current hotbar slot entity into
+/// whichever action-bar HALF it belongs to — the first `ceil(n/2)` slots go
+/// into the LEFT half (`action_bar_bg_left.png`), the rest into the RIGHT
+/// half (spec §3.1's "first half of slots in left, rest in right"). Runs
+/// AFTER [`sync_hotbar_slots`] so a LATER change in slot count (e.g. a weapon
+/// swap shortening/lengthening `NetAbilities::slots`, already handled by
+/// `sync_hotbar_slots`'s own resize logic) correctly re-splits which slots
+/// land in which half instead of leaving a stale assignment computed against
+/// a previous count.
+///
+/// Gated on `slot_entities.is_changed()` — `Res<T>::is_changed` is true the
+/// frame `HotbarSlotEntities` itself is replaced/mutated (i.e. exactly when
+/// `sync_hotbar_slots` resizes it), NOT every frame. This matters because
+/// `add_child` is NOT a no-op when the entity is already parented to that
+/// same target: Bevy 0.19's `ChildOf` relationship hooks unconditionally
+/// remove-then-reinsert on every call, moving the entity to the end of the
+/// parent's `Children` and marking `Children` `Changed` even when nothing
+/// actually moved. Re-running this every frame would therefore make every
+/// slot's `ChildOf` (and both halves' `Children`) tick "changed" on every
+/// single frame forever — harmless today only because nothing is gated on
+/// `Changed<Children>` downstream, but real, avoidable churn this fixes.
+fn sync_slot_half_parenting(
+    mut commands: Commands,
+    slot_entities: Res<HotbarSlotEntities>,
+    left_half: Query<Entity, With<HotbarLeftHalf>>,
+    right_half: Query<Entity, With<HotbarRightHalf>>,
+) {
+    if !slot_entities.is_changed() {
+        return;
+    }
+
+    let Ok(left_half) = left_half.single() else {
+        return;
+    };
+    let Ok(right_half) = right_half.single() else {
+        return;
+    };
+
+    let total = slot_entities.0.len();
+    let mid = total.div_ceil(2);
+    for (index, &slot_entity) in slot_entities.0.iter().enumerate() {
+        let target = if index < mid { left_half } else { right_half };
+        commands.entity(target).add_child(slot_entity);
     }
 }
 
@@ -572,19 +702,26 @@ fn handle_hotbar_drag_drop(
 
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::system::RunSystemOnce;
+    use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce, image::ImagePlugin};
     use xindeler_protocol::{NetCooldownEntry, NetHotbarSlot};
 
     use super::*;
 
+    /// `sync_hotbar_slots` now needs a real [`HudImages`] (the per-slot
+    /// `skill_slot_border.png` overlay) — built the same headless-`AssetServer`
+    /// way `combat_hud.rs`'s own `new_app_with_images` does.
     fn new_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        app.add_plugins(AssetPlugin::default());
+        app.add_plugins(ImagePlugin::default());
         app.insert_resource(HudTheme::default());
         app.insert_resource(HudFonts {
             title: Handle::default(),
             body: Handle::default(),
         });
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
         app.init_resource::<HotbarSlotEntities>();
         app
     }
@@ -603,7 +740,6 @@ mod tests {
     #[test]
     fn sync_hotbar_slots_spawns_exactly_as_many_slots_as_the_mirror_reports() {
         let mut app = new_app();
-        app.world_mut().spawn(HotbarSlotRow);
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
             primary: Some("common.abilities.sword.primary".to_owned()),
             secondary: None,
@@ -651,7 +787,6 @@ mod tests {
     #[test]
     fn sync_hotbar_slots_shrinks_when_the_mirror_reports_fewer_slots() {
         let mut app = new_app();
-        app.world_mut().spawn(HotbarSlotRow);
         let player = app
             .world_mut()
             .spawn((NetLocalPlayer, NetAbilities {
@@ -814,7 +949,6 @@ mod tests {
     #[test]
     fn cooldown_overlay_tracks_remaining_over_inferred_total() {
         let mut app = new_app();
-        app.world_mut().spawn(HotbarSlotRow);
         let player = app
             .world_mut()
             .spawn((
@@ -887,6 +1021,136 @@ mod tests {
         assert_eq!(
             app.world().get::<Node>(overlay).unwrap().height,
             Val::Percent(0.0)
+        );
+    }
+
+    /// BL-82 EM-5.17 Phase 2 (T57 action-bar split): with an odd slot count,
+    /// the first `ceil(n/2)` slots parent into the LEFT action-bar half and
+    /// the rest into the RIGHT half — spec §3.1's "first half of slots in
+    /// left, rest in right".
+    #[test]
+    fn slot_half_parenting_splits_slots_left_then_right() {
+        let mut app = new_app();
+        let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
+        let right_half = app.world_mut().spawn(HotbarRightHalf).id();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![
+                NetHotbarSlot::default(),
+                NetHotbarSlot::default(),
+                NetHotbarSlot::default(),
+                NetHotbarSlot::default(),
+                NetHotbarSlot::default(),
+            ],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("spawn 5 slots");
+        app.update();
+        app.world_mut()
+            .run_system_once(sync_slot_half_parenting)
+            .expect("split across halves");
+        app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        assert_eq!(slot_entities.len(), 5);
+
+        let left_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(left_half)
+            .expect("left half got children")
+            .iter()
+            .collect();
+        let right_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(right_half)
+            .expect("right half got children")
+            .iter()
+            .collect();
+
+        // ceil(5/2) == 3 slots in the left half, 2 in the right.
+        assert_eq!(left_children, slot_entities[0..3]);
+        assert_eq!(right_children, slot_entities[3..5]);
+    }
+
+    /// A LATER slot-count change re-splits the halves from scratch (not a
+    /// stale assignment from the previous count) — the reactive half of the
+    /// T57 acceptance bar.
+    #[test]
+    fn slot_half_parenting_resplits_when_slot_count_changes() {
+        let mut app = new_app();
+        let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
+        let right_half = app.world_mut().spawn(HotbarRightHalf).id();
+        let player = app
+            .world_mut()
+            .spawn((NetLocalPlayer, NetAbilities {
+                primary: None,
+                secondary: None,
+                slots: vec![NetHotbarSlot::default(), NetHotbarSlot::default()],
+            }))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("spawn 2 slots");
+        app.update();
+        app.world_mut()
+            .run_system_once(sync_slot_half_parenting)
+            .expect("split across halves");
+        app.update();
+        // ceil(2/2) == 1 slot in each half.
+        assert_eq!(
+            app.world()
+                .get::<Children>(left_half)
+                .unwrap()
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world()
+                .get::<Children>(right_half)
+                .unwrap()
+                .iter()
+                .count(),
+            1
+        );
+
+        app.world_mut()
+            .get_mut::<NetAbilities>(player)
+            .unwrap()
+            .slots = vec![
+            NetHotbarSlot::default(),
+            NetHotbarSlot::default(),
+            NetHotbarSlot::default(),
+        ];
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("grow to 3 slots");
+        app.update();
+        app.world_mut()
+            .run_system_once(sync_slot_half_parenting)
+            .expect("re-split across halves");
+        app.update();
+
+        // ceil(3/2) == 2 slots now belong in the left half, 1 in the right.
+        assert_eq!(
+            app.world()
+                .get::<Children>(left_half)
+                .unwrap()
+                .iter()
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.world()
+                .get::<Children>(right_half)
+                .unwrap()
+                .iter()
+                .count(),
+            1
         );
     }
 }

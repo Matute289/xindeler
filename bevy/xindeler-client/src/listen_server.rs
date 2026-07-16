@@ -315,6 +315,15 @@ impl Plugin for ListenServerPlugin {
         // the generic per-group tree renderer + Abilities tab) reading the
         // `SkillSetMirrorPlugin` mirror above. Pure Bevy.
         app.add_plugins(crate::diary::DiaryUiPlugin);
+        // BL-82 EM-5.17 Phase 5: the boss/target nameplate — panel + bars
+        // fully built, reading `NetHealth`/`NetPoise`/`NetXp` off whatever
+        // entity `SelectedTarget` resolves to. No real target-selection
+        // source exists yet (see `boss_nameplate`'s module doc comment: it
+        // would need a new 3D-picking system, not a small resource), so in
+        // real gameplay `SelectedTarget` stays `None` and the panel stays
+        // hidden; `XINDELER_SMOKE_FORCE_TARGET` is the only way to preview
+        // it, for visual smoke-testing only. Pure Bevy.
+        app.add_plugins(crate::boss_nameplate::BossNameplateViewPlugin);
 
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");
