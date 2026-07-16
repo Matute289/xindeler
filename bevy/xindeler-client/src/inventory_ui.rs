@@ -1179,11 +1179,14 @@ mod tests {
         );
     }
 
-    /// BL-82 EM-5.18 Phase 1 (T58.5) regression: a same-tab (`BAG_GROUP` ->
-    /// `BAG_GROUP`) drag still produces a real `InventoryActionRequest`
-    /// (`InventoryManip::Swap`) via the UNCHANGED `handle_slot_drops` —
-    /// proving the tab-split restructure didn't accidentally disturb this
-    /// system's registration/wiring (spec §3.6: same-tab drag-drop is
+    /// BL-82 EM-5.18 Phase 1 (T58.5): pins `handle_slot_drops`' existing
+    /// (previously untested) same-tab (`BAG_GROUP` -> `BAG_GROUP`) drag
+    /// behavior — it produces a real `InventoryActionRequest`
+    /// (`InventoryManip::Swap`). `handle_slot_drops`/`address_to_slot`
+    /// operate purely on `SlotDropped` message payloads and never read tab
+    /// state, so this coverage doesn't actually depend on the tab-split
+    /// restructure — it just guards against a FUTURE change to this file
+    /// silently breaking same-tab drag (spec §3.6: same-tab drag-drop is
     /// explicitly kept working, only CROSS-tab drag became impossible).
     #[test]
     fn same_tab_bag_to_bag_drag_still_produces_inventory_swap_request() {
