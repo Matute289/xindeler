@@ -201,5 +201,11 @@ impl Plugin for NetClientPlugin {
         // hidden here too, same as every other consumer plugin's
         // "degrade clean" posture in this list.
         app.add_plugins(crate::boss_nameplate::BossNameplateViewPlugin);
+        // BL-82 EM-5.17: the cursor-free aggregator — frees the OS cursor for
+        // clickable panels whenever a HUD window is open or chat is focused,
+        // re-grabbing for mouselook otherwise. Reads `HudState`
+        // (`CombatHudViewPlugin`'s `XindelerUiPlugin`) + chat focus
+        // (`ChatViewPlugin`), both added above. Pure Bevy.
+        app.add_plugins(crate::cursor::CursorControlPlugin);
     }
 }

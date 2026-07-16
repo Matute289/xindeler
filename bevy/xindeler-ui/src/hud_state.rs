@@ -54,6 +54,28 @@ impl HudState {
     #[must_use]
     pub fn is_open(&self, window: HudWindow) -> bool { self.open_window == window }
 
+    /// Whether ANY secondary/full-screen window is currently open (i.e.
+    /// [`open_window`](Self::open_window) is not [`HudWindow::None`]).
+    ///
+    /// This is the "a modal-like panel needs the pointer" half of the shared
+    /// cursor-free rule (BL-82 EM-5.17 — the "cursor doesn't appear when a UI
+    /// panel is open" fix): whenever this is `true`, the OS cursor must be
+    /// visible + ungrabbed so the player can actually click the panel's
+    /// controls, and camera mouselook must be suspended. It is the Bevy port
+    /// of legacy `voxygen`'s `Show::any_window_requires_cursor()`
+    /// (`voxygen/src/hud/mod.rs`), except that this project's single
+    /// mutually-exclusive [`HudWindow`] slot collapses legacy's
+    /// OR-of-every-window-boolean into one comparison — so EVERY existing
+    /// window (Inventory/Diary/Map/Social/Crafting/Settings/Controls) AND
+    /// every window added later (e.g. the EM-5.12 esc/pause menu) participates
+    /// in the cursor rule automatically, with no per-window bookkeeping to
+    /// forget. The client's cursor aggregator combines this with chat-input
+    /// focus (`chat::text_input_focused`) — the two together are the full "is
+    /// the cursor free" predicate, mirroring legacy's `want_grab =
+    /// !any_window_requires_cursor() && !typing()`.
+    #[must_use]
+    pub fn any_window_open(&self) -> bool { self.open_window != HudWindow::None }
+
     /// Opens `window`, closing whatever was previously open (a no-op toggle:
     /// re-toggling the ALREADY-open window closes it back to `None`,
     /// matching legacy's own toggle-key convention for e.g. the inventory
@@ -132,6 +154,41 @@ mod tests {
         state.toggle(HudWindow::Map);
         state.toggle(HudWindow::Map);
         assert_eq!(state.open_window(), HudWindow::None);
+    }
+
+    /// [`HudState::any_window_open`] is the "any modal-like panel needs the
+    /// pointer" half of the shared cursor-free rule (BL-82 EM-5.17): `false`
+    /// only when nothing is open, `true` for every real window — including a
+    /// window variant added later (proven here with [`HudWindow::Settings`],
+    /// the esc/pause-menu family EM-5.12 grows, so the cursor rule keeps
+    /// covering new panels with no extra bookkeeping).
+    #[test]
+    fn any_window_open_tracks_the_open_slot() {
+        let mut state = HudState::default();
+        assert!(
+            !state.any_window_open(),
+            "a fresh HUD (no window open) must report no modal — cursor stays grabbed for \
+             mouselook"
+        );
+
+        state.toggle(HudWindow::Diary);
+        assert!(
+            state.any_window_open(),
+            "opening a window must report a modal — cursor must free up so its controls are \
+             clickable"
+        );
+
+        state.toggle(HudWindow::Settings);
+        assert!(
+            state.any_window_open(),
+            "a later-added window variant (the esc/pause menu family) participates automatically"
+        );
+
+        state.close();
+        assert!(
+            !state.any_window_open(),
+            "closing the last window must return to no-modal — cursor re-grabs for mouselook"
+        );
     }
 
     /// [`apply_hud_actions`] wires `HudAction::ToggleWindow`/`CloseWindow`

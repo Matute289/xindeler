@@ -300,6 +300,13 @@ impl Plugin for ListenServerPlugin {
         // BL-82 EM-5.4: the chat panel (scrollback, channel tabs, input box)
         // reading `NetChatMsg`/writing `ChatSendRequest`. Pure Bevy.
         app.add_plugins(ChatViewPlugin);
+        // BL-82 EM-5.17: the cursor-free aggregator — frees the OS cursor
+        // (visible + ungrabbed, so panels are clickable) whenever any HUD
+        // window is open or the chat input is focused, and re-grabs for
+        // mouselook otherwise. Reads `HudState` (from `CombatHudViewPlugin`'s
+        // `XindelerUiPlugin`) + chat focus (from `ChatViewPlugin` above), so
+        // it's added after both. Pure Bevy.
+        app.add_plugins(crate::cursor::CursorControlPlugin);
         // BL-82 EM-5.3: the skillbar/hotbar screen (drag-to-assign, keybind
         // labels, cooldown sweeps) reading the mirror above. Reuses the
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)

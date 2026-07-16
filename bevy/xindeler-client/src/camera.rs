@@ -108,6 +108,10 @@ impl Plugin for CameraRigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlyCamMovementEnabled>()
             .init_resource::<OcclusionCullingConfig>()
+            // BL-82 EM-5.17: the shared cursor-free signal — always present so
+            // `cursor_grab` can read it in every mode (only the feature-gated
+            // `cursor::update_cursor_free` ever writes it; see `CursorFree`).
+            .init_resource::<CursorFree>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -123,6 +127,43 @@ impl Plugin for CameraRigPlugin {
             );
     }
 }
+
+/// Marks the primary player/fly camera (the HDR `Camera3d` this module spawns
+/// in [`spawn_camera`]). A distinct marker because this crate spawns MORE than
+/// one `Camera3d` (e.g. `far_terrain.rs`'s horizon camera), so a system that
+/// must target ONLY the main view — e.g. the esc-menu graphics live-apply
+/// (`crate::esc_menu`) toggling SSAO/TAA on the player camera, not the
+/// far-terrain pass — queries `With<MainCamera>` rather than the ambiguous
+/// `With<Camera3d>`.
+///
+/// `pub(crate)` — only this crate's own screens (`esc_menu`) query it; it is
+/// not part of any cross-crate contract.
+#[derive(Component, Debug, Default)]
+pub(crate) struct MainCamera;
+
+/// Whether the OS cursor should currently be FREE (visible + ungrabbed)
+/// because some UI element needs pointer input — a HUD window is open, the
+/// chat input box has keyboard focus, or the game is paused (BL-82 EM-5.17 —
+/// the "cursor doesn't appear when a UI panel is open" fix).
+///
+/// This is the ONE shared cursor-free signal [`cursor_grab`] reads: while it
+/// is `true` the cursor is forced free and a click can NOT re-grab it (so the
+/// player can actually click a panel's controls); while it is `false` the
+/// normal fly-cam controls apply (click grabs / Escape releases), and a
+/// cursor that was auto-freed for a now-closed UI element re-grabs for
+/// mouselook (legacy `voxygen`'s `want_grab` behaviour, `voxygen/src/hud/
+/// mod.rs`).
+///
+/// It is aggregated each frame by `crate::cursor::update_cursor_free` (a
+/// feature-gated client system) from [`xindeler_ui::hud_state::HudState::
+/// any_window_open`] plus `crate::chat::text_input_focused`. In the pure
+/// demo / fly-cam mode (no HUD, no chat — `cursor.rs` is not compiled) nothing
+/// writes it, so it stays `false` and the fly-cam's click-to-grab / Escape-to-
+/// release controls behave exactly as before. Always present:
+/// [`CameraRigPlugin`] `init_resource`s it unconditionally so [`cursor_grab`]
+/// can read it in every mode.
+#[derive(Resource, Debug, Default)]
+pub struct CursorFree(pub bool);
 
 /// Simple free-fly camera controller state.
 #[derive(Component)]
@@ -249,6 +290,7 @@ fn spawn_camera(
     let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
 
     let mut camera = commands.spawn((
+        MainCamera,
         Camera3d::default(),
         Hdr,
         // TAA requires Msaa::Off; MSAA also fights greedy meshing, so it
@@ -304,15 +346,62 @@ fn spawn_camera(
     }
 }
 
-/// Click grabs + hides the cursor; Escape releases it.
+/// Owns the OS cursor's grab state (BL-82 EM-5.17).
+///
+/// While [`CursorFree`] is `true` (a HUD window is open, chat input has focus,
+/// or the game is paused) the cursor is forced free (visible + ungrabbed) and
+/// a click can NOT re-grab it — so the player can actually click a panel's
+/// controls. This was the bug: before this, opening the Diary/Inventory/Map/
+/// Chat left the cursor grabbed+hidden (or a stray click re-grabbed it), so
+/// none of the new panels were clickable at all.
+///
+/// While [`CursorFree`] is `false` the normal fly-cam controls apply — click
+/// grabs + hides, Escape releases — AND a cursor that we auto-freed for a UI
+/// element that has since closed re-grabs for mouselook (legacy `voxygen`'s
+/// `want_grab` re-grab on window close, `voxygen/src/hud/mod.rs`). The
+/// `released_for_ui` latch makes that re-grab conditional: it only fires if WE
+/// released a grabbed cursor for the UI, so a cursor the player had manually
+/// freed (Escape) before opening a window is left free when it closes, rather
+/// than being surprised by a force-grab.
 fn cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    cursor_free: Res<CursorFree>,
+    mut released_for_ui: Local<bool>,
     mut cursor_options: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let Ok(mut cursor) = cursor_options.single_mut() else {
         return;
     };
+
+    if cursor_free.0 {
+        // A UI element needs the pointer: ensure the cursor is free and never
+        // let a click re-grab it while it is. Remember that WE released a
+        // grabbed cursor so mouselook can be restored once the UI closes.
+        if cursor.grab_mode != CursorGrabMode::None {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+            *released_for_ui = true;
+        }
+        return;
+    }
+
+    // No UI needs the pointer. If we auto-freed the cursor for a UI element
+    // that has now closed, restore the mouselook grab and STOP — do NOT fall
+    // through to the manual handlers below. The window that just closed was
+    // almost always dismissed WITH Escape (closing the pause menu, the map,
+    // etc.), so `keys.just_pressed(Escape)` is still true on this very frame;
+    // without this early return the manual Escape-release handler at the
+    // bottom would immediately undo the re-grab we just performed, dumping the
+    // player back to a free cursor with no mouselook (bevy-migration-reviewer
+    // finding). Skipping the manual handlers here is correct: this frame's
+    // click/Escape belonged to the UI interaction, not to a fly-cam command.
+    if *released_for_ui {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+        *released_for_ui = false;
+        return;
+    }
     if mouse.just_pressed(MouseButton::Left) && cursor.grab_mode == CursorGrabMode::None {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
@@ -429,6 +518,167 @@ fn fly_cam_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawns a primary-window entity carrying a [`CursorOptions`] in the
+    /// given grab state — the minimal fixture [`cursor_grab`]'s query needs.
+    fn spawn_window(app: &mut App, grab_mode: CursorGrabMode, visible: bool) -> Entity {
+        app.world_mut()
+            .spawn((PrimaryWindow, CursorOptions {
+                grab_mode,
+                visible,
+                ..Default::default()
+            }))
+            .id()
+    }
+
+    /// BL-82 EM-5.17 (the bug): with [`CursorFree`] `true` (a HUD panel open /
+    /// chat focused / paused) the cursor must be forced visible + ungrabbed so
+    /// the panel is clickable, and a left click must NOT re-grab it (the exact
+    /// failure Matías hit — opening the Diary left the cursor hidden/grabbed,
+    /// or a click into the panel re-grabbed it, so nothing was clickable).
+    #[test]
+    fn ui_open_frees_the_cursor_and_a_click_cannot_regrab_it() {
+        use bevy::input::mouse::MouseButton;
+
+        let mut app = App::new();
+        app.init_resource::<CursorFree>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        let window = spawn_window(&mut app, CursorGrabMode::Locked, false);
+        app.add_systems(Update, cursor_grab);
+
+        // A UI element opens -> the cursor must free up.
+        app.world_mut().resource_mut::<CursorFree>().0 = true;
+        app.update();
+        {
+            let cursor = app.world().get::<CursorOptions>(window).unwrap();
+            assert_eq!(
+                cursor.grab_mode,
+                CursorGrabMode::None,
+                "an open UI panel must ungrab the cursor"
+            );
+            assert!(
+                cursor.visible,
+                "an open UI panel must make the cursor visible"
+            );
+        }
+
+        // A left click while the UI is open must NOT re-grab (so the player
+        // can click the panel's controls).
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert_eq!(
+            app.world().get::<CursorOptions>(window).unwrap().grab_mode,
+            CursorGrabMode::None,
+            "clicking inside an open panel must not re-grab the cursor"
+        );
+    }
+
+    /// Closing the UI restores mouselook: a cursor we auto-freed for an open
+    /// panel re-grabs once [`CursorFree`] goes back to `false` (legacy
+    /// `want_grab` re-grab on window close). Uses a real two-frame `App` run so
+    /// the system's `released_for_ui` `Local` latch carries between frames.
+    #[test]
+    fn closing_the_ui_regrabs_for_mouselook() {
+        use bevy::input::mouse::MouseButton;
+
+        let mut app = App::new();
+        app.init_resource::<CursorFree>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        let window = spawn_window(&mut app, CursorGrabMode::Locked, false);
+        app.add_systems(Update, cursor_grab);
+
+        // Frame 1: UI open -> cursor freed (and the latch remembers we did it).
+        app.world_mut().resource_mut::<CursorFree>().0 = true;
+        app.update();
+        assert_eq!(
+            app.world().get::<CursorOptions>(window).unwrap().grab_mode,
+            CursorGrabMode::None
+        );
+
+        // Frame 2: UI closed -> the cursor we auto-freed re-grabs for mouselook.
+        app.world_mut().resource_mut::<CursorFree>().0 = false;
+        app.update();
+        let cursor = app.world().get::<CursorOptions>(window).unwrap();
+        assert_eq!(
+            cursor.grab_mode,
+            CursorGrabMode::Locked,
+            "closing the last panel must re-grab the cursor for camera mouselook"
+        );
+        assert!(
+            !cursor.visible,
+            "a re-grabbed mouselook cursor must be hidden"
+        );
+    }
+
+    /// The Escape-close path specifically: a window dismissed WITH Escape must
+    /// STILL re-grab for mouselook — the `released_for_ui` branch's early
+    /// return must beat the manual Escape-release handler on the same frame
+    /// (bevy-migration-reviewer finding). Without the early return, the
+    /// still-pressed Escape would immediately re-free the cursor we just
+    /// re-grabbed, leaving the player cursor-free with no mouselook after
+    /// closing the pause menu.
+    #[test]
+    fn closing_the_ui_with_escape_still_regrabs() {
+        use bevy::input::mouse::MouseButton;
+
+        let mut app = App::new();
+        app.init_resource::<CursorFree>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        let window = spawn_window(&mut app, CursorGrabMode::Locked, false);
+        app.add_systems(Update, cursor_grab);
+
+        // Frame 1: UI open -> cursor freed, latch set.
+        app.world_mut().resource_mut::<CursorFree>().0 = true;
+        app.update();
+
+        // Frame 2: UI closed by Escape (the key is still just-pressed this
+        // frame) -> must re-grab, and the manual Escape-release must NOT undo it.
+        app.world_mut().resource_mut::<CursorFree>().0 = false;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+
+        let cursor = app.world().get::<CursorOptions>(window).unwrap();
+        assert_eq!(
+            cursor.grab_mode,
+            CursorGrabMode::Locked,
+            "closing a window WITH Escape must still re-grab — the manual Escape-release must not \
+             undo the re-grab on the same frame"
+        );
+        assert!(!cursor.visible);
+    }
+
+    /// With no UI open, a cursor the player had already freed themselves
+    /// (Escape) must NOT be surprise-grabbed just because a frame ticks: the
+    /// re-grab only fires for a cursor WE auto-freed for a UI element. Here
+    /// `CursorFree` is never set, so the fly-cam's manual controls own the
+    /// cursor and a resting (ungrabbed) cursor stays free.
+    #[test]
+    fn no_ui_leaves_a_manually_freed_cursor_alone() {
+        use bevy::input::mouse::MouseButton;
+
+        let mut app = App::new();
+        app.init_resource::<CursorFree>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        let window = spawn_window(&mut app, CursorGrabMode::None, true);
+        app.add_systems(Update, cursor_grab);
+
+        app.update();
+        let cursor = app.world().get::<CursorOptions>(window).unwrap();
+        assert_eq!(
+            cursor.grab_mode,
+            CursorGrabMode::None,
+            "with no UI and no click, a free cursor must stay free (no surprise grab)"
+        );
+        assert!(cursor.visible);
+    }
 
     /// A normal, in-band rotation step (well under the ceiling — every real
     /// single-frame mouse delta) applies in FULL with nothing carried over,
