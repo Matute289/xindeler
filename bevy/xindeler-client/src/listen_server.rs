@@ -307,6 +307,11 @@ impl Plugin for ListenServerPlugin {
         // `XindelerUiPlugin`) + chat focus (from `ChatViewPlugin` above), so
         // it's added after both. Pure Bevy.
         app.add_plugins(crate::cursor::CursorControlPlugin);
+        // BL-82 EM-5.12: the Escape/pause menu + Video graphics settings tab
+        // (Resume + live SSAO/TAA/shadow-cascade toggles). Reads `HudState`
+        // (`CombatHudViewPlugin`'s `XindelerUiPlugin`) + mutates
+        // `XindelerSettings`/the live camera+sun render config. Pure Bevy.
+        app.add_plugins(crate::esc_menu::EscMenuPlugin);
         // BL-82 EM-5.3: the skillbar/hotbar screen (drag-to-assign, keybind
         // labels, cooldown sweeps) reading the mirror above. Reuses the
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)

@@ -37,6 +37,8 @@ mod diary;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod entity_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod esc_menu;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod far_terrain_material;

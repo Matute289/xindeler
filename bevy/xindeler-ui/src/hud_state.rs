@@ -38,6 +38,15 @@ pub enum HudWindow {
     /// tab of the full esc-menu settings window (§ that epic's task board
     /// note) — this is a real, standalone entry point, not a stub.
     Controls,
+    /// BL-82 EM-5.12 — the Escape/pause menu (`xindeler-client::esc_menu`):
+    /// Resume + a Video/Graphics settings tab. Opening it pauses interaction
+    /// like any other window (it participates in [`HudState::any_window_open`],
+    /// so the cursor frees automatically). Legacy `voxygen`'s esc menu carried
+    /// more entries (Settings tabs Interface/Gameplay/Controls/Sound/Video/
+    /// Language, plus Character Selection / Report Bug / Logout / Quit,
+    /// `voxygen/src/hud/esc_menu.rs`) — those remain future scope; this variant
+    /// is the Resume + Video-settings slice.
+    EscMenu,
 }
 
 /// The current HUD window state. `Resource`, not per-entity — there is

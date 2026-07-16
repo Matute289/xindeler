@@ -207,5 +207,10 @@ impl Plugin for NetClientPlugin {
         // (`CombatHudViewPlugin`'s `XindelerUiPlugin`) + chat focus
         // (`ChatViewPlugin`), both added above. Pure Bevy.
         app.add_plugins(crate::cursor::CursorControlPlugin);
+        // BL-82 EM-5.12: the Escape/pause menu + Video graphics settings tab
+        // (Resume + live SSAO/TAA/shadow-cascade toggles) — verbatim reuse,
+        // reads `HudState` + mutates `XindelerSettings`/the live render config.
+        // Pure Bevy.
+        app.add_plugins(crate::esc_menu::EscMenuPlugin);
     }
 }
