@@ -22,8 +22,11 @@
 //! [`notification`] (the real queued toast, subsuming EM-4.8), [`theme`]
 //! (colour/spacing/radius/font tokens), [`i18n`] (the fluent `.ftl` seam),
 //! [`hud_state`] (the `Show`-replacement state machine), [`scale`] (the
-//! UI-scale seam), and (BL-82 EM-5.6) [`slot`] (the drag-drop item-slot
-//! primitive bag/trade/hotbar/crafting screens share). Deferred to the
+//! UI-scale seam), (BL-82 EM-5.6) [`slot`] (the drag-drop item-slot
+//! primitive bag/trade/hotbar/crafting screens share), and (BL-82 EM-5.17)
+//! [`images`] (the `HudImages` art-pack lookup), [`orb_material`] (the
+//! `UiMaterial` spike/scaffold for the liquid-orb fill), and [`zlayer`] (the
+//! shared `GlobalZIndex` vocabulary). Deferred to the
 //! screens that first need them (documented here rather than stubbed, per
 //! "get the primitives right, don't over-build one-off screen-specific
 //! widgets" — spec §2 engineering note): Slider/Checkbox/Radio/TextInput
@@ -37,13 +40,16 @@ pub mod bar;
 pub mod button;
 pub mod hud_state;
 pub mod i18n;
+pub mod images;
 pub mod notification;
+pub mod orb_material;
 pub mod panel;
 pub mod scale;
 pub mod scroll;
 pub mod slot;
 pub mod theme;
 pub mod tooltip;
+pub mod zlayer;
 
 use bevy::{
     app::{App, Plugin, Startup, Update},
@@ -76,7 +82,14 @@ impl Plugin for XindelerUiPlugin {
         app.init_resource::<hud_state::HudState>()
             .add_message::<hud_state::HudAction>()
             .init_resource::<notification::NotificationQueue>()
-            .add_systems(Startup, theme::init_theme)
+            // BL-82 EM-5.17 T57.7: `HudImages` loads alongside `HudTheme`/
+            // `HudFonts` — both are flat resource-inserting systems with no
+            // dependency on each other, so they run in the same Startup
+            // batch (order between the two doesn't matter); a future screen
+            // needing `HudImages` orders its own spawn system
+            // `.after(images::init_images)`, mirroring the existing
+            // `.after(theme::init_theme)` convention below.
+            .add_systems(Startup, (theme::init_theme, images::init_images))
             .add_systems(
                 Startup,
                 (
@@ -89,8 +102,10 @@ impl Plugin for XindelerUiPlugin {
                 Update,
                 (
                     bar::update_bars,
+                    bar::update_orb_bars,
                     button::spawn_button_labels,
                     button::update_button_visuals,
+                    button::update_image_button_visuals,
                     tooltip::update_tooltip,
                     notification::advance_notifications,
                     slot::update_slot_visuals,
@@ -105,5 +120,11 @@ impl Plugin for XindelerUiPlugin {
         // every `HudSlot` anywhere in the app is drag-drop-capable the
         // moment it's spawned.
         slot::install_observers(app);
+        // BL-82 EM-5.17 T57.9: registers the `OrbLiquidMaterial` UiMaterial
+        // scaffolding (embedded WGSL + `UiMaterialPlugin`) — see
+        // `orb_material`'s module doc comment for the full spike write-up
+        // and why Phase 2's actual orb rendering is expected to use the
+        // CPU-clip `bar::spawn_orb_bar` path instead, at least for v1.
+        app.add_plugins(orb_material::OrbMaterialPlugin);
     }
 }

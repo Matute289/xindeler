@@ -11,14 +11,16 @@
 //! settings-tab button fires something else entirely).
 
 use bevy::{
+    asset::Handle,
     ecs::{component::Component, entity::Entity, query::Changed, system::Query},
+    image::Image,
     picking::hover::Hovered,
     prelude::{
         AlignItems, BackgroundColor, BorderRadius, FontSize, JustifyContent, Node, Text, TextColor,
         TextFont, UiRect, Val,
     },
     text::FontSource,
-    ui::{InteractionDisabled, Pressed},
+    ui::{InteractionDisabled, Pressed, widget::ImageNode},
 };
 use bevy_ui_widgets::Button;
 // Re-exported so downstream screen crates (e.g. `xindeler-client`) can
@@ -68,6 +70,80 @@ pub fn button_bundle(
     )
 }
 
+/// BL-82 EM-5.17 T57.8 — the three HUD-D4 button-state textures a
+/// [`image_button_bundle`] carries, so [`update_image_button_visuals`] can
+/// swap the button's `ImageNode` per its live `Hovered`/`Pressed` state.
+#[derive(Component, Debug, Clone)]
+pub struct HudButtonImages {
+    pub normal: Handle<Image>,
+    pub hover: Handle<Image>,
+    pub pressed: Handle<Image>,
+}
+
+/// Spawns an image-backed themed button: same headless `bevy_ui_widgets::
+/// Button` behaviour + label-child machinery as [`button_bundle`], but the
+/// background is an [`ImageNode`] swapped between `images.normal`/`.hover`/
+/// `.pressed` (e.g. `button_normal.png`/`button_hover.png`/
+/// `button_pressed.png` via [`crate::images::HudImages`]) instead of
+/// [`button_bundle`]'s flat-colour restyle. Purely additive — every existing
+/// `button_bundle(..)` call site is completely untouched.
+///
+/// Note: `bevy_ui`'s own `Node` component `#[require(.., BackgroundColor,
+/// ..)]`s a transparent default, so an image-backed button unavoidably still
+/// carries a (fully transparent, never touched) `BackgroundColor` — this is
+/// harmless (the opaque button texture fully covers it) but means "doesn't
+/// have the component" isn't the actual isolation mechanism.
+/// [`update_button_visuals`]'s query is explicitly scoped
+/// `Without<HudButtonImages>` instead, so it structurally cannot repaint an
+/// image-backed button's (irrelevant) transparent background.
+#[must_use]
+pub fn image_button_bundle(
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    label: &str,
+    images: HudButtonImages,
+) -> impl bevy::ecs::bundle::Bundle {
+    let normal = images.normal.clone();
+    (
+        HudButton,
+        Button,
+        Hovered(false),
+        Node {
+            padding: UiRect::axes(Val::Px(theme.spacing.md), Val::Px(theme.spacing.sm)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..Default::default()
+        },
+        ImageNode::new(normal),
+        images,
+        HudButtonLabel(label.to_owned(), fonts.body.clone()),
+    )
+}
+
+/// Recolors — err, re-TEXTURES — an image-backed button's [`ImageNode`]
+/// based on its current hover/pressed state, the image-backed counterpart to
+/// [`update_button_visuals`]. Same `Changed<Hovered>` gate (matching that
+/// function's own documented limitation: a `Pressed`-only change with no
+/// `Hovered` change in the same frame won't re-trigger this system either —
+/// an existing, accepted characteristic this mirrors rather than fixes, to
+/// keep the two systems' behaviour consistent).
+pub(crate) fn update_image_button_visuals(
+    mut buttons: Query<
+        (&HudButtonImages, &Hovered, Option<&Pressed>, &mut ImageNode),
+        (bevy::ecs::query::With<HudButton>, Changed<Hovered>),
+    >,
+) {
+    for (images, hovered, pressed, mut image_node) in &mut buttons {
+        image_node.image = if pressed.is_some() {
+            images.pressed.clone()
+        } else if hovered.get() {
+            images.hover.clone()
+        } else {
+            images.normal.clone()
+        };
+    }
+}
+
 /// Deferred label spec: the actual `Text` child is spawned by
 /// [`crate::XindelerUiPlugin`]'s `spawn_button_labels` system (a button
 /// widget entity is often built up via `button_bundle(..).observe(..)` chains
@@ -103,7 +179,10 @@ pub(crate) fn spawn_button_labels(
 /// owns. `Changed<Hovered>`/pressed-insertion already gate most of the real
 /// work upstream in `bevy_ui_widgets`/`bevy_picking`; this system itself
 /// just re-runs on every `Hovered` change, which only fires on an actual
-/// enter/leave.
+/// enter/leave. `Without<HudButtonImages>` (BL-82 EM-5.17) so this never
+/// repaints an [`image_button_bundle`]'s (irrelevant, always-transparent —
+/// `Node` requires a default `BackgroundColor` on every node) background;
+/// [`update_image_button_visuals`] owns that button's visuals instead.
 pub(crate) fn update_button_visuals(
     theme: bevy::ecs::system::Res<HudTheme>,
     mut buttons: Query<
@@ -113,7 +192,11 @@ pub(crate) fn update_button_visuals(
             Option<&InteractionDisabled>,
             &mut BackgroundColor,
         ),
-        (bevy::ecs::query::With<HudButton>, Changed<Hovered>),
+        (
+            bevy::ecs::query::With<HudButton>,
+            bevy::ecs::query::Without<HudButtonImages>,
+            Changed<Hovered>,
+        ),
     >,
 ) {
     for (hovered, pressed, disabled, mut background) in &mut buttons {
@@ -195,5 +278,113 @@ mod tests {
 
         let bg = app.world().get::<BackgroundColor>(button).unwrap();
         assert_eq!(bg.0, theme.palette.panel_border);
+    }
+
+    /// Three distinguishable `Handle<Image>`s, built without a real
+    /// `AssetServer` (mirrors this crate's other headless resource tests) —
+    /// `Handle::Uuid` handles compare by their UUID, so three DIFFERENT
+    /// UUIDs give three genuinely distinct handles `assert_ne!` can tell
+    /// apart, unlike three `Handle::default()`s which would all be equal.
+    fn distinct_button_images() -> HudButtonImages {
+        use bevy::asset::uuid::Uuid;
+        HudButtonImages {
+            normal: Handle::Uuid(Uuid::from_u128(1), core::marker::PhantomData),
+            hover: Handle::Uuid(Uuid::from_u128(2), core::marker::PhantomData),
+            pressed: Handle::Uuid(Uuid::from_u128(3), core::marker::PhantomData),
+        }
+    }
+
+    fn new_image_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        // Registers BOTH visual systems (not just the image one) — this is
+        // what actually proves `update_button_visuals`'s new
+        // `Without<HudButtonImages>` filter keeps it from touching an
+        // image-backed button, not merely that this test never registered it.
+        app.add_systems(
+            Update,
+            (
+                spawn_button_labels,
+                update_button_visuals,
+                update_image_button_visuals,
+            ),
+        );
+        app
+    }
+
+    /// `image_button_bundle` spawns with the NORMAL texture applied and a
+    /// label child — the T57.8 additive acceptance bar for the image-backed
+    /// button.
+    #[test]
+    fn image_button_spawns_with_normal_texture_and_label() {
+        let mut app = new_image_app();
+        let theme = HudTheme::default();
+        let fonts = crate::theme::HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        };
+        let images = distinct_button_images();
+        let normal = images.normal.clone();
+
+        let button = app
+            .world_mut()
+            .spawn(image_button_bundle(&theme, &fonts, "Continue", images))
+            .id();
+        app.update();
+
+        let image_node = app.world().get::<ImageNode>(button).unwrap();
+        assert_eq!(image_node.image, normal);
+
+        let children = app
+            .world()
+            .get::<bevy::ecs::hierarchy::Children>(button)
+            .expect("label child was spawned");
+        let text = children
+            .iter()
+            .find_map(|c| app.world().get::<Text>(c))
+            .expect("a Text child exists");
+        assert_eq!(text.0, "Continue");
+    }
+
+    /// Hovering an image-backed button swaps its `ImageNode` to the hover
+    /// texture; a subsequent `Pressed` insertion (without a `Hovered`
+    /// re-trigger) is NOT expected to re-swap in this same frame — matching
+    /// `update_button_visuals`'s own documented `Changed<Hovered>`-only
+    /// limitation, which this system deliberately mirrors for consistency.
+    /// ALSO asserts `update_button_visuals` (registered in this same test
+    /// app, see `new_image_app`) never repaints this button's unavoidable
+    /// default `BackgroundColor` (`Node`'s own required-components default,
+    /// not something either button constructor adds deliberately) — proving
+    /// its `Without<HudButtonImages>` filter actually isolates the two
+    /// systems, not merely that a plain test never registered the flat one.
+    #[test]
+    fn hovering_an_image_button_swaps_to_hover_texture_and_leaves_background_untouched() {
+        let mut app = new_image_app();
+        let theme = HudTheme::default();
+        let fonts = crate::theme::HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        };
+        let images = distinct_button_images();
+        let hover = images.hover.clone();
+
+        let button = app
+            .world_mut()
+            .spawn(image_button_bundle(&theme, &fonts, "Continue", images))
+            .id();
+        app.update();
+        let background_before = *app.world().get::<BackgroundColor>(button).unwrap();
+
+        app.world_mut().entity_mut(button).insert(Hovered(true));
+        app.update();
+
+        let image_node = app.world().get::<ImageNode>(button).unwrap();
+        assert_eq!(image_node.image, hover);
+        assert_eq!(
+            *app.world().get::<BackgroundColor>(button).unwrap(),
+            background_before,
+            "update_button_visuals must never repaint an image-backed button's background"
+        );
     }
 }

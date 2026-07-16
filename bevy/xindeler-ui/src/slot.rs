@@ -187,6 +187,32 @@ pub fn slot_bundle(
     )
 }
 
+/// BL-82 EM-5.17 T57.8 — a rarity-tiered variant of [`slot_bundle`]: the SAME
+/// slot (identical group/address/contents/drag-drop wiring), with the flat
+/// [`BackgroundColor`] fill overlaid by a rarity-texture [`ImageNode`] (e.g.
+/// `slot_bg_common.png`.. `slot_bg_mythic.png` via [`crate::images::
+/// HudImages`], keyed off Xindeler's existing item-quality tiers — a future
+/// phase's own mapping, not this primitive's concern). A wrapper around
+/// [`slot_bundle`] rather than an extra parameter on it, per this phase's own
+/// "prefer whichever additive shape needs zero existing-callsite changes"
+/// brief — every current `slot_bundle(..)` call site (bag/trade/hotbar
+/// screens) keeps compiling completely unchanged; a screen that wants a
+/// rarity background switches to this function instead, one call site at a
+/// time, whenever it's ready.
+#[must_use]
+pub fn slot_bundle_with_rarity(
+    theme: &HudTheme,
+    group: SlotGroup,
+    address: SlotAddress,
+    size_px: f32,
+    rarity_background: bevy::asset::Handle<bevy::image::Image>,
+) -> impl Bundle {
+    (
+        slot_bundle(theme, group, address, size_px),
+        bevy::ui::widget::ImageNode::new(rarity_background),
+    )
+}
+
 /// Reconciles every [`HudSlot`]'s icon-text/quantity-badge children against
 /// its current [`SlotContents`] — `Changed<SlotContents>`-gated, and further
 /// gated on the CONTENT actually needing a (re)spawn (children are reused,
@@ -432,6 +458,34 @@ mod tests {
             *app.world().get::<SlotAddress>(entity).unwrap(),
             SlotAddress(42)
         );
+    }
+
+    /// `slot_bundle_with_rarity` spawns a real `HudSlot` (same as plain
+    /// `slot_bundle`) that ALSO carries an `ImageNode` for the given rarity
+    /// texture — the T57.8 additive acceptance bar for the rarity-background
+    /// wrapper.
+    #[test]
+    fn slot_bundle_with_rarity_carries_image_node() {
+        let mut app = new_app();
+        let theme = HudTheme::default();
+        let rarity: Handle<Image> = Handle::default();
+        let entity = app
+            .world_mut()
+            .spawn(slot_bundle_with_rarity(
+                &theme,
+                SlotGroup(1),
+                SlotAddress(42),
+                48.0,
+                rarity.clone(),
+            ))
+            .id();
+
+        assert!(app.world().get::<HudSlot>(entity).is_some());
+        let image_node = app
+            .world()
+            .get::<bevy::ui::widget::ImageNode>(entity)
+            .expect("slot carries an ImageNode");
+        assert_eq!(image_node.image, rarity);
     }
 
     /// `SlotAddress`'s two packing helpers never collide (bag vs. equip
