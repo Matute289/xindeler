@@ -26,16 +26,20 @@
 
 use std::collections::HashMap;
 
-use bevy::prelude::*;
+use bevy::{prelude::*, ui::GlobalZIndex};
 use xindeler_protocol::{
     NetBuffs, NetCombo, NetEnergy, NetHealth, NetLocalPlayer, NetPoise, NetXp,
 };
 use xindeler_ui::{
-    bar::{BarValue, spawn_bar},
+    bar::{BarValue, spawn_bar, spawn_orb_bar},
     button::button_bundle,
+    images::{HudImageKey, HudImages},
     theme::{HudFonts, HudTheme},
     tooltip::Tooltip,
+    zlayer,
 };
+
+use crate::hud_layout;
 
 /// Marks the health bar's container entity (so [`sync_local_player_bars`]
 /// can update its [`BarValue`] without re-querying by position every frame).
@@ -99,7 +103,9 @@ impl Plugin for CombatHudViewPlugin {
         }
         app.add_systems(
             Startup,
-            spawn_combat_hud.after(xindeler_ui::theme::init_theme),
+            spawn_combat_hud
+                .after(xindeler_ui::theme::init_theme)
+                .after(xindeler_ui::images::init_images),
         )
         .add_systems(
             Update,
@@ -114,97 +120,153 @@ impl Plugin for CombatHudViewPlugin {
     }
 }
 
-/// Spawns every always-on combat HUD element: health/energy/poise/XP bars
-/// (top-left, stacked), a combo/level readout, an empty buff strip (filled
+/// Spawns every always-on combat HUD element: the bottom-centre 3-orb
+/// resource cluster (health/stamina/mana) + the 2-piece action bar's flanking
+/// XP bar/level readout (spec §3.1, BL-82 EM-5.17 Phase 2 — replaces the
+/// former top-left stacked health/energy/poise bars and the former top-right
+/// `LevelText`, closing Bug B), a combo readout, an empty buff strip (filled
 /// in by [`sync_buff_strip`] once real buffs arrive), a crosshair, the
 /// (initially hidden) death screen, and the (initially transparent) damage
 /// vignette.
-fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
-    // Health/energy/poise/XP bars, stacked top-left.
-    let health_bar = spawn_bar(
+fn spawn_combat_hud(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    images: Res<HudImages>,
+) {
+    // Bottom-centre resource-orb cluster (spec §3.1), left to right: Health
+    // (angel frame) — Stamina (a genuine full orb, dead centre, mirrors
+    // `NetPoise`) — Mana (cuthulhu frame, mirrors `NetEnergy`). Horizontal
+    // placement comes from `crate::hud_layout::CLUSTER`, the SAME arithmetic
+    // `hotbar.rs`'s two action-bar-half backgrounds use, so the two
+    // independent plugins render as one contiguous row (see that module's
+    // doc comment — including its asset-opacity finding, which means the
+    // liquid fill underneath each frame does not currently show through it).
+    let health_orb = spawn_orb_bar(
         &mut commands,
         &theme,
-        theme.palette.health,
-        theme.palette.health_bg,
-        220.0,
-        22.0,
+        images.get(HudImageKey::HealthLiquid),
+        Some(images.get(HudImageKey::OrbFrameAngel)),
+        hud_layout::ORB_SIZE_PX,
+        hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
     );
-    // NOTE (regression fix): `.entry::<Node>().and_modify(..)` mutates the
-    // EXISTING `Node` `spawn_bar` just inserted, instead of a second
-    // `insert(Node { .. })` that would REPLACE it wholesale and silently
-    // discard its width/height/overflow/border_radius — see this module's
-    // `spawn_combat_hud_keeps_every_bars_sizing_from_spawn_bar_intact` test
-    // for the full story and the exact symptom this regressed to.
+    // NOTE (regression precedent, see the historical comment this replaced):
+    // `.entry::<Node>().and_modify(..)` mutates the EXISTING `Node`
+    // `spawn_orb_bar` just inserted, instead of a second `insert(Node { .. })`
+    // that would REPLACE it wholesale and silently discard its
+    // width/height/overflow/border_radius.
     commands
-        .entity(health_bar)
-        .insert(HealthBarTag)
+        .entity(health_orb)
+        .insert((
+            HealthBarTag,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+        ))
         .entry::<Node>()
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
-            node.top = Val::Px(16.0);
-            node.left = Val::Px(16.0);
+            node.left = hud_layout::CENTER_LEFT;
+            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.health_orb_left));
         });
 
-    let energy_bar = spawn_bar(
+    let stamina_orb = spawn_orb_bar(
         &mut commands,
         &theme,
-        theme.palette.energy,
-        theme.palette.energy_bg,
-        220.0,
-        14.0,
+        images.get(HudImageKey::StaminaLiquid),
+        Some(images.get(HudImageKey::OrbFrameStamina)),
+        hud_layout::ORB_SIZE_PX,
+        hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
     );
     commands
-        .entity(energy_bar)
-        .insert(EnergyBarTag)
+        .entity(stamina_orb)
+        .insert((
+            PoiseBarTag,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+        ))
         .entry::<Node>()
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
-            node.top = Val::Px(42.0);
-            node.left = Val::Px(16.0);
+            node.left = hud_layout::CENTER_LEFT;
+            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.stamina_orb_left));
         });
 
-    let poise_bar = spawn_bar(
+    let mana_orb = spawn_orb_bar(
         &mut commands,
         &theme,
-        theme.palette.poise,
-        theme.palette.poise_bg,
-        220.0,
-        8.0,
+        images.get(HudImageKey::ManaLiquid),
+        Some(images.get(HudImageKey::OrbFrameCuthulhu)),
+        hud_layout::ORB_SIZE_PX,
+        hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
     );
     commands
-        .entity(poise_bar)
-        .insert(PoiseBarTag)
+        .entity(mana_orb)
+        .insert((
+            EnergyBarTag,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+        ))
         .entry::<Node>()
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
-            node.top = Val::Px(60.0);
-            node.left = Val::Px(16.0);
+            node.left = hud_layout::CENTER_LEFT;
+            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.mana_orb_left));
         });
+
+    // XP bar + the SINGLE canonical level readout, centred directly above the
+    // action bar's "core" span (both halves + the Stamina orb — spec §3.1;
+    // Bug B's fix removes the old top-right `LevelText` entirely, this is
+    // the only level readout left on screen outside the diary). A column
+    // flex container (not two independently-positioned nodes) so the level
+    // text centres over the (fixed-width) XP bar via `AlignItems::Center`
+    // rather than a guessed text-width offset.
+    let xp_cluster_root = commands
+        .spawn((GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP), Node {
+            position_type: PositionType::Absolute,
+            left: hud_layout::CENTER_LEFT,
+            bottom: Val::Px(
+                hud_layout::CLUSTER_BOTTOM_PX
+                    + hud_layout::ORB_SIZE_PX
+                    + hud_layout::XP_CLUSTER_GAP_PX,
+            ),
+            margin: UiRect::left(Val::Px(-hud_layout::ACTION_BAR_TOTAL_WIDTH_PX / 2.0)),
+            width: Val::Px(hud_layout::ACTION_BAR_TOTAL_WIDTH_PX),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(theme.spacing.xs),
+            ..Default::default()
+        }))
+        .with_children(|parent| {
+            parent.spawn((
+                LevelText,
+                Text("Lv. 1".to_owned()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(18.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text),
+            ));
+        })
+        .id();
 
     let xp_bar = spawn_bar(
         &mut commands,
         &theme,
         theme.palette.xp,
         theme.palette.xp_bg,
-        220.0,
+        hud_layout::ACTION_BAR_TOTAL_WIDTH_PX,
         6.0,
         BarValue::new(0.0, 1.0),
     );
-    commands
-        .entity(xp_bar)
-        .insert(XpBarTag)
-        .entry::<Node>()
-        .and_modify(|mut node| {
-            node.position_type = PositionType::Absolute;
-            node.bottom = Val::Px(0.0);
-            node.left = Val::Px(0.0);
-            node.width = Val::Percent(100.0);
-        });
+    commands.entity(xp_bar).insert(XpBarTag);
+    commands.entity(xp_cluster_root).add_child(xp_bar);
 
-    // Combo counter + level readout (top-right).
+    // Combo readout (unaffected by the bottom-centre reskin — stays
+    // top-right).
     commands.spawn((
         ComboText,
         Text(String::new()),
@@ -218,22 +280,6 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
             position_type: PositionType::Absolute,
             top: Val::Px(16.0),
             right: Val::Px(120.0),
-            ..Default::default()
-        },
-    ));
-    commands.spawn((
-        LevelText,
-        Text("Lv. 1".to_owned()),
-        TextFont {
-            font: bevy::text::FontSource::Handle(fonts.body.clone()),
-            font_size: bevy::text::FontSize::Px(18.0),
-            ..Default::default()
-        },
-        TextColor(theme.palette.text),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(16.0),
-            right: Val::Px(16.0),
             ..Default::default()
         },
     ));
@@ -262,12 +308,18 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         BackgroundColor(theme.palette.text),
     ));
 
-    // Death/respawn screen: hidden until NetHealth hits zero.
+    // Death/respawn screen: hidden until NetHealth hits zero. MODAL_WINDOWS
+    // z-tier (not just "spawned after the orbs/action bar," which stopped
+    // being a reliable ordering guarantee once those bars gained their own
+    // GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP) in this same phase — a
+    // node with a GlobalZIndex sorts as an independent stack partition, so
+    // an un-indexed sibling can end up BELOW it regardless of spawn order).
     let respawn_button = button_bundle(&theme, &fonts, "Respawn");
     commands
         .spawn((
             DeathScreenRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
@@ -299,9 +351,14 @@ fn spawn_combat_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         });
 
     // Low-health damage vignette: a full-screen overlay, alpha driven by
-    // `sync_death_screen_and_vignette` from `1.0 - health_fraction`.
+    // `sync_death_screen_and_vignette` from `1.0 - health_fraction`. Same
+    // MODAL_WINDOWS tier as the death screen it shares this spawn function
+    // with — a near-death warning is a crisis-state overlay, not a normal
+    // HUD panel, and must stay visible over the orb cluster/action bar
+    // rather than tinting underneath them.
     commands.spawn((
         DamageVignette,
+        GlobalZIndex(zlayer::MODAL_WINDOWS),
         Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -602,7 +659,7 @@ fn overhead_health_bars(
 
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::system::RunSystemOnce;
+    use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce, image::ImagePlugin};
     use common::comp::buff::BuffKind;
     use xindeler_protocol::NetBuffEntry;
 
@@ -615,30 +672,36 @@ mod tests {
         app
     }
 
+    /// [`spawn_combat_hud`] now needs a real [`HudImages`] (the orb/action-bar
+    /// art lookup) — built the same way `xindeler_ui::orb_material`'s own
+    /// tests build a headless `AssetServer` (a real asset type + loader
+    /// registration, no window/GPU needed just to allocate `Handle<Image>`s).
+    fn new_app_with_images() -> App {
+        let mut app = new_app();
+        app.add_plugins(AssetPlugin::default());
+        app.add_plugins(ImagePlugin::default());
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+        app
+    }
+
     /// Regression test for the bug a real play session hit (Matías, BL-82
     /// Phase 5 follow-up): only "Lv. 1" and one EMPTY gray rounded panel were
     /// visible — no health/energy/poise/XP fill, no crosshair content. Root
     /// cause: `spawn_combat_hud` did
     /// `commands.entity(bar).insert((Tag, Node { position_type, top, left,
-    /// ..Default::default() }))` on an entity [`bar::spawn_bar`] had ALREADY
-    /// given a real `Node` (explicit width/height/`Overflow::clip()`/
-    /// `border_radius`) — a second `insert` of the SAME component type
-    /// REPLACES it wholesale (`Node` isn't merged field-by-field), so the
-    /// `..Default::default()` silently discarded the bar's sizing, collapsing
-    /// every stat bar to a zero/auto-sized, invisible box while its sibling
-    /// `BackgroundColor` panel-ish container was the only thing left visibly
-    /// standing. This is exactly the "spawned but never actually renders"
-    /// class of bug the EM-5.1/5.2 PR's own reviewers already caught ONCE
-    /// (tooltip/notification widgets) — this was a second, unnoticed instance
-    /// in the very next module, because NONE of this module's other tests
-    /// call the real [`spawn_combat_hud`] (they all hand-build their own
-    /// fixture entities, bypassing the buggy code path entirely). This test
-    /// closes that gap: it calls `spawn_combat_hud` itself and asserts every
-    /// stat bar kept `spawn_bar`'s sizing/overflow/radius intact alongside
-    /// its position override.
+    /// ..Default::default() }))` on an entity [`bar::spawn_bar`]/
+    /// [`bar::spawn_orb_bar`] had ALREADY given a real `Node` (explicit
+    /// width/height/`Overflow::clip()`/`border_radius`) — a second `insert`
+    /// of the SAME component type REPLACES it wholesale (`Node` isn't merged
+    /// field-by-field), so the `..Default::default()` silently discarded the
+    /// bar's sizing. BL-82 EM-5.17 Phase 2 kept the `.entry::<Node>()
+    /// .and_modify(..)` fix for the three resource orbs (this test's
+    /// original regression target) and extended coverage to the new
+    /// bottom-centre cluster's positioning + the XP bar's new width.
     #[test]
-    fn spawn_combat_hud_keeps_every_bars_sizing_from_spawn_bar_intact() {
-        let mut app = new_app();
+    fn spawn_combat_hud_keeps_every_bars_sizing_and_cluster_position_intact() {
+        let mut app = new_app_with_images();
         app.insert_resource(HudFonts {
             title: Handle::default(),
             body: Handle::default(),
@@ -662,42 +725,134 @@ mod tests {
         let health = node_of::<HealthBarTag>(app.world_mut());
         assert_eq!(
             health.width,
-            Val::Px(220.0),
-            "health bar must keep spawn_bar's width, not collapse to Auto"
+            Val::Px(hud_layout::ORB_SIZE_PX),
+            "health orb must keep spawn_orb_bar's width, not collapse to Auto"
         );
-        assert_eq!(health.height, Val::Px(22.0));
+        assert_eq!(health.height, Val::Px(hud_layout::ORB_SIZE_PX));
         assert_eq!(health.overflow, clip);
         assert_eq!(health.border_radius, non_zero_radius);
         assert_eq!(health.position_type, PositionType::Absolute);
-        assert_eq!(health.top, Val::Px(16.0));
-        assert_eq!(health.left, Val::Px(16.0));
-
-        let energy = node_of::<EnergyBarTag>(app.world_mut());
-        assert_eq!(energy.width, Val::Px(220.0));
-        assert_eq!(energy.height, Val::Px(14.0));
-        assert_eq!(energy.overflow, clip);
-        assert_eq!(energy.border_radius, non_zero_radius);
-        assert_eq!(energy.top, Val::Px(42.0));
-        assert_eq!(energy.left, Val::Px(16.0));
+        assert_eq!(health.left, hud_layout::CENTER_LEFT);
+        assert_eq!(health.bottom, Val::Px(hud_layout::CLUSTER_BOTTOM_PX));
+        assert_eq!(
+            health.margin.left,
+            Val::Px(hud_layout::CLUSTER.health_orb_left)
+        );
 
         let poise = node_of::<PoiseBarTag>(app.world_mut());
-        assert_eq!(poise.width, Val::Px(220.0));
-        assert_eq!(poise.height, Val::Px(8.0));
+        assert_eq!(poise.width, Val::Px(hud_layout::ORB_SIZE_PX));
+        assert_eq!(poise.height, Val::Px(hud_layout::ORB_SIZE_PX));
         assert_eq!(poise.overflow, clip);
         assert_eq!(poise.border_radius, non_zero_radius);
-        assert_eq!(poise.top, Val::Px(60.0));
-        assert_eq!(poise.left, Val::Px(16.0));
+        assert_eq!(
+            poise.margin.left,
+            Val::Px(hud_layout::CLUSTER.stamina_orb_left)
+        );
+
+        let energy = node_of::<EnergyBarTag>(app.world_mut());
+        assert_eq!(energy.width, Val::Px(hud_layout::ORB_SIZE_PX));
+        assert_eq!(energy.height, Val::Px(hud_layout::ORB_SIZE_PX));
+        assert_eq!(energy.overflow, clip);
+        assert_eq!(energy.border_radius, non_zero_radius);
+        assert_eq!(
+            energy.margin.left,
+            Val::Px(hud_layout::CLUSTER.mana_orb_left)
+        );
 
         let xp = node_of::<XpBarTag>(app.world_mut());
-        // The XP bar's width is DELIBERATELY overridden to fill the screen
-        // (unlike the other three) — but its height/overflow/radius must
-        // still survive from `spawn_bar`.
-        assert_eq!(xp.width, Val::Percent(100.0));
+        // The XP bar now spans the action bar's "core" width (both halves +
+        // the Stamina orb), not the old full-screen `Percent(100.0)` — but
+        // height/overflow/radius must still survive from `spawn_bar`.
+        assert_eq!(xp.width, Val::Px(hud_layout::ACTION_BAR_TOTAL_WIDTH_PX));
         assert_eq!(xp.height, Val::Px(6.0));
         assert_eq!(xp.overflow, clip);
         assert_eq!(xp.border_radius, non_zero_radius);
-        assert_eq!(xp.bottom, Val::Px(0.0));
-        assert_eq!(xp.left, Val::Px(0.0));
+    }
+
+    /// BL-82 EM-5.17 Phase 2 (Bug B follow-through): exactly ONE character-
+    /// level readout node exists after `spawn_combat_hud` — the old
+    /// top-right `LevelText` is gone, replaced by the single readout in the
+    /// bottom-centre XP cluster. Guards against Bug B's "two Lv.1 texts on
+    /// screen" regression recurring on the code side (the diary-visibility
+    /// half of Bug B is Phase 0's fix, in a different file).
+    #[test]
+    fn spawn_combat_hud_creates_exactly_one_level_readout() {
+        let mut app = new_app_with_images();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_combat_hud)
+            .expect("spawn_combat_hud runs");
+
+        let count = app
+            .world_mut()
+            .query_filtered::<Entity, With<LevelText>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(count, 1, "exactly one LevelText readout must exist");
+    }
+
+    /// A resource orb spawned through this screen's own real
+    /// `spawn_orb_bar` call site (same image handles/size `spawn_combat_hud`
+    /// uses for the health orb) carries the correct [`BarValue`] and a real
+    /// fill child (`HudOrbBarFill`) whose height reflects the fraction it
+    /// was spawned with — mirrors `xindeler_ui::bar`'s own
+    /// `orb_bar_fill_tracks_value_changes_by_height` acceptance bar. This
+    /// tests the SPAWN-time fraction (not a later `BarValue` mutation): the
+    /// system that resizes the fill child on a LATER change
+    /// (`xindeler_ui::bar::update_orb_bars`) is `pub(crate)` to
+    /// `xindeler-ui` and already covered by that crate's own tests; from
+    /// `xindeler-client` the observable contract is "the orb this screen
+    /// spawns is a real `spawn_orb_bar` at the value it's given," which this
+    /// asserts directly.
+    #[test]
+    fn health_orb_spawns_with_correct_value_and_half_height_fill() {
+        let mut app = new_app_with_images();
+        let theme = HudTheme::default();
+        let images = app.world().resource::<HudImages>().clone();
+
+        let health_orb_entity = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_orb_bar(
+                &mut commands,
+                &theme,
+                images.get(HudImageKey::HealthLiquid),
+                Some(images.get(HudImageKey::OrbFrameAngel)),
+                hud_layout::ORB_SIZE_PX,
+                hud_layout::ORB_SIZE_PX,
+                BarValue::new(50.0, 100.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<BarValue>(health_orb_entity).unwrap(),
+            BarValue::new(50.0, 100.0)
+        );
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(health_orb_entity)
+            .expect("the orb has fill/frame children")
+            .iter()
+            .collect();
+        let fill_entity = children
+            .into_iter()
+            .find(|&e| {
+                app.world()
+                    .get::<xindeler_ui::bar::HudOrbBarFill>(e)
+                    .is_some()
+            })
+            .expect("a HudOrbBarFill child exists");
+        assert_eq!(
+            app.world().get::<Node>(fill_entity).unwrap().height,
+            Val::Percent(50.0)
+        );
     }
 
     /// The EM-5.2 acceptance bar (spec §6): spawning a `NetLocalPlayer`
