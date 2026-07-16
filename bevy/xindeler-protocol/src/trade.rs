@@ -156,6 +156,11 @@ mod tests {
                 quality: Quality::Common,
                 amount: 20,
                 is_two_handed: false,
+                // BL-82 EM-5.18 T58.7 — mechanical fixup: `NetItemStack`
+                // gained this field for the equip-picker (`inventory.rs`);
+                // coins are non-equippable, matching the field's own
+                // documented `[]` default for that case.
+                equippable_slots: Vec::new(),
             },
             offered: 5,
             owned: 20,

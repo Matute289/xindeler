@@ -69,6 +69,13 @@ pub const CHAT: i32 = 30;
 /// every always-on panel below this line.
 pub const MODAL_WINDOWS: i32 = 100;
 
+/// A modal opened from WITHIN another already-open modal (BL-82 EM-5.18
+/// T58.9) — the equip-picker (a click-to-equip item list opened from inside
+/// the already-open Inventory window) is the first consumer, but not
+/// necessarily the only one: any future "modal-on-modal" screen should reuse
+/// this same tier rather than inventing its own ad-hoc number.
+pub const MODAL_WINDOWS_STACKED: i32 = 150;
+
 /// Hover tooltips — must always draw over whatever spawned them, including
 /// a modal window's own tooltip (e.g. an inventory item's tooltip while the
 /// inventory modal is open).
@@ -93,6 +100,7 @@ mod tests {
             BOSS_NAMEPLATE,
             CHAT,
             MODAL_WINDOWS,
+            MODAL_WINDOWS_STACKED,
             TOOLTIP,
             TOAST,
         ];
