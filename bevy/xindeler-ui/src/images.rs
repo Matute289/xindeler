@@ -40,11 +40,29 @@
 //! landmine for asset-path string literals and general repo hygiene); the
 //! enum below and every `AssetServer::load` path use the clean
 //! `"skill_slot_border.png"` name.
+//!
+//! ## Some `.png` files are actually JPEG bytes (BL-82 EM-5.17 Phase 6 fix)
+//! Found via a live `--smoke-screenshot` of the Phase 6 skill-tree connector
+//! lines rendering as literally nothing: at least THREE of the 55 files
+//! copied from the art pack — `skill_line_active.png`, `skill_line_locked.png`,
+//! `orb_frame_stamina.png` — are JPEG-encoded bytes (`file(1)`/magic-byte
+//! confirmed: `FF D8 FF E0`, a JFIF SOI marker) saved with a `.png`
+//! extension, almost certainly an export-tool artifact of the same kind as
+//! the leading-space filename above. Bevy's default image-loader setting
+//! (`ImageFormatSetting::FromExtension`) trusts the extension, tries to
+//! decode JPEG bytes as PNG, fails, and the `Handle<Image>` never resolves —
+//! the `ImageNode` silently renders nothing (no error visible in a
+//! screenshot, no placeholder texture either). [`HudImages::load`] loads
+//! EVERY key with `ImageFormatSetting::Guess` instead (sniffs the real
+//! magic bytes via the `image` crate's `guess_format`, same behaviour for a
+//! genuinely-PNG file) so this asset-pack quirk can never silently blank out
+//! a texture again, for these 3 files or any future one sharing the same
+//! export artifact.
 
 use bevy::{
     asset::{AssetServer, Handle},
     ecs::{resource::Resource, system::Res},
-    image::Image,
+    image::{Image, ImageFormatSetting, ImageLoaderSettings},
 };
 
 /// The asset subfolder every `HudImageKey` variant resolves against,
@@ -253,12 +271,22 @@ pub struct HudImages {
 impl HudImages {
     /// Loads every [`HudImageKey`] variant's `Handle<Image>` via the
     /// [`AssetServer`] (hot-reloadable in dev, same as [`crate::theme::
-    /// HudFonts::load`]).
+    /// HudFonts::load`]). Uses `ImageFormatSetting::Guess` (content-sniffed,
+    /// not the file extension) — see this module's own doc comment for why:
+    /// at least 3 of the 55 real files are JPEG bytes under a `.png` name,
+    /// which the default `FromExtension` setting fails to decode.
     #[must_use]
     pub fn load(asset_server: &AssetServer) -> Self {
         let handles = HudImageKey::ALL
             .iter()
-            .map(|key| asset_server.load(format!("{HUD_D4_DIR}/{}", key.filename())))
+            .map(|key| {
+                asset_server
+                    .load_builder()
+                    .with_settings(|settings: &mut ImageLoaderSettings| {
+                        settings.format = ImageFormatSetting::Guess;
+                    })
+                    .load(format!("{HUD_D4_DIR}/{}", key.filename()))
+            })
             .collect();
         Self { handles }
     }
