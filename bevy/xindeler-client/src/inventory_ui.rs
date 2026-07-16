@@ -60,8 +60,32 @@
 //! Same-tab dragging (bag-to-bag reordering within Items; weapon-set-to-
 //! weapon-set within Equipment) is untouched and keeps working, since both
 //! ends of a same-tab drag stay mounted together.
+//!
+//! ## Click-to-equip picker modal (BL-82 EM-5.18 Phase 2)
+//! Closes the P1 gap noted above: clicking an equip slot
+//! ([`spawn_equip_slot`]'s new `.observe(On<Pointer<Click>>, ..)`, T58.10)
+//! opens [`EquipPickerRoot`] — a SIBLING of [`InventoryWindowRoot`] (not
+//! nested inside its `Row` panel), listing every bag item whose (server-
+//! computed, T58.7) `NetItemStack::equippable_slots` contains the clicked
+//! slot, plus an "Unequip" row when the slot is already occupied
+//! ([`rebuild_equip_picker_contents`], T58.12). Picking a row (or Unequip)
+//! sends the SAME `InventoryActionRequest(InventoryManip::Swap(..))` drag-
+//! drop already sent (spec §3.3) and closes the picker. [`EquipPickerState`]
+//! (a plain resource, outside `HudState` — no `HudWindow` variant fits a
+//! transient sub-modal of an already-open window) tracks which slot (if any)
+//! is open; [`sync_equip_picker_visibility`] toggles the root's
+//! `Visibility` (NOT `Node::display` — this root has no `Row`-direction
+//! flex siblings of its own, unlike P1's tab toggle, so `Visibility` is safe
+//! here). `Escape` closes the picker ([`close_equip_picker_on_escape`],
+//! T58.13) — see that system's own doc comment for why this is collision-
+//! free with `camera.rs`/`chat.rs`/`map_view.rs`'s own independent `Escape`
+//! consumers.
 
-use bevy::{ecs::schedule::common_conditions::not, prelude::*};
+use bevy::{
+    ecs::schedule::common_conditions::not,
+    picking::events::{Click, Pointer},
+    prelude::*,
+};
 use common::comp::inventory::{
     item::Quality,
     slot::{ArmorSlot, EquipSlot, InvSlotId, Slot},
@@ -74,10 +98,15 @@ use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
     images::{HudImageKey, HudImages},
-    panel::panel_bundle,
-    slot::{HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
+    panel::{image_panel_bundle, panel_bundle},
+    scroll::scroll_view_bundle,
+    slot::{
+        HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle,
+        slot_bundle_with_rarity,
+    },
     theme::{HudFonts, HudTheme},
     tooltip::TooltipBackground,
+    zlayer,
 };
 
 use crate::chat::text_input_focused;
@@ -92,6 +121,17 @@ use crate::chat::text_input_focused;
 /// an offer, or an offer item back OUT to the bag).
 pub(crate) const BAG_GROUP: SlotGroup = SlotGroup(1);
 const EQUIP_GROUP: SlotGroup = SlotGroup(2);
+/// BL-82 EM-5.18 Phase 2 — the equip-picker's candidate-item rows (T58.12).
+/// A fresh [`SlotGroup`] alongside hotbar (`0`)/bag (`1`)/equip (`2`)/the two
+/// trade-offer groups (`3`/`4`)/`diary.rs`'s Abilities tab (`5`) — reusing
+/// [`slot_bundle_with_rarity`] for a picker row's icon means it inherits the
+/// SAME global drag-drop observers every [`HudSlot`] gets
+/// (`xindeler_ui::slot::install_observers`); a drag started FROM a picker row
+/// is harmless (this group isn't recognized by [`address_to_slot`], so any
+/// resulting `SlotDropped` resolves to `None` and is silently ignored, the
+/// same "unknown group" contract this file already tests) — flagged, not a
+/// blocker.
+const EQUIP_PICKER_GROUP: SlotGroup = SlotGroup(6);
 
 /// BL-82 EM-5.17 T57.14 — the confirmed 18-of-22-slot Equipment panel layout
 /// (spec §3.7, Matías's direct confirmation): two full weapon SETS
@@ -181,6 +221,42 @@ struct ItemsTabRoot;
 #[derive(Component)]
 struct EquipmentTabRoot;
 
+/// BL-82 EM-5.18 Phase 2 (T58.11, spec §3.3) — which [`EquipSlot`] the
+/// click-to-equip picker modal currently shows candidates for (`None` =
+/// closed). Lives OUTSIDE [`HudState`] — no `HudWindow` variant fits a
+/// transient sub-modal of an already-open window (the same posture
+/// `social_hud.rs`'s `ActiveDialogue` already uses).
+#[derive(Resource, Default)]
+struct EquipPickerState {
+    open_slot: Option<EquipSlot>,
+}
+
+/// Marks the equip-picker modal's top-level root — a SIBLING of
+/// [`InventoryWindowRoot`] (not nested in its `Row` panel), spawned once at
+/// `Startup` (BL-82 EM-5.18 T58.11).
+#[derive(Component)]
+struct EquipPickerRoot;
+/// Marks the picker's scrollable content container — the parent
+/// [`rebuild_equip_picker_contents`] despawns/respawns children of.
+#[derive(Component)]
+struct EquipPickerContentRoot;
+/// Tags a rendered candidate-item row with the bag [`InvSlotId`] it
+/// represents — lets tests introspect which items [`rebuild_equip_picker_
+/// contents`] actually rendered without parsing the row's `Text` child.
+/// `#[allow(dead_code)]`: the `InvSlotId` field is only ever READ by this
+/// module's own tests (`picker_filters_items_to_compatible_equip_slots_only`)
+/// — no production call site needs to read it back (the click handler
+/// captures its own `bag_slot` by value instead) — documenting that as
+/// deliberate, not an oversight, so a non-`--all-targets` clippy run doesn't
+/// flag a real, tested field as unused.
+#[derive(Component)]
+#[allow(dead_code)]
+struct EquipPickerItemRow(InvSlotId);
+/// Tags the picker's "Unequip" row — lets tests assert its presence/absence
+/// without parsing button labels.
+#[derive(Component)]
+struct EquipPickerUnequipRow;
+
 /// Latches "have we spawned the `capacity`-sized bag grid yet" — the bag
 /// grid can't be spawned until the FIRST real `NetInventory` arrives (its
 /// capacity isn't known before then); a paper-doll's slot count is fixed
@@ -207,10 +283,14 @@ impl Plugin for InventoryUiPlugin {
         app.init_resource::<BagGridSpawned>()
             .init_resource::<LastSeenBag>()
             .init_resource::<InventoryTab>()
+            .init_resource::<EquipPickerState>()
             .add_systems(
                 Startup,
                 (
                     spawn_inventory_window.after(xindeler_ui::theme::init_theme),
+                    // BL-82 EM-5.18 T58.11 — a top-level SIBLING of
+                    // `InventoryWindowRoot`, not nested inside it.
+                    spawn_equip_picker_root.after(xindeler_ui::theme::init_theme),
                     force_open_inventory_for_smoke_capture,
                 ),
             )
@@ -240,6 +320,10 @@ impl Plugin for InventoryUiPlugin {
                     sync_two_handed_offhand_disable.after(spawn_bag_grid_once_capacity_known),
                     handle_slot_drops,
                     push_loot_pickup_notifications,
+                    // BL-82 EM-5.18 Phase 2 — the equip-picker modal.
+                    sync_equip_picker_visibility,
+                    rebuild_equip_picker_contents,
+                    close_equip_picker_on_escape,
                 ),
             );
     }
@@ -496,6 +580,15 @@ fn spawn_bag_grid_once_capacity_known(
 /// system that later mutates this same [`bevy::ui::widget::ImageNode`]'s tint
 /// (never its `image` handle — the frame itself never changes, only whether
 /// it's greyed).
+///
+/// BL-82 EM-5.18 T58.10 — also attaches [`on_equip_slot_click`], opening the
+/// equip-picker modal for THIS slot on click. Entirely additive/local to this
+/// function; `xindeler_ui::slot`/`trade_ui.rs`/`hotbar.rs` are untouched
+/// (spec §3.2). Two-handed-disabled Offhand slots already carry
+/// `Pickable::IGNORE` ([`sync_two_handed_offhand_disable`], unchanged) — the
+/// click observer simply never fires for them (`bevy_picking`'s own backend
+/// excludes `Pickable::IGNORE` entities from hit-testing before any observer
+/// runs), no extra guard needed here.
 fn spawn_equip_slot(
     parent: &mut ChildSpawnerCommands,
     theme: &HudTheme,
@@ -508,11 +601,30 @@ fn spawn_equip_slot(
         reason = "ALL_EQUIP_SLOTS has 22 entries, far below u32::MAX"
     )]
     let address = SlotAddress::from_equip_slot_discriminant(idx as u32);
-    parent.spawn((
-        slot_bundle(theme, EQUIP_GROUP, address, 48.0),
-        bevy::ui::widget::ImageNode::new(images.get(equip_slot_frame(equip_slot))),
-        TooltipBackground(HudImageKey::InventoryTooltipBg),
-    ));
+    parent
+        .spawn((
+            slot_bundle(theme, EQUIP_GROUP, address, 48.0),
+            bevy::ui::widget::ImageNode::new(images.get(equip_slot_frame(equip_slot))),
+            TooltipBackground(HudImageKey::InventoryTooltipBg),
+        ))
+        .observe(on_equip_slot_click(equip_slot));
+}
+
+/// BL-82 EM-5.18 T58.10 — builds the per-entity `.observe(On<Pointer<
+/// Click>>, ..)` closure [`spawn_equip_slot`] attaches to every equip slot:
+/// clicking it opens the equip-picker modal for THAT slot. Split out into a
+/// named function (rather than an inline closure at the call site) so
+/// [`equip_slot_click_opens_picker_with_correct_slot`] can attach the EXACT
+/// same wiring to a bare test entity without needing a full `HudTheme`/
+/// `HudImages`-backed [`spawn_equip_slot`] call (mirrors this file's own
+/// `spawn_equip_slot_for_test` convention of building only the shape a test
+/// needs).
+fn on_equip_slot_click(
+    equip_slot: EquipSlot,
+) -> impl Fn(On<Pointer<Click>>, ResMut<EquipPickerState>) + Send + Sync + 'static {
+    move |_: On<Pointer<Click>>, mut picker: ResMut<EquipPickerState>| {
+        picker.open_slot = Some(equip_slot);
+    }
 }
 
 /// BL-82 EM-5.17 T57.14 — the per-`EquipSlot` `equip_empty_*.png` frame
@@ -924,6 +1036,308 @@ fn push_loot_pickup_notifications(
     last_seen.baseline_established = true;
 }
 
+/// BL-82 EM-5.18 Phase 2 (T58.11, spec §3.3) — spawns the (initially hidden)
+/// equip-picker modal at `Startup`: a full-screen absolute dim backdrop
+/// ([`EquipPickerRoot`], `GlobalZIndex(zlayer::MODAL_WINDOWS_STACKED)` — one
+/// tier ABOVE `InventoryWindowRoot`'s own `MODAL_WINDOWS`, so it renders
+/// stacked on top of the already-open Inventory window) containing a
+/// centered [`image_panel_bundle`] (reusing [`HudImageKey::InventoryBg`] —
+/// unused elsewhere today, since [`spawn_inventory_window`] itself still uses
+/// the flat [`panel_bundle`]) wrapping a [`scroll_view_bundle`]
+/// ([`EquipPickerContentRoot`], the parent [`rebuild_equip_picker_contents`]
+/// fills in). A top-level SIBLING of [`InventoryWindowRoot`] — NOT nested in
+/// its `Row` panel (spec §3.3) — so opening it never perturbs the
+/// Inventory window's own tab layout.
+fn spawn_equip_picker_root(mut commands: Commands, theme: Res<HudTheme>, images: Res<HudImages>) {
+    commands
+        .spawn((
+            EquipPickerRoot,
+            Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS_STACKED),
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..Default::default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+        ))
+        .with_children(|backdrop| {
+            backdrop
+                .spawn(image_panel_bundle(
+                    &theme,
+                    images.get(HudImageKey::InventoryBg),
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        EquipPickerContentRoot,
+                        scroll_view_bundle(&theme, 360.0, 420.0),
+                    ));
+                });
+        });
+}
+
+/// Toggles [`EquipPickerRoot`]'s **`Visibility`** (NOT `Node::display`, spec
+/// §3.3) from [`EquipPickerState::open_slot`] — this root has no
+/// `Row`-direction flex siblings of its own (it's the only content under its
+/// backdrop, unlike P1's tab-content pair), so `Visibility::Hidden` doesn't
+/// hit the layout-summing hazard [`sync_inventory_tab_content_visibility`]'s
+/// own doc comment documents; toggling it here is safe and simpler.
+fn sync_equip_picker_visibility(
+    picker: Res<EquipPickerState>,
+    mut root: Query<&mut Visibility, With<EquipPickerRoot>>,
+) {
+    if !picker.is_changed() {
+        return;
+    }
+    let Ok(mut visibility) = root.single_mut() else {
+        return;
+    };
+    *visibility = if picker.open_slot.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+}
+
+/// Despawns every existing child of `root`, then hands the (now-empty)
+/// entity's `ChildSpawner` to `spawn_children` — mirrors `diary.rs::
+/// rebuild_children`'s exact shape (BL-82 EM-5.18 T58.12); duplicated rather
+/// than imported since that copy is private to `diary.rs`'s own module.
+fn rebuild_children(
+    commands: &mut Commands,
+    root: Entity,
+    children_query: &Query<&Children>,
+    spawn_children: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    if let Ok(children) = children_query.get(root) {
+        for &child in children {
+            commands.entity(child).despawn();
+        }
+    }
+    commands.entity(root).with_children(spawn_children);
+}
+
+/// BL-82 EM-5.18 T58.12 (spec §3.3) — rebuilds [`EquipPickerContentRoot`]'s
+/// children whenever [`EquipPickerState::open_slot`] changes: filters the
+/// local player's [`NetInventory::slots`] to items whose (T58.7)
+/// `equippable_slots` contains the open slot, prepending an "Unequip" row
+/// when the slot is currently occupied (`NetInventory::equipped`). Empties
+/// the content root (no rows) when the picker is closed or no local player
+/// is mirrored yet — degrade clean, spec §3.2.
+fn rebuild_equip_picker_contents(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    images: Res<HudImages>,
+    picker: Res<EquipPickerState>,
+    player: Query<&NetInventory, With<NetLocalPlayer>>,
+    content_root: Query<Entity, With<EquipPickerContentRoot>>,
+    children_query: Query<&Children>,
+) {
+    if !picker.is_changed() {
+        return;
+    }
+    let Ok(root_entity) = content_root.single() else {
+        return;
+    };
+
+    let Some(open_slot) = picker.open_slot else {
+        rebuild_children(&mut commands, root_entity, &children_query, |_parent| {});
+        return;
+    };
+
+    let Ok(inventory) = player.single() else {
+        rebuild_children(&mut commands, root_entity, &children_query, |_parent| {});
+        return;
+    };
+
+    let occupied = inventory
+        .equipped
+        .iter()
+        .any(|equipped| equipped.slot == open_slot && equipped.item.is_some());
+    let free_bag_slot = inventory
+        .slots
+        .iter()
+        .find(|slot| slot.item.is_none())
+        .map(|slot| slot.slot);
+    let candidates: Vec<(InvSlotId, &NetItemStack)> = inventory
+        .slots
+        .iter()
+        .filter_map(|net_slot| {
+            let item = net_slot.item.as_ref()?;
+            item.equippable_slots
+                .contains(&open_slot)
+                .then_some((net_slot.slot, item))
+        })
+        .collect();
+
+    rebuild_children(&mut commands, root_entity, &children_query, |parent| {
+        if occupied {
+            spawn_unequip_row(parent, &theme, &fonts, open_slot, free_bag_slot);
+        }
+        for (bag_slot, item) in candidates {
+            spawn_candidate_row(parent, &theme, &fonts, &images, bag_slot, item, open_slot);
+        }
+    });
+}
+
+/// BL-82 EM-5.18 T58.12 (spec §3.3 step 2) — the "Unequip" row: a plain
+/// themed [`button_bundle`] (no item icon), tagged [`EquipPickerUnequipRow`].
+/// Its click computes the first empty bag [`InvSlotId`] (`free_bag_slot`,
+/// already resolved by the caller from the local player's own mirrored
+/// `NetInventory` — no protocol addition needed) and sends
+/// `InventoryManip::Swap(Slot::Equip(open_slot), Slot::Inventory(free_slot))`.
+/// If the bag has no free slot, the row renders disabled
+/// (`bevy::ui::InteractionDisabled` — a documented, non-blocking edge case,
+/// spec §3.3).
+fn spawn_unequip_row(
+    parent: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    open_slot: EquipSlot,
+    free_bag_slot: Option<InvSlotId>,
+) {
+    let mut row = parent.spawn((
+        button_bundle(theme, fonts, "Unequip"),
+        EquipPickerUnequipRow,
+    ));
+    match free_bag_slot {
+        Some(free_bag_slot) => {
+            row.observe(on_unequip_row_click(open_slot, free_bag_slot));
+        },
+        None => {
+            row.insert(bevy::ui::InteractionDisabled);
+        },
+    }
+}
+
+/// BL-82 EM-5.18 T58.12 — the "Unequip" row's click handler, split out so
+/// [`picking_an_item_sends_swap_and_closes_picker`]'s sibling test can attach
+/// the EXACT same wiring directly (mirrors [`on_equip_slot_click`]'s own
+/// split for the same reason).
+fn on_unequip_row_click(
+    open_slot: EquipSlot,
+    free_bag_slot: InvSlotId,
+) -> impl Fn(On<Activate>, ResMut<EquipPickerState>, MessageWriter<InventoryActionRequest>)
++ Send
++ Sync
++ 'static {
+    move |_: On<Activate>,
+          mut picker: ResMut<EquipPickerState>,
+          mut requests: MessageWriter<InventoryActionRequest>| {
+        requests.write(InventoryActionRequest(common::comp::InventoryManip::Swap(
+            Slot::Equip(open_slot),
+            Slot::Inventory(free_bag_slot),
+        )));
+        picker.open_slot = None;
+    }
+}
+
+/// BL-82 EM-5.18 T58.12 (spec §3.3 step 3) — one candidate-item row: reuses
+/// [`slot_bundle_with_rarity`] (rarity background + icon/quantity via
+/// [`SlotContents`], matching the bag grid's existing rendering — no new
+/// visual vocabulary, per spec) + a plain name-label [`Text`] child, both
+/// under one clickable row container tagged [`EquipPickerItemRow`]. Clicking
+/// anywhere on the row sends `InventoryManip::Swap(Slot::Inventory(bag_slot),
+/// Slot::Equip(open_slot))` and closes the picker.
+fn spawn_candidate_row(
+    parent: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: &HudImages,
+    bag_slot: InvSlotId,
+    item: &NetItemStack,
+    open_slot: EquipSlot,
+) {
+    let rarity_bg = images.get(quality_rarity_background(item.quality));
+    let contents = net_item_to_slot_contents(Some(item));
+    let name = item.name.clone();
+    parent
+        .spawn((
+            EquipPickerItemRow(bag_slot),
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(4.0)),
+                ..Default::default()
+            },
+            bevy::picking::Pickable::default(),
+        ))
+        .with_children(|row| {
+            row.spawn(slot_bundle_with_rarity(
+                theme,
+                EQUIP_PICKER_GROUP,
+                SlotAddress::from_inv_slot_idx(bag_slot.idx()),
+                40.0,
+                rarity_bg,
+            ))
+            .insert(contents);
+            row.spawn((
+                Text(name),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(16.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text),
+            ));
+        })
+        .observe(on_candidate_row_click(bag_slot, open_slot));
+}
+
+/// BL-82 EM-5.18 T58.12 — a candidate row's click handler, split out so
+/// [`picking_an_item_sends_swap_and_closes_picker`] can attach the EXACT same
+/// wiring directly (mirrors [`on_equip_slot_click`]'s own split).
+fn on_candidate_row_click(
+    bag_slot: InvSlotId,
+    open_slot: EquipSlot,
+) -> impl Fn(On<Pointer<Click>>, ResMut<EquipPickerState>, MessageWriter<InventoryActionRequest>)
++ Send
++ Sync
++ 'static {
+    move |_: On<Pointer<Click>>,
+          mut picker: ResMut<EquipPickerState>,
+          mut requests: MessageWriter<InventoryActionRequest>| {
+        requests.write(InventoryActionRequest(common::comp::InventoryManip::Swap(
+            Slot::Inventory(bag_slot),
+            Slot::Equip(open_slot),
+        )));
+        picker.open_slot = None;
+    }
+}
+
+/// BL-82 EM-5.18 T58.13 (spec §5) — `Escape` closes the equip-picker modal
+/// while it's open. Mirrors `map_view.rs::close_full_map_on_escape`'s own
+/// scoping precedent (EM-5.17 Phase 0's root-caused Escape-collision bug for
+/// the map view): reads the raw `ButtonInput<KeyCode>` directly (there's no
+/// rebindable "close modal" `GameInput` action) and is deliberately NOT
+/// gated on `!text_input_focused` — `Escape` is never a typing-collision
+/// risk (not a printable character), so gating it on chat focus would wrongly
+/// block closing an already-open picker while chat happens to hold focus.
+///
+/// Collision check against every OTHER existing `KeyCode::Escape` consumer in
+/// this crate (verified 2026-07-16, BL-82 EM-5.18): `camera.rs` releases the
+/// cursor grab, `chat.rs` blurs the chat input, `map_view.rs` closes the full
+/// map — EACH keys off its OWN state (`CursorGrabMode`/`InputFocus`/
+/// `HudState::is_open(HudWindow::Map)` respectively), not a shared "generic
+/// Escape" dispatcher, so a SINGLE physical Escape press already fires
+/// several of these independently and harmlessly today. This system follows
+/// the identical shape, scoped purely by `EquipPickerState::open_slot` being
+/// `Some` — a fifth independent consumer, additive and collision-free by
+/// construction.
+fn close_equip_picker_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut picker: ResMut<EquipPickerState>,
+) {
+    if keys.just_pressed(KeyCode::Escape) && picker.open_slot.is_some() {
+        picker.open_slot = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -931,7 +1345,7 @@ mod tests {
         item::ItemDefinitionIdOwned,
         slot::{ArmorSlot, EquipSlot},
     };
-    use xindeler_protocol::NetEquippedSlot;
+    use xindeler_protocol::{NetEquippedSlot, NetInventorySlot};
 
     use super::*;
 
@@ -1034,6 +1448,7 @@ mod tests {
             amount: 1,
             quality: Quality::Common,
             is_two_handed: true,
+            equippable_slots: vec![EquipSlot::ActiveMainhand, EquipSlot::InactiveMainhand],
         }
     }
 
@@ -1046,7 +1461,64 @@ mod tests {
             amount: 1,
             quality: Quality::Common,
             is_two_handed: false,
+            equippable_slots: vec![
+                EquipSlot::ActiveMainhand,
+                EquipSlot::ActiveOffhand,
+                EquipSlot::InactiveMainhand,
+                EquipSlot::InactiveOffhand,
+            ],
         }
+    }
+
+    /// A real armor stack usable as an equip-picker candidate fixture (BL-82
+    /// EM-5.18 T58.14) — `equippable_slots` restricted to exactly ONE slot,
+    /// so filtering tests can assert an item is excluded from every OTHER
+    /// slot's candidate list.
+    fn feet_armor_stack() -> NetItemStack {
+        NetItemStack {
+            item_id: ItemDefinitionIdOwned::Simple("common.items.testing.test_boots".to_owned()),
+            name: "Testing Boots".to_owned(),
+            amount: 1,
+            quality: Quality::Low,
+            is_two_handed: false,
+            equippable_slots: vec![EquipSlot::Armor(ArmorSlot::Feet)],
+        }
+    }
+
+    /// Fires a synthetic [`Pointer<Click>`] at `entity` — mirrors
+    /// `diary.rs`'s own `world.trigger(Activate { entity: node })` test
+    /// precedent, generalized to `bevy_picking`'s `Pointer<E>` shape (the
+    /// `NormalizedRenderTarget::None` variant + `Entity::PLACEHOLDER` camera
+    /// need no real window/camera/AssetServer — this is a headless,
+    /// synthetic event, not a real picking-backend dispatch; see
+    /// `on_equip_slot_click`'s own doc comment for why testing the OBSERVER
+    /// this way, rather than re-exercising `bevy_picking`'s own hit-testing,
+    /// is this crate's established convention).
+    fn fire_pointer_click(world: &mut World, entity: Entity) {
+        use bevy::picking::{
+            backend::HitData,
+            pointer::{Location, PointerButton, PointerId},
+        };
+
+        let location = Location {
+            target: bevy::camera::NormalizedRenderTarget::None {
+                width: 0,
+                height: 0,
+            },
+            position: Vec2::ZERO,
+        };
+        let click = Click {
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        };
+        world.trigger(Pointer::new_without_propagate(
+            PointerId::Mouse,
+            location,
+            click,
+            entity,
+        ));
     }
 
     /// BL-82 EM-5.17 T57.15 — the core behavioral requirement from spec
@@ -1218,5 +1690,241 @@ mod tests {
         assert_eq!(sent, vec![InventoryActionRequest(
             common::comp::InventoryManip::Swap(Slot::Inventory(from_inv), Slot::Inventory(to_inv),)
         )]);
+    }
+
+    /// A real, headless `App` carrying `HudTheme`/`HudFonts`/a real (test)
+    /// `HudImages` (via `AssetPlugin` + `HudImages::load`, mirroring
+    /// `social_hud.rs`'s own established "AssetPlugin::default() for a real
+    /// AssetServer in a headless test" precedent — `HudImages`'s fields are
+    /// private to `xindeler_ui::images`, so `load` is the only public
+    /// constructor a downstream crate's test can use) — for tests exercising
+    /// [`rebuild_equip_picker_contents`], which needs all three resources.
+    fn new_app_with_hud_resources() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+        app.insert_resource(EquipPickerState::default());
+        app.add_message::<InventoryActionRequest>();
+        app
+    }
+
+    /// BL-82 EM-5.18 T58.14 — clicking an equip slot's real observer wiring
+    /// ([`on_equip_slot_click`], the SAME closure [`spawn_equip_slot`]
+    /// attaches) sets `EquipPickerState::open_slot` to THAT slot.
+    #[test]
+    fn equip_slot_click_opens_picker_with_correct_slot() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(EquipPickerState::default());
+
+        let slot = EquipSlot::Armor(ArmorSlot::Feet);
+        let entity = spawn_equip_slot_for_test(app.world_mut(), slot);
+        app.world_mut()
+            .entity_mut(entity)
+            .observe(on_equip_slot_click(slot));
+
+        fire_pointer_click(app.world_mut(), entity);
+
+        assert_eq!(
+            app.world().resource::<EquipPickerState>().open_slot,
+            Some(slot)
+        );
+    }
+
+    /// BL-82 EM-5.18 T58.14 — a two-handed-disabled Offhand slot's click
+    /// observer is wired IDENTICALLY to every other equip slot
+    /// (`spawn_equip_slot` never special-cases Offhand) — the ONLY thing
+    /// that keeps a REAL click from ever opening the picker for it is
+    /// `Pickable::IGNORE`, which `sync_two_handed_offhand_disable` already
+    /// sets (T57.15). `bevy_picking`'s own backend (`ui_picking`,
+    /// `bevy_ui::picking_backend`) excludes `Pickable::IGNORE` entities from
+    /// hit-testing before any observer ever runs — that dispatch guarantee
+    /// is `bevy_picking`'s own tested contract, not re-proven here (a raw
+    /// `World::trigger` bypasses it entirely, so firing one here would prove
+    /// the WRONG thing — see `fire_pointer_click`'s own doc comment). This
+    /// test instead pins the STATE that guarantee depends on, matching this
+    /// crate's own `install_observers_registers_without_panicking`
+    /// precedent (`xindeler-ui::slot`) for "prove the wiring is
+    /// structurally correct, not the picking backend's own internals".
+    #[test]
+    fn two_handed_offhand_slot_click_never_opens_picker() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+
+        let active_offhand = spawn_equip_slot_for_test(app.world_mut(), EquipSlot::ActiveOffhand);
+        app.world_mut()
+            .entity_mut(active_offhand)
+            .observe(on_equip_slot_click(EquipSlot::ActiveOffhand));
+
+        app.world_mut().spawn((NetLocalPlayer, NetInventory {
+            slots: Vec::new(),
+            equipped: vec![NetEquippedSlot {
+                slot: EquipSlot::ActiveMainhand,
+                item: Some(two_handed_weapon_stack()),
+            }],
+            capacity: 0,
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_two_handed_offhand_disable)
+            .expect("system runs");
+
+        assert_eq!(
+            *app.world()
+                .get::<bevy::picking::Pickable>(active_offhand)
+                .unwrap(),
+            bevy::picking::Pickable::IGNORE,
+            "sync_two_handed_offhand_disable must mark this slot Pickable::IGNORE — the sole \
+             guard preventing its (identically-wired) click observer from ever opening the picker \
+             in real play"
+        );
+    }
+
+    /// BL-82 EM-5.18 T58.14 — [`rebuild_equip_picker_contents`] renders only
+    /// the item whose `equippable_slots` contains the currently-open slot;
+    /// an item compatible with a DIFFERENT slot is excluded entirely.
+    #[test]
+    fn picker_filters_items_to_compatible_equip_slots_only() {
+        let mut app = new_app_with_hud_resources();
+
+        let feet_slot = InvSlotId::new(0, 0);
+        let weapon_slot = InvSlotId::new(0, 1);
+        app.world_mut().spawn((NetLocalPlayer, NetInventory {
+            slots: vec![
+                NetInventorySlot {
+                    slot: feet_slot,
+                    item: Some(feet_armor_stack()),
+                },
+                NetInventorySlot {
+                    slot: weapon_slot,
+                    item: Some(two_handed_weapon_stack()),
+                },
+            ],
+            equipped: Vec::new(),
+            capacity: 2,
+        }));
+        let content_root = app.world_mut().spawn(EquipPickerContentRoot).id();
+
+        *app.world_mut().resource_mut::<EquipPickerState>() = EquipPickerState {
+            open_slot: Some(EquipSlot::Armor(ArmorSlot::Feet)),
+        };
+        app.world_mut()
+            .run_system_once(rebuild_equip_picker_contents)
+            .expect("system runs");
+
+        let rendered: Vec<InvSlotId> = app
+            .world()
+            .get::<Children>(content_root)
+            .expect("content root has rendered rows")
+            .iter()
+            .filter_map(|child| {
+                app.world()
+                    .get::<EquipPickerItemRow>(child)
+                    .map(|row| row.0)
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![feet_slot],
+            "only the Feet-compatible item must render — the two-handed weapon's equippable_slots \
+             never contains Armor(Feet)"
+        );
+    }
+
+    /// BL-82 EM-5.18 T58.14 — the "Unequip" row appears ONLY when the open
+    /// slot is currently occupied (`NetInventory::equipped` has a real
+    /// item), and is absent when it's empty.
+    #[test]
+    fn unequip_row_appears_only_when_slot_occupied() {
+        let open_slot = EquipSlot::ActiveMainhand;
+
+        let has_unequip_row = |occupied: bool| -> bool {
+            let mut app = new_app_with_hud_resources();
+            app.world_mut().spawn((NetLocalPlayer, NetInventory {
+                slots: Vec::new(),
+                equipped: if occupied {
+                    vec![NetEquippedSlot {
+                        slot: open_slot,
+                        item: Some(one_handed_weapon_stack()),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                capacity: 0,
+            }));
+            let content_root = app.world_mut().spawn(EquipPickerContentRoot).id();
+
+            *app.world_mut().resource_mut::<EquipPickerState>() = EquipPickerState {
+                open_slot: Some(open_slot),
+            };
+            app.world_mut()
+                .run_system_once(rebuild_equip_picker_contents)
+                .expect("system runs");
+
+            app.world()
+                .get::<Children>(content_root)
+                .is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| app.world().get::<EquipPickerUnequipRow>(child).is_some())
+                })
+        };
+
+        assert!(
+            has_unequip_row(true),
+            "an occupied slot must render the Unequip row"
+        );
+        assert!(
+            !has_unequip_row(false),
+            "an empty slot must NOT render the Unequip row"
+        );
+    }
+
+    /// BL-82 EM-5.18 T58.14 — clicking a candidate row's real observer
+    /// wiring ([`on_candidate_row_click`], the SAME closure
+    /// [`spawn_candidate_row`] attaches) sends the real `InventoryManip::
+    /// Swap(Slot::Inventory(bag_slot), Slot::Equip(open_slot))` and closes
+    /// the picker (`open_slot` back to `None`).
+    #[test]
+    fn picking_an_item_sends_swap_and_closes_picker() {
+        use bevy::ecs::message::Messages;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<InventoryActionRequest>();
+        let open_slot = EquipSlot::Armor(ArmorSlot::Feet);
+        app.insert_resource(EquipPickerState {
+            open_slot: Some(open_slot),
+        });
+
+        let bag_slot = InvSlotId::new(0, 3);
+        let entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(entity)
+            .observe(on_candidate_row_click(bag_slot, open_slot));
+
+        fire_pointer_click(app.world_mut(), entity);
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<InventoryActionRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![InventoryActionRequest(
+            common::comp::InventoryManip::Swap(Slot::Inventory(bag_slot), Slot::Equip(open_slot))
+        )]);
+        assert_eq!(
+            app.world().resource::<EquipPickerState>().open_slot,
+            None,
+            "picking an item must close the picker"
+        );
     }
 }

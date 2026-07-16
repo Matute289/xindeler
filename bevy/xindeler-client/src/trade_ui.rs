@@ -408,6 +408,11 @@ mod tests {
                 amount: 10,
                 quality: Quality::Common,
                 is_two_handed: false,
+                // BL-82 EM-5.18 T58.7 — mechanical fixup: `NetItemStack`
+                // gained this field for the equip-picker (`inventory_ui.rs`);
+                // a potion is non-equippable, matching the field's own
+                // documented `[]` default for that case.
+                equippable_slots: Vec::new(),
             },
             offered: 3,
             owned: 10,

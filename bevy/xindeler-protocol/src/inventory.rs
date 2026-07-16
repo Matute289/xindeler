@@ -117,6 +117,16 @@ pub struct NetItemStack {
     /// every non-`Tool` item (armor, consumables, …), matching
     /// `EquipSlot::can_hold`'s own `Hands::One` default posture.
     pub is_two_handed: bool,
+    /// BL-82 EM-5.18 Phase 2 (T58.7, spec §3.4) — every [`EquipSlot`] this
+    /// item is compatible with, computed SERVER-SIDE by calling the real
+    /// authority ([`common::comp::inventory::slot::EquipSlot::can_hold`])
+    /// across every entry in [`crate::inventory::ALL_EQUIP_SLOTS`]. The
+    /// client NEVER re-implements slot-compatibility matching — it only ever
+    /// membership-tests this list (the same "project, don't dump" posture
+    /// this struct's own module doc comment already establishes for
+    /// `is_two_handed`). Empty for non-equippable items (consumables,
+    /// currency, quest items, etc.).
+    pub equippable_slots: Vec<EquipSlot>,
 }
 
 /// One bag slot, projected for the bag-grid UI (EM-5.6 T56.19) — EVERY
@@ -204,6 +214,7 @@ mod tests {
                 amount: 1,
                 quality: Quality::Common,
                 is_two_handed: false,
+                equippable_slots: vec![EquipSlot::ActiveMainhand],
             }),
         };
         // Round-trips through bincode the same way every other Net* payload
@@ -247,6 +258,7 @@ mod tests {
                 amount: 1,
                 quality: Quality::Common,
                 is_two_handed: true,
+                equippable_slots: vec![EquipSlot::ActiveMainhand, EquipSlot::InactiveMainhand],
             }),
         };
         let bytes =

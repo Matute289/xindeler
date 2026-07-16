@@ -79,6 +79,23 @@ pub(crate) fn item_is_two_handed(item: &comp::Item) -> bool {
     )
 }
 
+/// BL-82 EM-5.18 T58.7 — every [`comp::inventory::slot::EquipSlot`] `item` is
+/// compatible with, populating [`xindeler_protocol::NetItemStack::
+/// equippable_slots`] — see that field's own doc comment for why this
+/// projects rather than re-implements slot-compatibility matching. Calls the
+/// REAL authority, `EquipSlot::can_hold`, once per entry in
+/// [`xindeler_protocol::inventory::ALL_EQUIP_SLOTS`] — this crate never
+/// duplicates that match. `pub(crate)` (not private): `crate::trade`'s own
+/// `NetItemStack` construction site (`resolve_offer`) reuses this exact
+/// helper, the same way it already reuses [`item_is_two_handed`]/[`item_name`].
+pub(crate) fn item_equippable_slots(item: &comp::Item) -> Vec<comp::inventory::slot::EquipSlot> {
+    let kind = item.kind();
+    xindeler_protocol::inventory::ALL_EQUIP_SLOTS
+        .into_iter()
+        .filter(|slot| slot.can_hold(&kind))
+        .collect()
+}
+
 /// Reads the sim's `comp::Inventory` for every currently-mirrored entity and
 /// UPSERTs [`NetInventory`] (+ tags [`NetOwnerOnly`] with the entity's own
 /// `Uid`, for the per-owner visibility scoping — see
@@ -150,6 +167,7 @@ pub fn mirror_inventory_state(
                             amount: item.amount(),
                             quality: item.quality(),
                             is_two_handed: item_is_two_handed(item),
+                            equippable_slots: item_equippable_slots(item),
                         }),
                     })
                     .collect::<Vec<_>>();
@@ -167,6 +185,7 @@ pub fn mirror_inventory_state(
                                 amount: item.amount(),
                                 quality: item.quality(),
                                 is_two_handed: item_is_two_handed(item),
+                                equippable_slots: item_equippable_slots(item),
                             }
                         }),
                     })
@@ -583,5 +602,60 @@ mod tests {
             .expect("system runs");
 
         assert_eq!(resolved, None);
+    }
+
+    /// BL-82 EM-5.18 T58.8 — [`item_equippable_slots`] on a REAL armor item
+    /// (`Armor{kind: Foot, ..}`) resolves to exactly the one matching
+    /// [`EquipSlot`] — the core "projects the real authority" acceptance bar
+    /// for the equip-picker's data gap.
+    #[test]
+    fn item_equippable_slots_resolves_armor_to_its_one_matching_slot() {
+        use common::comp::inventory::slot::{ArmorSlot, EquipSlot};
+
+        let boots = comp::Item::new_from_asset_expect("common.items.testing.test_boots");
+        assert_eq!(item_equippable_slots(&boots), vec![EquipSlot::Armor(
+            ArmorSlot::Feet
+        )]);
+    }
+
+    /// A two-handed tool resolves to BOTH mainhands and NEITHER offhand —
+    /// `EquipSlot::can_hold` rejects `Hands::Two` on `*Offhand` (see that
+    /// function's own doc comment) — this is the same real greatsword asset
+    /// [`mirrors_is_two_handed_from_the_real_item_definition`] already uses.
+    #[test]
+    fn item_equippable_slots_resolves_a_two_handed_tool_to_both_mainhands_only() {
+        use common::comp::inventory::slot::EquipSlot;
+
+        let greatsword = comp::Item::new_from_asset_expect("common.items.weapons.sword.starter");
+        assert_eq!(item_equippable_slots(&greatsword), vec![
+            EquipSlot::ActiveMainhand,
+            EquipSlot::InactiveMainhand,
+        ]);
+    }
+
+    /// A one-handed tool resolves to all FOUR weapon slots (both mainhands
+    /// AND both offhands) — the same real starter-dagger asset
+    /// [`mirrors_is_two_handed_from_the_real_item_definition`] already uses.
+    #[test]
+    fn item_equippable_slots_resolves_a_one_handed_tool_to_all_four_weapon_slots() {
+        use common::comp::inventory::slot::EquipSlot;
+
+        let dagger =
+            comp::Item::new_from_asset_expect("common.items.weapons.dagger.starter_dagger");
+        assert_eq!(item_equippable_slots(&dagger), vec![
+            EquipSlot::ActiveMainhand,
+            EquipSlot::ActiveOffhand,
+            EquipSlot::InactiveMainhand,
+            EquipSlot::InactiveOffhand,
+        ]);
+    }
+
+    /// A non-equippable item (currency) resolves to an empty list — matching
+    /// [`xindeler_protocol::NetItemStack::equippable_slots`]'s own documented
+    /// `[]` default for this case.
+    #[test]
+    fn item_equippable_slots_resolves_a_non_equippable_item_to_empty() {
+        let coins = comp::Item::new_from_asset_expect("common.items.utility.coins");
+        assert!(item_equippable_slots(&coins).is_empty());
     }
 }
