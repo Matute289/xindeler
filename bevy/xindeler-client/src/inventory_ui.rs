@@ -35,6 +35,31 @@
 //! dropped item prop in the world) need a mirror of world item-drop entities
 //! that does not exist yet (only creatures/players are mirrored today,
 //! `NetBody`) — a real follow-up, not attempted in this task.
+//!
+//! ## Items / Equipment tab split (BL-82 EM-5.18 Phase 1)
+//! The bag grid ([`BagGridRoot`]) and the 18-slot paper-doll
+//! ([`PaperdollRoot`]) used to render as SIBLINGS in the same panel row (the
+//! Phase 7 "stacked in the same panel" problem Matías flagged live-testing).
+//! They are now split into two mutually-exclusive tabs — [`InventoryTab`]
+//! (a plain resource, not a component — mirrors `diary.rs`'s `DiaryTab`
+//! shape exactly, spec §1.3/§3.1) picks which of [`ItemsTabRoot`] (wraps
+//! `BagGridRoot`) / [`EquipmentTabRoot`] (wraps `PaperdollRoot`) is mounted
+//! with `Node::display: Flex` at a time — see
+//! [`sync_inventory_tab_content_visibility`]'s own doc comment for why
+//! `Node::display`, not `Visibility`, is the correct toggle here.
+//!
+//! **Temporary regression, expected and documented (NOT a bug):** because
+//! only one tab's slots are ever mounted with `Node::display: Flex`
+//! simultaneously, a bag slot and an equip slot are never BOTH laid out at
+//! the same time once the tabs are separate — Bevy cannot drag an item
+//! between an entity with a real layout box and one that is `Display::None`.
+//! **Between this Phase 1 merging and BL-82 EM-5.18 Phase 2 (the click-slot
+//! equip-picker modal) merging, there is NO way to equip or unequip an item
+//! via any path** — this is a structural, intentional consequence of the tab
+//! split itself (spec §3.1/§3.6), not a regression introduced by mistake.
+//! Same-tab dragging (bag-to-bag reordering within Items; weapon-set-to-
+//! weapon-set within Equipment) is untouched and keeps working, since both
+//! ends of a same-tab drag stay mounted together.
 
 use bevy::{ecs::schedule::common_conditions::not, prelude::*};
 use common::comp::inventory::{
@@ -46,11 +71,12 @@ use xindeler_protocol::{
     InventoryActionRequest, NetInventory, NetItemStack, NetLocalPlayer, inventory::ALL_EQUIP_SLOTS,
 };
 use xindeler_ui::{
+    button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
     images::{HudImageKey, HudImages},
     panel::panel_bundle,
     slot::{HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
-    theme::HudTheme,
+    theme::{HudFonts, HudTheme},
     tooltip::TooltipBackground,
 };
 
@@ -120,6 +146,41 @@ struct CenterEquipColumnRoot;
 #[derive(Component)]
 struct RightWeaponColumnRoot;
 
+/// The two tabs this inventory window splits into (BL-82 EM-5.18 Phase 1,
+/// spec §1/§3.1): "Items" = the bag grid ([`BagGridRoot`]), "Equipment" = the
+/// paper-doll ([`PaperdollRoot`] + its 3 columns). Mirrors `diary.rs`'s
+/// `DiaryTab` shape (a plain [`Resource`], not a component) but simplified —
+/// there's no dynamic tab list here (always exactly these 2), so the tab
+/// buttons spawn once in [`spawn_inventory_window`] rather than via a
+/// `sync_diary_tabs`-style reactive rebuild.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum InventoryTab {
+    #[default]
+    Items,
+    Equipment,
+}
+
+/// Marks the tab-button row container (BL-82 EM-5.18 Phase 1) — mirrors
+/// `diary.rs`'s `DiaryTabBar`.
+#[derive(Component)]
+struct InventoryTabBar;
+/// Tags a tab button with which [`InventoryTab`] it selects on click —
+/// mirrors `diary.rs`'s `DiaryTabButton`.
+#[derive(Component, Clone, Copy)]
+struct InventoryTabButton(InventoryTab);
+/// Wraps [`BagGridRoot`] — the Items tab's content root (BL-82 EM-5.18 Phase
+/// 1, spec §3.1). `BagGridRoot`'s own internal spawn logic
+/// ([`spawn_bag_grid_once_capacity_known`]) is completely unchanged; this is
+/// purely a new parent one level up.
+#[derive(Component)]
+struct ItemsTabRoot;
+/// Wraps [`PaperdollRoot`] (its 3 flanking/center columns) — the Equipment
+/// tab's content root (BL-82 EM-5.18 Phase 1, spec §3.1). `PaperdollRoot`'s
+/// own internal spawn logic is completely unchanged; this is purely a new
+/// parent one level up.
+#[derive(Component)]
+struct EquipmentTabRoot;
+
 /// Latches "have we spawned the `capacity`-sized bag grid yet" — the bag
 /// grid can't be spawned until the FIRST real `NetInventory` arrives (its
 /// capacity isn't known before then); a paper-doll's slot count is fixed
@@ -145,6 +206,7 @@ impl Plugin for InventoryUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BagGridSpawned>()
             .init_resource::<LastSeenBag>()
+            .init_resource::<InventoryTab>()
             .add_systems(
                 Startup,
                 (
@@ -165,6 +227,10 @@ impl Plugin for InventoryUiPlugin {
                         .after(xindeler_input::InputResolveSet)
                         .run_if(not(text_input_focused)),
                     sync_inventory_window_visibility,
+                    // BL-82 EM-5.18 Phase 1 — the Items/Equipment tab toggle;
+                    // see this system's own doc comment for why `Node::
+                    // display`, not `Visibility`.
+                    sync_inventory_tab_content_visibility,
                     spawn_bag_grid_once_capacity_known,
                     sync_slot_contents.after(spawn_bag_grid_once_capacity_known),
                     // BL-82 EM-5.17 T57.15 — must run after slots exist so a
@@ -179,12 +245,38 @@ impl Plugin for InventoryUiPlugin {
     }
 }
 
+/// A short display label for an [`InventoryTab`] — no i18n depth needed yet
+/// (matches this crate's other placeholder-label posture, e.g. `diary.rs`'s
+/// `group_label` for the parts real i18n doesn't cover).
+fn inventory_tab_label(tab: InventoryTab) -> &'static str {
+    match tab {
+        InventoryTab::Items => "Items",
+        InventoryTab::Equipment => "Equipment",
+    }
+}
+
 /// Spawns the (initially hidden) inventory window: a full-screen dim
-/// backdrop containing a themed panel with a paper-doll column (all 22
-/// equip slots — fixed size, spawned now) and an EMPTY bag-grid container
-/// ([`spawn_bag_grid_once_capacity_known`] fills it in once the real
-/// capacity is known).
-fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>) {
+/// backdrop containing a themed panel with a 2-button tab bar
+/// ([`InventoryTabBar`]) followed by [`ItemsTabRoot`] (wraps the bag grid,
+/// [`BagGridRoot`] — an EMPTY container; [`spawn_bag_grid_once_capacity_known`]
+/// fills it in once the real capacity is known) and [`EquipmentTabRoot`]
+/// (wraps the paper-doll, [`PaperdollRoot`] — all 22 equip slots, fixed size,
+/// spawned now).
+///
+/// BL-82 EM-5.18 Phase 1 (spec §3.1): before this change, `PaperdollRoot` and
+/// `BagGridRoot` spawned as SIBLINGS directly under this panel row — the
+/// "stacked in the same panel" problem Matías flagged live-testing. They are
+/// now each wrapped in their own tab-content root, and only ONE of
+/// `ItemsTabRoot`/`EquipmentTabRoot` is ever mounted with `Node::display:
+/// Flex` at a time (see [`sync_inventory_tab_content_visibility`]). Both
+/// tabs' INTERNAL content (the bag grid's later fill-in, the paper-doll's 3
+/// columns/`*_INDICES` constants/`spawn_equip_slot`) is byte-identical to
+/// Phase 7 — only this new wrapping parent + the tab bar are added. The tab
+/// set is fixed (always exactly 2), so — unlike `diary.rs`'s
+/// `sync_diary_tabs`, which reactively rebuilds a DYNAMIC tab list — the 2
+/// tab buttons spawn once, right here, with no reactive rebuild system
+/// needed.
+fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     commands
         .spawn((
             InventoryWindowRoot,
@@ -219,47 +311,97 @@ fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>) {
                 node.column_gap = column_gap;
             });
             panel_entity.with_children(|panel| {
-                // BL-82 EM-5.17 T57.14 — `PaperdollRoot` is now a ROW of 3
-                // columns (left weapon set / center armor column / right
-                // weapon set), not a flat 2-col grid of all 22 slots — see
-                // the module doc comment's layout constants for the
-                // confirmed arrangement.
+                // BL-82 EM-5.18 Phase 1 — the 2-button tab bar, mirroring
+                // `diary.rs::sync_diary_tabs`'s per-button `.observe(On<
+                // Activate>)` idiom verbatim (spec §1.3/§3.1), just spawned
+                // once here instead of via a reactive rebuild (the tab set
+                // never changes).
                 panel
-                    .spawn((PaperdollRoot, Node {
-                        display: Display::Flex,
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(8.0),
-                        align_items: AlignItems::FlexStart,
+                    .spawn((InventoryTabBar, Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(4.0),
+                        min_width: Val::Px(140.0),
                         ..Default::default()
                     }))
-                    .with_children(|paperdoll| {
-                        paperdoll.spawn((LeftWeaponColumnRoot, Node {
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
+                    .with_children(|tab_bar| {
+                        for tab in [InventoryTab::Items, InventoryTab::Equipment] {
+                            tab_bar
+                                .spawn(button_bundle(&theme, &fonts, inventory_tab_label(tab)))
+                                .insert(InventoryTabButton(tab))
+                                .observe(
+                                    move |activate: On<Activate>,
+                                          buttons: Query<&InventoryTabButton>,
+                                          mut selected: ResMut<InventoryTab>| {
+                                        if let Ok(button) = buttons.get(activate.entity) {
+                                            *selected = button.0;
+                                        }
+                                    },
+                                );
+                        }
+                    });
+
+                // `ItemsTabRoot` starts `Flex` (Items is the default tab);
+                // `EquipmentTabRoot` starts `None` — matching `InventoryTab`'s
+                // `#[default]` variant. `sync_inventory_tab_content_visibility`
+                // is the only system that ever changes either afterward.
+                panel
+                    .spawn((ItemsTabRoot, Node {
+                        display: Display::Flex,
+                        ..Default::default()
+                    }))
+                    .with_children(|items_tab| {
+                        items_tab.spawn((BagGridRoot, Node {
+                            display: Display::Grid,
+                            grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(8, 48.0)],
                             row_gap: Val::Px(4.0),
-                            ..Default::default()
-                        }));
-                        paperdoll.spawn((CenterEquipColumnRoot, Node {
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(4.0),
-                            ..Default::default()
-                        }));
-                        paperdoll.spawn((RightWeaponColumnRoot, Node {
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(4.0),
+                            column_gap: Val::Px(4.0),
+                            max_width: Val::Px(8.0 * 52.0),
                             ..Default::default()
                         }));
                     });
-                panel.spawn((BagGridRoot, Node {
-                    display: Display::Grid,
-                    grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(8, 48.0)],
-                    row_gap: Val::Px(4.0),
-                    column_gap: Val::Px(4.0),
-                    max_width: Val::Px(8.0 * 52.0),
-                    ..Default::default()
-                }));
+
+                panel
+                    .spawn((EquipmentTabRoot, Node {
+                        display: Display::None,
+                        ..Default::default()
+                    }))
+                    .with_children(|equipment_tab| {
+                        // BL-82 EM-5.17 T57.14 — `PaperdollRoot` is a ROW of 3
+                        // columns (left weapon set / center armor column /
+                        // right weapon set), not a flat 2-col grid of all 22
+                        // slots — see the module doc comment's layout
+                        // constants for the confirmed arrangement. Unchanged
+                        // by this Phase 1 restructure other than its new
+                        // `EquipmentTabRoot` parent.
+                        equipment_tab
+                            .spawn((PaperdollRoot, Node {
+                                display: Display::Flex,
+                                flex_direction: FlexDirection::Row,
+                                column_gap: Val::Px(8.0),
+                                align_items: AlignItems::FlexStart,
+                                ..Default::default()
+                            }))
+                            .with_children(|paperdoll| {
+                                paperdoll.spawn((LeftWeaponColumnRoot, Node {
+                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(4.0),
+                                    ..Default::default()
+                                }));
+                                paperdoll.spawn((CenterEquipColumnRoot, Node {
+                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(4.0),
+                                    ..Default::default()
+                                }));
+                                paperdoll.spawn((RightWeaponColumnRoot, Node {
+                                    display: Display::Flex,
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(4.0),
+                                    ..Default::default()
+                                }));
+                            });
+                    });
             });
         });
 }
@@ -505,6 +647,51 @@ fn sync_inventory_window_visibility(
     } else {
         Visibility::Hidden
     };
+}
+
+/// Toggles [`ItemsTabRoot`]'s and [`EquipmentTabRoot`]'s content to match the
+/// currently-selected [`InventoryTab`] — via `Node::display` (`Flex`/`None`),
+/// NOT `Visibility` (BL-82 EM-5.18 Phase 1, spec §3.1).
+///
+/// ## Why `Display`, not `Visibility` (a real bug this crate already fixed once)
+/// `Visibility::Hidden` only skips RENDERING an entity — it does NOT remove
+/// it from `taffy`'s layout computation, so a `Row`-direction panel with both
+/// tab-content containers as siblings would still lay them out SIDE BY SIDE
+/// regardless of which one is "hidden," summing BOTH widths into the row and
+/// mis-sizing/off-centering the whole panel. This is the exact same bug
+/// `diary.rs::sync_tab_content_visibility`'s own doc comment documents (a
+/// live `--smoke-screenshot` of the Diary window caught it there: the
+/// darkened backdrop rendered, but no panel content was ever visible
+/// anywhere on screen, because all three of Stats/Tree/Abilities summed their
+/// widths regardless of which was "selected"). This inventory panel is the
+/// IDENTICAL shape (`FlexDirection::Row` with tab-content siblings), so this
+/// system copies that fix verbatim: `Node::display = Display::None` removes
+/// an entity from layout entirely (zero size, as if it weren't there), so
+/// only the ONE currently-selected tab's content ever contributes to the
+/// row's width. Do not "fix" this back to `Visibility` — that would
+/// reintroduce the exact bug `diary.rs` already root-caused once in this
+/// same crate.
+fn sync_inventory_tab_content_visibility(
+    selected: Res<InventoryTab>,
+    mut items: Query<&mut Node, (With<ItemsTabRoot>, Without<EquipmentTabRoot>)>,
+    mut equipment: Query<&mut Node, (With<EquipmentTabRoot>, Without<ItemsTabRoot>)>,
+) {
+    if !selected.is_changed() {
+        return;
+    }
+    fn display_for(is_selected: bool) -> Display {
+        if is_selected {
+            Display::Flex
+        } else {
+            Display::None
+        }
+    }
+    if let Ok(mut node) = items.single_mut() {
+        node.display = display_for(matches!(*selected, InventoryTab::Items));
+    }
+    if let Ok(mut node) = equipment.single_mut() {
+        node.display = display_for(matches!(*selected, InventoryTab::Equipment));
+    }
 }
 
 /// Reconciles every bag/equip slot's [`SlotContents`] (+, for BAG slots
@@ -927,5 +1114,106 @@ mod tests {
             !is_disabled(app.world(), inactive_mainhand),
             "the Mainhand slot itself is never disabled by this system"
         );
+    }
+
+    /// BL-82 EM-5.18 Phase 1 (T58.5): selecting `InventoryTab::Equipment`
+    /// flips `EquipmentTabRoot`'s `Node::display` to `Flex` and
+    /// `ItemsTabRoot`'s to `None` — and the reverse holds for the default
+    /// (`Items`) selection. Asserted via `Node::display`, NOT `Visibility` —
+    /// that distinction is the entire point of this system (see its own doc
+    /// comment for why `Visibility::Hidden` alone would NOT be equivalent
+    /// here).
+    #[test]
+    fn sync_inventory_tab_content_visibility_toggles_node_display_per_selected_tab() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(InventoryTab::default());
+
+        let items_root = app
+            .world_mut()
+            .spawn((ItemsTabRoot, Node {
+                display: Display::Flex,
+                ..Default::default()
+            }))
+            .id();
+        let equipment_root = app
+            .world_mut()
+            .spawn((EquipmentTabRoot, Node {
+                display: Display::None,
+                ..Default::default()
+            }))
+            .id();
+
+        // `Res<InventoryTab>::is_changed()` is true on the tick the resource
+        // is inserted, so this first run already exercises the default
+        // (`Items`) branch.
+        app.world_mut()
+            .run_system_once(sync_inventory_tab_content_visibility)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<Node>(items_root).unwrap().display,
+            Display::Flex,
+            "Items is the default tab"
+        );
+        assert_eq!(
+            app.world().get::<Node>(equipment_root).unwrap().display,
+            Display::None,
+            "Equipment tab content stays unmounted while Items is selected"
+        );
+
+        *app.world_mut().resource_mut::<InventoryTab>() = InventoryTab::Equipment;
+        app.world_mut()
+            .run_system_once(sync_inventory_tab_content_visibility)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<Node>(items_root).unwrap().display,
+            Display::None,
+            "Items tab content unmounts once Equipment is selected"
+        );
+        assert_eq!(
+            app.world().get::<Node>(equipment_root).unwrap().display,
+            Display::Flex,
+            "Equipment tab content mounts once selected"
+        );
+    }
+
+    /// BL-82 EM-5.18 Phase 1 (T58.5) regression: a same-tab (`BAG_GROUP` ->
+    /// `BAG_GROUP`) drag still produces a real `InventoryActionRequest`
+    /// (`InventoryManip::Swap`) via the UNCHANGED `handle_slot_drops` —
+    /// proving the tab-split restructure didn't accidentally disturb this
+    /// system's registration/wiring (spec §3.6: same-tab drag-drop is
+    /// explicitly kept working, only CROSS-tab drag became impossible).
+    #[test]
+    fn same_tab_bag_to_bag_drag_still_produces_inventory_swap_request() {
+        use bevy::ecs::message::Messages;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<SlotDropped>();
+        app.add_message::<InventoryActionRequest>();
+
+        let from_inv = InvSlotId::new(0, 0);
+        let to_inv = InvSlotId::new(0, 1);
+        app.world_mut().write_message(SlotDropped {
+            from_group: BAG_GROUP,
+            from_address: SlotAddress::from_inv_slot_idx(from_inv.idx()),
+            to_group: BAG_GROUP,
+            to_address: SlotAddress::from_inv_slot_idx(to_inv.idx()),
+        });
+
+        app.world_mut()
+            .run_system_once(handle_slot_drops)
+            .expect("handler runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<InventoryActionRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![InventoryActionRequest(
+            common::comp::InventoryManip::Swap(Slot::Inventory(from_inv), Slot::Inventory(to_inv),)
+        )]);
     }
 }
