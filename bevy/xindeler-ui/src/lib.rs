@@ -25,8 +25,11 @@
 //! UI-scale seam), (BL-82 EM-5.6) [`slot`] (the drag-drop item-slot
 //! primitive bag/trade/hotbar/crafting screens share), and (BL-82 EM-5.17)
 //! [`images`] (the `HudImages` art-pack lookup), [`orb_material`] (the
-//! `UiMaterial` spike/scaffold for the liquid-orb fill), and [`zlayer`] (the
-//! shared `GlobalZIndex` vocabulary). Deferred to the
+//! `UiMaterial` spike/scaffold for the liquid-orb fill), [`zlayer`] (the
+//! shared `GlobalZIndex` vocabulary), and (BL-82 EM-5.17 Phase 3)
+//! [`minimap_material`] (the `UiMaterial` giving the minimap its soft
+//! radial alpha-feather edge — `orb_material`'s scaffold made a real
+//! consumer). Deferred to the
 //! screens that first need them (documented here rather than stubbed, per
 //! "get the primitives right, don't over-build one-off screen-specific
 //! widgets" — spec §2 engineering note): Slider/Checkbox/Radio/TextInput
@@ -41,6 +44,7 @@ pub mod button;
 pub mod hud_state;
 pub mod i18n;
 pub mod images;
+pub mod minimap_material;
 pub mod notification;
 pub mod orb_material;
 pub mod panel;
@@ -126,5 +130,9 @@ impl Plugin for XindelerUiPlugin {
         // and why Phase 2's actual orb rendering is expected to use the
         // CPU-clip `bar::spawn_orb_bar` path instead, at least for v1.
         app.add_plugins(orb_material::OrbMaterialPlugin);
+        // BL-82 EM-5.17 Phase 3: registers `MinimapFadeMaterial` (embedded
+        // WGSL + `UiMaterialPlugin`) — `map_view`'s minimap is this
+        // material's real consumer, unlike `OrbLiquidMaterial` above.
+        app.add_plugins(minimap_material::MinimapMaterialPlugin);
     }
 }
