@@ -210,9 +210,9 @@ use xindeler_dimensions::{
     DimensionsPlugin,
 };
 use xindeler_protocol::{
-    AiExecutionMode, AuroraOverlay, CompressedChunk, NetBody, NetFarTerrain, NetHealth, NetLoadout,
-    NetLocalPlayer, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel, RegionKey, RemoveChunk,
-    TerrainAnchor, region_key_for_pos,
+    AiExecutionMode, AuroraOverlay, CompressedChunk, NetAlignment, NetBody, NetFarTerrain,
+    NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel,
+    RegionKey, RemoveChunk, TerrainAnchor, region_key_for_pos,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -329,6 +329,9 @@ struct MirrorScratch {
         Option<NetHealth>,
         Option<NetLoadout>,
         Option<NetUid>,
+        // BL-82 EM-5.18 P1: the projected hostility/alignment (see
+        // `mirror_sim_entities`'s own doc comment on `net_alignment`).
+        NetAlignment,
         RegionKey,
         // BL-82 EM-4.9: the dimension this entity was assigned (see
         // `SimEntityDimension`'s doc comment) — DEFAULT for every entity
@@ -1773,6 +1776,13 @@ pub(crate) fn mirror_sim_entities(
     // Agent-bearing spawns (wildlife, rtsim, pets) structurally unable to
     // collide with a factory batch's entry regardless of discovery order.
     let spawn_correlations = ecs.read_storage::<comp::SpawnCorrelation>();
+    // BL-82 EM-5.18 P1: read the sim's hostility/alignment so the mirror can
+    // project it as `NetAlignment` — the hybrid target-selection scorer's
+    // "is this Enemy?" filter (spec §3.1/FD3). `.maybe()`: not every entity
+    // carries one (some scenery/object entities never get an `Alignment`),
+    // in which case the projection below defaults to `NetAlignment::Unknown`
+    // rather than dropping the entity's other mirrored fields.
+    let alignments = ecs.read_storage::<comp::Alignment>();
 
     // EM-4.2d (superseded by EM-4.10 Finding C below): this mirror loop used
     // to allocate `seen`/`updates`/`seen_set` fresh every tick over all
@@ -1818,6 +1828,7 @@ pub(crate) fn mirror_sim_entities(
         character_states.maybe(),
         uids.maybe(),
         spawn_correlations.maybe(),
+        alignments.maybe(),
     )
         .lend_join();
     while let Some((
@@ -1832,6 +1843,7 @@ pub(crate) fn mirror_sim_entities(
         character_state,
         uid,
         spawn_correlation,
+        alignment,
     )) = it.next()
     {
         // Region-map visibility predicate (see doc comment).
@@ -1855,6 +1867,13 @@ pub(crate) fn mirror_sim_entities(
             current: h.current(),
             max: h.maximum(),
         });
+        // BL-82 EM-5.18 P1: project the sim's `Alignment` (if any) verbatim
+        // via `NetAlignment::from`; an entity with no `Alignment` component
+        // at all mirrors as `Unknown` (see `NetAlignment`'s doc comment).
+        let net_alignment = alignment
+            .copied()
+            .map(NetAlignment::from)
+            .unwrap_or_default();
         // EM-3.8d: only humanoids have a figure that armour/tools reshape, so
         // only they carry a loadout: `Body::Humanoid` → `Some(NetLoadout)`,
         // built from the real `Inventory` when present. Every humanoid spawn
@@ -1929,6 +1948,7 @@ pub(crate) fn mirror_sim_entities(
             net_health,
             net_loadout,
             net_uid,
+            net_alignment,
             region_key,
             entity_dimension,
         ));
@@ -1947,6 +1967,7 @@ pub(crate) fn mirror_sim_entities(
         character_states,
         uids,
         spawn_correlations,
+        alignments,
     ));
 
     for (
@@ -1958,6 +1979,7 @@ pub(crate) fn mirror_sim_entities(
         net_health,
         net_loadout,
         net_uid,
+        net_alignment,
         region_key,
         entity_dimension,
     ) in updates.drain(..)
@@ -1982,6 +2004,11 @@ pub(crate) fn mirror_sim_entities(
                 // snapshot; the client interpolates toward them).
                 let mut ec = commands.entity(bevy_entity);
                 ec.insert((net_pos, net_ori, net_vel, net_body));
+                // BL-82 EM-5.18 P1: `NetAlignment` is `Copy`/cheap like
+                // `NetBody`/`NetUid` above — re-insert every tick, no dedup
+                // cache needed (unlike `NetLoadout`'s Strings/`RegionKey`'s
+                // visibility re-evaluation cost).
+                ec.insert(net_alignment);
                 match net_health {
                     Some(h) => {
                         ec.insert(h);
@@ -2043,6 +2070,7 @@ pub(crate) fn mirror_sim_entities(
                     net_ori,
                     net_vel,
                     net_body,
+                    net_alignment,
                     region_key,
                 ));
                 if let Some(h) = net_health {
@@ -3522,10 +3550,15 @@ mod tests {
         // `spawn_test_npcs`'s own test NPCs. No client connection is needed
         // for this: the LISTEN-SERVER's own local loopback (`ClientState::
         // Disconnected`) already runs the mirror.
+        // BL-82 EM-5.18 P1: also require `NetAlignment::Enemy` — this wolf's
+        // sim-side `Alignment::Enemy` (asserted above) must reach the mirror
+        // as the target-selection scorer's hostility filter (spec §3.1/FD3).
         let is_mirrored_wolf_visible = |app: &mut App| {
-            let mut q = app.world_mut().query::<&NetBody>();
-            q.iter(app.world())
-                .any(|body| matches!(body.0, common::comp::Body::QuadrupedMedium(_)))
+            let mut q = app.world_mut().query::<(&NetBody, &NetAlignment)>();
+            q.iter(app.world()).any(|(body, alignment)| {
+                matches!(body.0, common::comp::Body::QuadrupedMedium(_))
+                    && *alignment == NetAlignment::Enemy
+            })
         };
         let mut mirrored = is_mirrored_wolf_visible(&mut server_app);
         for _ in 0..MAX_TICKS {
@@ -3537,8 +3570,9 @@ mod tests {
         }
         assert!(
             mirrored,
-            "the factory-spawned NPC must be mirrored to a NetBody (+NetUid, EM-4.2f) entity, \
-             exactly like any other sim NPC — proving EM-3.8's figure pipeline is reused verbatim"
+            "the factory-spawned NPC must be mirrored to a NetBody+NetAlignment::Enemy (+NetUid, \
+             EM-4.2f) entity, exactly like any other sim NPC — proving EM-3.8's figure pipeline \
+             AND EM-5.18's alignment mirror are reused/applied verbatim"
         );
     }
 

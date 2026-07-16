@@ -197,6 +197,61 @@ pub struct NetBuffs(pub Vec<NetBuffEntry>);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct NetBody(pub common::comp::Body);
 
+/// Replicated coarse hostility/alignment classification of an entity (BL-82
+/// EM-5.18 Phase 1 — the hybrid target-selection system's hostility filter,
+/// design spec §3.1/FD3).
+///
+/// Projected from the sim's `comp::Alignment` by
+/// `xindeler-sim-bridge::mirror_sim_entities`, the same shape as
+/// [`NetBody`]/[`NetHealth`]. Two differences from the sim type, both
+/// intentional simplifications for the client-side scorer (which only needs
+/// "is this Enemy or not", never the full sim semantics):
+/// - `Alignment::Owned(Uid)` collapses to `Owned` — the specific owning
+///   player's identity isn't meaningful to the target-selection scorer, and
+///   carrying a `Uid` here would be the first replicated field to need one for
+///   no consumer.
+/// - `Unknown` has NO sim-side counterpart — it is what the mirror writes for
+///   an entity that carries no `comp::Alignment` component at all (some
+///   scenery/object entities never get one). `From<comp::Alignment>` never
+///   produces it; it exists purely as the client-side "not classified" default
+///   (see [`Default`] below).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NetAlignment {
+    /// Dungeon cultists/bandits — hostile. The ONLY alignment the v1
+    /// target-selection scorer treats as targetable (spec §3.1/FD3); wild-
+    /// animal neutrality and group/pet exclusion are a documented v1
+    /// simplification, not built here.
+    Enemy,
+    /// Wild animals and gentle giants — neutral in v1.
+    Wild,
+    /// Friendly folk in villages.
+    Npc,
+    /// Farm animals and pets of villagers.
+    Tame,
+    /// A player's tamed/owned pet (the owning player's `Uid` is dropped —
+    /// see the struct doc comment).
+    Owned,
+    /// Passive objects like training dummies.
+    Passive,
+    /// No mirrored `comp::Alignment` component on the sim entity at all.
+    /// Never targetable by the v1 scorer (only `Enemy` is).
+    #[default]
+    Unknown,
+}
+
+impl From<common::comp::Alignment> for NetAlignment {
+    fn from(alignment: common::comp::Alignment) -> Self {
+        match alignment {
+            common::comp::Alignment::Enemy => NetAlignment::Enemy,
+            common::comp::Alignment::Wild => NetAlignment::Wild,
+            common::comp::Alignment::Npc => NetAlignment::Npc,
+            common::comp::Alignment::Tame => NetAlignment::Tame,
+            common::comp::Alignment::Owned(_) => NetAlignment::Owned,
+            common::comp::Alignment::Passive => NetAlignment::Passive,
+        }
+    }
+}
+
 /// Replicated figure-relevant equipped gear of a humanoid entity (EM-3.8d).
 ///
 /// This is the COMPACT projection of the sim's `comp::Inventory`/loadout that
@@ -702,6 +757,9 @@ impl Plugin for XindelerProtocolPlugin {
             .replicate::<NetVel>()
             .replicate::<NetHealth>()
             .replicate::<NetBody>()
+            // BL-82 EM-5.18 P1: the hostility/alignment mirror — the target-
+            // selection scorer's "is this Enemy?" filter (spec §3.1/FD3).
+            .replicate::<NetAlignment>()
             // EM-3.8d: the humanoid's figure-relevant equipped gear (weapon(s) +
             // armour) so the client assembles the real character, not a fixed
             // test loadout. Only humanoids carry it; a plain-data component.
@@ -931,6 +989,41 @@ mod tests {
         assert_eq!(*got_vel, vel);
         assert_eq!(*got_health, health);
         assert_eq!(*got_body, body);
+    }
+
+    /// BL-82 EM-5.18 P1: `From<comp::Alignment>` maps every sim variant to
+    /// its `NetAlignment` counterpart — the ONLY thing the target-selection
+    /// scorer needs (spec §3.1/FD3's "is this Enemy?" filter). Pins
+    /// `Alignment::Enemy -> NetAlignment::Enemy` explicitly (the one variant
+    /// that actually changes scorer behavior) plus every other variant so a
+    /// future sim-side `Alignment` addition doesn't silently fall through
+    /// unmapped.
+    #[test]
+    fn net_alignment_from_alignment_maps_every_variant() {
+        use common::{comp::Alignment, uid::Uid};
+
+        assert_eq!(NetAlignment::from(Alignment::Enemy), NetAlignment::Enemy);
+        assert_eq!(NetAlignment::from(Alignment::Wild), NetAlignment::Wild);
+        assert_eq!(NetAlignment::from(Alignment::Npc), NetAlignment::Npc);
+        assert_eq!(NetAlignment::from(Alignment::Tame), NetAlignment::Tame);
+        assert_eq!(
+            NetAlignment::from(Alignment::Owned(Uid(std::num::NonZeroU64::new(7).unwrap()))),
+            NetAlignment::Owned,
+            "the owning player's Uid is dropped — not meaningful to the client scorer"
+        );
+        assert_eq!(
+            NetAlignment::from(Alignment::Passive),
+            NetAlignment::Passive
+        );
+    }
+
+    /// `NetAlignment::Unknown` is the client-only "no mirrored Alignment"
+    /// fallback (`mirror_sim_entities` writes it when an entity carries no
+    /// `comp::Alignment` at all) — it has no `comp::Alignment` counterpart,
+    /// so it's only reachable via `Default`, never via `From`.
+    #[test]
+    fn net_alignment_default_is_unknown() {
+        assert_eq!(NetAlignment::default(), NetAlignment::Unknown);
     }
 
     /// EM-3.8d: `NetLoadout` (weapon + armour keys) replicates server → client

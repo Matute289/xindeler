@@ -59,6 +59,23 @@
 //! Either path is a follow-up phase/spec question for Matías, not an
 //! invention made unilaterally in this PR.
 //!
+//! **UPDATE (BL-82 EM-5.18 Phase 1, 2026-07-16): resolved via option 2's
+//! spirit, but client-local, not raycast-based.** Matías specified a hybrid
+//! Diablo-IV-style soft-target: `crate::targeting::update_soft_target`
+//! continuously scans a cone in front of the camera and scores `Enemy`-
+//! aligned mirrored candidates (spec `docs/design/specs/2026-07-16-bl82-
+//! hybrid-target-selection-design.md`), then writes the winner into
+//! [`SelectedTarget`] every frame. This is neither of the two options sketched
+//! above verbatim — no raycast/picking system, and no new server-mirrored
+//! "current target" concept — but it is exactly the kind of new, scoped
+//! gameplay mechanic the TODO above called out as needing a real decision
+//! before being built; that decision has now been made (see the spec's FD1-3)
+//! and implemented in `targeting.rs`. `SelectedTarget` now becomes `Some(_)`
+//! in real gameplay whenever an `Enemy` is in range/cone — the panel is no
+//! longer permanently hidden. `force_target_for_smoke_capture` below is
+//! unchanged and still works; see `targeting.rs`'s module doc comment for the
+//! precedence between the two.
+//!
 //! ## What's mirrored for non-local entities (also verified directly)
 //! - Health → [`NetHealth`] (mirrored since EM-3.7, every entity).
 //! - Stagger → [`NetPoise`] (BL-82 EM-5.2's `mirror_combat_hud_state` iterates
@@ -170,7 +187,13 @@ impl Plugin for BossNameplateViewPlugin {
 /// and `inventory_ui.rs`'s `force_open_inventory_for_smoke_capture` already
 /// establish. A no-op unless the env var is set; this is dev/test tooling
 /// only, not a gameplay selection mechanism.
-fn force_target_for_smoke_capture(
+///
+/// `pub(crate)`: BL-82 EM-5.18 P1's `targeting::update_soft_target` also
+/// writes `SelectedTarget`, so it declares an explicit `.ambiguous_with(this)`
+/// edge to tell Bevy's ambiguity checker the shared-`ResMut` overlap is
+/// intentional and resolved by the env gate (both systems no-op unless the
+/// OTHER's precondition is false) — see `targeting.rs`'s module doc comment.
+pub(crate) fn force_target_for_smoke_capture(
     any_other: Query<Entity, (With<NetUid>, Without<NetLocalPlayer>)>,
     mut target: ResMut<SelectedTarget>,
 ) {
