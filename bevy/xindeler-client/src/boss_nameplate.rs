@@ -187,7 +187,13 @@ impl Plugin for BossNameplateViewPlugin {
 /// and `inventory_ui.rs`'s `force_open_inventory_for_smoke_capture` already
 /// establish. A no-op unless the env var is set; this is dev/test tooling
 /// only, not a gameplay selection mechanism.
-fn force_target_for_smoke_capture(
+///
+/// `pub(crate)`: BL-82 EM-5.18 P1's `targeting::update_soft_target` also
+/// writes `SelectedTarget`, so it declares an explicit `.ambiguous_with(this)`
+/// edge to tell Bevy's ambiguity checker the shared-`ResMut` overlap is
+/// intentional and resolved by the env gate (both systems no-op unless the
+/// OTHER's precondition is false) — see `targeting.rs`'s module doc comment.
+pub(crate) fn force_target_for_smoke_capture(
     any_other: Query<Entity, (With<NetUid>, Without<NetLocalPlayer>)>,
     mut target: ResMut<SelectedTarget>,
 ) {

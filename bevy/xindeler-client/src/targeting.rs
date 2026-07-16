@@ -78,11 +78,6 @@ pub struct TargetingConfig {
     pub beta: f32,
     /// Hysteresis margin (relative to the current target's score).
     pub epsilon: f32,
-    /// Auto-release range (Phase 2+): larger than `max_range` on purpose so
-    /// stepping back a step doesn't instantly drop a hard lock. Unused by
-    /// this phase's soft-only scan (no `HardLock` exists yet) — carried here
-    /// now so Phase 2 doesn't need a second config resource/env convention.
-    pub release_range: f32,
 }
 
 impl Default for TargetingConfig {
@@ -92,17 +87,12 @@ impl Default for TargetingConfig {
         let alpha = env_f32("XINDELER_TARGETING_ALPHA", DEFAULT_ALPHA);
         let beta = env_f32("XINDELER_TARGETING_BETA", DEFAULT_BETA);
         let epsilon = env_f32("XINDELER_TARGETING_EPSILON", DEFAULT_EPSILON);
-        // Default is derived from (possibly-overridden) `max_range`, matching
-        // spec §3.1's "RELEASE_RANGE ~= MAX_RANGE * 1.5" — but still
-        // independently overridable for A/B tuning.
-        let release_range = env_f32("XINDELER_TARGETING_RELEASE_RANGE", max_range * 1.5);
         Self {
             max_range,
             half_angle_rad: half_angle_deg.to_radians(),
             alpha,
             beta,
             epsilon,
-            release_range,
         }
     }
 }
@@ -240,36 +230,48 @@ pub fn update_soft_target(
         return;
     }
 
-    let Ok(cam_transform) = cameras.single() else {
-        target.0 = None;
-        return;
-    };
-    let Ok((player_transform, player_interp)) = local_player.single() else {
-        // No embedded local player yet (e.g. `net-client`'s spectator-only
-        // v1) — degrade clean like every other consumer of `NetLocalPlayer`.
-        target.0 = None;
-        return;
-    };
-    let player_pos = player_interp.map_or(player_transform.translation, |i| i.pos);
-    let camera_forward = *cam_transform.forward();
+    // Compute the next selection into a local, then assign only on a real
+    // change: an unconditional write to `ResMut<SelectedTarget>` marks it
+    // changed EVERY frame, defeating the `is_changed()` early-out in
+    // `boss_nameplate::sync_nameplate_visibility` (which is exactly why
+    // `SelectedTarget` derives `PartialEq`).
+    let next = 'next: {
+        let Ok(cam_transform) = cameras.single() else {
+            break 'next None;
+        };
+        let Ok((player_transform, player_interp)) = local_player.single() else {
+            // No embedded local player yet (e.g. `net-client`'s spectator-only
+            // v1) — degrade clean like every other consumer of
+            // `NetLocalPlayer`.
+            break 'next None;
+        };
+        let player_pos = player_interp.map_or(player_transform.translation, |i| i.pos);
+        let camera_forward = *cam_transform.forward();
 
-    let candidate_list =
-        candidates.iter().map(
-            |(entity, transform, interp, alignment, health)| TargetCandidate {
-                entity,
-                pos: interp.map_or(transform.translation, |i| i.pos),
-                alignment: *alignment,
-                alive: health.current > 0.0,
-            },
-        );
+        let candidate_list =
+            candidates
+                .iter()
+                .map(
+                    |(entity, transform, interp, alignment, health)| TargetCandidate {
+                        entity,
+                        pos: interp.map_or(transform.translation, |i| i.pos),
+                        alignment: *alignment,
+                        alive: health.current > 0.0,
+                    },
+                );
 
-    target.0 = best_soft_target(
-        player_pos,
-        camera_forward,
-        target.0,
-        &config,
-        candidate_list,
-    );
+        best_soft_target(
+            player_pos,
+            camera_forward,
+            target.0,
+            &config,
+            candidate_list,
+        )
+    };
+
+    if target.0 != next {
+        target.0 = next;
+    }
 }
 
 /// Ground offset (Bevy Y) the ring is drawn at — just above the target's
@@ -326,17 +328,34 @@ impl Plugin for TargetSelectionPlugin {
         app.init_resource::<SelectedTarget>();
         #[cfg(any(feature = "listen-server", feature = "net-client"))]
         {
-            // `.in_set(MirrorSet)`: must run after mirroring writes this
-            // frame's `Transform`/`Interpolated` (the same set
-            // `entity_view.rs`'s presentation systems occupy), before any
-            // `GameplaySet` system reads `SelectedTarget`.
+            // `.in_set(MirrorSet)`: run after this frame's mirroring writes
+            // `Transform`/`Interpolated` (the same set `entity_view.rs`'s
+            // presentation systems occupy). The nameplate readers
+            // (`sync_nameplate_visibility`/`sync_nameplate_content`) are plain
+            // `Update` systems, NOT in `GameplaySet`, so this is a best-effort
+            // same-frame write with at-most-one-frame latency if Bevy happens
+            // to schedule a reader before this system — purely cosmetic (the
+            // nameplate would lag a selection change by one frame at most), not
+            // a correctness concern, so no explicit edge to the readers is
+            // added.
+            //
+            // `.ambiguous_with(force_target_for_smoke_capture)`: both systems
+            // take `ResMut<SelectedTarget>` with no ordering edge between them.
+            // The overlap is intentional and correctness is already guaranteed
+            // by the `XINDELER_SMOKE_FORCE_TARGET` env gate (each no-ops unless
+            // the other's precondition is false — see this module's doc
+            // comment), so declare the ambiguity expected to keep Bevy's
+            // ambiguity checker quiet.
             app.add_systems(
                 Update,
                 update_soft_target
                     .after(crate::entity_view::interpolate_entities)
+                    .ambiguous_with(crate::boss_nameplate::force_target_for_smoke_capture)
                     .in_set(xindeler_app::MirrorSet),
             );
-            app.add_systems(Update, draw_soft_target_marker);
+            // `.after(update_soft_target)`: draw the ring from THIS frame's
+            // selection, so the marker can't trail the target by a frame.
+            app.add_systems(Update, draw_soft_target_marker.after(update_soft_target));
         }
     }
 }
@@ -361,7 +380,6 @@ mod tests {
             alpha: DEFAULT_ALPHA,
             beta: DEFAULT_BETA,
             epsilon: DEFAULT_EPSILON,
-            release_range: DEFAULT_MAX_RANGE * 1.5,
         }
     }
 
@@ -561,7 +579,6 @@ mod tests {
             std::env::remove_var("XINDELER_TARGETING_ALPHA");
             std::env::remove_var("XINDELER_TARGETING_BETA");
             std::env::remove_var("XINDELER_TARGETING_EPSILON");
-            std::env::remove_var("XINDELER_TARGETING_RELEASE_RANGE");
         }
         let cfg = TargetingConfig::default();
         assert_eq!(cfg.max_range, DEFAULT_MAX_RANGE);
@@ -569,7 +586,6 @@ mod tests {
         assert_eq!(cfg.alpha, DEFAULT_ALPHA);
         assert_eq!(cfg.beta, DEFAULT_BETA);
         assert_eq!(cfg.epsilon, DEFAULT_EPSILON);
-        assert_eq!(cfg.release_range, DEFAULT_MAX_RANGE * 1.5);
 
         // SAFETY: see above.
         unsafe {
@@ -577,8 +593,6 @@ mod tests {
         }
         let overridden = TargetingConfig::default();
         assert_eq!(overridden.max_range, 50.0);
-        // The release_range default derives from max_range when unset.
-        assert_eq!(overridden.release_range, 75.0);
 
         // SAFETY: see above; leave the environment clean.
         unsafe {
