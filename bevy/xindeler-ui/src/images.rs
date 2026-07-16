@@ -18,6 +18,22 @@
 //! not assumed from the design spec) — the spec's "58 PNGs" figure is
 //! approximate; every real file was copied and accounted for here.
 //!
+//! ## BL-82 EM-5.17 Phase 7 (T57.14) — 8 more `equip_empty_*.png` frames
+//! Matías generated bespoke frame art for the 8 equip slots that had no
+//! dedicated background yet (Legs, Tabard, and the 4 weapon slots +
+//! Lantern/Glider), closing the asset gap spec §3.7 originally flagged.
+//! Copied the same way as the original 55, into the same [`HUD_D4_DIR`].
+//! The source filenames do NOT exactly match their `EquipSlot`/`ArmorSlot`
+//! variant names (e.g. `equip_empty_mainhand.png` covers `ActiveMainhand`,
+//! `equip_empty_inactive_mainhand.png` covers `InactiveMainhand`) — the
+//! variant names below spell out which real slot each one is for rather
+//! than mirroring the filename verbatim, to avoid an
+//! `EquipEmptyMainhand`/`EquipEmptyInactiveMainhand` pair that reads as
+//! ambiguous about which is which. Combined with the pre-existing 9, all 18
+//! equip slots shown on the Phase 7 equipment panel (spec §3.7's confirmed
+//! layout) now have bespoke frame art — `slot_empty.png` is never used as a
+//! fallback anywhere in that panel.
+//!
 //! ## Deliberately excluded from this enum (spec §3.1, §6 "RESOLVED")
 //! Two of the 55 real files are copied to disk (for completeness/history)
 //! but have NO [`HudImageKey`] variant and are NEVER loaded by [`HudImages`]
@@ -76,15 +92,23 @@ pub enum HudImageKey {
     ButtonNormal,
     ButtonPressed,
     CopperCoin,
+    EquipEmptyActiveMainhand,
+    EquipEmptyActiveOffhand,
     EquipEmptyBack,
     EquipEmptyBelt,
     EquipEmptyChest,
     EquipEmptyFeet,
+    EquipEmptyGlider,
     EquipEmptyHands,
     EquipEmptyHelmet,
+    EquipEmptyInactiveMainhand,
+    EquipEmptyInactiveOffhand,
+    EquipEmptyLantern,
+    EquipEmptyLegs,
     EquipEmptyNecklace,
     EquipEmptyRing,
     EquipEmptyShoulders,
+    EquipEmptyTabard,
     GoldCoin,
     HealthLiquid,
     InventoryBg,
@@ -136,15 +160,23 @@ impl HudImageKey {
         Self::ButtonNormal,
         Self::ButtonPressed,
         Self::CopperCoin,
+        Self::EquipEmptyActiveMainhand,
+        Self::EquipEmptyActiveOffhand,
         Self::EquipEmptyBack,
         Self::EquipEmptyBelt,
         Self::EquipEmptyChest,
         Self::EquipEmptyFeet,
+        Self::EquipEmptyGlider,
         Self::EquipEmptyHands,
         Self::EquipEmptyHelmet,
+        Self::EquipEmptyInactiveMainhand,
+        Self::EquipEmptyInactiveOffhand,
+        Self::EquipEmptyLantern,
+        Self::EquipEmptyLegs,
         Self::EquipEmptyNecklace,
         Self::EquipEmptyRing,
         Self::EquipEmptyShoulders,
+        Self::EquipEmptyTabard,
         Self::GoldCoin,
         Self::HealthLiquid,
         Self::InventoryBg,
@@ -196,15 +228,23 @@ impl HudImageKey {
             Self::ButtonNormal => "button_normal.png",
             Self::ButtonPressed => "button_pressed.png",
             Self::CopperCoin => "copper_coin.png",
+            Self::EquipEmptyActiveMainhand => "equip_empty_mainhand.png",
+            Self::EquipEmptyActiveOffhand => "equip_empty_offhand.png",
             Self::EquipEmptyBack => "equip_empty_back.png",
             Self::EquipEmptyBelt => "equip_empty_belt.png",
             Self::EquipEmptyChest => "equip_empty_chest.png",
             Self::EquipEmptyFeet => "equip_empty_feet.png",
+            Self::EquipEmptyGlider => "equip_empty_glider.png",
             Self::EquipEmptyHands => "equip_empty_hands.png",
             Self::EquipEmptyHelmet => "equip_empty_helmet.png",
+            Self::EquipEmptyInactiveMainhand => "equip_empty_inactive_mainhand.png",
+            Self::EquipEmptyInactiveOffhand => "equip_empty_inactive_offhand.png",
+            Self::EquipEmptyLantern => "equip_empty_lantern.png",
+            Self::EquipEmptyLegs => "equip_empty_legs.png",
             Self::EquipEmptyNecklace => "equip_empty_necklace.png",
             Self::EquipEmptyRing => "equip_empty_ring.png",
             Self::EquipEmptyShoulders => "equip_empty_shoulders.png",
+            Self::EquipEmptyTabard => "equip_empty_tabard.png",
             Self::GoldCoin => "gold_coin.png",
             Self::HealthLiquid => "health_liquid.png",
             Self::InventoryBg => "inventory_bg.png",
@@ -263,6 +303,21 @@ impl HudImages {
         Self { handles }
     }
 
+    /// Test-only constructor mirroring this module's own
+    /// `every_key_resolves_to_a_handle` fixture below: every key maps to a
+    /// default (invalid, but real) `Handle<Image>`, with no `AssetServer`
+    /// needed. `pub(crate)` so sibling modules whose tests need a real
+    /// `HudImages` resource (e.g. `crate::tooltip`'s T57.16 rarity/reskin
+    /// tests) don't have to spin up a full `App` + `AssetServer` just to
+    /// prove their own logic — this crate's own field privacy (`handles` has
+    /// no `pub`) otherwise blocks that from outside this module.
+    #[cfg(test)]
+    pub(crate) fn dummy() -> Self {
+        Self {
+            handles: HudImageKey::ALL.iter().map(|_| Handle::default()).collect(),
+        }
+    }
+
     /// The handle for a given key. `HudImageKey::ALL` covers every variant
     /// and [`Self::load`] always builds one handle per `ALL` entry in the
     /// same order, so this never panics for a real [`HudImageKey`] value —
@@ -291,6 +346,48 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// BL-82 EM-5.17 Phase 7 (T57.14) — pins the 8 new equip-slot frame
+    /// variants' filenames EXPLICITLY against the brief's own mapping table
+    /// (the source PNG names do not exactly match their `EquipSlot`/
+    /// `ArmorSlot` variant names, e.g. `equip_empty_mainhand.png` covers
+    /// `ActiveMainhand`, not a generic "mainhand" — a generic/derived name
+    /// would have silently swapped `ActiveMainhand`/`InactiveMainhand`).
+    #[test]
+    fn the_eight_new_equip_frame_variants_map_to_the_documented_filenames() {
+        assert_eq!(
+            HudImageKey::EquipEmptyLegs.filename(),
+            "equip_empty_legs.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyTabard.filename(),
+            "equip_empty_tabard.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyActiveMainhand.filename(),
+            "equip_empty_mainhand.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyActiveOffhand.filename(),
+            "equip_empty_offhand.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyInactiveMainhand.filename(),
+            "equip_empty_inactive_mainhand.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyInactiveOffhand.filename(),
+            "equip_empty_inactive_offhand.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyLantern.filename(),
+            "equip_empty_lantern.png"
+        );
+        assert_eq!(
+            HudImageKey::EquipEmptyGlider.filename(),
+            "equip_empty_glider.png"
+        );
+    }
 
     /// Every [`HudImageKey`] variant has a distinct filename — a copy-paste
     /// mistake in the big `match` (two variants pointing at the same file,

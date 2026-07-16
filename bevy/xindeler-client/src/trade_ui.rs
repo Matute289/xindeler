@@ -407,6 +407,7 @@ mod tests {
                 name: "Minor Potion".to_owned(),
                 amount: 10,
                 quality: Quality::Common,
+                is_two_handed: false,
             },
             offered: 3,
             owned: 10,

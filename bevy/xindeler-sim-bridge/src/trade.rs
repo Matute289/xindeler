@@ -54,7 +54,7 @@ use xindeler_protocol::{
 
 use crate::{
     PlayerDimensionSession, SimMirror, SimServer,
-    inventory::{item_name, resolve_client_entity},
+    inventory::{item_is_two_handed, item_name, resolve_client_entity},
     mirror_sim_entities, tick_sim,
 };
 
@@ -93,6 +93,7 @@ fn resolve_offer(
                     name: item_name(item),
                     amount: item.amount(),
                     quality: item.quality(),
+                    is_two_handed: item_is_two_handed(item),
                 },
                 offered,
                 owned: item.amount(),
