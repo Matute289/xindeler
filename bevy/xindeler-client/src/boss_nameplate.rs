@@ -59,6 +59,14 @@
 //! Either path is a follow-up phase/spec question for Matías, not an
 //! invention made unilaterally in this PR.
 //!
+//! **UPDATE (BL-82 EM-5.19 Phase 2, 2026-07-16): hard-lock bright/dim.**
+//! `crate::targeting::HardLock` + `TargetLockKind` now layer a persistent
+//! lock (`GameInput::Select`) on top of the soft scan below;
+//! [`sync_nameplate_lock_style`] is the only change this phase makes here —
+//! it tints the panel dim while `TargetLockKind::Soft`, and leaves it at its
+//! default bright look for `TargetLockKind::Hard`. See `targeting.rs`'s own
+//! module doc for the promote/facing/auto-release machinery.
+//!
 //! **UPDATE (BL-82 EM-5.18 Phase 1, 2026-07-16): resolved via option 2's
 //! spirit, but client-local, not raycast-based.** Matías specified a hybrid
 //! Diablo-IV-style soft-target: `crate::targeting::update_soft_target`
@@ -120,6 +128,14 @@ const STAGGER_BAR_WIDTH: f32 = 340.0;
 const STAGGER_BAR_HEIGHT: f32 = 14.0;
 const LEVEL_BADGE_SIZE: f32 = 40.0;
 
+/// BL-82 EM-5.19 Phase 2 (spec §3.5): the nameplate background's tint while
+/// the selection is only a soft target — a translucent dim, so a hard lock
+/// (the default, untinted `Color::WHITE` the panel already spawns with)
+/// reads unmistakably brighter/solid by contrast. This is the ONE additive
+/// change this phase makes to the nameplate itself (see
+/// [`sync_nameplate_lock_style`]).
+const NAMEPLATE_SOFT_TINT: Color = Color::srgba(1.0, 1.0, 1.0, 0.55);
+
 /// The currently-selected/targeted mirrored entity, if any (BL-82 EM-5.17
 /// Phase 5's port of legacy's `HudInfo::target_entity`/`selected_entity`
 /// concept). See the module doc comment: real gameplay never sets this to
@@ -172,6 +188,12 @@ impl Plugin for BossNameplateViewPlugin {
                     force_target_for_smoke_capture,
                     sync_nameplate_visibility,
                     sync_nameplate_content,
+                    // BL-82 EM-5.19 Phase 2: dim the panel for a soft target,
+                    // bright (default/untinted) for a hard lock. Degrades
+                    // clean via `Option<Res<_>>` if `TargetSelectionPlugin`
+                    // isn't registered (see the fn's own doc comment) —
+                    // never a hard dependency between the two plugins.
+                    sync_nameplate_lock_style,
                 ),
             );
     }
@@ -374,6 +396,35 @@ fn sync_nameplate_visibility(
         Visibility::Visible
     } else {
         Visibility::Hidden
+    };
+}
+
+/// BL-82 EM-5.19 Phase 2 (spec §3.5) — the one additive change this phase
+/// makes to the nameplate: tints the panel [`NAMEPLATE_SOFT_TINT`] while the
+/// selection is a soft target, and back to the default untinted
+/// `Color::WHITE` (the panel's own spawn-time color, unchanged since P1) for
+/// a hard lock — so a lock reads visibly brighter/solid by contrast, with no
+/// new asset. Only runs the write when `TargetLockKind` actually changed
+/// (same `is_changed()` early-out convention [`sync_nameplate_visibility`]
+/// uses). Takes `Option<Res<_>>` rather than a hard `Res<_>` dependency:
+/// [`crate::targeting::TargetLockKind`] is registered by the separate
+/// `TargetSelectionPlugin`, so this degrades to a no-op (default bright
+/// look) rather than panicking if that plugin is ever not present alongside
+/// this one.
+fn sync_nameplate_lock_style(
+    lock_kind: Option<Res<crate::targeting::TargetLockKind>>,
+    mut root: Query<&mut ImageNode, With<NameplateRoot>>,
+) {
+    let Some(lock_kind) = lock_kind else { return };
+    if !lock_kind.is_changed() {
+        return;
+    }
+    let Ok(mut image) = root.single_mut() else {
+        return;
+    };
+    image.color = match *lock_kind {
+        crate::targeting::TargetLockKind::Soft => NAMEPLATE_SOFT_TINT,
+        crate::targeting::TargetLockKind::Hard => Color::WHITE,
     };
 }
 
@@ -615,6 +666,72 @@ mod tests {
         assert_eq!(
             app.world().get::<Node>(fill).unwrap().width,
             Val::Percent(50.0)
+        );
+    }
+
+    /// BL-82 EM-5.19 Phase 2: with no [`crate::targeting::TargetLockKind`]
+    /// resource registered at all (`TargetSelectionPlugin` absent),
+    /// [`sync_nameplate_lock_style`] must degrade clean — no panic, no
+    /// color change — rather than assume the other plugin is always present.
+    #[test]
+    fn sync_nameplate_lock_style_noops_without_target_lock_kind_resource() {
+        let mut app = new_app();
+        let root = app
+            .world_mut()
+            .spawn((NameplateRoot, ImageNode::default()))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_nameplate_lock_style)
+            .expect("system runs without the resource");
+
+        assert_eq!(
+            app.world().get::<ImageNode>(root).unwrap().color,
+            Color::default()
+        );
+    }
+
+    /// A soft target dims the panel to [`NAMEPLATE_SOFT_TINT`].
+    #[test]
+    fn sync_nameplate_lock_style_dims_panel_for_soft_target() {
+        let mut app = new_app();
+        app.insert_resource(crate::targeting::TargetLockKind::Soft);
+        let root = app
+            .world_mut()
+            .spawn((NameplateRoot, ImageNode::default()))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_nameplate_lock_style)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<ImageNode>(root).unwrap().color,
+            NAMEPLATE_SOFT_TINT
+        );
+    }
+
+    /// A hard lock renders at the panel's default (untinted, bright) color —
+    /// even if it was previously dimmed by a soft target the frame before.
+    #[test]
+    fn sync_nameplate_lock_style_brightens_panel_for_hard_lock() {
+        let mut app = new_app();
+        app.insert_resource(crate::targeting::TargetLockKind::Hard);
+        let root = app
+            .world_mut()
+            .spawn((NameplateRoot, ImageNode {
+                color: NAMEPLATE_SOFT_TINT,
+                ..Default::default()
+            }))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_nameplate_lock_style)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<ImageNode>(root).unwrap().color,
+            Color::WHITE
         );
     }
 }
