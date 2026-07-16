@@ -52,7 +52,7 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use bevy::prelude::*;
+use bevy::{ecs::schedule::common_conditions::not, prelude::*};
 use common::comp::skillset::{
     SkillGroupKind, SkillPrerequisite,
     skills::{ClassPassiveStat, Skill},
@@ -62,6 +62,8 @@ use xindeler_protocol::{
     LocalUnlockSkillRequest, NetAbilityPool, NetBuffs, NetCombo, NetEnergy, NetHealth,
     NetLocalPlayer, NetPoise, NetSkillSet, NetXp,
 };
+
+use crate::chat::text_input_focused;
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
@@ -257,7 +259,20 @@ impl Plugin for DiaryUiPlugin {
             .add_systems(
                 Update,
                 (
-                    toggle_diary_window,
+                    // Reads `ActionState` — must run after the frame's real
+                    // input resolution (BL-82 EM-5.17 Phase 0: this system
+                    // had no ordering constraint, so the scheduler could run
+                    // it BEFORE `InputResolveSet` cleared/rebuilt
+                    // `just_pressed`, missing the 'P' press edge on some
+                    // frames — the "sometimes doesn't respond" symptom).
+                    // Mirrors `controls_screen::toggle_controls_screen` and
+                    // `camera`'s own `ActionState`-reading systems. Also
+                    // gated on `!text_input_focused` (BL-82 EM-5.17 Phase 0)
+                    // so typing "p" in the chat box doesn't ALSO open the
+                    // Diary — see `chat::text_input_focused`'s doc comment.
+                    toggle_diary_window
+                        .after(xindeler_input::InputResolveSet)
+                        .run_if(not(text_input_focused)),
                     sync_diary_window_visibility,
                     sync_diary_tabs,
                     force_select_class_tab_for_smoke_capture,
@@ -354,27 +369,40 @@ fn spawn_diary_window(mut commands: Commands, theme: Res<HudTheme>) {
                 // `display` starts `Flex` (Stats, the default tab) / `None`
                 // (Tree/Abilities) is the ONLY thing that gates which content
                 // panel is shown (`sync_tab_content_visibility`'s own doc
-                // comment) — `Visibility` stays `Visible` on all three (a
-                // real bug this fixed: `Visibility::Hidden` gates PAINTING
-                // independent of `Node::display`/layout, so a panel spawned
-                // Hidden here would never render even once its `display`
-                // flipped to `Flex`, since nothing in this module ever
-                // touches `Visibility` again after spawn — only `Display`
-                // does. A live `--smoke-screenshot` of the Warrior tree tab
-                // caught this: `sync_skill_tree_content` really did build all
-                // 12 real skill nodes and `sync_tab_content_visibility` really
-                // did flip `TreeRoot`'s `Node::display` to `Flex`, yet NOTHING
+                // comment) — `Visibility` is `Inherited` on all three, NOT
+                // `Visible`. An earlier version of this fix used
+                // `Visibility::Visible` here (chasing a real bug:
+                // `Visibility::Hidden` gates PAINTING independent of
+                // `Node::display`/layout, so a panel spawned Hidden would
+                // never render even once its `display` flipped to `Flex`,
+                // since nothing in this module ever touches `Visibility`
+                // again after spawn — only `Display` does. A live
+                // `--smoke-screenshot` of the Warrior tree tab caught this:
+                // `sync_skill_tree_content` really did build all 12 real
+                // skill nodes and `sync_tab_content_visibility` really did
+                // flip `TreeRoot`'s `Node::display` to `Flex`, yet NOTHING
                 // painted — the tree area just showed the world through the
-                // backdrop, because `TreeRoot`/`AbilitiesPanelRoot` were
-                // spawned `Visibility::Hidden` and stayed that way forever).
-                panel.spawn((StatsPanelRoot, Visibility::Visible, Node {
+                // backdrop). But `Visibility::Visible` FORCE-OVERRIDES the
+                // ancestor (`DiaryWindowRoot`)'s `Visibility::Hidden` — it
+                // does NOT mean "inherit from parent", that's what
+                // `Inherited` means — so these three panels kept painting
+                // even while the whole Diary window was supposedly closed
+                // (BL-82 EM-5.17 Phase 0: a live `--smoke-screenshot` capture
+                // with the Diary never opened showed `StatsPanelRoot`'s
+                // "Level 1 / XP 0/250 / …" text floating above the chat
+                // panel — the "duplicate Lv.1" bug). `Inherited` still
+                // paints once the ancestor becomes `Visible` (the window
+                // opens) and does NOT paint while the ancestor is `Hidden`
+                // (the window is closed) — exactly the behaviour both fixes
+                // were reaching for.
+                panel.spawn((StatsPanelRoot, Visibility::Inherited, Node {
                     display: Display::Flex,
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(4.0),
                     width: Val::Px(TREE_W),
                     ..Default::default()
                 }));
-                panel.spawn((TreeRoot, Visibility::Visible, Node {
+                panel.spawn((TreeRoot, Visibility::Inherited, Node {
                     display: Display::None,
                     position_type: PositionType::Relative,
                     width: Val::Px(TREE_W),
@@ -383,7 +411,7 @@ fn spawn_diary_window(mut commands: Commands, theme: Res<HudTheme>) {
                 }));
                 let mut abilities_entity = panel.spawn((
                     AbilitiesPanelRoot,
-                    Visibility::Visible,
+                    Visibility::Inherited,
                     scroll_view_bundle(&theme, TREE_W, TREE_H),
                 ));
                 abilities_entity.entry::<Node>().and_modify(|mut node| {
@@ -1047,5 +1075,55 @@ mod tests {
             .drain()
             .collect();
         assert!(sent.is_empty());
+    }
+
+    /// BL-82 EM-5.17 Phase 0 regression (the "duplicate Lv.1" bug):
+    /// [`StatsPanelRoot`]/[`TreeRoot`]/[`AbilitiesPanelRoot`] must spawn with
+    /// `Visibility::Inherited`, NOT `Visibility::Visible`. `Visible`
+    /// FORCE-OVERRIDES the ancestor [`DiaryWindowRoot`]'s
+    /// `Visibility::Hidden` (it does not mean "inherit from parent" — that's
+    /// what `Inherited` means), so these panels kept painting even while the
+    /// whole Diary window was supposedly closed. This asserts the `Visibility`
+    /// component itself on each of the three content roots right after
+    /// spawn — a real computed-`InheritedVisibility`/`ViewVisibility`
+    /// assertion would need `bevy_render`'s `VisibilityPlugin` propagation
+    /// pass wired into the test app, which no existing test in this crate
+    /// does (`combat_hud.rs`'s own `spawn_combat_hud_keeps_every_bars_
+    /// sizing_from_spawn_bar_intact` test, the closest precedent, only
+    /// checks `Node` after a bare `MinimalPlugins` + `run_system_once`); this
+    /// is the documented fallback the task brief allows.
+    #[test]
+    fn diary_content_panels_spawn_inherited_not_visible() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+
+        app.world_mut()
+            .run_system_once(spawn_diary_window)
+            .expect("spawn_diary_window runs");
+
+        fn visibility_of<T: bevy::ecs::component::Component>(world: &mut World) -> Visibility {
+            *world
+                .query_filtered::<&Visibility, With<T>>()
+                .single(world)
+                .expect("the tagged panel root exists")
+        }
+
+        assert_eq!(
+            visibility_of::<StatsPanelRoot>(app.world_mut()),
+            Visibility::Inherited,
+            "StatsPanelRoot must inherit the (Hidden) DiaryWindowRoot's visibility, not \
+             force-override it"
+        );
+        assert_eq!(
+            visibility_of::<TreeRoot>(app.world_mut()),
+            Visibility::Inherited
+        );
+        assert_eq!(
+            visibility_of::<AbilitiesPanelRoot>(app.world_mut()),
+            Visibility::Inherited
+        );
     }
 }

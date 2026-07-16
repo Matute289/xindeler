@@ -40,12 +40,14 @@
 use bevy::{
     asset::RenderAssetUsages,
     color::ColorToPacked,
+    ecs::schedule::common_conditions::not,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
     math::Rect,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
     NetLocalPlayer, NetMapData, NetMapMarker, NetMapPoi, NetOri, NetPos, wpos_to_screen_uv,
 };
@@ -54,6 +56,8 @@ use xindeler_ui::{
     theme::{HudFonts, HudTheme},
     tooltip::Tooltip,
 };
+
+use crate::chat::text_input_focused;
 
 const MINIMAP_PANEL_PX: f32 = 160.0;
 /// Fixed UV half-extent the minimap shows around the player (v1 has no zoom
@@ -125,10 +129,6 @@ const FULL_MAP_PANEL_PX: (f32, f32) = (
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 1.0;
 const ZOOM_STEP_FRACTION: f32 = 0.12;
-/// Toggle key for the full map — hardcoded because EM-5.11 (input rebinding)
-/// hasn't landed yet, mirroring `camera.rs`'s own `CAMERA_TOGGLE_KEY`
-/// precedent for a pre-EM-5.11 hardcoded key.
-const MAP_TOGGLE_KEY: KeyCode = KeyCode::KeyM;
 
 /// Which on-screen viewport a [`MapMarkerDot`] belongs to — the minimap and
 /// full map are cropped independently (different zoom/pan state), so the
@@ -219,7 +219,15 @@ impl Plugin for MapViewPlugin {
                 (
                     receive_map_data,
                     spawn_marker_dots.after(receive_map_data),
-                    toggle_full_map_window,
+                    // Reads `ActionState` — must run after the frame's real
+                    // input resolution (BL-82 EM-5.17 Phase 0, same fix as
+                    // `diary::toggle_diary_window`/`controls_screen::
+                    // toggle_controls_screen`). Also gated on
+                    // `!text_input_focused` so typing "m" in the chat box
+                    // doesn't ALSO open the full map.
+                    toggle_full_map_window
+                        .after(xindeler_input::InputResolveSet)
+                        .run_if(not(text_input_focused)),
                     force_open_map_for_smoke_verification,
                     sync_full_map_visibility,
                     recenter_full_map_on_open,
@@ -717,16 +725,24 @@ fn spawn_marker_dots(
     }
 }
 
-/// `M` toggles the full map; `Escape` closes it ONLY while it's the currently
-/// open window (scoped — this doesn't claim generic Escape-closes-anything
-/// semantics for future screens, which stays an open question for whichever
-/// epic wants to own it generically).
+/// [`GameInput::Map`] (`M` by default, rebindable) toggles the full map;
+/// `Escape` closes it ONLY while it's the currently open window (scoped —
+/// this doesn't claim generic Escape-closes-anything semantics for future
+/// screens, which stays an open question for whichever epic wants to own it
+/// generically).
+///
+/// BL-82 EM-5.17 Phase 0: the map toggle used to read the raw,
+/// non-rebindable `ButtonInput<KeyCode>` via a hardcoded `KeyCode::KeyM` —
+/// converted to [`ActionState`]/[`GameInput::Map`] so a rebind actually
+/// takes effect. The `Escape`-closes check stays on raw `KeyCode` (out of
+/// scope for this fix — no `GameInput::Escape` conversion attempted here).
 fn toggle_full_map_window(
+    action_state: Res<ActionState>,
     keys: Res<ButtonInput<KeyCode>>,
     hud_state: Res<HudState>,
     mut actions: MessageWriter<HudAction>,
 ) {
-    if keys.just_pressed(MAP_TOGGLE_KEY) {
+    if action_state.just_pressed(GameInput::Map) {
         actions.write(HudAction::ToggleWindow(HudWindow::Map));
     }
     if keys.just_pressed(KeyCode::Escape) && hud_state.is_open(HudWindow::Map) {

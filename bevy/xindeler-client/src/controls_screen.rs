@@ -145,24 +145,22 @@ fn toggle_controls_screen(action_state: Res<ActionState>, mut actions: MessageWr
     }
 }
 
-/// Applies queued [`HudAction::ToggleWindow`]/`CloseWindow` to [`HudState`]
-/// (mirrors the exact pattern `combat_hud`'s death screen would use once it
-/// reads `HudAction` for window toggles — currently the only consumer of
-/// `ToggleWindow`/`CloseWindow`, since EM-5.1 shipped the message before any
-/// screen used those two variants yet) and syncs this screen's root
-/// [`Visibility`] to `HudState::is_open(HudWindow::Controls)`.
+/// Syncs this screen's root [`Visibility`] to
+/// `HudState::is_open(HudWindow::Controls)`.
+///
+/// Read-only with respect to [`HudAction`] — [`xindeler_ui::hud_state::
+/// apply_hud_actions`] is the ONE place [`HudAction::ToggleWindow`]/
+/// `CloseWindow` gets applied to [`HudState`]. This function used to ALSO
+/// drain a `MessageReader<HudAction>` and call `hud_state.toggle(*window)`
+/// itself (BL-82 EM-5.17 Phase 0 root cause): since every `MessageReader`
+/// keeps its own independent read cursor, both systems consumed the SAME
+/// `ToggleWindow` message every frame, so a single keypress toggled the
+/// window on then immediately back off again — a silent double-apply that
+/// broke every `HudAction`-routed window (Diary/Map/Controls).
 fn sync_window_visibility(
-    mut actions: MessageReader<HudAction>,
-    mut hud_state: ResMut<HudState>,
+    hud_state: Res<HudState>,
     mut root: Query<&mut Visibility, With<ControlsScreenRoot>>,
 ) {
-    for action in actions.read() {
-        match action {
-            HudAction::ToggleWindow(window) => hud_state.toggle(*window),
-            HudAction::CloseWindow => hud_state.close(),
-            HudAction::Respawn => {},
-        }
-    }
     let Ok(mut visibility) = root.single_mut() else {
         return;
     };
@@ -594,5 +592,35 @@ mod tests {
         unsafe {
             std::env::remove_var(xindeler_app::settings::USERDATA_ENV);
         }
+    }
+
+    /// BL-82 EM-5.17 Phase 0 regression: [`sync_window_visibility`] must NOT
+    /// also apply [`HudAction::ToggleWindow`] — [`xindeler_ui::hud_state::
+    /// apply_hud_actions`] is the one and only applier. Before the fix, both
+    /// systems drained the SAME message (each `MessageReader` keeps its own
+    /// cursor), so writing ONE `ToggleWindow(Diary)` and running a single
+    /// `app.update()` left `HudState` toggled ON then immediately back OFF —
+    /// this assertion would have failed (`is_open` returning `false`)
+    /// against the pre-fix code. With the duplicate consumer removed, one
+    /// `ToggleWindow` message flips the window open exactly once.
+    #[test]
+    fn a_single_toggle_window_action_opens_the_window_exactly_once() {
+        use bevy::app::{App, Update};
+        use xindeler_ui::hud_state::apply_hud_actions;
+
+        let mut app = App::new();
+        app.init_resource::<HudState>();
+        app.add_message::<HudAction>();
+        app.add_systems(Update, (apply_hud_actions, sync_window_visibility));
+
+        app.world_mut()
+            .write_message(HudAction::ToggleWindow(HudWindow::Diary));
+        app.update();
+
+        assert!(
+            app.world().resource::<HudState>().is_open(HudWindow::Diary),
+            "a single ToggleWindow(Diary) message must leave the Diary window open — a second \
+             consumer double-applying the same message would toggle it back off"
+        );
     }
 }
