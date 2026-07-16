@@ -64,6 +64,25 @@
 //!   system owning real objective data appends one row (label +
 //!   `HudImageKey::ObjectiveBullet`/`NonObjectiveBullet` icon) per objective
 //!   into [`ObjectivesContainer`], never hardcoded fake rows.
+//!
+//! ### Phase 3 follow-up (2026-07-16): square frame still visible
+//! Matías's live-test after Phase 3 landed (`record19.mov`) confirmed the
+//! radial fade itself looked right, but a hard-edged SQUARE frame was still
+//! visible around it. Root cause: [`MinimapPanelRoot`] had kept the standard
+//! windowed-panel chrome (`BackgroundColor(theme.palette.panel_bg)` +
+//! `BorderColor::all(theme.palette.panel_border)`, the same opaque fill+
+//! border every OTHER themed panel in this codebase uses deliberately — see
+//! `xindeler_ui::panel`) from before the Phase 3 rewrite. That opaque fill
+//! sat directly behind [`MinimapViewport`], showing through wherever the
+//! shader's falloff made the minimap image transparent — precisely the
+//! square frame reported. Fixed by dropping the two explicit render
+//! components from [`MinimapPanelRoot`]'s spawn — `Node` still REQUIRES a
+//! `BackgroundColor`/`BorderColor` be present (`bevy_ui`'s own
+//! `#[require(...)]` list on `Node`), but without an explicit value they
+//! fall back to their component defaults (`Color::NONE`, fully transparent),
+//! which is exactly what removes the visible fill/border. Layout
+//! (padding/border/radius) is untouched — this is the same "no chrome at
+//! all" treatment `GroupPanelRoot` (`social_hud.rs`) already gets.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -525,6 +544,12 @@ fn spawn_map_screens(
     ));
 
     // --- Minimap: top-right, always visible. ---
+    //
+    // No explicit `BackgroundColor`/`BorderColor` here (BL-82 EM-5.17 Phase 3
+    // follow-up) — see the module doc above for why: an opaque panel fill
+    // behind the frameless `MinimapFadeMaterial` drew the square frame
+    // Matías reported. Layout (`padding`/`border`/`border_radius`) is
+    // otherwise untouched.
     commands
         .spawn((
             MinimapPanelRoot,
@@ -538,8 +563,6 @@ fn spawn_map_screens(
                 border_radius: BorderRadius::all(Val::Px(theme.radius.md)),
                 ..Default::default()
             },
-            BackgroundColor(theme.palette.panel_bg),
-            bevy::ui::BorderColor::all(theme.palette.panel_border),
         ))
         .with_children(|panel| {
             panel
@@ -1111,6 +1134,8 @@ fn sync_marker_dot_positions(
 mod tests {
     use std::f32::consts::{FRAC_PI_2, PI};
 
+    use bevy::color::Alpha;
+
     use super::*;
 
     #[test]
@@ -1354,6 +1379,46 @@ mod tests {
             .expect("the minimap panel root exists")
             .0;
         assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+    }
+
+    /// Regression test for the Phase 3 follow-up (see the module doc's
+    /// "square frame still visible" section for the full root-cause
+    /// writeup): [`MinimapPanelRoot`]'s `BackgroundColor`/
+    /// `bevy::ui::BorderColor` must stay fully transparent, not the opaque
+    /// panel colours every other themed panel uses. `Node` requires both
+    /// components to be present, so this asserts on VALUE rather than
+    /// presence.
+    #[test]
+    fn minimap_panel_root_background_and_border_are_fully_transparent() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let world = app.world_mut();
+        let entity = world
+            .query_filtered::<Entity, With<MinimapPanelRoot>>()
+            .single(world)
+            .expect("the minimap panel root exists");
+
+        let background = world
+            .get::<BackgroundColor>(entity)
+            .expect("Node requires BackgroundColor to be present (as a component)");
+        assert!(
+            background.0.is_fully_transparent(),
+            "MinimapPanelRoot's BackgroundColor must be fully transparent, got {:?} — an opaque \
+             fill here draws the exact square frame Matías reported behind the radial fade",
+            background.0
+        );
+
+        let border = world
+            .get::<bevy::ui::BorderColor>(entity)
+            .expect("Node requires BorderColor to be present (as a component)");
+        assert!(
+            border.is_fully_transparent(),
+            "MinimapPanelRoot's BorderColor must be fully transparent, got {border:?} — same \
+             square-frame bug as the background chrome"
+        );
     }
 
     /// [`MinimapImage`] must be a `MaterialNode<MinimapFadeMaterial>` (the
