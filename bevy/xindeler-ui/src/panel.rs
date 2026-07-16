@@ -11,8 +11,13 @@
 //! function, not every screen that calls it.
 
 use bevy::{
+    asset::Handle,
     ecs::{bundle::Bundle, component::Component},
-    ui::{BackgroundColor, BorderColor, BorderRadius, Node, PositionType, UiRect, Val},
+    image::Image,
+    ui::{
+        BackgroundColor, BorderColor, BorderRadius, Node, PositionType, UiRect, Val,
+        widget::ImageNode,
+    },
 };
 
 use crate::theme::HudTheme;
@@ -84,6 +89,69 @@ pub fn anchored_panel_bundle(
     )
 }
 
+/// BL-82 EM-5.17 T57.8 — an image-backed panel: the SAME padding/border
+/// geometry [`panel_bundle`] uses, but with the flat [`BackgroundColor`] fill
+/// replaced by an [`ImageNode`] rendering `image` (e.g. `inventory_bg.png`/
+/// `skill_tree_bg.png`/`boss_name_plate_bg.png` via [`crate::images::
+/// HudImages`]) stretched to the panel's bounds. Purely additive —
+/// [`panel_bundle`]/[`anchored_panel_bundle`] are untouched and every
+/// existing flat-color call site keeps compiling and rendering exactly as
+/// before; a later phase re-points its OWN screen at this function when it
+/// wants the real HUD-D4 frame texture instead of the v1 flat placeholder
+/// (this crate's own long-standing "swap in a genuine frame texture later"
+/// note, at the top of this file, finally has a concrete landing spot).
+#[must_use]
+pub fn image_panel_bundle(theme: &HudTheme, image: Handle<Image>) -> impl Bundle {
+    (
+        HudPanel,
+        Node {
+            padding: UiRect::all(theme.spacing.md_px()),
+            ..Default::default()
+        },
+        ImageNode {
+            image,
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..Default::default()
+        },
+    )
+}
+
+/// An image-backed panel positioned absolutely at a screen corner/edge — the
+/// image-backed counterpart to [`anchored_panel_bundle`], same additive
+/// posture as [`image_panel_bundle`].
+#[must_use]
+pub fn anchored_image_panel_bundle(
+    theme: &HudTheme,
+    image: Handle<Image>,
+    top: Option<f32>,
+    left: Option<f32>,
+    right: Option<f32>,
+    bottom: Option<f32>,
+) -> impl Bundle {
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        padding: UiRect::all(theme.spacing.md_px()),
+        ..Default::default()
+    };
+    if let Some(top) = top {
+        node.top = Val::Px(top);
+    }
+    if let Some(left) = left {
+        node.left = Val::Px(left);
+    }
+    if let Some(right) = right {
+        node.right = Val::Px(right);
+    }
+    if let Some(bottom) = bottom {
+        node.bottom = Val::Px(bottom);
+    }
+    (HudPanel, node, ImageNode {
+        image,
+        image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
@@ -103,6 +171,27 @@ mod tests {
             .get::<BackgroundColor>(entity)
             .expect("panel carries a BackgroundColor");
         assert_eq!(bg.0, theme.palette.panel_bg);
+        assert!(world.get::<HudPanel>(entity).is_some());
+    }
+
+    /// `image_panel_bundle` spawns a real `HudPanel`-tagged entity carrying
+    /// an `ImageNode` for the given handle — the T57.8 additive acceptance
+    /// bar. (`Node`'s own required components still default-insert a
+    /// transparent `BackgroundColor` — harmless since nothing repaints a
+    /// panel's background, unlike the button primitive, which has to
+    /// explicitly account for it; see `button.rs`'s `update_button_visuals`
+    /// doc comment.)
+    #[test]
+    fn image_panel_bundle_spawns_with_image_node() {
+        let mut world = World::new();
+        let theme = HudTheme::default();
+        let handle: Handle<Image> = Handle::default();
+        let entity = world.spawn(image_panel_bundle(&theme, handle.clone())).id();
+
+        let image_node = world
+            .get::<ImageNode>(entity)
+            .expect("panel carries an ImageNode");
+        assert_eq!(image_node.image, handle);
         assert!(world.get::<HudPanel>(entity).is_some());
     }
 }
