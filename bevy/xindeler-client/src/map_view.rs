@@ -224,10 +224,15 @@ impl Plugin for MapViewPlugin {
                     // `diary::toggle_diary_window`/`controls_screen::
                     // toggle_controls_screen`). Also gated on
                     // `!text_input_focused` so typing "m" in the chat box
-                    // doesn't ALSO open the full map.
+                    // doesn't ALSO open the full map. Split from the
+                    // Escape-close handling (ecs-design-reviewer MAJOR
+                    // finding) — see both systems' own doc comments.
                     toggle_full_map_window
                         .after(xindeler_input::InputResolveSet)
                         .run_if(not(text_input_focused)),
+                    // Deliberately UNGATED — Escape must still close an
+                    // already-open map even while chat holds focus.
+                    close_full_map_on_escape,
                     force_open_map_for_smoke_verification,
                     sync_full_map_visibility,
                     recenter_full_map_on_open,
@@ -725,26 +730,38 @@ fn spawn_marker_dots(
     }
 }
 
-/// [`GameInput::Map`] (`M` by default, rebindable) toggles the full map;
-/// `Escape` closes it ONLY while it's the currently open window (scoped —
-/// this doesn't claim generic Escape-closes-anything semantics for future
-/// screens, which stays an open question for whichever epic wants to own it
-/// generically).
+/// [`GameInput::Map`] (`M` by default, rebindable) toggles the full map open.
 ///
-/// BL-82 EM-5.17 Phase 0: the map toggle used to read the raw,
-/// non-rebindable `ButtonInput<KeyCode>` via a hardcoded `KeyCode::KeyM` —
-/// converted to [`ActionState`]/[`GameInput::Map`] so a rebind actually
-/// takes effect. The `Escape`-closes check stays on raw `KeyCode` (out of
-/// scope for this fix — no `GameInput::Escape` conversion attempted here).
-fn toggle_full_map_window(
-    action_state: Res<ActionState>,
+/// BL-82 EM-5.17 Phase 0: used to read the raw, non-rebindable
+/// `ButtonInput<KeyCode>` via a hardcoded `KeyCode::KeyM` — converted to
+/// [`ActionState`]/[`GameInput::Map`] so a rebind actually takes effect.
+///
+/// Split out from the Escape-closes handling (now
+/// [`close_full_map_on_escape`], a separate system) as an ecs-design-reviewer
+/// MAJOR fix: this system alone is gated
+/// `.run_if(not(text_input_focused))` (typing "m" in chat shouldn't ALSO
+/// open the map) — Escape is never a typing-collision risk (not a printable
+/// character), so it must stay ungated, or a focused chat box would also
+/// block closing an already-open map, contradicting
+/// [`close_full_map_on_escape`]'s own "Escape closes it ONLY while it's the
+/// currently open window" contract.
+fn toggle_full_map_window(action_state: Res<ActionState>, mut actions: MessageWriter<HudAction>) {
+    if action_state.just_pressed(GameInput::Map) {
+        actions.write(HudAction::ToggleWindow(HudWindow::Map));
+    }
+}
+
+/// `Escape` closes the full map ONLY while it's the currently open window
+/// (scoped — this doesn't claim generic Escape-closes-anything semantics for
+/// future screens, which stays an open question for whichever epic wants to
+/// own it generically). Deliberately NOT gated on `!text_input_focused` —
+/// see [`toggle_full_map_window`]'s doc comment for why splitting this out
+/// was necessary.
+fn close_full_map_on_escape(
     keys: Res<ButtonInput<KeyCode>>,
     hud_state: Res<HudState>,
     mut actions: MessageWriter<HudAction>,
 ) {
-    if action_state.just_pressed(GameInput::Map) {
-        actions.write(HudAction::ToggleWindow(HudWindow::Map));
-    }
     if keys.just_pressed(KeyCode::Escape) && hud_state.is_open(HudWindow::Map) {
         actions.write(HudAction::CloseWindow);
     }

@@ -232,6 +232,10 @@ impl Plugin for ChatViewPlugin {
                 // `diary::toggle_diary_window`/`controls_screen::
                 // toggle_controls_screen`).
                 toggle_chat_via_hotkey.after(xindeler_input::InputResolveSet),
+                // The explicit blur path `text_input_focused`'s doc comment
+                // requires — ecs-design-reviewer BLOCKER fix, see
+                // `blur_chat_input_on_escape`'s own doc comment.
+                blur_chat_input_on_escape,
             ),
         );
     }
@@ -616,6 +620,26 @@ fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: Re
 /// (see `diary::DiaryUiPlugin`/`inventory_ui::InventoryUiPlugin`/
 /// `social_hud::SocialHudViewPlugin`/`map_view::MapViewPlugin` for the
 /// wiring).
+///
+/// **This predicate is only correct alongside a blur path** —
+/// [`blur_chat_input_on_escape`] below. `InputFocus` is only ever SET in
+/// this codebase: automatically, by `bevy_ui_widgets::text_input`'s own
+/// pointer-press observer (vendored library behaviour, not code we wrote)
+/// the first time the player clicks into the chat input box. Nothing
+/// UN-sets it on its own — not `handle_chat_submit` (clears the TEXT on
+/// Enter, never `InputFocus`), not `EditableText`'s own Escape handling
+/// (only collapses the text selection, doesn't blur), not the chat tabs/
+/// minimize button (plain `Button`/`Activate` widgets, same as every other
+/// HUD button — none touch `InputFocus`). An ecs-design-reviewer BLOCKER
+/// finding on an earlier version of this fix: without an explicit blur
+/// path, the FIRST chat message of a session would make this predicate
+/// return `true` forever after, permanently (not intermittently)
+/// suppressing every gated hotkey (P/I/M/O). [`blur_chat_input_on_escape`]
+/// closes that gap — Escape while chat holds focus clears [`InputFocus`],
+/// matching legacy `xindeler-old`'s own `Hud::typing()`/
+/// `focus_widget(None)` precedent this doc comment already cited (the
+/// "gate hotkeys on typing" half was ported first; this is the "give the
+/// player a way out of typing" half).
 pub(crate) fn text_input_focused(
     focus: Res<InputFocus>,
     inputs: Query<Entity, With<ChatInputBox>>,
@@ -624,6 +648,31 @@ pub(crate) fn text_input_focused(
         return false;
     };
     focus.get() == Some(input_entity)
+}
+
+/// Clears [`InputFocus`] when Escape is pressed WHILE the chat input box
+/// holds it — the explicit blur path [`text_input_focused`]'s own doc
+/// comment requires (BL-82 EM-5.17 Phase 0, ecs-design-reviewer BLOCKER
+/// fix). Without this, `InputFocus` is only ever set (by `bevy_ui_widgets`'
+/// own click-to-focus behaviour) and never cleared, so the typing-focus
+/// guard would permanently suppress every gated hotkey after the first chat
+/// message of a session, for good. A no-op if the input box isn't currently
+/// focused (Escape then falls through to whatever else reads it, e.g.
+/// `camera.rs`'s cursor-release handling).
+fn blur_chat_input_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    if focus.get() == Some(input_entity) {
+        focus.clear();
+    }
 }
 
 /// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
@@ -1156,6 +1205,72 @@ mod tests {
         assert!(
             !app.world().resource::<ChatUiState>().collapsed,
             "a second F5 press must restore it"
+        );
+    }
+
+    /// BL-82 EM-5.17 Phase 0 regression (ecs-design-reviewer BLOCKER): once
+    /// the chat input box gains [`InputFocus`], [`text_input_focused`] must
+    /// stay `true` forever UNLESS something explicitly blurs it —
+    /// [`blur_chat_input_on_escape`] is that path. Unlike the other new
+    /// tests in this module (which hand-insert focus and never simulate
+    /// "focus, then look away"), this one drives the full
+    /// focus → suppressed → Escape → un-suppressed lifecycle the reviewer
+    /// found nothing previously covered.
+    #[test]
+    fn escape_blurs_the_chat_input_and_lifts_the_typing_guard() {
+        let mut app = new_app();
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.insert_resource(InputFocus::from_entity(input));
+
+        assert!(
+            app.world_mut()
+                .run_system_once(text_input_focused)
+                .expect("condition runs"),
+            "text_input_focused must be true while the chat input holds focus"
+        );
+
+        // Escape, while chat holds focus, must blur it.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_escape)
+            .expect("system runs");
+
+        assert!(
+            !app.world_mut()
+                .run_system_once(text_input_focused)
+                .expect("condition runs"),
+            "Escape must clear InputFocus, lifting the typing guard so gated hotkeys \
+             (Diary/Inventory/Map/Social) fire again — without this, the FIRST chat message of a \
+             session would suppress them permanently"
+        );
+    }
+
+    /// [`blur_chat_input_on_escape`] must be a no-op when the chat input
+    /// does NOT currently hold focus — it must not clear an unrelated
+    /// widget's focus, nor panic when nothing is focused at all.
+    #[test]
+    fn escape_without_chat_focus_does_not_clear_an_unrelated_focus() {
+        let mut app = new_app();
+        app.world_mut().spawn((ChatInputBox, EditableText::new("")));
+        let other = app.world_mut().spawn_empty().id();
+        app.insert_resource(InputFocus::from_entity(other));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_escape)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(other),
+            "Escape must only blur the CHAT input, not whatever else happens to be focused"
         );
     }
 
