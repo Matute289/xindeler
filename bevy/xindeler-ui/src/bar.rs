@@ -239,6 +239,109 @@ pub(crate) fn update_orb_bars(
     }
 }
 
+/// BL-82 EM-5.17 Phase 5 — marks a horizontal, image-filled bar's fill child
+/// (the node [`update_horizontal_image_bars`] resizes by WIDTH). Distinct
+/// from [`HudBarFill`] (which paints a flat [`BackgroundColor`]) since the
+/// boss/target nameplate's health + stagger bars use the HUD-D4 pack's own
+/// dedicated fill textures (a red `ImageNode` fill under `boss_bar_frame.png`;
+/// `boss_stagger_full_bar.png` over `boss_stagger_bar.png`'s track), not a
+/// themed flat color — a third, parallel primitive following the exact
+/// "sibling function, not a parameter grafted onto an existing one"
+/// precedent [`spawn_orb_bar`]'s own doc comment already established for
+/// vertical orb bars (horizontal fill here instead of `spawn_bar`'s width
+/// resize, image instead of color).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct HudImageBarFill;
+
+/// Marks a horizontal image-filled bar's container.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct HudImageBar;
+
+/// Spawns a themed HORIZONTAL bar whose fill is an `ImageNode` (not a flat
+/// color) sized to `value`'s current fraction — the nameplate health/
+/// stagger-bar shape (spec §3.5): a background TRACK image (e.g.
+/// `boss_stagger_bar.png`) with a left-anchored fill image (e.g.
+/// `boss_stagger_full_bar.png`) clipped to the fraction, optionally topped
+/// by a separate frame `ImageNode` (`Pickable::IGNORE`, same convention
+/// [`spawn_orb_bar`]'s frame overlay already uses) so the frame's own
+/// opaque border still reads over the fill's square-clipped edge. Returns
+/// the container entity — callers update the display purely by mutating
+/// [`BarValue`] on it, exactly like [`spawn_bar`]/[`spawn_orb_bar`].
+#[must_use]
+pub fn spawn_horizontal_image_bar(
+    commands: &mut Commands,
+    track_image: Handle<Image>,
+    fill_image: Handle<Image>,
+    frame_image: Option<Handle<Image>>,
+    width_px: f32,
+    height_px: f32,
+    value: BarValue,
+) -> bevy::ecs::entity::Entity {
+    let container = commands
+        .spawn((
+            HudImageBar,
+            value,
+            Node {
+                width: Val::Px(width_px),
+                height: Val::Px(height_px),
+                overflow: bevy::ui::Overflow::clip(),
+                ..Default::default()
+            },
+            ImageNode::new(track_image),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                HudImageBarFill,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(value.fraction() * 100.0),
+                    height: Val::Percent(100.0),
+                    overflow: bevy::ui::Overflow::clip(),
+                    ..Default::default()
+                },
+                ImageNode::new(fill_image),
+            ));
+        })
+        .id();
+
+    if let Some(frame_image) = frame_image {
+        commands.entity(container).with_children(|parent| {
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..Default::default()
+                },
+                ImageNode::new(frame_image),
+                Pickable::IGNORE,
+            ));
+        });
+    }
+
+    container
+}
+
+/// Resizes every horizontal image bar's fill child to its container's
+/// current [`BarValue`] fraction (WIDTH, left-anchored) — the image-fill
+/// counterpart to [`update_bars`], same `Changed<BarValue>` gate.
+pub(crate) fn update_horizontal_image_bars(
+    bars: Query<(&BarValue, &Children), (Changed<BarValue>, With<HudImageBar>)>,
+    mut fills: Query<&mut Node, With<HudImageBarFill>>,
+) {
+    for (value, children) in &bars {
+        for &child in children.iter() {
+            if let Ok(mut node) = fills.get_mut(child) {
+                node.width = Val::Percent(value.fraction() * 100.0);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
@@ -423,6 +526,132 @@ mod tests {
                 None,
                 160.0,
                 160.0,
+                BarValue::new(1.0, 1.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(children.len(), 1, "only the fill child, no frame overlay");
+    }
+
+    fn new_image_bar_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, update_horizontal_image_bars);
+        app
+    }
+
+    /// `spawn_horizontal_image_bar` at half value gives the fill child a 50%
+    /// WIDTH (left-anchored, same axis as [`spawn_bar`]'s flat-color fill,
+    /// but image-backed) — the nameplate health/stagger-bar acceptance case
+    /// (BL-82 EM-5.17 Phase 5).
+    #[test]
+    fn image_bar_fill_tracks_value_changes_by_width() {
+        let mut app = new_image_bar_app();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_horizontal_image_bar(
+                &mut commands,
+                Handle::default(),
+                Handle::default(),
+                Some(Handle::default()),
+                360.0,
+                24.0,
+                BarValue::new(50.0, 100.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let fill_width = |app: &mut App, container: Entity| -> Val {
+            let children: Vec<Entity> = app
+                .world()
+                .get::<Children>(container)
+                .unwrap()
+                .iter()
+                .collect();
+            let fill_entity = children
+                .into_iter()
+                .find(|&e| app.world().get::<HudImageBarFill>(e).is_some())
+                .expect("image bar has a fill child");
+            app.world().get::<Node>(fill_entity).unwrap().width
+        };
+
+        assert_eq!(fill_width(&mut app, container), Val::Percent(50.0));
+
+        app.world_mut()
+            .get_mut::<BarValue>(container)
+            .unwrap()
+            .current = 25.0;
+        app.update();
+
+        assert_eq!(fill_width(&mut app, container), Val::Percent(25.0));
+    }
+
+    /// The optional frame overlay, when given, spawns as a SECOND child
+    /// carrying [`Pickable::IGNORE`] — same contract as
+    /// [`orb_bar_frame_overlay_ignores_picking`].
+    #[test]
+    fn image_bar_frame_overlay_ignores_picking() {
+        let mut app = new_image_bar_app();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_horizontal_image_bar(
+                &mut commands,
+                Handle::default(),
+                Handle::default(),
+                Some(Handle::default()),
+                360.0,
+                24.0,
+                BarValue::new(1.0, 1.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(children.len(), 2, "fill child + frame overlay child");
+        let frame_entity = children
+            .into_iter()
+            .find(|&e| app.world().get::<HudImageBarFill>(e).is_none())
+            .expect("a non-fill (frame) child exists");
+        assert_eq!(
+            *app.world().get::<Pickable>(frame_entity).unwrap(),
+            Pickable::IGNORE
+        );
+    }
+
+    /// Omitting the frame overlay spawns only the fill child.
+    #[test]
+    fn image_bar_without_frame_spawns_only_fill_child() {
+        let mut app = new_image_bar_app();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_horizontal_image_bar(
+                &mut commands,
+                Handle::default(),
+                Handle::default(),
+                None,
+                360.0,
+                24.0,
                 BarValue::new(1.0, 1.0),
             );
             app.world_mut().flush();

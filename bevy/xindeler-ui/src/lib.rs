@@ -103,6 +103,7 @@ impl Plugin for XindelerUiPlugin {
                 (
                     bar::update_bars,
                     bar::update_orb_bars,
+                    bar::update_horizontal_image_bars,
                     button::spawn_button_labels,
                     button::update_button_visuals,
                     button::update_image_button_visuals,

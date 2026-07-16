@@ -21,6 +21,8 @@
 //! underneath it and who hosts the sim. See `net_client.rs`.
 
 mod atmosphere;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod boss_nameplate;
 mod camera;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod chat;
