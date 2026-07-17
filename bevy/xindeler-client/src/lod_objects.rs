@@ -64,6 +64,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     ecs::message::MessageReader,
+    light::NotShadowCaster,
     mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology},
     pbr::StandardMaterial,
     platform::collections::HashMap,
@@ -230,7 +231,7 @@ fn receive_lod_zones(
 
         let handle = material_handle
             .get_or_insert_with(|| {
-                let (bend_strength, bend_start, fog_color, sky_color) =
+                let (bend_strength, bend_start, near_band, fog_color, sky_color) =
                     bend_uniforms(&culling, atmosphere.as_deref());
                 let handle = materials.add(FarTerrainMaterial {
                     base: StandardMaterial {
@@ -243,6 +244,16 @@ fn receive_lod_zones(
                     extension: FarTerrainExtension {
                         bend_strength,
                         bend_start,
+                        // BL-82 EM-3.11 round 24: THE fix. Discard any fragment
+                        // of these simplified pyramid/box proxies that falls
+                        // inside the near real-terrain band — where the real,
+                        // detailed voxel trees/houses already render — so the
+                        // proxies stop drawing on top of (and z-fighting) them
+                        // into the constant silhouette-shaped flicker rounds
+                        // 20-23 chased through the shadow pipeline. Proxies
+                        // BEYOND the band (the horizon this feature exists for)
+                        // are untouched. See the field's doc comment.
+                        near_band,
                         fog_color,
                         sky_color,
                         ..default()
@@ -260,22 +271,36 @@ fn receive_lod_zones(
                 MeshMaterial3d(handle),
                 Transform::IDENTITY, // positions are already absolute world-space
                 Visibility::Visible,
+                // BL-82 EM-3.11 round 24: these coarse silhouette proxies must
+                // never cast shadows. The near-band discard above is a
+                // main-pass-only fragment kill (the material keeps
+                // StandardMaterial's default prepass/shadow shaders — see
+                // `far_terrain_material::specialize`), so without this a proxy
+                // discarded from view inside the near band would still cast a
+                // coarse pyramid/box shadow onto the ground with no visible
+                // object above it. Distant proxies casting shadows is also
+                // undesirable (coarse shapes overlapping the real trees' own
+                // shadows) and needless shadow-map churn, so this holds at
+                // every distance, not just the near band.
+                NotShadowCaster,
             ))
             .id();
         state.entities.insert(msg.key, entity);
     }
 }
 
-/// Computes the SAME `(bend_strength, bend_start, fog_color, sky_color)`
-/// tuple `far_terrain::retile_far_mesh` computes for the terrain sheet, so a
-/// zone mesh's material matches the live terrain's bend/dissolve exactly at
-/// spawn time (mirrors that function's own
+/// Computes the SAME `(bend_strength, bend_start, near_band, fog_color,
+/// sky_color)` uniforms `far_terrain::retile_far_mesh` computes for the
+/// terrain sheet, so a zone mesh's material matches the live terrain's
+/// bend/dissolve exactly at spawn time (mirrors that function's own
 /// fallback-when-no-`AtmosphereController` behaviour verbatim — see its doc
-/// comment).
+/// comment). `near_band` (BL-82 EM-3.11 round 24) is the far sheet's own
+/// `hole_radius` — the near real-terrain band the fragment shader discards
+/// inside, so these proxies never overlap the real near trees/houses.
 fn bend_uniforms(
     culling: &CullingConfig,
     atmosphere: Option<&AtmosphereController>,
-) -> (f32, f32, Vec4, Vec4) {
+) -> (f32, f32, f32, Vec4, Vec4) {
     let (fog_color, sky_color, bend_strength, bend_start_scale) = atmosphere.map_or_else(
         || {
             let defaults = AtmosphereProfile::default();
@@ -300,6 +325,11 @@ fn bend_uniforms(
     (
         bend_strength,
         bend_start,
+        // near_band: the un-scaled `hole_radius` (NOT `bend_start`, which the
+        // atmosphere's `bend_start_scale >= 1.0` can push out cosmetically) —
+        // it must track where the REAL near terrain actually renders
+        // (`chunk_render_distance` + margin), independent of the bend's look.
+        hole_radius,
         fog_color.extend(1.0),
         sky_color.extend(1.0),
     )

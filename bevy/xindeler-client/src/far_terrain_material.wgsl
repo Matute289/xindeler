@@ -8,10 +8,14 @@
 // cites, PLUS `bevy_render`'s `view.wgsl` for `view.world_position`, the
 // live camera position every material can read for free from group 0).
 //
-// Used for the MAIN pass only; prepass/shadow keep `StandardMaterial`'s
-// default shaders (see `far_terrain_material.rs`'s `specialize`). Meshes
-// come from `far_terrain::far_mesh_from_heights`: POSITION/NORMAL/COLOR
-// always present (no UV/tangent/skinning), plus FAR_HORIZON @8 appended by
+// Used for the MAIN pass only. The depth/normal PREPASS has its own shader
+// (BL-82 EM-3.11 round 24: `far_terrain_material_prepass.wgsl`, applying the
+// same `near_band` discard below); the SHADOW pass keeps `StandardMaterial`'s
+// default shader (the LOD-object zone meshes that actually need `near_band`
+// are `NotShadowCaster`, so this material never casts a shadow in practice —
+// see `lod_objects.rs`). Meshes come from `far_terrain::far_mesh_from_heights`
+// / `lod_objects::zone_mesh_from_objects`: POSITION/NORMAL/COLOR always
+// present (no UV/tangent/skinning), plus FAR_HORIZON @8 appended by
 // `specialize()`.
 
 #import bevy_pbr::{
@@ -31,6 +35,18 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> sun_direction: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> haze_fog_color: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> haze_sky_color: vec4<f32>;
+// BL-82 EM-3.11 round 24: horizontal (XZ) camera-relative radius, in world
+// metres, inside which this material must NOT draw — the SAME near band the
+// far-terrain sheet already cuts a CPU hole for (`far_terrain::retile_far_
+// mesh`'s `hole_radius`). For the far sheet this is a no-op (its geometry is
+// already CPU-culled inside the hole); its real job is the LOD-object zone
+// meshes (`lod_objects.rs`), which — unlike the sheet — had NO near-band
+// exclusion and so drew their simplified pyramid/box proxies ON TOP of the
+// real, detailed near-terrain trees/houses, z-fighting them into the
+// constant silhouette-shaped flicker rounds 20-23 chased through the shadow
+// pipeline. `0.0` disables the discard (the `FarTerrainExtension::default`
+// used by bare test apps).
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> near_band: f32;
 
 struct FarTerrainVertex {
     @builtin(instance_index) instance_index: u32,
@@ -136,6 +152,26 @@ fn fragment(
     std_in.instance_index = in.instance_index;
 #endif
 
+    // Camera-relative HORIZONTAL (XZ) distance — computed ONCE and reused
+    // below by both the near-band discard and the sky-blend `dist_fade`
+    // (rust-perf-reviewer finding, round 24 review: these used to be two
+    // separate `length()` calls of the identical expression).
+    let dist = length(in.world_position.xz - view.world_position.xz);
+
+    // ---- BL-82 EM-3.11 round 24: near-band discard ----
+    // Kill any fragment inside the near real-terrain band (the same
+    // `hole_radius` the far sheet cuts a CPU hole for). Camera-relative and
+    // HORIZONTAL (XZ) — matches how the near voxel chunks are streamed/culled
+    // (`lod::cull_chunk_meshes`, also horizontal) and the vertex bend's own
+    // `bend_start` clamp — so an LOD proxy is removed exactly where a real,
+    // block-accurate tree/house already renders, and kept everywhere beyond
+    // it (the horizon silhouette this feature exists for is untouched). Done
+    // BEFORE any PBR work so discarded fragments cost nothing. `near_band ==
+    // 0.0` (the default) disables it.
+    if near_band > 0.0 && dist < near_band {
+        discard;
+    }
+
     var pbr_input = pbr_input_from_standard_material(std_in, is_front);
 
     // ---- (a) soft sun-occlusion from the horizon record ----
@@ -192,7 +228,6 @@ fn fragment(
     // being unused — a subtle "fading toward nothing" cue for the most
     // extreme recession, without ever letting it dominate and defeat the
     // near-horizon dissolve into the bright sky.
-    let dist = length(in.world_position.xz - view.world_position.xz);
     let dist_fade = smoothstep(bend_start, bend_start + SKY_BLEND_DIST_RANGE, dist);
     let sink = view.world_position.y - in.world_position.y; // > 0 once bent below eye level
     let sink_fade = smoothstep(0.0, SKY_BLEND_SINK_RANGE, sink);
