@@ -417,4 +417,111 @@ impl EditableSettings {
             ..load
         }
     }
+
+    /// Grants Admin to `username`'s derived login uuid, ADDITIVELY — unlike
+    /// [`Self::singleplayer`] (which overwrites `self.admins` wholesale with
+    /// just its own "singleplayer" grant), this only inserts one entry, so it
+    /// composes safely on top of an already-built [`EditableSettings`]
+    /// (its `singleplayer()` grant, a loaded production admin list, etc.)
+    /// without disturbing anything already there.
+    ///
+    /// ## Why this exists (BL-82)
+    /// [`Self::singleplayer`] grants Admin to
+    /// `login_provider::derive_singleplayer_uuid()` ==
+    /// `derive_uuid("singleplayer")` — correct for the legacy voxygen
+    /// singleplayer client, which really does log in under the username
+    /// `"singleplayer"` (see `voxygen/src/menu/main/mod.rs`'s
+    /// `attempt_login(..., "singleplayer".to_owned(), ...)`). The Bevy
+    /// listen-server's embedded local player logs in as `"listen_host"`
+    /// instead (`xindeler_sim_bridge::player::PLAYER_USERNAME` — deliberately
+    /// distinct from the smoke bot's own username so a shared save dir never
+    /// collides), so with auth disabled (`auth_server_address: None`, exactly
+    /// what `singleplayer()` sets) the login path derives a UUID straight
+    /// from that DIFFERENT string
+    /// (`server/src/sys/msg/register.rs`'s `extra_checks` closure calls
+    /// `editable_settings.admins.get(&uuid)` with the uuid
+    /// `LoginProvider::login`'s no-auth-server branch derived from the
+    /// username actually presented at registration) — `singleplayer()`'s
+    /// grant never applies to it, so every admin-gated command
+    /// (`/make_party`, `/give_item_quality`, ...) silently fails with "no
+    /// permission" in listen-server mode. This has presumably never worked;
+    /// it is not a regression.
+    ///
+    /// Renaming `PLAYER_USERNAME` to `"singleplayer"` was considered and
+    /// rejected: characters are persisted keyed by the player's derived
+    /// UUID (`player_uuid` in `server/src/persistence/models.rs`), not
+    /// username, so changing the username would change the derived UUID
+    /// and ORPHAN any already-created embedded-player character/save data.
+    /// This method instead grants the SAME role to the actual login
+    /// identity, leaving `PLAYER_USERNAME` (and every UUID already derived
+    /// from it) untouched.
+    ///
+    /// Must be called before the sim processes the corresponding
+    /// registration message (i.e. before the client's `Client::new`
+    /// handshake is pumped) — `register.rs` reads `editable_settings.admins`
+    /// once, at registration time, to decide whether to attach
+    /// `comp::Admin`; inserting into the map afterward would be too late for
+    /// that already-registered session.
+    pub fn grant_admin(&mut self, username: &str) {
+        self.admins.insert(
+            crate::login_provider::derive_uuid_for_username(username),
+            AdminRecord {
+                username_when_admined: Some(username.to_owned()),
+                date: Utc::now(),
+                role: admin::Role::Admin,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BL-82 regression: `EditableSettings::singleplayer` grants Admin to
+    /// `derive_singleplayer_uuid()`, which is NOT the uuid the listen-server
+    /// embedded player (username `"listen_host"`) actually logs in as — see
+    /// `grant_admin`'s doc comment for the full story. This asserts
+    /// `grant_admin` (a) actually covers that different login identity and
+    /// (b) is additive: the pre-existing `"singleplayer"` grant a real
+    /// `singleplayer()` call already made must survive untouched, since
+    /// `grant_admin` is meant to compose on top of it, not replace it.
+    #[test]
+    fn grant_admin_covers_a_different_login_username_additively() {
+        let mut settings = EditableSettings {
+            whitelist: Whitelist::default(),
+            banlist: Banlist::default(),
+            server_description: ServerDescriptions::default(),
+            admins: Admins::default(),
+            server_physics_force_list: ServerPhysicsForceList::default(),
+        };
+        // Seed it with the exact grant `singleplayer()` itself makes, so this
+        // test proves `grant_admin` doesn't clobber it.
+        settings.admins.insert(
+            crate::login_provider::derive_singleplayer_uuid(),
+            AdminRecord {
+                username_when_admined: Some("singleplayer".into()),
+                date: Utc::now(),
+                role: admin::Role::Admin,
+            },
+        );
+
+        settings.grant_admin("listen_host");
+
+        let singleplayer_uuid = crate::login_provider::derive_singleplayer_uuid();
+        let embedded_uuid = crate::login_provider::derive_uuid_for_username("listen_host");
+
+        // The bug: these two derived uuids are different, so a single
+        // "singleplayer"-only grant can never cover both login identities.
+        assert_ne!(embedded_uuid, singleplayer_uuid);
+
+        // The fix: the embedded player's OWN login uuid is now Admin too.
+        assert_eq!(
+            settings.admins.get(&embedded_uuid).map(|r| r.role),
+            Some(admin::Role::Admin)
+        );
+        // Additive: the pre-existing "singleplayer" grant is untouched.
+        assert!(settings.admins.contains_key(&singleplayer_uuid));
+        assert_eq!(settings.admins.len(), 2);
+    }
 }

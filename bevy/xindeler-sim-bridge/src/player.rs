@@ -561,6 +561,29 @@ fn resolve_chat_send(
 pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // BL-82 fix: grant Admin to the embedded player's OWN login identity
+    // before anything below can register it. `EditableSettings::singleplayer`
+    // (already applied when the sim was booted, e.g. via `boot_test_server`)
+    // only grants Admin to `derive_singleplayer_uuid()` ==
+    // `derive_uuid("singleplayer")` — the legacy voxygen singleplayer
+    // client's login identity, NOT this embedded player's, which logs in as
+    // `PLAYER_USERNAME` ("listen_host", see its own doc comment for why it
+    // deliberately differs from "singleplayer"). With auth disabled
+    // (singleplayer settings always disable it), the sim derives the login
+    // uuid straight from whatever username is presented, so that grant never
+    // covered the embedded player — every admin-gated command (`/make_party`,
+    // `/give_item_quality`, ...) silently failed with "no permission" in
+    // listen-server mode. See `EditableSettings::grant_admin`'s doc for the
+    // full story and why renaming `PLAYER_USERNAME` instead would be unsafe.
+    //
+    // This MUST run before the scoped background thread below starts pumping
+    // ticks (the very next thing that happens) — that's what will process the
+    // embedded `Client`'s registration message, and `register.rs` reads
+    // `editable_settings.admins` only once, at registration time.
+    sim.server
+        .editable_settings_mut()
+        .grant_admin(PLAYER_USERNAME);
+
     // Read the loopback TCP port the sim is listening on (Settings live in the
     // sim ECS; `Server::settings()` derefs to them). Singleplayer settings only
     // configure TCP — the smoke bot relies on the same.
@@ -1188,6 +1211,180 @@ mod tests {
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         assert!((inputs.move_dir.magnitude() - 1.0).abs() < 1e-5);
+    }
+
+    /// BL-82 regression: the listen-server embedded player must actually be
+    /// granted Admin end-to-end, not just have a matching entry sitting
+    /// unused in `EditableSettings::admins`. Boots the REAL sim + embedded
+    /// player (exactly as `--listen-server` does), ticks until it reaches
+    /// [`PlayerStage::InGame`], resolves its sim `Uid` to a live `Entity` via
+    /// [`player_sim_entity`], and asserts `comp::Admin` was actually attached
+    /// to it — the SAME component `server/src/events/entity_manipulation.rs`'s
+    /// `MakeAdminEvent` handler inserts, and the one every admin-gated
+    /// command (`/make_party`, `/give_item_quality`, ...) checks. Before this
+    /// fix (`EditableSettings::grant_admin` not called from
+    /// [`boot_embedded_player`]), the embedded player registered under
+    /// `PLAYER_USERNAME` ("listen_host") with no matching `Admins` entry, so
+    /// `register.rs`'s `editable_settings.admins.get(&uuid)` lookup was
+    /// `None` and this component was never attached — this test fails on the
+    /// pre-fix code and passes after it. `#[ignore]` (needs assets + LFS);
+    /// run locally with VELOREN_ASSETS.
+    #[test]
+    #[ignore = "boots a real world + embedded player: needs assets + LFS; run with VELOREN_ASSETS"]
+    fn embedded_player_is_granted_admin() {
+        const MAX_TICKS: u32 = 6000;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let player = boot_embedded_player(&mut sim).expect("failed to boot embedded player");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+                PlayerBridgePlugin,
+            ))
+            .finish();
+        app.insert_non_send(sim);
+        app.insert_non_send(player);
+        app.insert_resource(LocalPlayerInput {
+            move_dir: BVec2::ZERO,
+            jump: false,
+            look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
+        });
+
+        let mut uid = None;
+        for _ in 0..MAX_TICKS {
+            update_with_real_frame_time(&mut app);
+            let p = app.world().non_send::<EmbeddedPlayer>();
+            if let Some(u) = p.uid() {
+                uid = Some(u);
+                break;
+            }
+        }
+        let uid = uid.expect("embedded player never reached in-game");
+
+        let sim = app.world().non_send::<SimServer>();
+        let entity = player_sim_entity(sim, uid).expect("uid must resolve to a live sim entity");
+        let ecs = sim.server.state().ecs();
+        let admins = ecs.read_storage::<comp::Admin>();
+        assert!(
+            admins.get(entity).is_some(),
+            "the listen-server embedded player must be granted Admin (BL-82: username != \
+             derive_singleplayer_uuid, so EditableSettings::singleplayer's own grant never \
+             covered it)"
+        );
+    }
+
+    /// BL-82 regression, full pipeline: sends a REAL admin-gated
+    /// `/give_item_quality` command through the embedded [`Client`]'s actual
+    /// network connection (exactly [`EmbeddedPlayer::send_chat_request`],
+    /// the same path a real client's typed `/give_item_quality ...` takes),
+    /// and asserts the server's reply is a SUCCESS (`ChatType::CommandInfo`),
+    /// not the "no permission" `ChatType::CommandError` Matías originally
+    /// reported. This is the live, end-to-end proof the fix works — not just
+    /// that `comp::Admin` got attached ([`embedded_player_is_granted_admin`]
+    /// above), but that the full round trip (dispatch's generic
+    /// `needs_role` gate in `server/src/cmd.rs`, `handle_give_item_quality`'s
+    /// own `real_role` re-check, then the actual inventory push) now
+    /// succeeds for the embedded player specifically. `#[ignore]` (needs
+    /// assets + LFS); run locally with VELOREN_ASSETS.
+    #[test]
+    #[ignore = "boots a real world + embedded player: needs assets + LFS; run with VELOREN_ASSETS"]
+    fn embedded_player_can_run_admin_gated_command() {
+        const MAX_TICKS: u32 = 6000;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(data_dir.path()).expect("failed to boot test server");
+        let player = boot_embedded_player(&mut sim).expect("failed to boot embedded player");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins.build())
+            .add_plugins(StatesPlugin)
+            .add_plugins(RepliconPlugins.set(ServerPlugin::new(bevy::app::PostUpdate)))
+            .add_plugins((
+                XindelerProtocolPlugin,
+                SimBridgePlugin,
+                SimEntityMirrorPlugin,
+                PlayerBridgePlugin,
+            ))
+            .finish();
+        app.insert_non_send(sim);
+        app.insert_non_send(player);
+        app.insert_resource(LocalPlayerInput {
+            move_dir: BVec2::ZERO,
+            jump: false,
+            look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
+        });
+
+        // Tick until in-game.
+        for _ in 0..MAX_TICKS {
+            update_with_real_frame_time(&mut app);
+            if app.world().non_send::<EmbeddedPlayer>().is_in_game() {
+                break;
+            }
+        }
+        assert!(
+            app.world().non_send::<EmbeddedPlayer>().is_in_game(),
+            "embedded player never reached in-game"
+        );
+
+        // Discard any chat already queued before we send our command — e.g.
+        // `server/src/sys/msg/character_screen.rs`'s join-time MOTD is ALSO
+        // sent as `ChatType::CommandInfo`, so leaving it in the queue would
+        // let the assertion below match that instead of our command's real
+        // reply, silently passing regardless of whether the command actually
+        // succeeded.
+        {
+            let mut player = app.world_mut().non_send_mut::<EmbeddedPlayer>();
+            player.drain_pending_chat();
+        }
+
+        // Send the exact command Matías reported failing, through the real
+        // network connection.
+        {
+            let mut player = app.world_mut().non_send_mut::<EmbeddedPlayer>();
+            player.send_chat_request(&xindeler_protocol::ChatSendRequest::Command {
+                name: "give_item_quality".to_owned(),
+                args: vec![
+                    "common.items.weapons.sword.starter".to_owned(),
+                    "common".to_owned(),
+                ],
+            });
+        }
+
+        // Tick a few more times so the request round-trips (send -> server
+        // cmd dispatch -> reply chat message received) and drain whatever
+        // chat the embedded client received.
+        let mut replies = Vec::new();
+        for _ in 0..60 {
+            update_with_real_frame_time(&mut app);
+            let mut player = app.world_mut().non_send_mut::<EmbeddedPlayer>();
+            replies.extend(player.drain_pending_chat());
+        }
+
+        let command_reply = replies
+            .iter()
+            .find(|msg| {
+                matches!(
+                    msg.chat_type,
+                    comp::ChatType::CommandInfo | comp::ChatType::CommandError
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("no CommandInfo/CommandError reply arrived for /give_item_quality")
+            });
+        assert!(
+            matches!(command_reply.chat_type, comp::ChatType::CommandInfo),
+            "/give_item_quality must succeed for the embedded (Admin-granted) listen-server \
+             player, got {:?}: {:?}",
+            command_reply.chat_type,
+            command_reply.content()
+        );
     }
 
     /// EM-3.7b acceptance: boot the REAL sim + the embedded player, drive

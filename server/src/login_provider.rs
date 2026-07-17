@@ -44,6 +44,20 @@ fn derive_uuid(username: &str) -> Uuid {
 /// derive Uuid for "singleplayer" is a pub fn
 pub fn derive_singleplayer_uuid() -> Uuid { derive_uuid("singleplayer") }
 
+/// Generalizes [`derive_singleplayer_uuid`] to an arbitrary username — the
+/// same derivation the no-auth-server login path below
+/// (`Ok(derive_uuid(username))`) uses at registration time, so a caller that
+/// knows a disabled-auth server's client logs in under a specific username
+/// can compute the SAME uuid that login will assign it.
+///
+/// `pub(crate)`: only [`crate::settings::EditableSettings::grant_admin`] uses
+/// this today (BL-82: the listen-server embedded player logs in as
+/// `"listen_host"`, not `"singleplayer"`, so [`EditableSettings::
+/// singleplayer`]'s own `derive_singleplayer_uuid()` grant never covers it —
+/// see that method's doc for the full story). Kept crate-internal rather than
+/// `pub` since nothing outside `server` needs the raw derivation.
+pub(crate) fn derive_uuid_for_username(username: &str) -> Uuid { derive_uuid(username) }
+
 /// Counts entities currently carrying a `Player` component — the same
 /// player-count-cap denominator `server/src/sys/msg/register.rs` computes
 /// inline via its own `SystemData` join.
