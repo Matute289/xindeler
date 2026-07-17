@@ -47,10 +47,25 @@ use crate::{PlayerDimensionSession, SimMirror, SimServer, mirror_sim_entities, t
 /// UNCHANGED `NetOwnerOnly` every tick would retrigger `bevy_replicon`'s
 /// O(clients) `VisibilityFilter` recomputation for no reason, exactly the
 /// cost [`crate::SimRegionCache`] already exists to avoid for `RegionKey`.
+///
+/// `equippable_slots` is a DIFFERENT kind of cache than the two above — it's
+/// keyed by item DEFINITION id (a `String`, the `ItemDefinitionId::Simple`
+/// case — see [`item_equippable_slots_cached`]'s own doc comment), not by
+/// `specs::Entity`, so it's never pruned alongside `mirror.0` the way
+/// `inventory`/`owner` are: the set of distinct item DEFINITIONS in the game
+/// is small and finite (bounded by the RON item catalog), unlike the set of
+/// live entities, so it only ever grows to that bound and then stays flat —
+/// no retain() needed (rust-perf-reviewer follow-up, BL-82 EM-5.18, this
+/// session: `item_equippable_slots` — a 22-entry `EquipSlot::can_hold` scan +
+/// a fresh `Vec` allocation — was being recomputed per ITEM INSTANCE, per
+/// TICK, for every mirrored entity's inventory, even though slot
+/// compatibility is a pure function of the item's definition and never
+/// changes for a given definition id).
 #[derive(Resource, Default, Debug)]
 pub struct InventoryMirrorCache {
     inventory: HashMap<specs::Entity, NetInventory>,
     owner: HashMap<specs::Entity, u64>,
+    equippable_slots: HashMap<String, Vec<comp::inventory::slot::EquipSlot>>,
 }
 
 /// Converts one sim `Item` into its wire projection. `#[allow(deprecated)]`:
@@ -94,6 +109,76 @@ pub(crate) fn item_equippable_slots(item: &comp::Item) -> Vec<comp::inventory::s
         .into_iter()
         .filter(|slot| slot.can_hold(&kind))
         .collect()
+}
+
+/// rust-perf-reviewer follow-up (BL-82 EM-5.18, this session) — the SAME
+/// result as [`item_equippable_slots`], but served from `cache` on a repeat
+/// lookup instead of re-running the 22-entry `EquipSlot::can_hold` scan (+ a
+/// fresh `Vec` allocation) EVERY item instance, EVERY tick. Used by
+/// [`mirror_inventory_state`], which runs unconditionally in `FixedUpdate`
+/// for every mirrored entity's `comp::Inventory` — the hot path this cache
+/// exists for (`crate::trade::resolve_offer` stays on the uncached
+/// [`item_equippable_slots`]: it's bounded to actively-trading entities, a
+/// much lower cardinality that doesn't need this).
+///
+/// Cache key is the item's [`comp::inventory::item::ItemDefinitionId::
+/// Simple`] string id — the `ItemBase::Simple` case, "the overwhelming
+/// majority of items" (every non-modular item: weapons, armor, consumables,
+/// currency, …). Slot compatibility is a pure function of `ItemKind`, and for
+/// `ItemBase::Simple`, `Item::kind()` returns the SAME `&ItemDef::kind`
+/// reference for every instance sharing that definition id — so the
+/// definition id is a safe, stable cache key, REGARDLESS of whether that
+/// `ItemBase::Simple` item also carries components (the `ItemDefinitionId::
+/// Compound` case): `Item::kind()`'s `ItemBase::Simple` arm reads only
+/// `&item_def.kind`, never `self.components()`, so a Compound id is JUST as
+/// cacheable as a plain Simple one — this match arm only checks for
+/// `Simple(id)` and falls through for `Compound` too, which is a
+/// conservative, safe-but-missed optimization (not a correctness
+/// requirement) left for a later pass if profiling shows it matters.
+/// `ItemBase::Modular` is the one case that's ACTUALLY unsafe to cache by
+/// definition id: `Item::kind()` for it is computed from `self.components()`
+/// and `self.stats_durability_multiplier()`, genuine per-instance state the
+/// bare `ItemDefinitionId::Modular` doesn't fully pin down — caching that by
+/// id risks silently serving a stale slot list for a modular item whose
+/// kind-affecting state differs between two instances that otherwise look
+/// alike. Modular gear is a small minority of items, so falling through for
+/// it (and, conservatively, for Compound too) doesn't undercut the
+/// optimization's real-world payoff.
+pub(crate) fn item_equippable_slots_cached(
+    item: &comp::Item,
+    cache: &mut HashMap<String, Vec<comp::inventory::slot::EquipSlot>>,
+) -> Vec<comp::inventory::slot::EquipSlot> {
+    let comp::inventory::item::ItemDefinitionId::Simple(id) = item.item_definition_id() else {
+        // Modular/Compound — see this function's own doc comment for why
+        // these deliberately bypass the cache rather than risk a stale hit.
+        return item_equippable_slots(item);
+    };
+    if let Some(cached) = cache.get(id.as_ref()) {
+        return cached.clone();
+    }
+    let slots = item_equippable_slots(item);
+    cache.insert(id.into_owned(), slots.clone());
+    slots
+}
+
+/// Builds one [`xindeler_protocol::NetItemStack`] via the definition-cached
+/// [`item_equippable_slots_cached`] — the shared construction site
+/// [`mirror_inventory_state`]'s bag-slot pass and equip-slot pass both call,
+/// replacing what used to be two separately-typed-out, identical struct
+/// literals (one per pass) that each called the UNCACHED
+/// [`item_equippable_slots`] directly.
+fn build_net_item_stack(
+    item: &comp::Item,
+    equippable_slots_cache: &mut HashMap<String, Vec<comp::inventory::slot::EquipSlot>>,
+) -> xindeler_protocol::NetItemStack {
+    xindeler_protocol::NetItemStack {
+        item_id: item.item_definition_id().to_owned(),
+        name: item_name(item),
+        amount: item.amount(),
+        quality: item.quality(),
+        is_two_handed: item_is_two_handed(item),
+        equippable_slots: item_equippable_slots_cached(item, equippable_slots_cache),
+    }
 }
 
 /// Reads the sim's `comp::Inventory` for every currently-mirrored entity and
@@ -156,40 +241,29 @@ pub fn mirror_inventory_state(
             Some(inventory) => {
                 // Every PHYSICAL bag slot (occupied or not) — see
                 // `NetInventorySlot`'s doc comment for why an empty slot
-                // still needs a real address (a valid drop target).
-                let slots = inventory
-                    .slots_with_id()
-                    .map(|(slot, item)| NetInventorySlot {
-                        slot,
-                        item: item.as_ref().map(|item| xindeler_protocol::NetItemStack {
-                            item_id: item.item_definition_id().to_owned(),
-                            name: item_name(item),
-                            amount: item.amount(),
-                            quality: item.quality(),
-                            is_two_handed: item_is_two_handed(item),
-                            equippable_slots: item_equippable_slots(item),
-                        }),
-                    })
-                    .collect::<Vec<_>>();
+                // still needs a real address (a valid drop target). A plain
+                // `for` loop (not `.map().collect()`) so each iteration can
+                // mutably borrow `cache.equippable_slots` in turn — see
+                // `item_equippable_slots_cached`'s own doc comment for why
+                // this is now the definition-cached lookup, not a per-item
+                // 22-entry rescan.
+                let mut slots = Vec::new();
+                for (slot, item) in inventory.slots_with_id() {
+                    let item = item
+                        .as_ref()
+                        .map(|item| build_net_item_stack(item, &mut cache.equippable_slots));
+                    slots.push(NetInventorySlot { slot, item });
+                }
                 // Every POSSIBLE equip slot (see `xindeler_protocol::inventory::
                 // ALL_EQUIP_SLOTS`'s doc comment) — `Inventory::equipped`
                 // returns `None` for one that's currently empty.
-                let equipped = xindeler_protocol::inventory::ALL_EQUIP_SLOTS
-                    .into_iter()
-                    .map(|slot| NetEquippedSlot {
-                        slot,
-                        item: inventory.equipped(slot).map(|item| {
-                            xindeler_protocol::NetItemStack {
-                                item_id: item.item_definition_id().to_owned(),
-                                name: item_name(item),
-                                amount: item.amount(),
-                                quality: item.quality(),
-                                is_two_handed: item_is_two_handed(item),
-                                equippable_slots: item_equippable_slots(item),
-                            }
-                        }),
-                    })
-                    .collect::<Vec<_>>();
+                let mut equipped = Vec::new();
+                for slot in xindeler_protocol::inventory::ALL_EQUIP_SLOTS {
+                    let item = inventory
+                        .equipped(slot)
+                        .map(|item| build_net_item_stack(item, &mut cache.equippable_slots));
+                    equipped.push(NetEquippedSlot { slot, item });
+                }
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "a bag never holds u32::MAX slots"
@@ -657,6 +731,77 @@ mod tests {
     fn item_equippable_slots_resolves_a_non_equippable_item_to_empty() {
         let coins = comp::Item::new_from_asset_expect("common.items.utility.coins");
         assert!(item_equippable_slots(&coins).is_empty());
+    }
+
+    /// rust-perf-reviewer follow-up (BL-82 EM-5.18, this session) —
+    /// [`item_equippable_slots_cached`] must return the EXACT same result as
+    /// the uncached [`item_equippable_slots`] on a fresh (empty) cache — a
+    /// cache miss still has to fall through to the real computation, not
+    /// silently return the wrong thing.
+    #[test]
+    fn item_equippable_slots_cached_matches_uncached_on_a_cold_cache() {
+        let mut cache = HashMap::new();
+        let boots = comp::Item::new_from_asset_expect("common.items.testing.test_boots");
+        assert_eq!(
+            item_equippable_slots_cached(&boots, &mut cache),
+            item_equippable_slots(&boots)
+        );
+    }
+
+    /// The core perf claim under test: a cache HIT must be served from the
+    /// cache rather than recomputed. There's no direct way to observe "the
+    /// 22-entry scan didn't run", so this proves it indirectly — pre-seed the
+    /// cache with a deliberately WRONG value under the boots' own
+    /// `ItemDefinitionId::Simple` id, then call
+    /// [`item_equippable_slots_cached`] again. If the function recomputed
+    /// from `EquipSlot::can_hold` it would return the CORRECT
+    /// `[Armor(Feet)]`; getting the poisoned value back instead proves the
+    /// cache entry was consulted and returned as-is, with no recomputation.
+    #[test]
+    fn item_equippable_slots_cached_serves_a_hit_from_the_cache_without_recomputing() {
+        use common::comp::inventory::item::ItemDefinitionId;
+
+        let boots = comp::Item::new_from_asset_expect("common.items.testing.test_boots");
+        let ItemDefinitionId::Simple(id) = boots.item_definition_id() else {
+            panic!("test_boots is a Simple item");
+        };
+
+        let poisoned = vec![
+            comp::inventory::slot::EquipSlot::Lantern,
+            comp::inventory::slot::EquipSlot::Glider,
+        ];
+        let mut cache = HashMap::new();
+        cache.insert(id.into_owned(), poisoned.clone());
+
+        assert_eq!(
+            item_equippable_slots_cached(&boots, &mut cache),
+            poisoned,
+            "a cache hit must be served verbatim from the cache, not recomputed from \
+             EquipSlot::can_hold (which would have returned [Armor(Feet)] instead)"
+        );
+    }
+
+    /// A second, DIFFERENT item that shares no `ItemDefinitionId` with an
+    /// already-cached entry must still resolve correctly (a miss on one key
+    /// doesn't corrupt or short-circuit lookups for another key in the same
+    /// cache) — and both entries end up cached.
+    #[test]
+    fn item_equippable_slots_cached_handles_two_distinct_items_independently() {
+        let boots = comp::Item::new_from_asset_expect("common.items.testing.test_boots");
+        let dagger =
+            comp::Item::new_from_asset_expect("common.items.weapons.dagger.starter_dagger");
+        let mut cache = HashMap::new();
+
+        let boots_slots = item_equippable_slots_cached(&boots, &mut cache);
+        let dagger_slots = item_equippable_slots_cached(&dagger, &mut cache);
+
+        assert_eq!(boots_slots, item_equippable_slots(&boots));
+        assert_eq!(dagger_slots, item_equippable_slots(&dagger));
+        assert_eq!(
+            cache.len(),
+            2,
+            "both distinct definition ids get their own cache entry"
+        );
     }
 
     /// BL-82 EM-5.18 T58.17 — the P3 "end-to-end gap-closure confirm" the
