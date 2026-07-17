@@ -34,6 +34,7 @@ use xindeler_ui::{
     bar::{BarValue, spawn_bar, spawn_orb_bar},
     button::button_bundle,
     images::{HudImageKey, HudImages},
+    orb_material::OrbLiquidMaterial,
     theme::{HudFonts, HudTheme},
     tooltip::Tooltip,
     zlayer,
@@ -133,6 +134,7 @@ fn spawn_combat_hud(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
+    mut orb_materials: ResMut<Assets<OrbLiquidMaterial>>,
 ) {
     // Bottom-centre resource-orb cluster (spec §3.1), left to right: Health
     // (angel frame) — Stamina (a genuine full orb, dead centre, mirrors
@@ -161,6 +163,7 @@ fn spawn_combat_hud(
     let health_orb = spawn_orb_bar(
         &mut commands,
         &theme,
+        &mut orb_materials,
         images.get(HudImageKey::HealthLiquid),
         Some(images.get(HudImageKey::OrbFrameAngel)),
         Some(hud_layout::ORB_SOURCE_CROP),
@@ -193,6 +196,7 @@ fn spawn_combat_hud(
     let stamina_orb = spawn_orb_bar(
         &mut commands,
         &theme,
+        &mut orb_materials,
         images.get(HudImageKey::StaminaLiquid),
         Some(images.get(HudImageKey::OrbFrameStamina)),
         Some(hud_layout::ORB_SOURCE_CROP),
@@ -220,6 +224,7 @@ fn spawn_combat_hud(
     let mana_orb = spawn_orb_bar(
         &mut commands,
         &theme,
+        &mut orb_materials,
         images.get(HudImageKey::ManaLiquid),
         Some(images.get(HudImageKey::OrbFrameCuthulhu)),
         Some(hud_layout::ORB_SOURCE_CROP),
@@ -747,11 +752,15 @@ mod tests {
     /// [`spawn_combat_hud`] now needs a real [`HudImages`] (the orb/action-bar
     /// art lookup) — built the same way `xindeler_ui::orb_material`'s own
     /// tests build a headless `AssetServer` (a real asset type + loader
-    /// registration, no window/GPU needed just to allocate `Handle<Image>`s).
+    /// registration, no window/GPU needed just to allocate `Handle<Image>`s)
+    /// — plus a real `Assets<OrbLiquidMaterial>` collection (BL-82 EM-5.17
+    /// wave/stone-reveal rework: `spawn_orb_bar` now needs `ResMut<Assets<
+    /// OrbLiquidMaterial>>` to `add` each orb's own material instance).
     fn new_app_with_images() -> App {
         let mut app = new_app();
         app.add_plugins(AssetPlugin::default());
         app.add_plugins(ImagePlugin::default());
+        app.init_asset::<OrbLiquidMaterial>();
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
         app
@@ -922,48 +931,52 @@ mod tests {
     /// A resource orb spawned through this screen's own real
     /// `spawn_orb_bar` call site (same image handles/size/crop
     /// `spawn_combat_hud` uses for the health orb) carries the correct
-    /// [`BarValue`] and a real fraction-reveal CLIP WINDOW
-    /// (`HudOrbBarFillClip`) whose height reflects the fraction it was
-    /// spawned with — mirrors `xindeler_ui::bar`'s own
-    /// `orb_bar_fill_tracks_value_changes_by_height` acceptance bar.
-    /// Updated for the BL-82 EM-5.17 Phase 0 follow-up clip-reveal rework:
-    /// the fraction now lives on the clip WRAPPER (a direct child of the
-    /// orb), not the liquid image itself (`HudOrbBarFill`, now nested one
-    /// level deeper inside that wrapper) — this test also pins the liquid
-    /// image's `Node` to a FIXED `Val::Px` matching the orb's full size, the
-    /// regression this screen's own real call site must never reintroduce
-    /// (Matías's "shrinks instead of drains" report). This tests the
-    /// SPAWN-time fraction (not a later `BarValue` mutation): the system
-    /// that resizes the clip window on a LATER change
-    /// (`xindeler_ui::bar::update_orb_bars`) is `pub(crate)` to
-    /// `xindeler-ui` and already covered by that crate's own tests; from
-    /// `xindeler-client` the observable contract is "the orb this screen
-    /// spawns is a real `spawn_orb_bar` at the value/crop it's given," which
-    /// this asserts directly.
+    /// [`BarValue`] and writes that same fraction onto its
+    /// [`HudOrbBarFill`](xindeler_ui::bar::HudOrbBarFill) child's
+    /// [`OrbLiquidMaterial::fill_fraction`] uniform — mirrors
+    /// `xindeler_ui::bar`'s own
+    /// `orb_bar_material_fraction_tracks_value_changes` acceptance bar.
+    /// Reworked (BL-82 EM-5.17 wave/stone-reveal shader rework) from the
+    /// old CPU-clip-window height assertion to a material uniform read,
+    /// since the fraction (plus the wave/stone-reveal) is now entirely the
+    /// shader's job. This test also pins the liquid layer's `Node` to a
+    /// FIXED `Val::Px` matching the orb's full inset size, the regression
+    /// this screen's own real call site must never reintroduce
+    /// (Matías's original "shrinks instead of drains" report, which this
+    /// primitive already fixed once before this shader rework). This tests
+    /// the SPAWN-time fraction (not a later `BarValue` mutation): the system
+    /// that writes a LATER change (`xindeler_ui::bar::update_orb_bars`) is
+    /// `pub(crate)` to `xindeler-ui` and already covered by that crate's own
+    /// tests; from `xindeler-client` the observable contract is "the orb
+    /// this screen spawns is a real `spawn_orb_bar` at the value/crop it's
+    /// given," which this asserts directly.
     #[test]
-    fn health_orb_spawns_with_correct_value_and_half_height_fill() {
+    fn health_orb_spawns_with_correct_value_and_half_fill_fraction() {
         let mut app = new_app_with_images();
         let theme = HudTheme::default();
         let images = app.world().resource::<HudImages>().clone();
 
-        let health_orb_entity = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                images.get(HudImageKey::HealthLiquid),
-                Some(images.get(HudImageKey::OrbFrameAngel)),
-                Some(hud_layout::ORB_SOURCE_CROP),
-                Some(hud_layout::ANGEL_FRAME_SOURCE_CROP),
-                hud_layout::ANGEL_FRAME_WIDTH_PX,
-                hud_layout::ANGEL_LIQUID_INSET_PX,
-                hud_layout::ORB_SIZE_PX,
-                hud_layout::ORB_SIZE_PX,
-                BarValue::new(50.0, 100.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let health_orb_entity = app
+            .world_mut()
+            .resource_scope::<Assets<OrbLiquidMaterial>, _>(|world, mut materials| {
+                let mut commands = world.commands();
+                let id = spawn_orb_bar(
+                    &mut commands,
+                    &theme,
+                    &mut materials,
+                    images.get(HudImageKey::HealthLiquid),
+                    Some(images.get(HudImageKey::OrbFrameAngel)),
+                    Some(hud_layout::ORB_SOURCE_CROP),
+                    Some(hud_layout::ANGEL_FRAME_SOURCE_CROP),
+                    hud_layout::ANGEL_FRAME_WIDTH_PX,
+                    hud_layout::ANGEL_LIQUID_INSET_PX,
+                    hud_layout::ORB_SIZE_PX,
+                    hud_layout::ORB_SIZE_PX,
+                    BarValue::new(50.0, 100.0),
+                );
+                world.flush();
+                id
+            });
         app.update();
 
         assert_eq!(
@@ -974,50 +987,29 @@ mod tests {
         let children: Vec<Entity> = app
             .world()
             .get::<Children>(health_orb_entity)
-            .expect("the orb has clip-window/frame children")
+            .expect("the orb has fill/frame children")
             .iter()
             .collect();
-        let clip_entity = children
-            .into_iter()
-            .find(|&e| {
-                app.world()
-                    .get::<xindeler_ui::bar::HudOrbBarFillClip>(e)
-                    .is_some()
-            })
-            .expect("a HudOrbBarFillClip child exists");
-        // BL-82 bugfix (Matías's "orb looks empty but I survive 3 more
-        // hits" report): the clip window's height is now expressed as an
-        // absolute `Val::Px` computed from `liquid_inset_px` + the
-        // fraction-of-the-liquid's-own-span (see
-        // `xindeler_ui::bar::HudOrbBarFillClipGeometry::clip_height_px`'s doc
-        // comment), not a flat `Val::Percent(fraction * 100.0)` of the
-        // container — the old formula went fully invisible below
-        // `ANGEL_LIQUID_INSET_PX / ORB_SIZE_PX ≈ 8.75%` HP. At this test's
-        // `fraction == 0.5` the two formulas coincidentally agree numerically
-        // (`14.0 + 0.5 * (160.0 - 28.0) == 0.5 * 160.0 == 80.0`), which is why
-        // this call site alone couldn't have caught the bug — see
-        // `xindeler_ui::bar`'s own
-        // `health_orb_clip_window_stays_visible_at_low_fraction_with_inset`
-        // regression test for the LOW-fraction case where they diverge.
-        assert_eq!(
-            app.world().get::<Node>(clip_entity).unwrap().height,
-            Val::Px(80.0)
-        );
-
-        let clip_children: Vec<Entity> = app
-            .world()
-            .get::<Children>(clip_entity)
-            .expect("the clip window has a fill-image grandchild")
-            .iter()
-            .collect();
-        let fill_entity = clip_children
+        let fill_entity = children
             .into_iter()
             .find(|&e| {
                 app.world()
                     .get::<xindeler_ui::bar::HudOrbBarFill>(e)
                     .is_some()
             })
-            .expect("a HudOrbBarFill grandchild exists");
+            .expect("a HudOrbBarFill child exists");
+
+        let material_node = app
+            .world()
+            .get::<bevy::prelude::MaterialNode<OrbLiquidMaterial>>(fill_entity)
+            .expect("the fill child carries a MaterialNode<OrbLiquidMaterial>");
+        let materials = app.world().resource::<Assets<OrbLiquidMaterial>>();
+        assert_eq!(
+            materials.get(material_node).unwrap().fill_fraction,
+            0.5,
+            "the material's fill_fraction must match the spawn-time BarValue fraction"
+        );
+
         let fill_node = app.world().get::<Node>(fill_entity).unwrap();
         let inset_size = hud_layout::ORB_SIZE_PX - 2.0 * hud_layout::ANGEL_LIQUID_INSET_PX;
         assert_eq!(

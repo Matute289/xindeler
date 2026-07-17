@@ -8,15 +8,15 @@
 //! gated so it costs nothing on ticks where nothing changed.
 
 use bevy::{
-    asset::Handle,
+    asset::{Assets, Handle},
     ecs::{
         component::Component,
         hierarchy::Children,
         query::{Changed, With},
-        system::{Commands, Query},
+        system::{Commands, Query, ResMut},
     },
     image::Image,
-    math::Rect,
+    math::{Rect, Vec2},
     picking::Pickable,
     ui::{
         BackgroundColor, GlobalZIndex, Node, PositionType, Val,
@@ -24,7 +24,7 @@ use bevy::{
     },
 };
 
-use crate::{theme::HudTheme, zlayer};
+use crate::{orb_material::OrbLiquidMaterial, theme::HudTheme, zlayer};
 
 /// The value a bar displays: `current` / `max`. Any caller (an EM-5.2 HUD
 /// system reading `NetHealth`/`NetEnergy`/etc.) writes this; [`update_bars`]
@@ -124,97 +124,27 @@ pub(crate) fn update_bars(
     }
 }
 
-/// BL-82 EM-5.17 T57.8, reworked BL-82 EM-5.17 Phase 0 follow-up (Matías's
-/// "the liquid SHRINKS instead of DRAINS" report) — marks an orb bar's
-/// liquid-image child. **This node's own `Node.width`/`Node.height` is now
-/// FIXED** (`Val::Px`, matching the orb's full `width_px`/`height_px`) and
-/// NEVER touched by [`update_orb_bars`] — that was the bug: resizing an
-/// `ImageNode`-carrying `Node` directly makes `ImageNode`'s default
-/// stretch-to-fit rescale/squash the texture into the shrunk box, which
-/// reads as the liquid shrinking rather than draining. The fraction is now
-/// expressed purely by [`HudOrbBarFillClip`], the wrapper this node lives
-/// inside — see that type's doc comment for the full clip-reveal mechanism.
+/// BL-82 EM-5.17 T57.8, reworked twice: BL-82 EM-5.17 Phase 0 follow-up
+/// (Matías's "the liquid SHRINKS instead of DRAINS" report) fixed the
+/// squash bug by splitting this into a fixed-size image nested inside a
+/// resizing CPU-clip window; this later rework (BL-82 EM-5.17, Matías's
+/// "the orbs need a real shader-based wave + stone-reveal effect" request)
+/// REPLACES that CPU-clip window entirely — marks an orb bar's liquid
+/// render layer, now a
+/// [`bevy::prelude::MaterialNode`]`<`[`OrbLiquidMaterial`]`>` instead of a
+/// plain `ImageNode`. **This node's own `Node.width`/ `Node.height` is FIXED**
+/// (`Val::Px`, the orb's full size minus `liquid_inset_px` on each side) and
+/// NEVER touched by [`update_orb_bars`] — the fraction (AND, new in this
+/// rework, the wave-animated surface line plus dark stone/metal depletion
+/// reveal) are now expressed entirely inside
+/// the shader via [`OrbLiquidMaterial::fill_fraction`]/`time`, computed
+/// per-fragment rather than by resizing a CPU clip box. This is strictly
+/// MORE capable than the old two-node clip-window nesting (a flat rectangle
+/// can only ever reveal a flat line — see [`OrbLiquidMaterial`]'s own module
+/// doc comment for the full wave/stone rationale), so the old
+/// `HudOrbBarFillClip` wrapper this node used to live inside no longer exists.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudOrbBarFill;
-
-/// BL-82 EM-5.17 Phase 0 follow-up — the fraction-reveal CLIP WINDOW wrapped
-/// around an orb bar's [`HudOrbBarFill`] image. This is the node
-/// [`update_orb_bars`] resizes (see
-/// [`HudOrbBarFillClipGeometry::clip_height_px`] for the exact height formula),
-/// bottom-anchored with `overflow: Overflow::clip()`: as the fraction shrinks,
-/// this window's TOP edge sinks toward the bottom (never resizing the liquid
-/// image inside it), progressively hiding more of the fixed-size liquid graphic
-/// from the top down — a real "liquid level draining inside a fixed-size glass"
-/// look, the CSS `clip-path`/`overflow:hidden` idiom applied to `bevy_ui`'s own
-/// `Overflow::clip()` primitive. This is a SECOND, INNER clip layer, nested
-/// inside the `container`'s own outer `overflow: Overflow::clip_y()` (BL-82
-/// orb crop round 3 narrowed this from both-axis `clip()` to `y`-only, so a
-/// wider-than-square frame overlay can spill past the container horizontally
-/// — see `spawn_orb_bar`'s own doc comment on `frame_width_px`; this inner
-/// clip window is unaffected, since it only ever needs to clip vertically
-/// anyway) — the two clips serve different jobs and neither can substitute
-/// for the other.
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct HudOrbBarFillClip;
-
-/// BL-82 bugfix (Matías, live: "the health orb looked completely
-/// empty/invisible, yet I survived roughly 3 more hits") — per-orb-bar
-/// geometry [`update_orb_bars`] needs to compute a clip-window height that
-/// keeps the visible liquid area EXACTLY proportional to the health fraction
-/// across the WHOLE `[0, 1]` range, stored on the clip entity itself (the
-/// same entity [`update_orb_bars`] already queries by
-/// `With<HudOrbBarFillClip>`).
-///
-/// ## Root cause this fixes
-/// [`HudOrbBarFillClip`]'s window used to be sized as a flat
-/// `Val::Percent(fraction * 100.0)` of the container's `height_px` — i.e. its
-/// height in pixels was simply `fraction * height_px`. But [`HudOrbBarFill`]
-/// (the liquid image nested one level inside the clip window) is NOT flush
-/// with the container's bottom edge: `spawn_orb_bar`'s `liquid_inset_px`
-/// bottom-anchors it `liquid_inset_px` ABOVE the container's true bottom (so
-/// it centres inside the frame's circular hole instead of touching the
-/// frame's ring — see `spawn_orb_bar`'s own doc comment). Since the clip
-/// window is ALSO bottom-anchored at the container's true bottom, its own
-/// visible span is `[0, fraction * height_px]` in that same coordinate frame
-/// — and whenever `fraction * height_px < liquid_inset_px`, that visible span
-/// doesn't even reach up to where the liquid image STARTS (`liquid_inset_px`),
-/// so the two ranges have ZERO overlap: the liquid renders **fully
-/// invisible** even though the fraction is genuinely `> 0.0`. For the health
-/// orb specifically (`ORB_SIZE_PX = 160.0`, `ANGEL_LIQUID_INSET_PX = 14.0`,
-/// see `xindeler-client::hud_layout`), that threshold is `14.0 / 160.0 ≈
-/// 8.75%` of max HP — anywhere below that, the orb reads as completely
-/// drained no matter how much real HP remains, which is exactly consistent
-/// with Matías surviving several more hits after the orb "emptied."
-///
-/// ## The fix
-/// The clip window's height must be measured from where the liquid image
-/// ITSELF starts (`liquid_inset_px`), not from the container's true bottom —
-/// see [`Self::clip_height_px`]. This keeps the revealed liquid height
-/// EXACTLY `fraction * (height_px - 2.0 * liquid_inset_px)` (the liquid
-/// image's own real height) for every fraction in `[0.0, 1.0]`, with no dead
-/// zone. `liquid_inset_px == 0.0` (every existing mock/test call site that
-/// doesn't pass a real inset) degenerates back to the OLD `fraction *
-/// height_px` formula exactly — this is a strict generalisation, not a
-/// special case that could regress the zero-inset call sites.
-#[derive(Component, Debug, Clone, Copy)]
-pub(crate) struct HudOrbBarFillClipGeometry {
-    /// The orb's full box height in px — the same `height_px`
-    /// `spawn_orb_bar` was given.
-    height_px: f32,
-    /// The liquid image's inset from the box's top/bottom edges — the same
-    /// `liquid_inset_px` `spawn_orb_bar` was given.
-    liquid_inset_px: f32,
-}
-
-impl HudOrbBarFillClipGeometry {
-    /// The clip window's height, in PIXELS (not a `%` of the container),
-    /// that keeps the visible liquid area exactly proportional to `fraction`
-    /// — see this type's own doc comment for the full derivation. Degrades
-    /// to the old `fraction * height_px` when `liquid_inset_px == 0.0`.
-    fn clip_height_px(self, fraction: f32) -> f32 {
-        self.liquid_inset_px + fraction * (self.height_px - 2.0 * self.liquid_inset_px)
-    }
-}
 
 /// Marks an orb bar's container — the vertical, bottom-anchored counterpart
 /// to [`HudBar`]. See [`spawn_orb_bar`]'s doc comment for why this is a
@@ -230,11 +160,11 @@ pub struct HudOrbBar;
 /// spawned as a full-size sibling `ImageNode` ON TOP of the fill, with
 /// [`Pickable::IGNORE`] so it never blocks interaction with whatever's
 /// underneath — the frame PNGs in the HUD-D4 pack have an alpha-transparent
-/// centre, so the fill shows through the frame's circular cutout while the
-/// frame's own opaque ring/carving still renders over the fill's square
-/// corners (no separate circular-clip shader needed for this v1 — see
-/// `crate::orb_material`'s module doc comment for the full `UiMaterial`
-/// spike + why v1 deliberately stays with this CPU-clip mechanism).
+/// centre, so the fill (now a real [`crate::orb_material::OrbLiquidMaterial`]
+/// shader — see that module's doc comment for the wave/stone-reveal
+/// rationale) shows through the frame's circular cutout while the frame's own
+/// opaque ring/carving still renders over the fill's square corners; no
+/// separate circular-clip mask is needed for either layer.
 ///
 /// ## Why a PARALLEL primitive, not an `Orientation` param on `spawn_bar`
 /// [`spawn_bar`]'s signature is a real, already-shipped API with existing
@@ -317,11 +247,27 @@ pub struct HudOrbBar;
 /// pre-round-3 call site that doesn't need the wider box, and every
 /// variant whose art already fits, e.g. the stamina orb) reproduces the
 /// exact old square-frame behaviour byte-for-byte.
+///
+/// ## `materials` — the shader now doing the fraction/wave/stone-reveal work
+/// BL-82 EM-5.17 (Matías's "the orbs need a real shader-based agitated-water
+/// plus dark stone/metal depletion reveal" request): the liquid layer is now a
+/// [`bevy::prelude::MaterialNode`]`<`[`OrbLiquidMaterial`]`>` instead of a
+/// plain `ImageNode`, so this function needs write access to that material
+/// asset collection to `add` the orb's own material instance — `materials`
+/// is exactly that, the same "pass the `ResMut<Assets<M>>` the caller already
+/// has" pattern `map_view::spawn_map_screens` uses for
+/// `MinimapFadeMaterial`. `fill_source_crop`, when given, converts straight
+/// to the material's pixel-space `crop_min`/`crop_size` uniforms (see
+/// [`OrbLiquidMaterial`]'s own module doc comment for why those stay pixel
+/// space rather than being pre-divided into UV here) — `frame_source_crop`
+/// is UNCHANGED, still an `ImageNode::rect` crop, since the frame overlay
+/// this function spawns is untouched by this rework.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_orb_bar(
     commands: &mut Commands,
     theme: &HudTheme,
+    materials: &mut Assets<OrbLiquidMaterial>,
     fill_image: Handle<Image>,
     frame_image: Option<Handle<Image>>,
     fill_source_crop: Option<Rect>,
@@ -332,11 +278,18 @@ pub fn spawn_orb_bar(
     height_px: f32,
     value: BarValue,
 ) -> bevy::ecs::entity::Entity {
-    let mut fill_image_node = ImageNode::new(fill_image);
-    if let Some(rect) = fill_source_crop {
-        fill_image_node.rect = Some(rect);
-        fill_image_node.image_mode = NodeImageMode::Stretch;
-    }
+    let (crop_min, crop_size) = match fill_source_crop {
+        Some(rect) => (rect.min, rect.max - rect.min),
+        // `Vec2::ZERO` is `OrbLiquidMaterial`'s own "no crop, sample the
+        // full [0,1]^2 UV" sentinel — see its module doc comment.
+        None => (Vec2::ZERO, Vec2::ZERO),
+    };
+    let fill_material = materials.add(OrbLiquidMaterial::new(
+        fill_image,
+        crop_min,
+        crop_size,
+        value.fraction(),
+    ));
 
     let container = commands
         .spawn((HudOrbBar, value, Node {
@@ -357,59 +310,33 @@ pub fn spawn_orb_bar(
             ..Default::default()
         }))
         .with_children(|parent| {
-            // The fraction-reveal clip window (see [`HudOrbBarFillClip`]'s
-            // doc comment) — bottom-anchored, its OWN height is what tracks
-            // `value.fraction()`, and it clips (`Overflow::clip()`) whatever
-            // of the always-full-size liquid image below sticks out above
-            // it.
-            let clip_geometry = HudOrbBarFillClipGeometry {
-                height_px,
-                liquid_inset_px,
-            };
-            parent
-                .spawn((HudOrbBarFillClip, clip_geometry, Node {
+            // The liquid render layer itself: FIXED `Val::Px` size —
+            // deliberately NOT resized as the fraction changes (that was the
+            // old CPU-clip bug this whole primitive already fixed once —
+            // see [`HudOrbBarFill`]'s doc comment). `liquid_inset_px` insets
+            // it EQUALLY on all four sides (BL-82 EM-5.17 Phase 0 second
+            // follow-up), centring it a few px inside the orb's full
+            // `width_px`×`height_px` box rather than flush with it — see
+            // [`spawn_orb_bar`]'s own doc comment for why the liquid needs
+            // to render a hair SMALLER than the frame's hole rather than
+            // exactly flush: a few px of deliberate slack means sub-pixel
+            // rounding at different UI-scale factors can never read as the
+            // liquid overlapping the frame's ring. The fraction (and, new in
+            // this rework, the wave-animated surface + stone-reveal) is now
+            // expressed entirely inside [`OrbLiquidMaterial`]'s shader, not
+            // by this `Node`'s own size.
+            parent.spawn((
+                HudOrbBarFill,
+                Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    bottom: Val::Px(0.0),
-                    width: Val::Percent(100.0),
-                    height: Val::Px(clip_geometry.clip_height_px(value.fraction())),
-                    overflow: bevy::ui::Overflow::clip(),
+                    left: Val::Px(liquid_inset_px),
+                    bottom: Val::Px(liquid_inset_px),
+                    width: Val::Px((width_px - 2.0 * liquid_inset_px).max(0.0)),
+                    height: Val::Px((height_px - 2.0 * liquid_inset_px).max(0.0)),
                     ..Default::default()
-                }))
-                .with_children(|clip_parent| {
-                    // The liquid graphic itself: FIXED `Val::Px` size —
-                    // deliberately NOT `Val::Percent(100.0)` of the
-                    // (shrinking) clip window's own box, which would
-                    // re-squash the texture right back into the exact bug
-                    // this rework fixes. `liquid_inset_px` insets it
-                    // EQUALLY on all four sides (BL-82 EM-5.17 Phase 0
-                    // second follow-up), centring it a few px inside the
-                    // orb's full `width_px`×`height_px` box rather than
-                    // flush with it — see [`spawn_orb_bar`]'s own doc
-                    // comment for why the liquid needs to render a hair
-                    // SMALLER than the frame's hole rather than exactly
-                    // flush: a few px of deliberate slack means sub-pixel
-                    // rounding at different UI-scale factors can never read
-                    // as the liquid overlapping the frame's ring. Still
-                    // bottom-anchored (via the `bottom: Val::Px(liquid_inset_px)`
-                    // offset) inside the clip window so the window's
-                    // fraction-driven reveal still tracks a real "liquid
-                    // level," just measured from `liquid_inset_px` above the
-                    // container's true bottom instead of the container's
-                    // bottom exactly.
-                    clip_parent.spawn((
-                        HudOrbBarFill,
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(liquid_inset_px),
-                            bottom: Val::Px(liquid_inset_px),
-                            width: Val::Px((width_px - 2.0 * liquid_inset_px).max(0.0)),
-                            height: Val::Px((height_px - 2.0 * liquid_inset_px).max(0.0)),
-                            ..Default::default()
-                        },
-                        fill_image_node,
-                    ));
-                });
+                },
+                bevy::prelude::MaterialNode(fill_material),
+            ));
         })
         .id();
 
@@ -459,24 +386,28 @@ pub fn spawn_orb_bar(
     container
 }
 
-/// Resizes every orb bar's fraction-reveal CLIP WINDOW ([`HudOrbBarFillClip`])
-/// to its container's current [`BarValue`] fraction, bottom-anchored (grows
-/// the window's HEIGHT, unlike [`update_bars`]'s width resize) — the
-/// vertical counterpart to [`update_bars`], same `Changed<BarValue>` gate.
-/// **Never touches [`HudOrbBarFill`]** (the liquid image itself, one level
-/// deeper) — that split is the whole fix for the "liquid shrinks instead of
-/// drains" bug: only the clip window's box may react to the fraction, the
-/// liquid graphic's own `Node` must stay a constant `Val::Px` forever. See
-/// `orb_bar_fill_image_never_resizes_only_the_clip_wrapper_does` below for
-/// the regression guard.
+/// Writes every orb bar's current [`BarValue`] fraction onto its
+/// [`HudOrbBarFill`] child's [`OrbLiquidMaterial::fill_fraction`] uniform —
+/// the vertical counterpart to [`update_bars`], same `Changed<BarValue>`
+/// gate. Reworked (BL-82 EM-5.17, the wave/stone-reveal shader rework) from
+/// the old "resize a CPU-clip window's `Node.height`" mechanism to a direct
+/// material-asset write, since the fraction (plus the wave/stone-reveal) is
+/// now entirely the shader's job — see [`HudOrbBarFill`]'s doc comment.
+/// **Never touches the [`HudOrbBarFill`] entity's own `Node`** — that node's
+/// size stays a constant `Val::Px` forever (the fixed liquid-inset box); only
+/// the material asset's uniform reacts to the fraction. See
+/// `orb_bar_material_fraction_tracks_value_changes` below for the coverage.
 pub(crate) fn update_orb_bars(
     bars: Query<(&BarValue, &Children), (Changed<BarValue>, With<HudOrbBar>)>,
-    mut clips: Query<(&mut Node, &HudOrbBarFillClipGeometry), With<HudOrbBarFillClip>>,
+    fills: Query<&bevy::prelude::MaterialNode<OrbLiquidMaterial>, With<HudOrbBarFill>>,
+    mut materials: ResMut<Assets<OrbLiquidMaterial>>,
 ) {
     for (value, children) in &bars {
         for &child in children.iter() {
-            if let Ok((mut node, geometry)) = clips.get_mut(child) {
-                node.height = Val::Px(geometry.clip_height_px(value.fraction()));
+            if let Ok(material_node) = fills.get(child)
+                && let Some(mut material) = materials.get_mut(material_node)
+            {
+                material.fill_fraction = value.fraction();
             }
         }
     }
@@ -510,19 +441,24 @@ pub(crate) fn update_orb_bars(
 pub struct HudImageBarFill;
 
 /// BL-82 EM-5.17 Phase 5 follow-up — the fraction-reveal CLIP WINDOW wrapped
-/// around a horizontal image bar's [`HudImageBarFill`] image, the horizontal
-/// counterpart to [`HudOrbBarFillClip`]. This is the node
+/// around a horizontal image bar's [`HudImageBarFill`] image (the
+/// nameplate health/stagger bars this primitive serves — see
+/// [`spawn_horizontal_image_bar`] — are UNCHANGED by the orb liquid's BL-82
+/// EM-5.17 wave/stone-reveal shader rework; this CPU-clip mechanism stays the
+/// simple, correct choice here since those bars have no "empty vessel"
+/// material-reveal requirement). This is the node
 /// [`update_horizontal_image_bars`] resizes (`Node.width = value.fraction() *
 /// 100%`), left-anchored with `overflow: Overflow::clip()`: as the fraction
 /// shrinks, this window's RIGHT edge sweeps toward the left (never resizing
 /// the fill image inside it), progressively hiding more of the fixed-size
 /// fill graphic from the right side in — a real "meter draining" look, the
 /// CSS `clip-path`/`overflow:hidden` idiom applied to `bevy_ui`'s own
-/// `Overflow::clip()` primitive, same mechanism [`HudOrbBarFillClip`] applies
-/// on the height axis. This is a SECOND, INNER clip layer, nested inside the
-/// container's own outer `overflow: Overflow::clip()` (spawn-time only,
-/// never resized) — the two clips serve different jobs and neither can
-/// substitute for the other.
+/// `Overflow::clip()` primitive (the same CPU-clip idiom the orb liquid used
+/// to use too, before this rework moved that one to a shader — see
+/// [`HudOrbBarFill`]'s doc comment). This is a SECOND, INNER clip layer,
+/// nested inside the container's own outer `overflow: Overflow::clip()`
+/// (spawn-time only, never resized) — the two clips serve different jobs and
+/// neither can substitute for the other.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudImageBarFillClip;
 
@@ -645,7 +581,7 @@ pub(crate) fn update_horizontal_image_bars(
 
 #[cfg(test)]
 mod tests {
-    use bevy::prelude::*;
+    use bevy::{asset::AssetPlugin, prelude::*};
 
     use super::*;
 
@@ -716,64 +652,114 @@ mod tests {
     fn new_orb_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        app.add_plugins(AssetPlugin::default());
+        app.init_asset::<OrbLiquidMaterial>();
         app.add_systems(Update, update_orb_bars);
         app
     }
 
-    /// `spawn_orb_bar` at half value gives the fraction-reveal CLIP WINDOW
-    /// ([`HudOrbBarFillClip`], the container's direct child) a proportional
-    /// HEIGHT (bottom-anchored, unlike the horizontal bar's width fill); a
-    /// later `BarValue` mutation resizes it on the next update — the T57.8
-    /// acceptance bar for the vertical orb-bar primitive, updated for the
-    /// BL-82 EM-5.17 Phase 0 follow-up clip-reveal rework: the CLIP WINDOW
-    /// is what tracks the fraction now, not the liquid image itself (see
-    /// [`orb_bar_fill_image_never_resizes_only_the_clip_wrapper_does`]).
-    /// With `liquid_inset_px == 0.0` (this test's call site) the fixed
-    /// [`HudOrbBarFillClipGeometry::clip_height_px`] formula degrades back to
-    /// the plain `fraction * height_px` value expressed here as `Val::Px`
-    /// (the clip window is now sized in absolute px, not `%`, so the fix in
-    /// [`health_orb_clip_window_stays_visible_at_low_fraction_with_inset`]
-    /// below can express a non-zero-but-sub-container height correctly).
+    /// Test-only helper: `spawn_orb_bar` needs simultaneous `&mut Commands` +
+    /// `&mut Assets<OrbLiquidMaterial>`, which `App`'s test helpers can't hand
+    /// out together directly — `World::resource_scope` is the standard idiom
+    /// for exactly this (borrow the resource out, hand back a `&mut World` to
+    /// build `Commands` from, same pattern `combat_hud.rs`'s own test uses).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_orb_bar_for_test(
+        app: &mut App,
+        theme: &HudTheme,
+        fill_image: Handle<Image>,
+        frame_image: Option<Handle<Image>>,
+        fill_source_crop: Option<Rect>,
+        frame_source_crop: Option<Rect>,
+        frame_width_px: f32,
+        liquid_inset_px: f32,
+        width_px: f32,
+        height_px: f32,
+        value: BarValue,
+    ) -> Entity {
+        app.world_mut()
+            .resource_scope::<Assets<OrbLiquidMaterial>, _>(|world, mut materials| {
+                let mut commands = world.commands();
+                let id = spawn_orb_bar(
+                    &mut commands,
+                    theme,
+                    &mut materials,
+                    fill_image,
+                    frame_image,
+                    fill_source_crop,
+                    frame_source_crop,
+                    frame_width_px,
+                    liquid_inset_px,
+                    width_px,
+                    height_px,
+                    value,
+                );
+                world.flush();
+                id
+            })
+    }
+
+    /// Finds an orb bar container's [`HudOrbBarFill`] child and reads its
+    /// [`OrbLiquidMaterial::fill_fraction`] uniform straight off the material
+    /// asset — the one place every orb test below needs to look to observe
+    /// the fraction, now that it lives in a shader uniform instead of a
+    /// resizable `Node`.
+    fn fill_fraction_of(app: &mut App, container: Entity) -> f32 {
+        let fill_entity = find_fill_child(app, container);
+        let material_node = app
+            .world()
+            .get::<bevy::prelude::MaterialNode<OrbLiquidMaterial>>(fill_entity)
+            .expect("the fill child carries a MaterialNode<OrbLiquidMaterial>");
+        let materials = app.world().resource::<Assets<OrbLiquidMaterial>>();
+        materials.get(material_node).unwrap().fill_fraction
+    }
+
+    /// Finds an orb bar container's [`HudOrbBarFill`] child entity — now a
+    /// DIRECT child of the container (the CPU-clip wrapper this used to be
+    /// nested inside no longer exists, see [`HudOrbBarFill`]'s own doc
+    /// comment).
+    fn find_fill_child(app: &mut App, container: Entity) -> Entity {
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
+            .expect("orb bar has a fill child")
+    }
+
+    /// `spawn_orb_bar` at half value writes `0.5` onto the fill child's
+    /// [`OrbLiquidMaterial::fill_fraction`] uniform; a later `BarValue`
+    /// mutation updates it again on the next [`update_orb_bars`] run — the
+    /// T57.8 acceptance bar for the vertical orb-bar primitive, reworked
+    /// (BL-82 EM-5.17 wave/stone-reveal shader rework) from the old
+    /// CPU-clip-window height resize to this material-uniform write (see
+    /// [`orb_bar_fill_node_never_resizes_only_the_material_fraction_does`]
+    /// for the companion "the `Node` itself never changes" guard).
     #[test]
-    fn orb_bar_fill_tracks_value_changes_by_height() {
+    fn orb_bar_material_fraction_tracks_value_changes() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(50.0, 100.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(50.0, 100.0),
+        );
         app.update();
 
-        let clip_height = |app: &mut App, container: Entity| -> Val {
-            let children: Vec<Entity> = app
-                .world()
-                .get::<Children>(container)
-                .unwrap()
-                .iter()
-                .collect();
-            let clip_entity = children
-                .into_iter()
-                .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-                .expect("orb bar has a clip-window child");
-            app.world().get::<Node>(clip_entity).unwrap().height
-        };
-
-        assert_eq!(clip_height(&mut app, container), Val::Px(80.0));
+        assert_eq!(fill_fraction_of(&mut app, container), 0.5);
 
         app.world_mut()
             .get_mut::<BarValue>(container)
@@ -781,162 +767,101 @@ mod tests {
             .current = 25.0;
         app.update();
 
-        assert_eq!(clip_height(&mut app, container), Val::Px(40.0));
+        assert_eq!(fill_fraction_of(&mut app, container), 0.25);
     }
 
-    /// Regression test for the ROOT CAUSE Matías hit live: "the health orb's
-    /// liquid appeared completely empty/invisible... yet I survived roughly
-    /// 3 more hits before actually dying." With a real `liquid_inset_px > 0`
-    /// (e.g. the health orb's `ANGEL_LIQUID_INSET_PX = 14.0` at
-    /// `ORB_SIZE_PX = 160.0`), the OLD clip-window formula
-    /// (`Val::Percent(fraction * 100.0)`, i.e. `fraction * height_px` in
-    /// pixels) went to ZERO overlap with the liquid image — which starts
-    /// `liquid_inset_px` above the container's true bottom — for any
-    /// `fraction < liquid_inset_px / height_px` (here, `< 8.75%`): the whole
-    /// liquid rendered invisible despite real, nonzero HP remaining. This
-    /// asserts the FIXED clip height at a low-but-nonzero fraction (5%,
-    /// safely below that old 8.75% dead-zone) is non-zero and reaches at
-    /// least up to where the liquid image starts — i.e. some of the liquid
-    /// is genuinely visible, not fully clipped away.
+    /// Regression test for the ROOT CAUSE Matías hit live pre-shader-rework
+    /// (PR #142): "the health orb's liquid appeared completely
+    /// empty/invisible... yet I survived roughly 3 more hits before actually
+    /// dying." The OLD `HudOrbBarFillClip` CPU-clip window measured its
+    /// height as a flat fraction of the CONTAINER's full height, while the
+    /// liquid image lived `liquid_inset_px` above the container's true bottom
+    /// — for a real inset (e.g. the health orb's `ANGEL_LIQUID_INSET_PX =
+    /// 14.0` at `ORB_SIZE_PX = 160.0`) any `fraction < liquid_inset_px /
+    /// height_px` (here, `< 8.75%`) meant the clip window never reached where
+    /// the liquid started, so it rendered fully invisible despite real,
+    /// nonzero HP. This shader-based rework structurally cannot reintroduce
+    /// that class of bug: [`OrbLiquidMaterial::fill_fraction`] maps directly
+    /// and proportionally onto the [`HudOrbBarFill`] node's OWN local UV
+    /// space (already sized to exactly `height_px - 2.0 * liquid_inset_px`
+    /// by `spawn_orb_bar` — see that function's doc comment), with no
+    /// separate "measured from the container's true bottom" clip window to
+    /// go out of sync with the liquid's own inset — asserted here at the
+    /// same low-but-nonzero 5% fraction PR #142's original regression test
+    /// used.
     #[test]
-    fn health_orb_clip_window_stays_visible_at_low_fraction_with_inset() {
+    fn health_orb_fill_fraction_has_no_low_fraction_dead_zone_with_inset() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
         const HEIGHT_PX: f32 = 160.0;
         const LIQUID_INSET_PX: f32 = 14.0;
         const LOW_FRACTION: f32 = 0.05; // 5% HP — below the old 8.75% dead zone.
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                HEIGHT_PX,
-                LIQUID_INSET_PX,
-                HEIGHT_PX,
-                HEIGHT_PX,
-                BarValue::new(LOW_FRACTION * 100.0, 100.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            HEIGHT_PX,
+            LIQUID_INSET_PX,
+            HEIGHT_PX,
+            HEIGHT_PX,
+            BarValue::new(LOW_FRACTION * 100.0, 100.0),
+        );
         app.update();
 
-        let clip_height_px = |app: &mut App, container: Entity| -> f32 {
-            let children: Vec<Entity> = app
-                .world()
-                .get::<Children>(container)
-                .unwrap()
-                .iter()
-                .collect();
-            let clip_entity = children
-                .into_iter()
-                .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-                .expect("orb bar has a clip-window child");
-            match app.world().get::<Node>(clip_entity).unwrap().height {
-                Val::Px(px) => px,
-                other => panic!("expected a Val::Px clip height, got {other:?}"),
-            }
-        };
-
-        let height = clip_height_px(&mut app, container);
-
-        // The OLD (buggy) formula would give `LOW_FRACTION * HEIGHT_PX == 8.0`
-        // — strictly less than `LIQUID_INSET_PX == 14.0`, meaning the clip
-        // window never reached up to where the liquid image starts, so NONE
-        // of it would be visible. The FIX must clip window at least up to the
-        // liquid's own start point whenever the fraction is > 0.
-        assert!(
-            height >= LIQUID_INSET_PX,
-            "clip window height ({height}px) must reach at least the liquid image's own start \
-             point ({LIQUID_INSET_PX}px) whenever fraction > 0, or the liquid renders fully \
-             invisible despite nonzero HP — this is the exact bug Matías hit live"
-        );
-
-        // The visible slice of the liquid (the overlap between the clip
-        // window `[0, height]` and the liquid image's own box
-        // `[LIQUID_INSET_PX, HEIGHT_PX - LIQUID_INSET_PX]`) must be
-        // proportional to the fraction, not just "technically nonzero."
-        let visible_liquid_px = (height - LIQUID_INSET_PX).max(0.0);
-        let expected_visible_px = LOW_FRACTION * (HEIGHT_PX - 2.0 * LIQUID_INSET_PX);
-        assert!(
-            (visible_liquid_px - expected_visible_px).abs() < 0.01,
-            "visible liquid height ({visible_liquid_px}px) must be proportional to the health \
-             fraction ({LOW_FRACTION}), expected {expected_visible_px}px"
+        assert_eq!(
+            fill_fraction_of(&mut app, container),
+            LOW_FRACTION,
+            "the material's fill_fraction must equal the real fraction even at a low value with a \
+             nonzero liquid_inset_px — this mechanism has no separate clip-window geometry that \
+             could go out of sync with the inset, unlike the old CPU-clip mechanism PR #142 fixed"
         );
     }
 
-    /// Regression guard for the exact bug this rework fixes (Matías's
-    /// report: the health/stamina/mana orbs visually SHRANK as the resource
-    /// depleted instead of looking like liquid draining). Root cause: the
-    /// old [`update_orb_bars`] resized the `ImageNode`-carrying fill child's
-    /// own `Node.height` directly — `ImageNode`'s stretch-to-fit then
-    /// rescales/squashes the liquid texture into the shrunk box. This
-    /// asserts the liquid image's `Node` ([`HudOrbBarFill`], now a
-    /// GRANDCHILD nested inside [`HudOrbBarFillClip`]) stays a FIXED
-    /// `Val::Px` matching the orb's full size across a `BarValue` mutation
-    /// — only the clip wrapper (covered above) may react to the fraction. A
-    /// future change that goes back to resizing the fill image directly
-    /// must fail this test.
+    /// Regression guard for the ORIGINAL bug this primitive's CPU-clip
+    /// rework once fixed (Matías's report: the health/stamina/mana orbs
+    /// visually SHRANK as the resource depleted instead of looking like
+    /// liquid draining) — still enforced after the BL-82 EM-5.17 wave/
+    /// stone-reveal shader rework: the [`HudOrbBarFill`] node's own
+    /// `Node.width`/`Node.height` must stay a FIXED `Val::Px` (the orb's full
+    /// size minus `liquid_inset_px`) across a `BarValue` mutation — ONLY the
+    /// material's `fill_fraction` uniform (covered above) may react to the
+    /// fraction. A future change that goes back to resizing this `Node`
+    /// directly must fail this test.
     #[test]
-    fn orb_bar_fill_image_never_resizes_only_the_clip_wrapper_does() {
+    fn orb_bar_fill_node_never_resizes_only_the_material_fraction_does() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(50.0, 100.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(50.0, 100.0),
+        );
         app.update();
 
-        let fill_image_size = |app: &mut App, container: Entity| -> (Val, Val) {
-            let container_children: Vec<Entity> = app
-                .world()
-                .get::<Children>(container)
-                .unwrap()
-                .iter()
-                .collect();
-            let clip_entity = container_children
-                .into_iter()
-                .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-                .expect("orb bar has a clip-window child");
-            let clip_children: Vec<Entity> = app
-                .world()
-                .get::<Children>(clip_entity)
-                .unwrap()
-                .iter()
-                .collect();
-            let fill_entity = clip_children
-                .into_iter()
-                .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
-                .expect("clip window has a fill-image grandchild");
+        let fill_node_size = |app: &mut App, container: Entity| -> (Val, Val) {
+            let fill_entity = find_fill_child(app, container);
             let node = app.world().get::<Node>(fill_entity).unwrap();
             (node.width, node.height)
         };
 
         let full_size = (Val::Px(160.0), Val::Px(160.0));
         assert_eq!(
-            fill_image_size(&mut app, container),
+            fill_node_size(&mut app, container),
             full_size,
-            "the liquid image must spawn at the orb's FULL fixed size"
+            "the liquid layer must spawn at the orb's FULL fixed size"
         );
 
         app.world_mut()
@@ -946,45 +871,57 @@ mod tests {
         app.update();
 
         assert_eq!(
-            fill_image_size(&mut app, container),
+            fill_node_size(&mut app, container),
             full_size,
-            "changing BarValue must NEVER resize the liquid image itself — only the clip \
-             wrapper's height may change"
+            "changing BarValue must NEVER resize the liquid layer's Node — only the material's \
+             fill_fraction uniform may change"
+        );
+        assert_eq!(
+            fill_fraction_of(&mut app, container),
+            0.05,
+            "the material's fill_fraction must still track the changed BarValue"
         );
     }
 
-    /// `fill_source_crop`/`frame_source_crop`, when given, are each applied
-    /// to their OWN `ImageNode` as a pixel-space source `rect` +
-    /// `NodeImageMode::Stretch` — the fix for the "squashed ellipse" sizing
-    /// bug (see `spawn_orb_bar`'s own doc comment on the parameters). `None`
-    /// leaves an `ImageNode` at its default `rect`/`image_mode` (whole-image
-    /// stretch), preserving the pre-fix behaviour for callers that don't
-    /// pass real HUD-D4 art.
+    /// `fill_source_crop`, when given, converts straight to the fill
+    /// material's pixel-space `crop_min`/`crop_size` uniforms (`rect.min`/
+    /// `rect.max - rect.min`) — the material-based fix for the "squashed
+    /// ellipse" sizing bug the old `ImageNode::rect` crop used to handle
+    /// (see `spawn_orb_bar`'s own doc comment). `frame_source_crop` is
+    /// UNCHANGED — still an `ImageNode::rect` crop on the frame overlay,
+    /// since the frame is untouched by the shader rework. `None` leaves the
+    /// material's crop at `Vec2::ZERO`/`Vec2::ZERO` (the "no crop, full UV"
+    /// sentinel — see [`OrbLiquidMaterial`]'s own doc comment).
     #[test]
-    fn orb_bar_source_crop_applies_rect_and_stretch_to_fill_and_frame() {
+    fn orb_bar_source_crop_applies_pixel_rect_to_material_and_frame_image() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
         let crop = Rect::new(320.0, 0.0, 1088.0, 768.0);
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                Some(crop),
-                Some(crop),
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            Some(crop),
+            Some(crop),
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
+
+        let fill_entity = find_fill_child(&mut app, container);
+        let material_node = app
+            .world()
+            .get::<bevy::prelude::MaterialNode<OrbLiquidMaterial>>(fill_entity)
+            .unwrap();
+        let materials = app.world().resource::<Assets<OrbLiquidMaterial>>();
+        let material = materials.get(material_node).unwrap();
+        assert_eq!(material.crop_min, crop.min);
+        assert_eq!(material.crop_size, crop.max - crop.min);
 
         let container_children: Vec<Entity> = app
             .world()
@@ -992,31 +929,13 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        let clip_entity = container_children
-            .iter()
-            .copied()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-            .expect("orb bar has a clip-window child");
         let frame_entity = container_children
             .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_none())
             .expect("orb bar has a frame overlay child");
-        let clip_children: Vec<Entity> = app
-            .world()
-            .get::<Children>(clip_entity)
-            .unwrap()
-            .iter()
-            .collect();
-        let fill_entity = clip_children
-            .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
-            .expect("clip window has a fill-image grandchild");
-
-        for entity in [fill_entity, frame_entity] {
-            let image_node = app.world().get::<ImageNode>(entity).unwrap();
-            assert_eq!(image_node.rect, Some(crop));
-            assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
-        }
+        let image_node = app.world().get::<ImageNode>(frame_entity).unwrap();
+        assert_eq!(image_node.rect, Some(crop));
+        assert_eq!(image_node.image_mode, NodeImageMode::Stretch);
     }
 
     /// The fix for BL-82 EM-5.17 Phase 0's second follow-up (Matías's HUD-D4
@@ -1025,10 +944,9 @@ mod tests {
     /// `frame_source_crop` are genuinely INDEPENDENT — a caller may crop the
     /// frame image tighter than the liquid image (making the frame's own
     /// hole occupy more of the shared box) without that choice being forced
-    /// onto the liquid's crop too, unlike the old single shared `source_crop`
-    /// parameter this replaced (which could only scale both images by the
-    /// exact same factor — see [`spawn_orb_bar`]'s own doc comment on why
-    /// that made the frame/liquid RATIO untunable).
+    /// onto the liquid's crop too. Still holds after the shader rework: the
+    /// fill's crop now lives on the material, the frame's crop still on its
+    /// `ImageNode`, and the two remain independent parameters.
     #[test]
     fn orb_bar_fill_and_frame_source_crops_are_independent() {
         let mut app = new_orb_app();
@@ -1036,25 +954,30 @@ mod tests {
         let fill_crop = Rect::new(320.0, 0.0, 1088.0, 768.0);
         let frame_crop = Rect::new(352.0, 29.0, 1068.0, 745.0);
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                Some(fill_crop),
-                Some(frame_crop),
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            Some(fill_crop),
+            Some(frame_crop),
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
+
+        let fill_entity = find_fill_child(&mut app, container);
+        let material_node = app
+            .world()
+            .get::<bevy::prelude::MaterialNode<OrbLiquidMaterial>>(fill_entity)
+            .unwrap();
+        let materials = app.world().resource::<Assets<OrbLiquidMaterial>>();
+        let material = materials.get(material_node).unwrap();
+        assert_eq!(material.crop_min, fill_crop.min);
+        assert_eq!(material.crop_size, fill_crop.max - fill_crop.min);
 
         let container_children: Vec<Entity> = app
             .world()
@@ -1062,89 +985,45 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        let clip_entity = container_children
-            .iter()
-            .copied()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-            .expect("orb bar has a clip-window child");
         let frame_entity = container_children
             .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_none())
             .expect("orb bar has a frame overlay child");
-        let clip_children: Vec<Entity> = app
-            .world()
-            .get::<Children>(clip_entity)
-            .unwrap()
-            .iter()
-            .collect();
-        let fill_entity = clip_children
-            .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
-            .expect("clip window has a fill-image grandchild");
-
-        assert_eq!(
-            app.world().get::<ImageNode>(fill_entity).unwrap().rect,
-            Some(fill_crop)
-        );
         assert_eq!(
             app.world().get::<ImageNode>(frame_entity).unwrap().rect,
             Some(frame_crop)
         );
     }
 
-    /// `liquid_inset_px` shrinks the liquid image EQUALLY on all four sides,
+    /// `liquid_inset_px` shrinks the liquid layer EQUALLY on all four sides,
     /// centring it inside the orb's full `width_px`×`height_px` box instead
     /// of spawning it flush with the box edges — the other half of the
     /// BL-82 EM-5.17 Phase 0 second follow-up fix (a tighter
     /// `frame_source_crop` makes the frame's hole bigger; this inset makes
     /// the liquid a hair smaller, so the liquid's edge sits fully inside
-    /// the hole with no overlap even under sub-pixel rounding).
+    /// the hole with no overlap even under sub-pixel rounding). Unaffected
+    /// by the shader rework — this is still a plain `Node` position/size.
     #[test]
-    fn orb_bar_liquid_inset_shrinks_and_centers_fill_image() {
+    fn orb_bar_liquid_inset_shrinks_and_centers_fill_node() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                160.0,
-                8.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            160.0,
+            8.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
 
-        let container_children: Vec<Entity> = app
-            .world()
-            .get::<Children>(container)
-            .unwrap()
-            .iter()
-            .collect();
-        let clip_entity = container_children
-            .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
-            .expect("orb bar has a clip-window child");
-        let clip_children: Vec<Entity> = app
-            .world()
-            .get::<Children>(clip_entity)
-            .unwrap()
-            .iter()
-            .collect();
-        let fill_entity = clip_children
-            .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
-            .expect("clip window has a fill-image grandchild");
-
+        let fill_entity = find_fill_child(&mut app, container);
         let node = app.world().get::<Node>(fill_entity).unwrap();
         assert_eq!(node.left, Val::Px(8.0));
         assert_eq!(node.bottom, Val::Px(8.0));
@@ -1160,24 +1039,19 @@ mod tests {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
 
         let children: Vec<Entity> = app
@@ -1186,42 +1060,37 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        assert_eq!(children.len(), 2, "clip-window child + frame overlay child");
+        assert_eq!(children.len(), 2, "fill child + frame overlay child");
         let frame_entity = children
             .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
-            .expect("a non-clip-window (frame) child exists");
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_none())
+            .expect("a non-fill (frame) child exists");
         assert_eq!(
             *app.world().get::<Pickable>(frame_entity).unwrap(),
             Pickable::IGNORE
         );
     }
 
-    /// Omitting the frame overlay spawns only the fraction-reveal clip
-    /// window — the frame stays a genuinely OPTIONAL parameter.
+    /// Omitting the frame overlay spawns only the fill child — the frame
+    /// stays a genuinely OPTIONAL parameter.
     #[test]
     fn orb_bar_without_frame_spawns_only_fill_child() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                None,
-                None,
-                None,
-                160.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            None,
+            None,
+            None,
+            160.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
 
         let children: Vec<Entity> = app
@@ -1230,11 +1099,7 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        assert_eq!(
-            children.len(),
-            1,
-            "only the clip-window child, no frame overlay"
-        );
+        assert_eq!(children.len(), 1, "only the fill child, no frame overlay");
     }
 
     /// BL-82 orb crop round 3 — the regression guard for the actual fix:
@@ -1246,30 +1111,26 @@ mod tests {
     /// onto — see [`crate::zlayer::AMBIENT_CHROME_OVERLAY`]'s doc comment).
     /// This is exactly the mechanism `hud_layout::CUTHULHU_FRAME_WIDTH_PX`
     /// relies on to show the mana orb's wing art in full instead of the
-    /// square-crop clipping round 2 shipped.
+    /// square-crop clipping round 2 shipped. Unaffected by the shader
+    /// rework — the frame overlay itself is untouched.
     #[test]
     fn orb_bar_wider_frame_overlay_spills_symmetrically_with_its_own_z_index() {
         let mut app = new_orb_app();
         let theme = HudTheme::default();
 
-        let container = {
-            let mut commands = app.world_mut().commands();
-            let id = spawn_orb_bar(
-                &mut commands,
-                &theme,
-                Handle::default(),
-                Some(Handle::default()),
-                None,
-                None,
-                200.0,
-                0.0,
-                160.0,
-                160.0,
-                BarValue::new(1.0, 1.0),
-            );
-            app.world_mut().flush();
-            id
-        };
+        let container = spawn_orb_bar_for_test(
+            &mut app,
+            &theme,
+            Handle::default(),
+            Some(Handle::default()),
+            None,
+            None,
+            200.0,
+            0.0,
+            160.0,
+            160.0,
+            BarValue::new(1.0, 1.0),
+        );
         app.update();
 
         let children: Vec<Entity> = app
@@ -1280,7 +1141,7 @@ mod tests {
             .collect();
         let frame_entity = children
             .into_iter()
-            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_none())
             .expect("orb bar has a frame overlay child");
 
         let node = app.world().get::<Node>(frame_entity).unwrap();
