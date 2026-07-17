@@ -94,6 +94,31 @@ impl Clock {
 
     pub fn game_dt(&self) -> Duration { Duration::from_secs_f64(self.last_game_dt) }
 
+    /// Smooth + nudge the game-clock delta toward real time for one tick, then
+    /// clamp it to `[0, MAX_GAME_DT]`.
+    ///
+    /// The ceiling (`MAX_GAME_DT`) stops a single lag spike from producing a
+    /// huge gameplay dt. The **floor of `0`** is equally load-bearing: the game
+    /// clock must never run backwards. When `game_time` transiently overshoots
+    /// `real_time` — e.g. during the startup stall -> catch-up burst, where a
+    /// long LOD/terrain bake first elevates `average_dt` and pushes `real_time`
+    /// far ahead, then a run of near-zero-length catch-up frames lets
+    /// `game_time` overshoot — the nudge term `(real - game) * NUDGE_RATE` can
+    /// exceed the (by then decayed) `average_dt` and drive this negative.
+    /// Without the floor, `game_dt()`'s `Duration::from_secs_f64` panics with
+    /// "cannot convert float seconds to Duration: value is negative", a hard
+    /// crash on startup. A single clamped-to-zero frame is harmless: the nudge
+    /// pulls `game_time` back into line over the next few ticks.
+    //
+    // XINDELER: local addition (not upstream Veloren). This helper only extracts
+    // the inline `last_game_dt` expression in `tick()` so it can be unit-tested;
+    // the sole behavioural change vs. upstream is widening `.min(MAX_GAME_DT)` to
+    // `.clamp(0.0, MAX_GAME_DT)` (adds the missing floor). On a `gitlab` upstream
+    // sync, keep the `0.0` floor if upstream still edits this line.
+    fn nudged_game_dt(average_dt: f64, real_secs: f64, game_secs: f64) -> f64 {
+        (average_dt + (real_secs - game_secs) * NUDGE_RATE).clamp(0.0, MAX_GAME_DT)
+    }
+
     pub fn tick(&mut self) {
         span!(_guard, "tick", "Clock::tick");
         span!(guard, "clock work");
@@ -168,10 +193,102 @@ impl Clock {
         // Instead, we gradually nudge the game time back toward real time over
         // several ticks.
         self.last_real_dt = tick_time;
-        self.last_game_dt = (self.average_dt
-            + (self.real_time.as_secs_f64() - self.game_time.as_secs_f64()) * NUDGE_RATE)
-            .min(MAX_GAME_DT);
+        self.last_game_dt = Self::nudged_game_dt(
+            self.average_dt,
+            self.real_time.as_secs_f64(),
+            self.game_time.as_secs_f64(),
+        );
 
         self.tick += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the startup crash "cannot convert float seconds to
+    /// Duration: value is negative". `Clock::game_dt()` calls
+    /// `Duration::from_secs_f64(last_game_dt)`, so `last_game_dt` must never be
+    /// negative. It is produced by [`Clock::nudged_game_dt`], which used to
+    /// only `.min(MAX_GAME_DT)` (a ceiling, no floor): when `game_time`
+    /// transiently overshoots `real_time`, the nudge term drives the raw
+    /// value below zero.
+    #[test]
+    fn nudged_game_dt_is_never_negative_when_game_overshoots_real() {
+        // game_time far ahead of real_time (the overshoot case). The *raw*,
+        // pre-clamp value is unambiguously negative here...
+        let raw = 0.05 + (1.0 - 5.0) * NUDGE_RATE;
+        assert!(raw < 0.0, "test setup must exercise the negative raw case");
+        // ...but the clamped result must be 0, and must convert to a Duration
+        // without panicking.
+        let dt = Clock::nudged_game_dt(0.05, 1.0, 5.0);
+        assert_eq!(
+            dt, 0.0,
+            "overshoot must clamp the game dt to zero, got {dt}"
+        );
+        let _ = Duration::from_secs_f64(dt); // must not panic
+
+        // A mild overshoot (avg_dt just under the nudge pull) also clamps to 0.
+        let dt = Clock::nudged_game_dt(0.001, 0.0, 0.1);
+        assert!(dt >= 0.0, "mild overshoot must not go negative, got {dt}");
+        let _ = Duration::from_secs_f64(dt);
+    }
+
+    /// The floor must not disturb the normal behaviour: the ceiling still caps
+    /// big lag spikes, and the nudge still moves `game_time` toward
+    /// `real_time`.
+    #[test]
+    fn nudged_game_dt_keeps_ceiling_and_normal_nudge() {
+        // real_time far ahead of game_time -> large positive nudge, capped.
+        let dt = Clock::nudged_game_dt(0.033, 5.0, 1.0);
+        assert!(
+            (dt - MAX_GAME_DT).abs() < 1e-9,
+            "large positive nudge must clamp to the ceiling, got {dt}"
+        );
+        // real == game -> just the smoothed average, untouched by the clamp.
+        let dt = Clock::nudged_game_dt(0.016, 3.0, 3.0);
+        assert!(
+            (dt - 0.016).abs() < 1e-9,
+            "balanced clock returns average_dt, got {dt}"
+        );
+    }
+
+    /// End-to-end: replay the exact `Clock::tick()` game-dt recurrence over the
+    /// adversarial "startup stall then fast catch-up burst" frame-time trace
+    /// (a long bake frame, then a run of near-zero-length frames). This is the
+    /// pattern that produced the live crash; with the floor, `last_game_dt`
+    /// stays >= 0 across the whole trace so no `from_secs_f64` call panics.
+    #[test]
+    fn startup_stall_then_fast_catchup_never_produces_negative_game_dt() {
+        // Mirror the fields the recurrence touches, seeded like `Clock::new`
+        // with target_dt = ZERO (the embedded-player clock, EM-4.11).
+        let mut real_time = 0.0f64;
+        let mut game_time = 0.0f64;
+        let mut average_dt = 0.0f64;
+        let mut last_real_dt = 0.0f64;
+        let mut last_game_dt = 0.0f64;
+
+        // 3s startup stall, then 200 near-zero-length catch-up frames.
+        let mut trace = vec![3.0f64];
+        trace.extend([0.0005f64; 200]);
+
+        for tau in trace {
+            // Advance clocks by the previous tick's deltas (Clock::tick order).
+            real_time += last_real_dt;
+            assert!(
+                last_game_dt >= 0.0,
+                "game_time += from_secs_f64(last_game_dt) would panic: {last_game_dt}"
+            );
+            game_time += last_game_dt;
+            // Smooth the average, then recompute the deltas.
+            average_dt += (tau - average_dt) * SMOOTH_WEIGHT;
+            last_real_dt = tau;
+            last_game_dt = Clock::nudged_game_dt(average_dt, real_time, game_time);
+            assert!(
+                last_game_dt >= 0.0,
+                "game_dt() would panic on from_secs_f64({last_game_dt})"
+            );
+        }
     }
 }
