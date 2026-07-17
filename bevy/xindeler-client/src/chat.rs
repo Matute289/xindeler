@@ -76,12 +76,16 @@ const PANEL_BOTTOM_SAFETY_MARGIN_PX: f32 = 24.0;
 ///
 /// This used to be a bare `Some(16.0)` (`anchored_panel_bundle`'s own
 /// `bottom` parameter) — 16px above the viewport's bottom edge, the SAME
-/// vertical band the bottom-CENTRE health-orb cluster occupies
-/// (`hud_layout::CLUSTER_BOTTOM_PX` = 20px). The cluster is centred and
-/// ~1013px wide (`hud_layout::health_orb_screen_x`'s own doc comment) — at
+/// vertical band the bottom-CENTRE health-orb cluster occupied at the time
+/// (`hud_layout::CLUSTER_BOTTOM_PX` was `20px` then; BL-82 HUD polish round 3
+/// later moved it to `0px` so the cluster sits flush with the screen edge —
+/// see that constant's own doc comment — which only widens this fix's
+/// margin, it doesn't reintroduce the overlap). The cluster is centred and
+/// ~1196px wide (BL-82 HUD polish round 3 widened this from ~1013px — see
+/// `hud_layout::health_orb_screen_x`'s own doc comment) — at
 /// the game's own default 1280×720 window (`main.rs`'s
 /// `WindowResolution::new(1280, 720)`, itself already "small" by this
-/// cluster's standard) the health orb's left edge sits barely 130px in from
+/// cluster's standard) the health orb's left edge sits barely 57px in from
 /// the screen's left edge, well inside where even a NARROWED chat panel's
 /// width would reach. Shrinking the panel's WIDTH alone therefore cannot
 /// guarantee zero overlap across the window sizes players actually resize
@@ -1990,7 +1994,8 @@ mod tests {
 
         // (width, height) — 1280x720 is the project's own literal default
         // (`main.rs`'s `WindowResolution::new(1280, 720)`) and already reads
-        // as "small" against the ~1013px-wide orb cluster (see
+        // as "small" against the ~1196px-wide orb cluster (BL-82 HUD polish
+        // round 3 widened this from ~1013px — see
         // `hud_layout::health_orb_screen_x`'s doc comment) — exactly the
         // size Matías's report was reproducing against. 960x540 and 800x600
         // are progressively more "reduced"; 480x320 is the genuinely tiny
