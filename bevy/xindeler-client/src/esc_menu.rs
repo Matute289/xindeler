@@ -20,15 +20,44 @@
 //! here is future scope.
 //!
 //! ## Live application (the whole point for the flicker investigation)
-//! [`apply_graphics_settings`] reconciles the live camera/sun entities to
-//! match [`xindeler_app::GraphicsSettings`] whenever it changes: it
-//! inserts/removes [`ScreenSpaceAmbientOcclusion`]/[`TemporalAntiAliasing`] on
-//! the camera and rebuilds the sun's [`CascadeShadowConfig`] — so a toggle
-//! flip changes the RUNNING render config immediately, no restart, no
-//! renderer-plugin rebuild. The change is also persisted to `settings.ron`
-//! (and the graphics `tier` is forced to [`GraphicsTier::Custom`] so a
-//! hand-edited toggle isn't clobbered by a preset on next load — see
-//! [`GraphicsSettings::sanitize`]).
+//! [`apply_graphics_settings`] reconciles the live camera to match
+//! [`xindeler_app::GraphicsSettings`] whenever it changes: it inserts/removes
+//! [`ScreenSpaceAmbientOcclusion`]/[`TemporalAntiAliasing`] on the camera — so
+//! flipping SSAO or TAA changes the RUNNING render config immediately, no
+//! restart, no renderer-plugin rebuild. Every change is persisted to
+//! `settings.ron` (and the graphics `tier` is forced to
+//! [`GraphicsTier::Custom`] so a hand-edited toggle isn't clobbered by a preset
+//! on next load — see [`GraphicsSettings::sanitize`]).
+//!
+//! ## Shadow cascades apply on RESTART, not live (BL-82 crash fix)
+//! The **cascade COUNT** is the one exception to live-apply, and deliberately
+//! so. Changing `num_cascades` on an ALREADY-RUNNING directional light — by any
+//! means, whether re-`insert`ing a new `CascadeShadowConfig` on the existing
+//! sun OR despawning and respawning the sun entity — reliably aborts the client
+//! from a `bevy_light` internal:
+//!
+//! ```text
+//! thread 'Compute Task Pool' panicked at bevy_light-0.19.0/src/lib.rs:477:
+//! index out of bounds: the len is 1 but the index is 1
+//! ```
+//!
+//! Root cause (traced through the actual panicking system, not just the line):
+//! `bevy_light::check_dir_light_mesh_visibility` keeps a **persistent**
+//! `Local<Parallel<Vec<Vec<Entity>>>>` of per-cascade visibility scratch
+//! queues. Each frame its `for_each_init` only `resize`s that scratch to the
+//! current cascade count *on the worker threads rayon actually schedules work
+//! onto*; threads left idle this pass keep the PREVIOUS frame's (shorter) Vec.
+//! The collect loop then iterates ALL ever-touched thread-locals and indexes
+//! each at the new cascade index — so the first frame the count *increases*
+//! (e.g. 1 -> 2), any thread carrying a stale length-1 queue is indexed at [1]
+//! and panics. Because that stale state lives in a per-SYSTEM `Local` (not on
+//! the light entity), respawning the sun does not reset it — only a fresh app
+//! start begins with an empty `Local`, which is why a cascade count picked at
+//! `crate::light::spawn_light_rig` time is always safe while a live change is
+//! not. Bevy is pinned at `=0.19.0` from crates.io (not a fork), so we fix this
+//! from our side by NOT reconfiguring cascades on the live light: the setting
+//! still cycles + persists, and takes effect on the next launch. SSAO and TAA
+//! stay fully live.
 //!
 //! Compiled only under `listen-server`/`net-client`, matching every other
 //! `xindeler_ui`-consuming screen module in this crate.
@@ -37,7 +66,6 @@ use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     core_pipeline::prepass::DepthPrepass,
     ecs::schedule::common_conditions::{not, resource_changed},
-    light::{CascadeShadowConfig, CascadeShadowConfigBuilder},
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     render::camera::{MipBias, TemporalJitter},
@@ -51,9 +79,7 @@ use xindeler_ui::{
     theme::{HudFonts, HudTheme},
 };
 
-use crate::{
-    camera::MainCamera, chat::text_input_focused, light::Sun, targeting::hard_lock_active,
-};
+use crate::{camera::MainCamera, chat::text_input_focused, targeting::hard_lock_active};
 
 /// Effective shadow-cascade range (matches `crate::light::spawn_light_rig`'s
 /// own `clamp(1, 4)`): cycling the toggle wraps within this.
@@ -236,10 +262,17 @@ fn spawn_esc_menu(
                     spawn_graphics_row(panel, &theme, &fonts, &settings, control);
                 }
 
-                // Restart-vs-live honesty: nothing here needs a restart, so
-                // the note simply confirms the change is immediate.
+                // Restart-vs-live honesty: SSAO/TAA apply immediately; the
+                // shadow-cascade COUNT is read once at startup by
+                // `crate::light::spawn_light_rig` (changing it on the live sun
+                // aborts the client — see the module doc), so it is flagged
+                // "(restart)" and applies on the next launch.
                 panel.spawn((
-                    Text("Changes apply immediately.".to_owned()),
+                    Text(
+                        "SSAO and anti-aliasing apply immediately. Shadow cascades apply on \
+                         restart."
+                            .to_owned(),
+                    ),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
                         font_size: bevy::text::FontSize::Px(13.0),
@@ -351,7 +384,11 @@ fn control_name(control: GraphicsControl) -> &'static str {
     match control {
         GraphicsControl::Ssao => "SSAO",
         GraphicsControl::Taa => "Anti-aliasing (TAA)",
-        GraphicsControl::ShadowCascades => "Shadow cascades",
+        // "(restart)": unlike SSAO/TAA this does NOT apply live — see the
+        // module-level "Shadow cascades apply on RESTART" doc for the
+        // `bevy_light` crash it avoids. The new count is read at startup by
+        // `crate::light::spawn_light_rig`.
+        GraphicsControl::ShadowCascades => "Shadow cascades (restart)",
     }
 }
 
@@ -394,12 +431,18 @@ fn sync_graphics_labels(
     }
 }
 
-/// Reconciles the live camera/sun render components to match
-/// [`XindelerSettings`] — this is what makes the toggles apply WITHOUT a
-/// restart. Idempotent: it only inserts/removes a component (or rebuilds the
-/// cascade config) when the live state doesn't already match, so re-running it
-/// on any settings change (e.g. a controls rebind that also saves settings) is
-/// harmless.
+/// Reconciles the live CAMERA render components (SSAO/TAA) to match
+/// [`XindelerSettings`] — this is what makes those two toggles apply WITHOUT a
+/// restart. Idempotent: it only inserts/removes a component when the live state
+/// doesn't already match, so re-running it on any settings change (e.g. a
+/// controls rebind that also saves settings) is harmless.
+///
+/// It deliberately does NOT touch the sun's `CascadeShadowConfig`: changing
+/// the cascade COUNT on the live directional light aborts the client from a
+/// `bevy_light` internal (stale per-thread visibility scratch — see this
+/// module's "Shadow cascades apply on RESTART" doc). The cascade count is read
+/// once at startup by `crate::light::spawn_light_rig`, so a changed value is
+/// simply persisted here and takes effect on the next launch.
 fn apply_graphics_settings(
     settings: Res<XindelerSettings>,
     mut commands: Commands,
@@ -411,7 +454,6 @@ fn apply_graphics_settings(
         ),
         With<MainCamera>,
     >,
-    suns: Query<Entity, With<Sun>>,
 ) {
     let g = &settings.graphics;
     for (camera, has_ssao, has_taa) in &cameras {
@@ -461,24 +503,11 @@ fn apply_graphics_settings(
             _ => {},
         }
     }
-    // Rebuild the sun's cascade config to the current count. Cheap, and only
-    // runs on a settings change (the plugin gates this system on
-    // `resource_changed`).
-    let cascades = build_cascades(g.shadow_cascades);
-    for sun in &suns {
-        commands.entity(sun).insert(cascades.clone());
-    }
-}
-
-/// Builds a [`CascadeShadowConfig`] for `shadow_cascades`, clamped to the
-/// renderer-supported range (mirrors `crate::light::spawn_light_rig`).
-fn build_cascades(shadow_cascades: u8) -> CascadeShadowConfig {
-    CascadeShadowConfigBuilder {
-        num_cascades: usize::from(shadow_cascades.clamp(MIN_SHADOW_CASCADES, MAX_SHADOW_CASCADES)),
-        maximum_distance: 500.0,
-        ..Default::default()
-    }
-    .build()
+    // NOTE: the shadow-cascade COUNT is intentionally NOT reconciled here.
+    // Re-inserting a `CascadeShadowConfig` with a different `num_cascades` on
+    // the live sun (or respawning the sun) crashes `bevy_light` — see the
+    // module doc. It is applied at startup by `crate::light::spawn_light_rig`
+    // instead; here it is only persisted (by the caller) for the next launch.
 }
 
 #[cfg(test)]
@@ -717,6 +746,59 @@ mod tests {
         assert!(
             app.world().get::<MipBias>(camera).is_none(),
             "the TAA mip-bias sharpening must be cleared for a clean no-TAA baseline"
+        );
+    }
+
+    /// BL-82 crash regression: changing `shadow_cascades` must NOT touch the
+    /// live sun's `CascadeShadowConfig`. Re-inserting a config with a
+    /// different `num_cascades` on the running light (or respawning it) aborts
+    /// the client from a `bevy_light` internal — the stale per-thread
+    /// visibility scratch in `check_dir_light_mesh_visibility` (see the module
+    /// doc). The count is applied at startup by `crate::light::spawn_light_rig`
+    /// instead; here we assert the live-reconcile system leaves an existing
+    /// cascade config byte-for-byte untouched even across a settings change,
+    /// so the crash-triggering live mutation can never be reintroduced without
+    /// this test failing.
+    #[test]
+    fn changing_shadow_cascades_does_not_mutate_the_live_sun() {
+        use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
+
+        let mut app = App::new();
+        // Start at the Ultra default (4 cascades).
+        app.insert_resource(XindelerSettings::default());
+        // A stand-in for the live sun, carrying a 1-cascade config. If the
+        // system ever live-reconciled cascades, a settings bump to a higher
+        // count would grow `bounds` here — exactly the cross-frame count
+        // INCREASE that crashes `bevy_light`.
+        let sun_config = CascadeShadowConfigBuilder {
+            num_cascades: 1,
+            maximum_distance: 500.0,
+            ..Default::default()
+        }
+        .build();
+        let bounds_before = sun_config.bounds.len();
+        assert_eq!(bounds_before, 1, "sanity: 1 cascade -> 1 bound");
+        let sun = app.world_mut().spawn(sun_config).id();
+        app.add_systems(Update, apply_graphics_settings);
+
+        // First reconcile with the default settings.
+        app.update();
+        // Now change the cascade count (1 -> 3, the crash-prone INCREASE).
+        {
+            let mut settings = app.world_mut().resource_mut::<XindelerSettings>();
+            settings.graphics.shadow_cascades = 3;
+        }
+        app.update();
+
+        let after = app
+            .world()
+            .get::<CascadeShadowConfig>(sun)
+            .expect("sun still carries its cascade config");
+        assert_eq!(
+            after.bounds.len(),
+            bounds_before,
+            "apply_graphics_settings must NOT reconfigure the live sun's cascade count — that \
+             crashes bevy_light; the count is applied at startup instead"
         );
     }
 }
