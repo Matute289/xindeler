@@ -505,7 +505,7 @@ fn sync_nameplate_content(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use xindeler_ui::bar::HudImageBarFill;
+    use xindeler_ui::bar::HudImageBarFillClip;
 
     use super::*;
 
@@ -766,13 +766,18 @@ mod tests {
 
     /// The stagger bar is built via
     /// `xindeler_ui::bar::spawn_horizontal_image_bar` — proving it carries
-    /// a real fill child (tagged [`HudImageBarFill`]) sized to the initial
-    /// `BarValue` fraction, the same shape
+    /// a real fraction-reveal clip window (tagged [`HudImageBarFillClip`])
+    /// sized to the initial `BarValue` fraction, the same shape
     /// `bar::image_bar_fill_tracks_value_changes_by_width` already proves the
     /// primitive keeps in sync as the value changes (that crate owns
     /// `update_horizontal_image_bars`, `pub(crate)` there, so this module
     /// only asserts the spawn shape it depends on, not the private update
-    /// system itself).
+    /// system itself). Checks the CLIP WINDOW, not the fill image directly —
+    /// BL-82 EM-5.17 Phase 0-style follow-up rework: the fill image's own
+    /// `Node` is now a fixed `Val::Px` (never resized), only the clip
+    /// wrapper reacts to the fraction (see `bar::
+    /// image_bar_fill_image_never_resizes_only_the_clip_wrapper_does` for
+    /// the regression guard on that split).
     #[test]
     fn stagger_bar_is_built_from_the_shared_image_bar_primitive() {
         let mut app = new_app();
@@ -795,12 +800,12 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        let fill = children
+        let clip = children
             .into_iter()
-            .find(|&e| app.world().get::<HudImageBarFill>(e).is_some())
-            .expect("fill child exists");
+            .find(|&e| app.world().get::<HudImageBarFillClip>(e).is_some())
+            .expect("clip-window child exists");
         assert_eq!(
-            app.world().get::<Node>(fill).unwrap().width,
+            app.world().get::<Node>(clip).unwrap().width,
             Val::Percent(50.0)
         );
     }
