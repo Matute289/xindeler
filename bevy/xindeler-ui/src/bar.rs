@@ -219,9 +219,15 @@ pub struct HudOrbBar;
 /// `source_crop` can never change how big the liquid renders RELATIVE to
 /// the frame's own opening, only how much of each image's outer padding is
 /// visible. Cropping the frame image TIGHTER than the liquid image (see
-/// [`crate::bar`]'s callers in `hud_layout::ORB_FRAME_SOURCE_CROP` vs
-/// `hud_layout::ORB_SOURCE_CROP`) makes the frame's hole occupy more of the
-/// shared `width_px`×`height_px` box, independent of the liquid's own scale.
+/// [`crate::bar`]'s callers in `hud_layout`'s per-variant
+/// `*_FRAME_SOURCE_CROP` constants vs the shared `hud_layout::
+/// ORB_SOURCE_CROP`) makes the frame's hole occupy more of the shared
+/// `width_px`×`height_px` box, independent of the liquid's own scale — BL-82
+/// orb crop round 2 went further and made the frame crop (plus the
+/// `liquid_inset_px` this function takes) per-variant rather than one shared
+/// constant, since a single shared value clipped some variants' decorative
+/// art while still under/over-sizing others' liquid; see `hud_layout`'s
+/// `ANGEL_FRAME_SOURCE_CROP` doc comment for the full story.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_orb_bar(

@@ -69,15 +69,22 @@ pub const ORB_SIZE_PX: f32 = 160.0;
 /// pre-fix behaviour) squashed the circle into an ellipse.
 ///
 /// This is the crop for the LIQUID (`*_liquid.png`) images specifically —
-/// see [`ORB_FRAME_SOURCE_CROP`] for the frame's own (tighter) crop. It is
-/// already as tight as it can be: the liquid's own opaque content spans the
-/// full `699`–`700px` of the canvas's `768px` height (`y[28,727]`,
-/// re-verified directly against the on-disk PNGs), so there is no further
-/// square sub-region available within this canvas that both stays square AND
-/// keeps the whole liquid circle — any tighter crop would clip real liquid
-/// pixels. Making the liquid render SMALLER (BL-82 EM-5.17 Phase 0 second
-/// follow-up, see [`ORB_FRAME_SOURCE_CROP`]'s doc comment) therefore has to
-/// come from [`LIQUID_INSET_PX`] instead of a tighter crop here.
+/// see [`ANGEL_FRAME_SOURCE_CROP`]/[`CUTHULHU_FRAME_SOURCE_CROP`]/
+/// [`STAMINA_FRAME_SOURCE_CROP`] for the frame's own PER-VARIANT crops
+/// (BL-82 orb crop round 2 — see those constants' doc comments for why a
+/// single shared frame crop stopped working). This liquid crop stays SHARED
+/// across all four liquid variants (health/mana/mana2/stamina) — re-verified
+/// round 2: all four `*_liquid.png` files measure an IDENTICAL opaque bbox
+/// (`x[353,1057] y[28,728]`), so unlike the frame crop there is no per-
+/// variant difference to tune here. It is already as tight as it can be: the
+/// liquid's own opaque content spans the full `699`–`700px` of the canvas's
+/// `768px` height (`y[28,727]`, re-verified directly against the on-disk
+/// PNGs), so there is no further square sub-region available within this
+/// canvas that both stays square AND keeps the whole liquid circle — any
+/// tighter crop would clip real liquid pixels. Making the liquid render
+/// SMALLER (BL-82 EM-5.17 Phase 0 second follow-up, see
+/// [`ANGEL_LIQUID_INSET_PX`]'s doc comment) therefore has to come from the
+/// per-variant `*_LIQUID_INSET_PX` constants instead of a tighter crop here.
 pub const ORB_SOURCE_CROP: Rect = Rect {
     min: bevy::math::Vec2::new(320.0, 0.0),
     max: bevy::math::Vec2::new(1088.0, 768.0),
@@ -98,43 +105,120 @@ pub const ORB_SOURCE_CROP: Rect = Rect {
 /// scale onto the exact same `width_px`×`height_px` box by the exact same
 /// factor, a shared crop can only ever preserve the two images' SOURCE pixel
 /// ratio — it can never change how big the liquid renders RELATIVE to the
-/// frame's own hole, no matter which square sub-region is chosen. This
-/// constant is a crop for the FRAME ALONE, cropped much tighter around the
-/// hole than [`ORB_SOURCE_CROP`], so the hole occupies more of the shared
-/// box independent of the liquid's own scale.
+/// frame's own hole, no matter which square sub-region is chosen. A crop for
+/// the FRAME ALONE, tighter around the hole than [`ORB_SOURCE_CROP`], makes
+/// the hole occupy more of the shared box independent of the liquid's own
+/// scale.
 ///
-/// Measured hole bounding boxes (enclosed-component, alpha>10 threshold):
-/// angel `(525,197)-(896,577)`, cuthulhu `(529,199)-(893,576)`, stamina
-/// `(524,202)-(894,568)` — all centred within a couple px of `(710,387)`.
-/// Measured ring OUTER edge (opaque frame material, walking outward from the
-/// hole boundary along a non-wing-affected axis — vertical for all three,
-/// plus horizontal right for angel/stamina): the tightest of these is
-/// stamina's vertical top at `362px` from centre. This crop's half-size is
-/// `358px` (a small few-px safety margin below that tightest measurement) —
-/// tight enough to markedly enlarge the hole, without cropping into any of
-/// the three frames' own visible ring silhouette (which would show as an
-/// abrupt flat cut instead of the ring's own rounded edge). Centred on
-/// `(710,387)`, giving `x[352,1068] y[29,745]` — a `716×716` square.
-pub const ORB_FRAME_SOURCE_CROP: Rect = Rect {
-    min: bevy::math::Vec2::new(352.0, 29.0),
-    max: bevy::math::Vec2::new(1068.0, 745.0),
+/// ## BL-82 orb crop round 2 (per-variant tuning) — this went TOO tight
+/// The Phase 0 second-follow-up fix above originally landed as ONE shared
+/// `ORB_FRAME_SOURCE_CROP` (`716×716`, centred `(710,387)`) tight enough to
+/// markedly enlarge the hole — but Matías's round-2 report (`foto1.png`)
+/// showed the angel/cuthulhu frames' own decorative statue/tentacle art now
+/// visibly CUT OFF by that square window (opposite-direction regression from
+/// the original "liquid smaller than the hole" bug: the shared crop had
+/// swung from too loose to too tight). Re-measured directly (connected-
+/// component analysis of each frame PNG's alpha channel, `scipy.ndimage.
+/// label`, `alpha>10` threshold) two things per variant: the ENCLOSED hole
+/// (the transparent component that does NOT touch the canvas border — the
+/// real liquid window, immune to the wing art's own internal transparent
+/// gaps) and the full decorative-art extent. The art extent
+/// (angel `879px` wide, cuthulhu `1165px` wide — genuinely spans most of the
+/// `1408px`-ish canvas, not a thin bleed of stray anti-aliasing: column-
+/// density profiling confirms substantial opaque coverage all the way out)
+/// physically CANNOT fit in a square crop bounded by the canvas's own `768px`
+/// height, so zero clipping into every last decorative pixel is geometrically
+/// impossible for a square orb — the widest available square is exactly
+/// `768×768` (the full canvas height). The fix: use that FULL `768×768`
+/// square (not the narrower `716×716`) for each variant, centred
+/// horizontally on that VARIANT'S OWN measured hole centre (not the art's
+/// centre, and not one shared centre) so the hole still lines up with
+/// [`ORB_SOURCE_CROP`]'s own centred liquid circle:
+/// - angel: hole `(525,197)-(897,578)`, centre `x=711.0` → `x[327.0,1095.0]`
+/// - cuthulhu: hole `(529,199)-(894,577)`, centre `x=711.5` → `x[327.5,1095.5]`
+/// - stamina: hole `(524,202)-(895,569)`, centre `x=709.5` → `x[325.5,1093.5]`
+///
+/// (all `y[0,768]`, the full canvas height, same as [`ORB_SOURCE_CROP`]).
+/// This maximizes how much of each variant's own decorative art survives the
+/// square crop while keeping hole/liquid alignment exact — verified via
+/// direct pixel-level compositing (crop+resize+alpha-overlay, mirroring
+/// `spawn_orb_bar`'s own crop→`NodeImageMode::Stretch` pipeline) that the
+/// full statue/tentacle silhouettes render uncut. See
+/// [`ANGEL_LIQUID_INSET_PX`]/[`CUTHULHU_LIQUID_INSET_PX`]/
+/// [`STAMINA_LIQUID_INSET_PX`] for the companion per-variant inset fix this
+/// widened crop requires (a looser frame crop shrinks the hole's SHARE of the
+/// rendered box, so the liquid needs a bigger inset to still fit inside it
+/// without visibly spilling past the ring).
+pub const ANGEL_FRAME_SOURCE_CROP: Rect = Rect {
+    min: bevy::math::Vec2::new(327.0, 0.0),
+    max: bevy::math::Vec2::new(1095.0, 768.0),
+};
+
+/// Cuthulhu (mana orb) variant of [`ANGEL_FRAME_SOURCE_CROP`] — see that
+/// constant's doc comment for the round-2 per-variant crop rationale. Centred
+/// on cuthulhu's own measured hole centre (`x=711.5`); `cuthulhu`'s canvas is
+/// `1407px` wide (1px narrower than the other two, a negligible artist-export
+/// rounding difference), still comfortably wide enough for this crop's
+/// `x1=1095.5`.
+pub const CUTHULHU_FRAME_SOURCE_CROP: Rect = Rect {
+    min: bevy::math::Vec2::new(327.5, 0.0),
+    max: bevy::math::Vec2::new(1095.5, 768.0),
+};
+
+/// Stamina (centre orb) variant of [`ANGEL_FRAME_SOURCE_CROP`] — see that
+/// constant's doc comment for the round-2 per-variant crop rationale. Centred
+/// on stamina's own measured hole centre (`x=709.5`).
+pub const STAMINA_FRAME_SOURCE_CROP: Rect = Rect {
+    min: bevy::math::Vec2::new(325.5, 0.0),
+    max: bevy::math::Vec2::new(1093.5, 768.0),
 };
 
 /// BL-82 EM-5.17 Phase 0 second follow-up — companion to
-/// [`ORB_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s
-/// `liquid_inset_px` parameter for the three resource orbs. [`ORB_SOURCE_CROP`]
+/// [`ANGEL_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s
+/// `liquid_inset_px` parameter for the health (angel) orb. [`ORB_SOURCE_CROP`]
 /// is already as tight as the liquid PNGs' own canvas allows (see its doc
 /// comment), so the liquid can't be shrunk any further via cropping — this
 /// insets the liquid's RENDERED box a few px on every side instead, centred
 /// within the orb's full [`ORB_SIZE_PX`]×[`ORB_SIZE_PX`] box, so its circular
-/// edge sits comfortably inside [`ORB_FRAME_SOURCE_CROP`]'s enlarged hole
-/// with deliberate slack rather than exactly flush with it — flush-fit only
-/// holds at one exact scale; a few px of margin means sub-pixel rounding at
-/// a different UI-scale factor can never read as the liquid overlapping the
-/// frame's ring. Tuned by eye against the Phase 0 second-follow-up smoke
-/// screenshot (a modest inset — the liquid is meant to fill MOST of the
-/// hole, just with breathing room at the very edge, not shrink dramatically).
-pub const LIQUID_INSET_PX: f32 = 6.0;
+/// edge sits comfortably inside the frame's hole with deliberate slack rather
+/// than exactly flush with it — flush-fit only holds at one exact scale; a
+/// few px of margin means sub-pixel rounding at a different UI-scale factor
+/// can never read as the liquid overlapping the frame's ring.
+///
+/// ## BL-82 orb crop round 2 — re-tuned per variant, no longer one shared value
+/// The original Phase 0 second follow-up used ONE shared `LIQUID_INSET_PX =
+/// 6.0`, tuned against the since-widened-away `716×716` frame crop. Widening
+/// the frame crop to `768×768` (see [`ANGEL_FRAME_SOURCE_CROP`]'s doc
+/// comment) shrinks the hole's share of the rendered box, so a `6px` inset
+/// now lets the liquid visibly spill past the ring's outer silhouette on
+/// stamina especially (Matías's round-2 report: "the center stamina orb's
+/// liquid circle is still visibly larger than its frame"). Re-tuned directly
+/// via pixel-mask overlap analysis (not eyeballing): for each variant,
+/// composited the liquid's own alpha mask against the frame's own alpha mask
+/// at the real render resolution (mirroring `spawn_orb_bar`'s crop→resize→
+/// composite pipeline) and swept `inset` to find the smallest value at which
+/// the VISIBLE liquid (the part not hidden under the frame's own opaque ring
+/// material, which the frame draws on top of and therefore occludes) no
+/// longer has any pixels outside the enclosed hole — i.e. the smallest inset
+/// with zero genuine spill visible past the ring's own silhouette — then
+/// added a `+3px` safety margin (same "deliberate slack" reasoning as the
+/// original Phase 0 tuning). Zero-spill insets measured: angel `11px`,
+/// cuthulhu `17px` (a couple stray anti-aliasing px persist past this due to
+/// the wing art's irregular ring edge — negligible), stamina `17px` — angel's
+/// hole is proportionally larger (relative to its own frame crop) than the
+/// other two, hence its lower value; this is exactly why round 2 goes
+/// per-variant instead of trying a second shared constant.
+pub const ANGEL_LIQUID_INSET_PX: f32 = 14.0;
+
+/// Cuthulhu (mana orb) variant of [`ANGEL_LIQUID_INSET_PX`] — see that
+/// constant's doc comment for the round-2 re-tuning methodology.
+pub const CUTHULHU_LIQUID_INSET_PX: f32 = 20.0;
+
+/// Stamina (centre orb) variant of [`ANGEL_LIQUID_INSET_PX`] — see that
+/// constant's doc comment for the round-2 re-tuning methodology. This is the
+/// orb Matías's round-2 report called out by name ("the center stamina orb's
+/// liquid circle is still visibly larger than its frame").
+pub const STAMINA_LIQUID_INSET_PX: f32 = 20.0;
 
 /// Height (px) of each action-bar-half background. Matches [`ORB_SIZE_PX`]
 /// so the whole cluster's bottom edge lines up in one row.
