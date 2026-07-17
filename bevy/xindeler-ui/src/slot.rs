@@ -52,7 +52,7 @@ use bevy::{
         hierarchy::Children,
         message::{Message, MessageWriter},
         observer::On,
-        query::{Changed, With},
+        query::{Changed, Has, With},
         system::{Commands, Query, Res},
     },
     picking::{
@@ -126,6 +126,32 @@ pub struct SlotContents {
 /// Marks a spawned drag-drop slot root.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct HudSlot;
+
+/// Marks a slot whose "resting" `BackgroundColor`/`BorderColor` is fully
+/// transparent (`Color::NONE`) by DESIGN, not the flat `panel_bg`/
+/// `panel_border` chrome [`slot_bundle`] gives every slot by default — a
+/// caller (e.g. `xindeler-client`'s hotbar) that overrides those two render
+/// components right after spawning to let its own overlay art (`skill_slot_
+/// border.png`) be the slot's only frame ALSO inserts this marker, so
+/// [`on_drag_end`]/[`on_drag_leave`]/[`on_drag_drop`] restore the drag/hover
+/// cues back to `Color::NONE` instead of the theme's opaque panel colours —
+/// without this marker those observers (registered GLOBALLY against every
+/// `HudSlot`, see [`install_observers`]) would silently reintroduce the flat
+/// chrome the FIRST time a chromeless slot participates in a drag (as either
+/// end), recreating the exact "doubled rectangle" visual bug the override
+/// was meant to fix, just gated behind a user interaction instead of always
+/// on. [`on_drag_start`] additionally skips its dim-while-dragging cue for a
+/// chromeless slot (no flat fill to fade to 40% alpha; dimming the overlay
+/// art itself is a real asset swap this primitive doesn't own — deferred,
+/// same "documented v1 simplification" posture as the module doc comment's
+/// no-ghost-sprite note). [`on_drag_enter`]'s accent-coloured hover-target
+/// ring is left unchanged for chromeless slots too — it draws a real, thin
+/// border in the layout's already-reserved 2px border box regardless of the
+/// resting `BorderColor`, so it reads as a legitimate transient highlight
+/// (not a second background rectangle) whether or not the slot is
+/// chromeless.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct ChromelessSlot;
 
 /// Marks a slot's icon-text child (the node [`update_slot_visuals`] retexts).
 /// `pub(crate)` (not private): `update_slot_visuals` is itself `pub(crate)`
@@ -319,13 +345,19 @@ pub(crate) fn update_slot_visuals(
 }
 
 /// Dims a slot while it's being dragged (the "this is the thing you're
-/// moving" cue) — restored by [`on_drag_end`].
+/// moving" cue) — restored by [`on_drag_end`]. A [`ChromelessSlot`] has no
+/// flat fill to dim (see that marker's doc comment) — its background stays
+/// untouched during the drag rather than manufacturing a fill that isn't
+/// otherwise part of its resting state.
 fn on_drag_start(
     trigger: On<Pointer<DragStart>>,
-    mut backgrounds: Query<&mut BackgroundColor, With<HudSlot>>,
+    mut backgrounds: Query<(&mut BackgroundColor, Has<ChromelessSlot>), With<HudSlot>>,
     theme: Res<HudTheme>,
 ) {
-    if let Ok(mut bg) = backgrounds.get_mut(trigger.entity) {
+    if let Ok((mut bg, chromeless)) = backgrounds.get_mut(trigger.entity) {
+        if chromeless {
+            return;
+        }
         let mut faded = theme.palette.panel_bg.to_srgba();
         faded.alpha *= 0.4;
         bg.0 = bevy::color::Color::Srgba(faded);
@@ -333,14 +365,21 @@ fn on_drag_start(
 }
 
 /// Restores a slot's normal background once the drag ends (whether or not it
-/// landed on a valid target — [`on_drag_drop`] handles the actual move).
+/// landed on a valid target — [`on_drag_drop`] handles the actual move). A
+/// [`ChromelessSlot`]'s "normal" background is `Color::NONE`, not the theme's
+/// opaque `panel_bg` — see that marker's doc comment for why restoring the
+/// wrong one here would silently reintroduce the doubled-rectangle bug.
 fn on_drag_end(
     trigger: On<Pointer<DragEnd>>,
-    mut backgrounds: Query<&mut BackgroundColor, With<HudSlot>>,
+    mut backgrounds: Query<(&mut BackgroundColor, Has<ChromelessSlot>), With<HudSlot>>,
     theme: Res<HudTheme>,
 ) {
-    if let Ok(mut bg) = backgrounds.get_mut(trigger.entity) {
-        bg.0 = theme.palette.panel_bg;
+    if let Ok((mut bg, chromeless)) = backgrounds.get_mut(trigger.entity) {
+        bg.0 = if chromeless {
+            bevy::color::Color::NONE
+        } else {
+            theme.palette.panel_bg
+        };
     }
 }
 
@@ -356,14 +395,21 @@ fn on_drag_enter(
     }
 }
 
-/// Restores a slot's normal border once a drag leaves it without dropping.
+/// Restores a slot's normal border once a drag leaves it without dropping. A
+/// [`ChromelessSlot`]'s "normal" border is `Color::NONE`, not the theme's
+/// opaque `panel_border` — see that marker's doc comment for why restoring
+/// the wrong one here would silently reintroduce the doubled-rectangle bug.
 fn on_drag_leave(
     trigger: On<Pointer<DragLeave>>,
-    mut borders: Query<&mut BorderColor, With<HudSlot>>,
+    mut borders: Query<(&mut BorderColor, Has<ChromelessSlot>), With<HudSlot>>,
     theme: Res<HudTheme>,
 ) {
-    if let Ok(mut border) = borders.get_mut(trigger.entity) {
-        *border = BorderColor::all(theme.palette.panel_border);
+    if let Ok((mut border, chromeless)) = borders.get_mut(trigger.entity) {
+        *border = BorderColor::all(if chromeless {
+            bevy::color::Color::NONE
+        } else {
+            theme.palette.panel_border
+        });
     }
 }
 
@@ -396,15 +442,21 @@ fn resolve_drop(
 fn on_drag_drop(
     trigger: On<Pointer<DragDrop>>,
     slots: Query<(&SlotGroup, &SlotAddress), With<HudSlot>>,
-    mut borders: Query<&mut BorderColor, With<HudSlot>>,
+    mut borders: Query<(&mut BorderColor, Has<ChromelessSlot>), With<HudSlot>>,
     theme: Res<HudTheme>,
     mut writer: MessageWriter<SlotDropped>,
 ) {
     let to_entity = trigger.entity;
     let dropped_entity = trigger.event.dropped;
 
-    if let Ok(mut border) = borders.get_mut(to_entity) {
-        *border = BorderColor::all(theme.palette.panel_border);
+    // Same `ChromelessSlot` resting-border rule as `on_drag_leave` — see
+    // that marker's doc comment.
+    if let Ok((mut border, chromeless)) = borders.get_mut(to_entity) {
+        *border = BorderColor::all(if chromeless {
+            bevy::color::Color::NONE
+        } else {
+            theme.palette.panel_border
+        });
     }
 
     if let Some(dropped) = resolve_drop(slots.get(to_entity).ok(), slots.get(dropped_entity).ok()) {
@@ -599,5 +651,196 @@ mod tests {
         app.add_plugins(bevy::picking::PickingPlugin);
         install_observers(&mut app);
         app.update();
+    }
+
+    /// A synthetic pointer location shared by every `fire_drag_*` helper
+    /// below — mirrors `xindeler-client`'s own `inventory_ui.rs::
+    /// fire_pointer_click` precedent (`NormalizedRenderTarget::None` needs no
+    /// real window/camera, so this is a headless, synthetic event, not a
+    /// real `bevy_picking` backend dispatch).
+    fn synthetic_location() -> bevy::picking::pointer::Location {
+        bevy::picking::pointer::Location {
+            target: bevy::camera::NormalizedRenderTarget::None {
+                width: 0,
+                height: 0,
+            },
+            position: bevy::math::Vec2::ZERO,
+        }
+    }
+
+    /// Fires a synthetic [`Pointer<DragEnd>`] at `entity`.
+    fn fire_drag_end(world: &mut bevy::ecs::world::World, entity: Entity) {
+        use bevy::picking::pointer::PointerId;
+
+        world.trigger(Pointer::new_without_propagate(
+            PointerId::Mouse,
+            synthetic_location(),
+            DragEnd {
+                button: bevy::picking::pointer::PointerButton::Primary,
+                distance: bevy::math::Vec2::ZERO,
+            },
+            entity,
+        ));
+    }
+
+    /// Fires a synthetic [`Pointer<DragLeave>`] at `entity`, reporting
+    /// `dragged` as the entity that was being dragged when the pointer left.
+    fn fire_drag_leave(world: &mut bevy::ecs::world::World, entity: Entity, dragged: Entity) {
+        use bevy::picking::{backend::HitData, pointer::PointerId};
+
+        world.trigger(Pointer::new_without_propagate(
+            PointerId::Mouse,
+            synthetic_location(),
+            DragLeave {
+                button: bevy::picking::pointer::PointerButton::Primary,
+                dragged,
+                hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            },
+            entity,
+        ));
+    }
+
+    /// Fires a synthetic [`Pointer<DragDrop>`] at `entity`, reporting
+    /// `dropped` as the entity dropped onto it.
+    fn fire_drag_drop(world: &mut bevy::ecs::world::World, entity: Entity, dropped: Entity) {
+        use bevy::picking::{backend::HitData, pointer::PointerId};
+
+        world.trigger(Pointer::new_without_propagate(
+            PointerId::Mouse,
+            synthetic_location(),
+            DragDrop {
+                button: bevy::picking::pointer::PointerButton::Primary,
+                dropped,
+                hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            },
+            entity,
+        ));
+    }
+
+    /// Regression test for the drag-restore half of the "doubled rectangle"
+    /// bug (see [`ChromelessSlot`]'s own doc comment): a [`ChromelessSlot`]'s
+    /// `BackgroundColor` must come back `Color::NONE` — NOT the theme's
+    /// opaque `panel_bg` — once [`on_drag_end`] fires, while a plain slot
+    /// (no marker) keeps restoring the theme colour exactly as before.
+    #[test]
+    fn on_drag_end_restores_chromeless_slots_to_transparent() {
+        use bevy::color::Alpha;
+
+        let mut app = new_app();
+        app.add_plugins(bevy::picking::PickingPlugin);
+        install_observers(&mut app);
+        let theme = HudTheme::default();
+
+        let chromeless = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(0), 48.0))
+            .insert((BackgroundColor(bevy::color::Color::NONE), ChromelessSlot))
+            .id();
+        let plain = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(1), 48.0))
+            .id();
+
+        fire_drag_end(app.world_mut(), chromeless);
+        fire_drag_end(app.world_mut(), plain);
+        app.update();
+
+        let world = app.world();
+        assert!(
+            world
+                .get::<BackgroundColor>(chromeless)
+                .unwrap()
+                .0
+                .is_fully_transparent(),
+            "on_drag_end must restore a ChromelessSlot's background to Color::NONE, not the \
+             opaque theme panel colour — else the FIRST drag on a hotbar slot reintroduces the \
+             doubled-rectangle bug"
+        );
+        assert_eq!(
+            world.get::<BackgroundColor>(plain).unwrap().0,
+            theme.palette.panel_bg,
+            "a plain (non-chromeless) slot's on_drag_end behaviour must stay unchanged"
+        );
+    }
+
+    /// Same contract as
+    /// [`on_drag_end_restores_chromeless_slots_to_transparent`]
+    /// for [`on_drag_leave`]'s border restore.
+    #[test]
+    fn on_drag_leave_restores_chromeless_slots_to_transparent() {
+        use bevy::color::Alpha;
+
+        let mut app = new_app();
+        app.add_plugins(bevy::picking::PickingPlugin);
+        install_observers(&mut app);
+        let theme = HudTheme::default();
+
+        let chromeless = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(0), 48.0))
+            .insert((BorderColor::all(bevy::color::Color::NONE), ChromelessSlot))
+            .id();
+        let plain = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(1), 48.0))
+            .id();
+        let dragged = app.world_mut().spawn_empty().id();
+
+        fire_drag_leave(app.world_mut(), chromeless, dragged);
+        fire_drag_leave(app.world_mut(), plain, dragged);
+        app.update();
+
+        let world = app.world();
+        assert!(
+            world
+                .get::<BorderColor>(chromeless)
+                .unwrap()
+                .top
+                .is_fully_transparent(),
+            "on_drag_leave must restore a ChromelessSlot's border to Color::NONE, not the opaque \
+             theme panel colour"
+        );
+        assert_eq!(
+            world.get::<BorderColor>(plain).unwrap().top,
+            theme.palette.panel_border,
+            "a plain (non-chromeless) slot's on_drag_leave behaviour must stay unchanged"
+        );
+    }
+
+    /// Same contract as
+    /// [`on_drag_end_restores_chromeless_slots_to_transparent`]
+    /// for [`on_drag_drop`]'s border restore.
+    #[test]
+    fn on_drag_drop_restores_chromeless_slots_to_transparent() {
+        use bevy::color::Alpha;
+
+        let mut app = new_app();
+        app.add_plugins(bevy::picking::PickingPlugin);
+        install_observers(&mut app);
+        let theme = HudTheme::default();
+
+        let chromeless = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(0), 48.0))
+            .insert((BorderColor::all(bevy::color::Color::NONE), ChromelessSlot))
+            .id();
+        let dropped = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(1), 48.0))
+            .id();
+
+        fire_drag_drop(app.world_mut(), chromeless, dropped);
+        app.update();
+
+        let world = app.world();
+        assert!(
+            world
+                .get::<BorderColor>(chromeless)
+                .unwrap()
+                .top
+                .is_fully_transparent(),
+            "on_drag_drop must restore a ChromelessSlot's border to Color::NONE, not the opaque \
+             theme panel colour"
+        );
     }
 }

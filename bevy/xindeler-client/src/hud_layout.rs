@@ -145,7 +145,23 @@ pub const ACTION_BAR_HALF_HEIGHT_PX: f32 = ORB_SIZE_PX;
 /// ratio (`1380×752`/`1379×752`, i.e. ≈1.835:1) at
 /// [`ACTION_BAR_HALF_HEIGHT_PX`] tall — keeps the ornate frame art undistorted
 /// instead of an arbitrary guessed width.
-pub const ACTION_BAR_HALF_WIDTH_PX: f32 = ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0);
+///
+/// BL-82 EM-5.17 Phase 0 review follow-up (Matías: the bronze-framed action-
+/// bar pieces themselves should shrink a bit, distinct from the orb/gap
+/// tuning PR #126 already did — "more breathing room in the overall HUD
+/// row"). [`ACTION_BAR_WIDTH_TRIM`] scales the pure aspect-derived width down
+/// a modest 12% — a "small trim, not a redesign" per Matías's own framing,
+/// tuned by eye against `--smoke-screenshot` output. The two pieces' 3+2
+/// ability slots (`SLOT_SIZE_PX` each, `hotbar.rs`) stay comfortably clear of
+/// the trimmed width, so nothing overflows. A pure width-only scale (height
+/// untouched, since [`ACTION_BAR_HALF_HEIGHT_PX`] still has to match
+/// [`ORB_SIZE_PX`] for the row's shared bottom edge) does very slightly
+/// squash the art off its native aspect ratio — imperceptible at this modest
+/// a trim, and the far smaller evil compared to either shrinking the row's
+/// height (breaking the orb alignment) or leaving no breathing room at all.
+pub const ACTION_BAR_WIDTH_TRIM: f32 = 0.88;
+pub const ACTION_BAR_HALF_WIDTH_PX: f32 =
+    ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0) * ACTION_BAR_WIDTH_TRIM;
 
 /// Horizontal gap (px) between adjacent cluster pieces — health orb / left
 /// action-bar half / stamina orb / right action-bar half / mana orb. Was a
@@ -259,5 +275,29 @@ mod tests {
     fn action_bar_total_width_spans_both_halves_and_stamina_orb() {
         let expected = 2.0 * ACTION_BAR_HALF_WIDTH_PX + ORB_SIZE_PX + 2.0 * CLUSTER_GAP_PX;
         assert!((ACTION_BAR_TOTAL_WIDTH_PX - expected).abs() < f32::EPSILON);
+    }
+
+    /// Regression guard for [`ACTION_BAR_WIDTH_TRIM`] (BL-82 EM-5.17 Phase 0
+    /// review follow-up): the module doc comment on
+    /// [`ACTION_BAR_HALF_WIDTH_PX`] claims "the two pieces' 3+2 ability
+    /// slots stay comfortably clear of the trimmed width" — this pins that
+    /// claim as a real assertion instead of a comment that could silently
+    /// go stale if `SLOT_SIZE_PX`, `HudSpacing::xs`, or
+    /// `ACTION_BAR_WIDTH_TRIM` ever change independently.
+    /// `hotbar.rs::sync_slot_half_parenting` gives the LEFT half
+    /// `total.div_ceil(2)` slots — the worst case for a 5-slot hotbar (the
+    /// sim's current default `ActiveAbilities::limit`) is 3 slots + 2 gaps.
+    #[test]
+    fn trimmed_action_bar_half_width_still_fits_the_worst_case_slot_row() {
+        let xs_gap = xindeler_ui::theme::HudSpacing::default().xs;
+        let worst_case_slots_per_half = 3.0;
+        let worst_case_row_width =
+            worst_case_slots_per_half * crate::hotbar::SLOT_SIZE_PX + 2.0 * xs_gap;
+        assert!(
+            ACTION_BAR_HALF_WIDTH_PX >= worst_case_row_width,
+            "ACTION_BAR_HALF_WIDTH_PX ({ACTION_BAR_HALF_WIDTH_PX}) must fit 3 hotbar slots + 2 \
+             gaps ({worst_case_row_width}) — a future change to ACTION_BAR_WIDTH_TRIM, \
+             SLOT_SIZE_PX, or HudSpacing::xs shrank this below that floor"
+        );
     }
 }
