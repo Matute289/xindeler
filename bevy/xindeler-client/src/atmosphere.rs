@@ -5,9 +5,21 @@
 //! - `DistanceFog` (camera): color + exponential falloff density,
 //! - `VolumetricFog` (camera): ambient intensity,
 //! - `FogVolume` (scene entities): density factor,
-//! - `DirectionalLight` (the [`Sun`]): illuminance,
 //! - `ClearColor` (world): sky/void color,
 //! - [`SunCycle`]: `time_lock` freezes/unfreezes the day/night stub.
+//!
+//! `DirectionalLight::illuminance` (on the sun, `light::Sun`) is deliberately
+//! NOT applied here — `light::day_night_stub` is the sole writer of that
+//! field, since it
+//! must scale `AtmosphereController::current`'s `sun_illuminance` by the
+//! current sun elevation (day/night factor) every frame, not just on the rare
+//! frames this system runs. A second writer here would race it: this system
+//! only runs on `resource_changed::<AtmosphereController>` (profile loads/
+//! transitions), so during a night-time weather transition it would
+//! periodically reset the sun back to the full (un-scaled) daytime peak,
+//! flickering between correctly-dark and incorrectly-full-bright until
+//! `day_night_stub`'s next tick re-applied the day/night factor. See
+//! `light.rs`'s module doc for the bug this closes.
 //!
 //! The controller only dirties its change tick while a transition animates
 //! (or a profile [re]loads), so this system is quiet — and the sun's cascade
@@ -24,7 +36,7 @@ use xindeler_oracle_host::{
     atmosphere::DEFAULT_PROFILE_ASSET_PATH,
 };
 
-use crate::light::{Sun, SunCycle};
+use crate::light::SunCycle;
 
 /// Asset path of the boot profile (see `assets/xindeler/atmosphere/`).
 pub const PROFILE_ASSET_PATH: &str = DEFAULT_PROFILE_ASSET_PATH;
@@ -142,7 +154,6 @@ fn apply_atmosphere(
     mut distance_fogs: Query<&mut DistanceFog, With<Camera3d>>,
     mut volumetric_fogs: Query<&mut VolumetricFog, With<Camera3d>>,
     mut fog_volumes: Query<&mut bevy::light::FogVolume>,
-    mut suns: Query<&mut DirectionalLight, With<Sun>>,
     mut ambient: ResMut<bevy::light::GlobalAmbientLight>,
     mut clear_color: ResMut<ClearColor>,
     mut cycle: ResMut<SunCycle>,
@@ -163,14 +174,6 @@ fn apply_atmosphere(
 
     for mut volume in &mut fog_volumes {
         volume.density_factor = profile.fog_volume_density;
-    }
-
-    for mut sun in &mut suns {
-        // Guard the write: dirtying DirectionalLight forces light re-prep, so
-        // only touch it while illuminance actually animates.
-        if (sun.illuminance - profile.sun_illuminance).abs() > f32::EPSILON {
-            sun.illuminance = profile.sun_illuminance;
-        }
     }
 
     // Sky ambient -> GlobalAmbientLight (EM-3.4). Guard the write like the
