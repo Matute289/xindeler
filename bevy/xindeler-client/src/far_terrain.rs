@@ -426,6 +426,23 @@ fn retile_far_mesh(
                         bend_start,
                         fog_color: haze.extend(1.0),
                         sky_color: sky_color.extend(1.0),
+                        // BL-82 EM-3.11 round 24 (bevy-migration-reviewer
+                        // finding): deliberately LEFT at the `Default`'s 0.0
+                        // (discard disabled), not set to `hole_radius`. This
+                        // mesh already cuts an exact CPU hole around
+                        // `hole_center` (the retile anchor); the shader's own
+                        // discard would instead be centred on the LIVE camera,
+                        // which can drift up to `HOLE_MARGIN_CHUNKS ·
+                        // CHUNK_EDGE` from `hole_center` before the next
+                        // retile — briefly discarding a thin crescent of
+                        // sheet geometry the CPU cull correctly kept. Setting
+                        // `near_band` here would trade an exact, correct CPU
+                        // cull for an approximate, camera-centred one that
+                        // buys the sheet nothing (its geometry never overlaps
+                        // near terrain either way). The LOD-object zone meshes
+                        // (`lod_objects.rs`) are the ONLY real user of this
+                        // uniform — see [`FarTerrainExtension::near_band`]'s
+                        // doc comment.
                         ..default()
                     },
                 })),
