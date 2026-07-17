@@ -363,6 +363,30 @@ pub const CLUSTER_BOTTOM_PX: f32 = 20.0;
 /// action bar").
 pub const XP_CLUSTER_GAP_PX: f32 = 6.0;
 
+/// Approximate height (px) of the XP-bar+level readout sitting above the orb
+/// row — `combat_hud.rs::spawn_combat_hud`'s `xp_cluster_root` stacks
+/// `LevelText` (18px font) + a `theme.spacing.xs` (4px, the stock
+/// [`xindeler_ui::theme::HudSpacing`] default) row gap + the 6px XP bar, with
+/// no extra container padding. Deliberately a generous OVERESTIMATE (real
+/// text line-height/leading isn't accounted for exactly) —
+/// [`CLUSTER_TOTAL_HEIGHT_PX`] exists so other screens can clear the WHOLE row
+/// without re-measuring it themselves, and erring tall here only ever gives
+/// them a little MORE clearance than strictly required, never less.
+pub const XP_CLUSTER_CONTENT_HEIGHT_PX: f32 = 40.0;
+
+/// Total height (px), from the viewport's bottom edge, of the entire
+/// bottom-centre HUD row — the 3 resource orbs plus the XP/level cluster
+/// sitting above them ([`XP_CLUSTER_GAP_PX`] +
+/// [`XP_CLUSTER_CONTENT_HEIGHT_PX`]). BL-82 HUD-responsive-scaling pass: other
+/// screens that need to sit ABOVE this row without vertically overlapping it
+/// (`chat.rs`'s panel — Matías's "chat and the health orb overlap at a reduced
+/// window size" report) read this rather than re-deriving or guessing the row's
+/// real height. Computed from the SAME public constants `combat_hud.rs` itself
+/// builds the row from, so it can never silently drift out of sync with the
+/// real layout.
+pub const CLUSTER_TOTAL_HEIGHT_PX: f32 =
+    CLUSTER_BOTTOM_PX + ORB_SIZE_PX + XP_CLUSTER_GAP_PX + XP_CLUSTER_CONTENT_HEIGHT_PX;
+
 /// Total width (px) of the "core" action-bar span — the two background
 /// halves plus the centre Stamina orb, EXCLUDING the two outer (Health/Mana)
 /// orbs. The XP bar + level readout are centred on this span, matching the
@@ -412,6 +436,29 @@ pub const CLUSTER: ClusterOffsets = {
 /// constant so call sites don't repeat the literal.
 pub const CENTER_LEFT: Val = Val::Percent(50.0);
 
+/// The health orb's screen-space `(left, right)` x-edges for a given window
+/// width — `width / 2.0` (the `CENTER_LEFT` anchor resolves against the REAL
+/// window, `Val::Percent` is untouched by `UiScale`) plus
+/// [`CLUSTER::health_orb_left`]'s margin offset. Exists purely so the
+/// overlap-avoidance test suite (this module's own + `chat.rs`'s, BL-82
+/// HUD-responsive-scaling pass) can reason about exactly where the health
+/// orb sits without duplicating this arithmetic by hand — `chat.rs`'s actual
+/// production fix (`PANEL_BOTTOM_PX`) guarantees zero overlap via a purely
+/// VERTICAL separation instead (see that constant's own doc comment for why
+/// a width-based avoidance can't work across every window size), so nothing
+/// in non-test code needs this at runtime — `#[cfg(test)]` rather than
+/// `#[allow(dead_code)]`, since it's genuinely only ever called from tests.
+/// Can go negative (or spill past `width`) for a window narrower than the
+/// cluster's own ~1013px total span — the orb is simply partially or fully
+/// off-screen at that point, a real but SEPARATE known limitation of this
+/// cluster's fixed-width design, not something this function hides.
+#[cfg(test)]
+#[must_use]
+pub fn health_orb_screen_x(window_width: f32) -> (f32, f32) {
+    let left = window_width / 2.0 + CLUSTER.health_orb_left;
+    (left, left + ORB_SIZE_PX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +495,35 @@ mod tests {
     fn action_bar_total_width_spans_both_halves_and_stamina_orb() {
         let expected = 2.0 * ACTION_BAR_HALF_WIDTH_PX + ORB_SIZE_PX + 2.0 * CLUSTER_GAP_PX;
         assert!((ACTION_BAR_TOTAL_WIDTH_PX - expected).abs() < f32::EPSILON);
+    }
+
+    /// [`CLUSTER_TOTAL_HEIGHT_PX`] is exactly the sum of its own named parts
+    /// — pins the arithmetic so a future edit to any one constant can't
+    /// silently desync the combined value from what the row actually spawns.
+    #[test]
+    fn cluster_total_height_sums_its_named_parts() {
+        let expected =
+            CLUSTER_BOTTOM_PX + ORB_SIZE_PX + XP_CLUSTER_GAP_PX + XP_CLUSTER_CONTENT_HEIGHT_PX;
+        assert!((CLUSTER_TOTAL_HEIGHT_PX - expected).abs() < f32::EPSILON);
+    }
+
+    /// [`health_orb_screen_x`]: the orb's edges sit exactly
+    /// `width / 2.0 + CLUSTER.health_orb_left` .. `+ ORB_SIZE_PX` — and, for
+    /// a window narrower than the cluster's own ~1013px total span, the left
+    /// edge genuinely goes negative (the orb spills off-screen) rather than
+    /// being silently clamped — callers must handle that themselves.
+    #[test]
+    fn health_orb_screen_x_matches_the_raw_arithmetic_and_can_go_negative() {
+        let (left, right) = health_orb_screen_x(1280.0);
+        assert!((left - (640.0 + CLUSTER.health_orb_left)).abs() < f32::EPSILON);
+        assert!((right - (left + ORB_SIZE_PX)).abs() < f32::EPSILON);
+
+        let (narrow_left, _) = health_orb_screen_x(400.0);
+        assert!(
+            narrow_left < 0.0,
+            "a window narrower than the cluster's own span must report a genuinely off-screen \
+             (negative) left edge, not a clamped one"
+        );
     }
 
     /// Regression guard for [`ACTION_BAR_WIDTH_TRIM`] (BL-82 EM-5.17 "5+5
