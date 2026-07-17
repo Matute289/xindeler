@@ -51,7 +51,9 @@ use xindeler_ui::{
     theme::{HudFonts, HudTheme},
 };
 
-use crate::{camera::MainCamera, chat::text_input_focused, light::Sun};
+use crate::{
+    camera::MainCamera, chat::text_input_focused, light::Sun, targeting::hard_lock_active,
+};
 
 /// Effective shadow-cascade range (matches `crate::light::spawn_light_rig`'s
 /// own `clamp(1, 4)`): cycling the toggle wraps within this.
@@ -77,13 +79,22 @@ impl Plugin for EscMenuPlugin {
                 // toggle in this crate). Gated on `!text_input_focused` so
                 // Escape while typing in chat blurs the chat box instead of
                 // opening the pause menu (`chat::blur_chat_input_on_escape`
-                // owns that). Ordered BEFORE `apply_hud_actions` so the open/
-                // close it requests lands the SAME frame (the atomic
-                // cursor-free chain `cursor::update_cursor_free` relies on).
+                // owns that). ALSO gated on `!hard_lock_active` (BL-82
+                // EM-5.19 Phase 3, finalizing the seam P2 explicitly
+                // deferred): while a hard lock is active, Escape ONLY clears
+                // it (`targeting::clear_hard_lock_on_escape`, ordered
+                // `.after(toggle_esc_menu)` so it reads this SAME frame's
+                // pre-clear lock state — see that system's own doc comment
+                // for the full ordering argument) and must NOT also open/
+                // close the pause menu on that same press. Ordered BEFORE
+                // `apply_hud_actions` so the open/close it requests lands the
+                // SAME frame (the atomic cursor-free chain
+                // `cursor::update_cursor_free` relies on).
                 toggle_esc_menu
                     .after(xindeler_input::InputResolveSet)
                     .before(xindeler_ui::hud_state::apply_hud_actions)
-                    .run_if(not(text_input_focused)),
+                    .run_if(not(text_input_focused))
+                    .run_if(not(hard_lock_active)),
                 // After `apply_hud_actions` so the panel's `Visibility` matches
                 // the window state THIS frame (no one-frame open lag).
                 sync_esc_menu_visibility.after(xindeler_ui::hud_state::apply_hud_actions),
@@ -125,7 +136,14 @@ struct GraphicsControlButton(GraphicsControl);
 /// [`HudAction::CloseWindow`] is idempotent ([`HudState::close`] sets `None`),
 /// so `map_view::close_full_map_on_escape` also firing on the same frame is
 /// harmless — both just close the (one) open window.
-fn toggle_esc_menu(
+///
+/// `pub(crate)` (BL-82 EM-5.19 Phase 3): so
+/// `targeting::clear_hard_lock_on_escape` can name it in an explicit
+/// `.after(toggle_esc_menu)` ordering edge — see that system's doc comment for
+/// why the ORDER (not just the `hard_lock_active` run-condition gate above) is
+/// load-bearing for "Escape-while-locked clears the lock without also opening
+/// the pause menu on the same press."
+pub(crate) fn toggle_esc_menu(
     action_state: Res<ActionState>,
     hud_state: Res<HudState>,
     mut actions: MessageWriter<HudAction>,
@@ -519,6 +537,71 @@ mod tests {
             vec![HudAction::CloseWindow],
             "Escape with another window (Diary) open must close it — Escape is the universal \
              back-out key, not just a pause-menu opener"
+        );
+    }
+
+    /// BL-82 EM-5.19 Phase 3: while a hard lock is active, Escape must NOT
+    /// open/close the pause menu at all —
+    /// `targeting::clear_hard_lock_on_escape` (not exercised by this
+    /// fixture; see `targeting.rs`'s own tests for that half) owns clearing
+    /// the lock instead. Builds the REAL `.run_if(not(text_input_focused)).
+    /// run_if(not(hard_lock_active))` chain
+    /// (unlike `escape_opens_and_closes_only_when_appropriate` above, which
+    /// calls the bare `toggle_esc_menu` function with no conditions) so this
+    /// actually exercises the gating wiring, not just the predicate.
+    #[test]
+    fn escape_does_not_open_pause_menu_while_hard_lock_active() {
+        use bevy::input_focus::InputFocus;
+        use xindeler_input::KeyMap;
+
+        use crate::targeting::HardLock;
+
+        let mut app = App::new();
+        app.init_resource::<HudState>();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+        // `text_input_focused` (the other run condition in this chain) reads
+        // `Res<InputFocus>` unconditionally — it must be present even though
+        // this test's whole point is the `hard_lock_active` gate, not chat
+        // focus (`chat::tests` is what actually exercises the focused case).
+        app.init_resource::<InputFocus>();
+        app.add_message::<HudAction>();
+        let locked = app.world_mut().spawn_empty().id();
+        app.insert_resource(HardLock(Some(locked)));
+
+        let esc_key = app
+            .world()
+            .resource::<KeyMap>()
+            .keyboard
+            .get_binding(GameInput::Escape);
+        if let Some(xindeler_input::KeyOrMouse::Key(key)) = esc_key {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(key);
+        }
+        app.add_systems(
+            Update,
+            (
+                xindeler_input::action_state::update_action_state,
+                toggle_esc_menu
+                    .run_if(not(text_input_focused))
+                    .run_if(not(hard_lock_active)),
+            )
+                .chain(),
+        );
+        app.update();
+
+        let actions: Vec<HudAction> = app
+            .world_mut()
+            .resource_mut::<Messages<HudAction>>()
+            .drain()
+            .collect();
+        assert!(
+            actions.is_empty(),
+            "Escape while a hard lock is active must not emit any HudAction — no pause-menu \
+             open/close on the same press"
         );
     }
 
