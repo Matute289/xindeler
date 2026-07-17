@@ -33,7 +33,10 @@
 //!   command-typed only), and full Fluent rendering of non-plain `Content`
 //!   (server-side `render_content` fallback covers it — EM-5.16's job).
 
-use bevy::{color::Alpha as _, input_focus::InputFocus, prelude::*, text::EditableText};
+use bevy::{
+    color::Alpha as _, input_focus::InputFocus, prelude::*, text::EditableText,
+    window::PrimaryWindow,
+};
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
 use xindeler_ui::{
@@ -41,6 +44,8 @@ use xindeler_ui::{
     scroll::scroll_view_bundle,
     theme::{HudFonts, HudTheme},
 };
+
+use crate::hud_layout;
 
 /// Scrollback cap (BL-82 EM-5.4's own "bounded" requirement). 200 lines is
 /// comfortably more than a player reads back in one session before it
@@ -50,10 +55,84 @@ use xindeler_ui::{
 /// number instead of an implicit one).
 const MAX_CHAT_HISTORY: usize = 200;
 
-/// The panel's fixed on-screen size (bottom-left, matching legacy's chat
-/// placement).
-const PANEL_WIDTH: f32 = 420.0;
-const SCROLL_HEIGHT: f32 = 180.0;
+/// The panel's on-screen width (bottom-left, matching legacy's chat
+/// placement) — narrowed from the original `420.0` (BL-82
+/// HUD-responsive-scaling pass, Matías's explicit "make it narrower and
+/// taller" ask, alongside [`PANEL_BOTTOM_PX`]'s own overlap fix below).
+const PANEL_WIDTH: f32 = 320.0;
+
+/// Safety margin (px) [`PANEL_BOTTOM_PX`] adds on top of
+/// [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`] — a deliberate, visible gap
+/// rather than a flush/touching fit.
+const PANEL_BOTTOM_SAFETY_MARGIN_PX: f32 = 24.0;
+
+/// The panel's `bottom` offset (px, from the viewport's bottom edge) — **the
+/// actual fix** for Matías's live-testing report: "at a small/reduced window
+/// size, the health orb and the chat dialog box overlap; at a large/
+/// fullscreen window they don't."
+///
+/// This used to be a bare `Some(16.0)` (`anchored_panel_bundle`'s own
+/// `bottom` parameter) — 16px above the viewport's bottom edge, the SAME
+/// vertical band the bottom-CENTRE health-orb cluster occupies
+/// (`hud_layout::CLUSTER_BOTTOM_PX` = 20px). The cluster is centred and
+/// ~1013px wide (`hud_layout::health_orb_screen_x`'s own doc comment) — at
+/// the game's own default 1280×720 window (`main.rs`'s
+/// `WindowResolution::new(1280, 720)`, itself already "small" by this
+/// cluster's standard) the health orb's left edge sits barely 130px in from
+/// the screen's left edge, well inside where even a NARROWED chat panel's
+/// width would reach. Shrinking the panel's WIDTH alone therefore cannot
+/// guarantee zero overlap across the window sizes players actually resize
+/// to (it would either stay too wide for genuinely small windows, or shrink
+/// to an unusably thin sliver at everyday ones) — the only way to guarantee
+/// **zero overlap at every window size**, without reshaping the whole
+/// orb/action-bar cluster, is to guarantee zero VERTICAL overlap instead:
+/// sit the entire chat panel above [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`]
+/// (the row's real top edge — orbs + the XP/level readout above them), plus
+/// [`PANEL_BOTTOM_SAFETY_MARGIN_PX`]. Two AABBs that don't overlap on one
+/// axis can never overlap at all, regardless of how their extents compare
+/// on the other axis — so this holds independent of window WIDTH entirely.
+///
+/// It also survives the new window-height-derived
+/// [`xindeler_ui::scale::window_derived_hud_scale`] `UiScale` (this same
+/// pass's fix for "everything stays tiny on a large window") untouched:
+/// `UiScale` multiplies every `Val::Px` conversion to physical pixels by the
+/// SAME global factor, and both this constant and every `hud_layout`
+/// constant it's built from are plain `Val::Px` figures — a strict `>`
+/// relationship between two quantities scaled by the same positive factor
+/// stays strict at ANY scale.
+const PANEL_BOTTOM_PX: f32 = hud_layout::CLUSTER_TOTAL_HEIGHT_PX + PANEL_BOTTOM_SAFETY_MARGIN_PX;
+
+const PANEL_LEFT_PX: f32 = 16.0;
+
+/// [`chat_scroll_height`]'s clamp bounds (px) — taller than the original
+/// fixed `180.0` at every supported window size (Matías's "narrower and
+/// TALLER" ask), while never collapsing on a very short window nor growing
+/// unboundedly on a very tall one (`UiScale`, wired separately, already
+/// grows the WHOLE HUD together on a tall window — this is a modest, capped
+/// adjustment layered on top of that, not a second uncapped growth path).
+const MIN_SCROLL_HEIGHT_PX: f32 = 220.0;
+const MAX_SCROLL_HEIGHT_PX: f32 = 320.0;
+
+/// The fraction of window height [`chat_scroll_height`] targets before
+/// clamping — chosen so the default 720px-tall reference window (the same
+/// one every `hud_layout` constant was tuned against, see
+/// `xindeler_ui::scale::REFERENCE_WINDOW_HEIGHT_PX`'s own doc comment) lands
+/// near the middle of the clamp range (`720.0 * 0.35 ≈ 252px`) rather than
+/// pinned to either bound.
+const SCROLL_HEIGHT_WINDOW_FRACTION: f32 = 0.35;
+
+/// The scrollback's height (px) for a given window height — see
+/// [`MIN_SCROLL_HEIGHT_PX`]/[`MAX_SCROLL_HEIGHT_PX`]'s own doc comment for
+/// why it's bounded rather than a raw fraction. Pure and directly
+/// unit-tested (BL-82 HUD-responsive-scaling pass), not only exercised
+/// through a live [`Window`] read — [`sync_chat_scroll_height_to_window`]
+/// is the thin ECS wrapper that actually applies it every time the window's
+/// real height changes.
+#[must_use]
+fn chat_scroll_height(window_height_px: f32) -> f32 {
+    (window_height_px * SCROLL_HEIGHT_WINDOW_FRACTION)
+        .clamp(MIN_SCROLL_HEIGHT_PX, MAX_SCROLL_HEIGHT_PX)
+}
 
 /// The channel tabs shown, in order: `None` = "All" (view filter only, never
 /// a send target); every `Some(channel)` doubles as a filter AND (for the
@@ -227,6 +306,11 @@ impl Plugin for ChatViewPlugin {
                 update_input_placeholder,
                 handle_chat_submit,
                 chat_smoke_verify,
+                // BL-82 HUD-responsive-scaling pass: keeps the scrollback
+                // TALLER on a taller window (Matías's ask) as the window is
+                // live-resized, not just at the size it happened to be at
+                // `Startup`.
+                sync_chat_scroll_height_to_window,
                 // Reads `ActionState` — must run after the frame's real
                 // input resolution (BL-82 EM-5.17 Phase 0, same fix as
                 // `diary::toggle_diary_window`/`controls_screen::
@@ -321,15 +405,41 @@ fn chat_smoke_verify(
     }
 }
 
+/// Window height assumed when the real primary window isn't queryable yet
+/// (a pre-`Startup`-ordering edge — winit's window creation isn't guaranteed
+/// to have run before an early `Startup` system) — matches
+/// `xindeler_ui::scale::REFERENCE_WINDOW_HEIGHT_PX` / `main.rs`'s own
+/// default `WindowResolution::new(1280, 720)`.
+const FALLBACK_WINDOW_HEIGHT_PX: f32 = 720.0;
+
 /// Spawns the panel root (bottom-left, using the real themed
 /// [`anchored_panel_bundle`] primitive — border/background/radius, not a
 /// bare `Node`), the tab row, the scrollable message log, and the input row
-/// (placeholder label + `EditableText` box).
-fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+/// (placeholder label + `EditableText` box). The panel's `left`/`bottom`
+/// offsets ([`PANEL_LEFT_PX`]/[`PANEL_BOTTOM_PX`]) and its initial scrollback
+/// height ([`chat_scroll_height`]) are the BL-82 HUD-responsive-scaling
+/// pass's fix — see those constants' own doc comments.
+fn spawn_chat_panel(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let initial_scroll_height = windows.single().map_or_else(
+        |_| chat_scroll_height(FALLBACK_WINDOW_HEIGHT_PX),
+        |window| chat_scroll_height(window.height()),
+    );
+
     let root = commands
         .spawn((
             ChatPanelRoot,
-            xindeler_ui::panel::anchored_panel_bundle(&theme, None, Some(16.0), None, Some(16.0)),
+            xindeler_ui::panel::anchored_panel_bundle(
+                &theme,
+                None,
+                Some(PANEL_LEFT_PX),
+                None,
+                Some(PANEL_BOTTOM_PX),
+            ),
         ))
         .id();
     // `.entry::<Node>().and_modify(..)` mutates the EXISTING `Node`
@@ -379,7 +489,11 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
 
         // Scrollable message log.
         parent
-            .spawn(scroll_view_bundle(&theme, PANEL_WIDTH, SCROLL_HEIGHT))
+            .spawn(scroll_view_bundle(
+                &theme,
+                PANEL_WIDTH,
+                initial_scroll_height,
+            ))
             .insert((ChatScrollArea, ChatCollapsible));
 
         // Input row: placeholder label (shown only while empty) +
@@ -434,6 +548,29 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 ));
             });
     });
+}
+
+/// Keeps the scrollback's height tracking [`chat_scroll_height`] as the
+/// REAL primary window is live-resized — `spawn_chat_panel` only sets the
+/// height ONCE, at `Startup`, off whatever size the window happened to be
+/// at that moment; without this, resizing the window afterward would leave
+/// the scrollback pinned at its initial height instead of genuinely growing
+/// on a taller window. A no-op write-guard (`if node.height != desired`)
+/// avoids marking the `Node` changed (and re-triggering `bevy_ui` layout)
+/// every single frame when the window hasn't actually resized.
+fn sync_chat_scroll_height_to_window(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut areas: Query<&mut Node, With<ChatScrollArea>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let desired = Val::Px(chat_scroll_height(window.height()));
+    for mut node in &mut areas {
+        if node.height != desired {
+            node.height = desired;
+        }
+    }
 }
 
 /// A tab button's channel colour tag, rendered as a short bracketed prefix on
@@ -1425,5 +1562,121 @@ mod tests {
             .drain()
             .collect();
         assert!(sent.is_empty(), "no message may send without focus");
+    }
+
+    /// [`chat_scroll_height`]: grows with window height but stays within
+    /// [`MIN_SCROLL_HEIGHT_PX`]/[`MAX_SCROLL_HEIGHT_PX`] at both extremes —
+    /// the "taller" half of Matías's "narrower and taller" ask, bounded so a
+    /// tiny window doesn't collapse the scrollback to nothing and a huge one
+    /// doesn't grow it without limit (BL-82 HUD-responsive-scaling pass).
+    #[test]
+    fn chat_scroll_height_clamps_and_grows_with_window_height() {
+        assert_eq!(chat_scroll_height(100.0), MIN_SCROLL_HEIGHT_PX);
+        assert_eq!(chat_scroll_height(4000.0), MAX_SCROLL_HEIGHT_PX);
+
+        let short = chat_scroll_height(600.0);
+        let tall = chat_scroll_height(900.0);
+        assert!(
+            tall > short,
+            "a taller window must yield a taller scrollback ({tall} was not > {short})"
+        );
+    }
+
+    /// **The BL-82 HUD-responsive-scaling pass's core acceptance test**:
+    /// Matías's live-testing report was "at a small/reduced window size, the
+    /// health orb and the chat dialog box overlap." This asserts the chat
+    /// panel's real on-screen AABB (`PANEL_LEFT_PX`/`PANEL_BOTTOM_PX`/
+    /// `PANEL_WIDTH` + a total height built from `chat_scroll_height` plus a
+    /// generous chrome overestimate for the header/tab/input rows
+    /// `spawn_chat_panel` also spawns) never intersects the KNOWN health-orb
+    /// bounding box (`hud_layout::health_orb_screen_x` +
+    /// `hud_layout::CLUSTER_BOTTOM_PX`/`ORB_SIZE_PX`) at a spread of window
+    /// sizes: the project's own default (1280×720), a couple of
+    /// progressively smaller "reduced" sizes, and a genuinely tiny one.
+    #[test]
+    fn chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size() {
+        // Deliberately generous (an overestimate, never an underestimate) —
+        // `spawn_chat_panel`'s header row (button + margin) + tab row
+        // (button + margin) + input row (text/box + padding) on top of the
+        // scrollback itself. Erring tall here only ever makes this test
+        // STRICTER than the real spawned panel, never looser.
+        const CHROME_HEIGHT_PX: f32 = 140.0;
+
+        // (width, height) — 1280x720 is the project's own literal default
+        // (`main.rs`'s `WindowResolution::new(1280, 720)`) and already reads
+        // as "small" against the ~1013px-wide orb cluster (see
+        // `hud_layout::health_orb_screen_x`'s doc comment) — exactly the
+        // size Matías's report was reproducing against. 960x540 and 800x600
+        // are progressively more "reduced"; 480x320 is the genuinely tiny
+        // floor this test also covers.
+        let window_sizes: &[(f32, f32)] = &[
+            (1280.0, 720.0),
+            (960.0, 540.0),
+            (800.0, 600.0),
+            (480.0, 320.0),
+        ];
+
+        for &(width, height) in window_sizes {
+            let chat_left = PANEL_LEFT_PX;
+            let chat_right = PANEL_LEFT_PX + PANEL_WIDTH;
+            let chat_top_from_bottom =
+                PANEL_BOTTOM_PX + chat_scroll_height(height) + CHROME_HEIGHT_PX;
+            let chat_bottom_from_bottom = PANEL_BOTTOM_PX;
+
+            let (orb_left, orb_right) = hud_layout::health_orb_screen_x(width);
+            let orb_bottom_from_bottom = hud_layout::CLUSTER_BOTTOM_PX;
+            let orb_top_from_bottom = hud_layout::CLUSTER_BOTTOM_PX + hud_layout::ORB_SIZE_PX;
+
+            let x_overlaps = chat_left < orb_right && orb_left < chat_right;
+            let y_overlaps = chat_bottom_from_bottom < orb_top_from_bottom
+                && orb_bottom_from_bottom < chat_top_from_bottom;
+
+            assert!(
+                !(x_overlaps && y_overlaps),
+                "chat panel [{chat_left}, {chat_right}] x [{chat_bottom_from_bottom}, \
+                 {chat_top_from_bottom}] overlaps the health orb [{orb_left}, {orb_right}] x \
+                 [{orb_bottom_from_bottom}, {orb_top_from_bottom}] at window size {width}x{height}"
+            );
+        }
+    }
+
+    /// [`sync_chat_scroll_height_to_window`]: a LIVE window resize (not just
+    /// the size at `Startup`) updates the scroll area's real `Node::height`
+    /// — without this, `spawn_chat_panel`'s one-shot height would stay
+    /// pinned at whatever the window was when the app booted.
+    #[test]
+    fn sync_chat_scroll_height_to_window_tracks_a_live_resize() {
+        let mut app = new_app();
+        let window_entity = app
+            .world_mut()
+            .spawn((PrimaryWindow, Window {
+                resolution: bevy::window::WindowResolution::new(1280, 720),
+                ..Default::default()
+            }))
+            .id();
+        let scroll_area = app
+            .world_mut()
+            .spawn((ChatScrollArea, Node {
+                height: Val::Px(chat_scroll_height(720.0)),
+                ..Default::default()
+            }))
+            .id();
+
+        // Resize to a much taller window — the scrollback must grow to
+        // match (clamped at `MAX_SCROLL_HEIGHT_PX`).
+        app.world_mut()
+            .get_mut::<Window>(window_entity)
+            .unwrap()
+            .resolution = bevy::window::WindowResolution::new(1280, 2000);
+        app.world_mut()
+            .run_system_once(sync_chat_scroll_height_to_window)
+            .expect("system runs");
+
+        let node = app.world().get::<Node>(scroll_area).unwrap();
+        assert_eq!(
+            node.height,
+            Val::Px(chat_scroll_height(2000.0)),
+            "the scrollback must track a LIVE window resize, not just the size at Startup"
+        );
     }
 }

@@ -48,6 +48,7 @@ mod figure_view;
 mod hotbar;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod hud_layout;
+mod hud_scale;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod hud_toast;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
@@ -243,6 +244,12 @@ fn main() -> AppExit {
         scene::DemoScenePlugin,
         // EM-3.3: VoxelMaterialExt registration + the async chunk pipeline.
         VoxelRenderPlugin,
+        // BL-82 HUD-responsive-scaling pass: wires the T56.6 `UiScale`
+        // seam to the ACTUAL window size (Matías's "HUD stays tiny on a
+        // large/fullscreen window" report) — unconditional (not feature-
+        // gated), same reasoning as `XindelerInputPlugin` above, since every
+        // client mode renders through the same `bevy_ui` `UiScale`.
+        hud_scale::HudScalePlugin,
         // EM-3.10b: opt-in (`XINDELER_PERF_LOG=1`) periodic frame-time log,
         // used to measure the GPU occlusion-culling toggle; a no-op system
         // otherwise.
