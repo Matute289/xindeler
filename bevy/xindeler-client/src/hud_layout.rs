@@ -149,29 +149,110 @@ pub const ORB_SOURCE_CROP: Rect = Rect {
 /// widened crop requires (a looser frame crop shrinks the hole's SHARE of the
 /// rendered box, so the liquid needs a bigger inset to still fit inside it
 /// without visibly spilling past the ring).
+///
+/// ## BL-82 orb crop round 3 — round 2 was STILL cropped, by its own math
+/// Round 2's `768×768` crop was correctly the WIDEST possible SQUARE, but its
+/// own doc comment above already admitted this can't be a full fix: the
+/// angel/cuthulhu art is wider (`879px`/`1165px`) than the `768px` a square
+/// crop is bounded by, so a square crop geometrically MUST still clip real
+/// wing/tentacle pixels no matter how it's centred — round 2 only shrank the
+/// clipping versus the original `716×716` crop, it never eliminated it. This
+/// held up live: Matías's round-3 report confirmed the angel/cuthulhu orbs
+/// still visibly lose wing/tentacle art after round 2 shipped. Independently
+/// re-verified directly against the on-disk PNGs (alpha-channel connected-
+/// component analysis, matching round 2's own method): rendering round 2's
+/// `768×768` crop at the real `160×160` orb size and comparing to the full
+/// source art confirms angel loses both wingtips + the right-side fence/gate
+/// spikes, and cuthulhu loses almost its entire right wing — a severe, boldly
+/// visible crop, not a few stray anti-aliased px.
+///
+/// The real fix: stop forcing the frame into a SQUARE crop at all. A crop
+/// symmetric around each variant's own measured hole centre, wide enough to
+/// contain the FULL measured opaque art extent (`+4px` anti-aliasing margin,
+/// mirrored equally on the shorter side too so the hole stays exactly
+/// centred) plus a rendered box whose WIDTH is scaled from that crop by the
+/// exact same factor `height_px` already uses (see
+/// [`xindeler_ui::bar::spawn_orb_bar`]'s own doc comment on its new
+/// `frame_width_px` parameter) shows every decorative pixel with zero
+/// distortion — verified via the same pixel-level compositing method as
+/// round 2, at the real render scale, that the full statue/wing/tentacle
+/// silhouettes now render uncut for every variant. Crucially this does NOT
+/// change how big the hole itself renders (same scale factor as round 2's
+/// `768`-wide crop → `160px` box, just applied to a wider crop → wider box),
+/// so [`ANGEL_LIQUID_INSET_PX`]/[`CUTHULHU_LIQUID_INSET_PX`]/
+/// [`STAMINA_LIQUID_INSET_PX`] stay valid UNCHANGED from round 2 — this is
+/// purely an additive fix for the decorative art, not a re-tune of the
+/// liquid/hole fit.
+///
+/// Measured (hole centres re-used unchanged from round 2; opaque-art extent
+/// independently re-verified): half-width = `max(hole_centre - art_min,
+/// art_max - hole_centre) + 4px margin`, crop = `[hole_centre - half_width,
+/// hole_centre + half_width]`.
+/// - angel: art `x[237,1115]`, hole centre `711.0` → half-width `478.0` →
+///   `x[233.0,1189.0]` (`956px` wide) → renders `199.17px` wide (`19.58px`
+///   overhang per side past the orb's own `160px` box).
+/// - cuthulhu: art `x[169,1333]`, hole centre `711.5` → half-width `625.5` →
+///   `x[86.0,1337.0]` (`1251px` wide) → renders `260.63px` wide (`50.31px`
+///   overhang per side — the mana orb's own right side has nothing next to it
+///   in the cluster, so only its LEFT overhang visually spills onto the right
+///   action-bar half).
+/// - stamina: art `x[334,1083]`, hole centre `709.5` → half-width `379.5` →
+///   `x[330.0,1089.0]` (`759px` wide) → renders `158.13px` wide, i.e.
+///   marginally NARROWER than the orb's own `160px` box (a `-0.94px`
+///   "overhang," meaning stamina's art already fit — matching the earlier
+///   finding that stamina was never the variant losing decorative art; Matías's
+///   round-2 report about stamina was about the LIQUID sizing, not this frame
+///   crop).
+///
+/// See [`ANGEL_FRAME_WIDTH_PX`]/[`CUTHULHU_FRAME_WIDTH_PX`]/
+/// [`STAMINA_FRAME_WIDTH_PX`] for the corresponding rendered-box widths, and
+/// [`crate::zlayer::AMBIENT_CHROME_OVERLAY`] for why the now-overlapping
+/// frame needs its own explicit `GlobalZIndex`.
 pub const ANGEL_FRAME_SOURCE_CROP: Rect = Rect {
-    min: bevy::math::Vec2::new(327.0, 0.0),
-    max: bevy::math::Vec2::new(1095.0, 768.0),
+    min: bevy::math::Vec2::new(233.0, 0.0),
+    max: bevy::math::Vec2::new(1189.0, 768.0),
 };
 
 /// Cuthulhu (mana orb) variant of [`ANGEL_FRAME_SOURCE_CROP`] — see that
-/// constant's doc comment for the round-2 per-variant crop rationale. Centred
-/// on cuthulhu's own measured hole centre (`x=711.5`); `cuthulhu`'s canvas is
-/// `1407px` wide (1px narrower than the other two, a negligible artist-export
-/// rounding difference), still comfortably wide enough for this crop's
-/// `x1=1095.5`.
+/// constant's doc comment for the round-3 per-variant crop rationale. Centred
+/// on cuthulhu's own measured hole centre (`x=711.5`, unchanged from round 2).
 pub const CUTHULHU_FRAME_SOURCE_CROP: Rect = Rect {
-    min: bevy::math::Vec2::new(327.5, 0.0),
-    max: bevy::math::Vec2::new(1095.5, 768.0),
+    min: bevy::math::Vec2::new(86.0, 0.0),
+    max: bevy::math::Vec2::new(1337.0, 768.0),
 };
 
 /// Stamina (centre orb) variant of [`ANGEL_FRAME_SOURCE_CROP`] — see that
-/// constant's doc comment for the round-2 per-variant crop rationale. Centred
-/// on stamina's own measured hole centre (`x=709.5`).
+/// constant's doc comment for the round-3 per-variant crop rationale. Centred
+/// on stamina's own measured hole centre (`x=709.5`, unchanged from round 2).
+/// Barely different from round 2's `768`-wide square crop (`759px` vs
+/// `768px`) since stamina's art already fit within a square — kept per-variant
+/// anyway rather than special-cased, so all three variants go through the
+/// exact same [`xindeler_ui::bar::spawn_orb_bar`] `frame_width_px` mechanism.
 pub const STAMINA_FRAME_SOURCE_CROP: Rect = Rect {
-    min: bevy::math::Vec2::new(325.5, 0.0),
-    max: bevy::math::Vec2::new(1093.5, 768.0),
+    min: bevy::math::Vec2::new(330.0, 0.0),
+    max: bevy::math::Vec2::new(1089.0, 768.0),
 };
+
+/// The rendered WIDTH (px) of the health (angel) orb's frame overlay —
+/// [`ANGEL_FRAME_SOURCE_CROP`]'s own width (`956px`) scaled by the exact same
+/// factor [`ORB_SIZE_PX`]`/768.0` that `height_px` already uses for every
+/// orb, so the wider crop stretches onto a proportionally wider box with NO
+/// distortion (see that constant's doc comment for the full round-3
+/// rationale). Passed as `spawn_orb_bar`'s `frame_width_px` argument —
+/// wider than [`ORB_SIZE_PX`], so the frame overlay spills a few px past the
+/// orb's own square hit-box on each side instead of clipping the wingtips.
+pub const ANGEL_FRAME_WIDTH_PX: f32 = (1189.0 - 233.0) * ORB_SIZE_PX / 768.0;
+
+/// Cuthulhu (mana orb) variant of [`ANGEL_FRAME_WIDTH_PX`] — by far the
+/// widest overhang of the three (the cuthulhu wing is the single widest
+/// piece of decorative art in the whole pack).
+pub const CUTHULHU_FRAME_WIDTH_PX: f32 = (1337.0 - 86.0) * ORB_SIZE_PX / 768.0;
+
+/// Stamina (centre orb) variant of [`ANGEL_FRAME_WIDTH_PX`] — renders
+/// marginally NARROWER than [`ORB_SIZE_PX`] (stamina's art already fit a
+/// square crop); still routed through the same `frame_width_px` mechanism as
+/// the other two variants rather than special-cased to `ORB_SIZE_PX`.
+pub const STAMINA_FRAME_WIDTH_PX: f32 = (1089.0 - 330.0) * ORB_SIZE_PX / 768.0;
 
 /// BL-82 EM-5.17 Phase 0 second follow-up — companion to
 /// [`ANGEL_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s

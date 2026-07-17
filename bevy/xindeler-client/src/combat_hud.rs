@@ -151,6 +151,13 @@ fn spawn_combat_hud(
     // the opposite "frame crop clips the decorative art" regression a single
     // SHARED crop caused — see those constants' own doc comments for why
     // this needs 3 different values per parameter instead of 1 shared one.
+    // BL-82 orb crop round 3: round 2's square crop was STILL clipping the
+    // angel/cuthulhu wings (geometrically unavoidable for a square box —
+    // see `hud_layout::ANGEL_FRAME_SOURCE_CROP`'s own doc comment), so the
+    // per-variant `hud_layout::*_FRAME_WIDTH_PX` constants now size each
+    // frame overlay WIDER than `ORB_SIZE_PX` (via `spawn_orb_bar`'s new
+    // `frame_width_px` parameter) instead of squeezing it into the orb's
+    // own square hit-box.
     let health_orb = spawn_orb_bar(
         &mut commands,
         &theme,
@@ -158,6 +165,7 @@ fn spawn_combat_hud(
         Some(images.get(HudImageKey::OrbFrameAngel)),
         Some(hud_layout::ORB_SOURCE_CROP),
         Some(hud_layout::ANGEL_FRAME_SOURCE_CROP),
+        hud_layout::ANGEL_FRAME_WIDTH_PX,
         hud_layout::ANGEL_LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
@@ -189,6 +197,7 @@ fn spawn_combat_hud(
         Some(images.get(HudImageKey::OrbFrameStamina)),
         Some(hud_layout::ORB_SOURCE_CROP),
         Some(hud_layout::STAMINA_FRAME_SOURCE_CROP),
+        hud_layout::STAMINA_FRAME_WIDTH_PX,
         hud_layout::STAMINA_LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
@@ -215,6 +224,7 @@ fn spawn_combat_hud(
         Some(images.get(HudImageKey::OrbFrameCuthulhu)),
         Some(hud_layout::ORB_SOURCE_CROP),
         Some(hud_layout::CUTHULHU_FRAME_SOURCE_CROP),
+        hud_layout::CUTHULHU_FRAME_WIDTH_PX,
         hud_layout::CUTHULHU_LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
@@ -752,6 +762,13 @@ mod tests {
         }
 
         let clip = bevy::ui::Overflow::clip();
+        // BL-82 orb crop round 3: the three orb containers now clip only the
+        // `y` axis (`x` stays `Visible` so a `frame_width_px` wider than
+        // `ORB_SIZE_PX` can spill past the container — see
+        // `xindeler_ui::bar::spawn_orb_bar`'s own doc comment). `spawn_bar`'s
+        // containers (the XP bar below) are untouched by this and still clip
+        // both axes.
+        let orb_clip = bevy::ui::Overflow::clip_y();
         let non_zero_radius = bevy::ui::BorderRadius::all(Val::Px(HudTheme::default().radius.sm));
 
         let health = node_of::<HealthBarTag>(app.world_mut());
@@ -761,7 +778,7 @@ mod tests {
             "health orb must keep spawn_orb_bar's width, not collapse to Auto"
         );
         assert_eq!(health.height, Val::Px(hud_layout::ORB_SIZE_PX));
-        assert_eq!(health.overflow, clip);
+        assert_eq!(health.overflow, orb_clip);
         assert_eq!(health.border_radius, non_zero_radius);
         assert_eq!(health.position_type, PositionType::Absolute);
         assert_eq!(health.left, hud_layout::CENTER_LEFT);
@@ -774,7 +791,7 @@ mod tests {
         let poise = node_of::<PoiseBarTag>(app.world_mut());
         assert_eq!(poise.width, Val::Px(hud_layout::ORB_SIZE_PX));
         assert_eq!(poise.height, Val::Px(hud_layout::ORB_SIZE_PX));
-        assert_eq!(poise.overflow, clip);
+        assert_eq!(poise.overflow, orb_clip);
         assert_eq!(poise.border_radius, non_zero_radius);
         assert_eq!(
             poise.margin.left,
@@ -784,7 +801,7 @@ mod tests {
         let energy = node_of::<EnergyBarTag>(app.world_mut());
         assert_eq!(energy.width, Val::Px(hud_layout::ORB_SIZE_PX));
         assert_eq!(energy.height, Val::Px(hud_layout::ORB_SIZE_PX));
-        assert_eq!(energy.overflow, clip);
+        assert_eq!(energy.overflow, orb_clip);
         assert_eq!(energy.border_radius, non_zero_radius);
         assert_eq!(
             energy.margin.left,
@@ -908,6 +925,7 @@ mod tests {
                 Some(images.get(HudImageKey::OrbFrameAngel)),
                 Some(hud_layout::ORB_SOURCE_CROP),
                 Some(hud_layout::ANGEL_FRAME_SOURCE_CROP),
+                hud_layout::ANGEL_FRAME_WIDTH_PX,
                 hud_layout::ANGEL_LIQUID_INSET_PX,
                 hud_layout::ORB_SIZE_PX,
                 hud_layout::ORB_SIZE_PX,
