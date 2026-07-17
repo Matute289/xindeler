@@ -42,7 +42,12 @@ net-client = [
 # `file_watcher` (EM-2.4): asset hot reload — bevy_asset builds its notify-based
 # watcher and AssetPlugin's default `watch_for_changes_override: None` resolves
 # to watching in Unprocessed mode.
-bevy = { version = "=0.19.0", features = ["file_watcher"] }
+# `system_clipboard` (BL-82 chat rewrite): the chat input line reads/writes the
+# real OS clipboard via `bevy::clipboard::Clipboard` (Cmd/Ctrl+C/X/V). That
+# resource + its `ClipboardPlugin` are gated on this feature; it is otherwise
+# only enabled TRANSITIVELY (via `bevy_text`), so declare it explicitly here so
+# a future bevy bump can't silently drop chat copy/paste out from under us.
+bevy = { version = "=0.19.0", features = ["file_watcher", "system_clipboard"] }
 # fps-overlay: deliberate for Phase-2 validation; gate behind a GraphicsSettings
 # toggle / debug_assertions before the EM-5.x UI gate (reviewer m5).
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }

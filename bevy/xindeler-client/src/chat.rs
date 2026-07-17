@@ -1,6 +1,5 @@
 //! BL-82 EM-5.4 — the chat panel: a bounded scrollback + channel tabs +
-//! `EditableText` input box, built on the EM-5.1 widget kit
-//! (`xindeler-ui`), reading [`NetChatMsg`] (server → client) and writing
+//! a text input line, reading [`NetChatMsg`] (server → client) and writing
 //! [`ChatSendRequest`] (client → server) — the two wire types
 //! `xindeler-protocol::chat` defines (see that module's doc comment for the
 //! full send/receive design).
@@ -10,35 +9,57 @@
 //! matching every other consumer module in this crate (`combat_hud`,
 //! `hud_toast`, …).
 //!
+//! ## Why the input line is a self-owned buffer, NOT `bevy_ui_widgets`' `EditableText`
+//! (BL-82 chat rewrite — the FOURTH report of "I can't type in chat"):
+//! the original port built the input on `bevy::text::EditableText`. Focusing it
+//! (via `InputFocus`) *looked* correct, but typed characters never reached
+//! `EditableText::value()` on macOS. Root cause: `bevy_ui_widgets`'
+//! `EditableTextInputPlugin` flips `window.ime_enabled = true` the instant an
+//! `EditableText` gains focus (its
+//! `listen_for_ime_input_when_text_input_focused` system), which on macOS
+//! routes every keystroke through the OS input method — and in-progress IME
+//! composition text is **deliberately excluded** from `EditableText::value()`.
+//! So the caret blinked, the box had focus, but the value stayed empty: exactly
+//! the "focus looks right, can't type" symptom that survived three prior
+//! InputFocus-bookkeeping patches (PRs #102/#141/#149), all of which only ever
+//! touched *setting/clearing* `InputFocus`, never the keyboard→text delivery
+//! underneath it. A live windowed harness reproduced it: `smoke-chat-focus FAIL
+//! … a real KeyboardInput character never reached EditableText::value() while
+//! focused`.
+//!
+//! The legacy pre-Bevy client (`xindeler-old`, `voxygen/src/hud/chat.rs`) never
+//! had this problem because it **owns the input string itself**
+//! (`state.input.message: String`), feeding it from raw key events and handing
+//! it to the widget purely for display — focus is just "is chat capturing the
+//! keyboard", entirely independent of the OS cursor or any IME. This module
+//! ports that design: [`ChatInput`] owns the `String` + caret,
+//! [`read_chat_input`] folds real [`KeyboardInput`] into it directly (no
+//! `EditableText`, no `FocusedInput` dispatch, no IME — we never focus an
+//! `EditableText`, so `ime_enabled` is never set), and
+//! copy/cut/paste/select-all + standard editing keys are handled explicitly
+//! against the engine's [`bevy::clipboard::Clipboard`] resource. [`InputFocus`]
+//! is still used as the canonical "chat is focused" signal (so `cursor.rs` and
+//! the hotkey-typing guard `text_input_focused` are unchanged), just pointed at
+//! a plain `Text` node instead of an `EditableText`.
+//!
 //! ## Scope (v1, "the whole task in one PR")
 //! - Bounded scrollback (`MAX_CHAT_HISTORY` lines — old lines AND their row
-//!   entities are evicted, never growing unbounded — the task's own "history
-//!   should be bounded" requirement).
+//!   entities are evicted, never growing unbounded).
 //! - Channel tabs: **All** (view filter only) plus the five sendable channels
-//!   (Say/Region/Group/Faction/World, per `NetChatChannel::send_command_name`)
-//!   plus **Whisper** (view filter only — sending a `Tell` is reachable by
-//!   typing `/tell <alias> <message>`, see the protocol module's doc comment
-//!   for why). Clicking a sendable tab ALSO becomes the active send channel for
-//!   the next plain (non-`/command`) line typed.
-//! - `EditableText` input: Enter sends; a leading `/` bypasses the channel tabs
-//!   entirely and sends a raw [`ChatSendRequest::Command`] (full slash-command
-//!   parity, not just the six named channels); Tab cycles command-name
-//!   completions while typing a `/command`.
-//! - A simple `@mention` highlight: any line containing an `@token` gets a
-//!   tinted row background (cosmetic, no self-alias plumbing needed — the
-//!   client doesn't know its own alias yet, nothing mirrors it).
-//! - NOT built here (documented, not silently skipped): rich per-token mention
-//!   colouring (needs multi-span `Text`, the whole-row tint is the v1
-//!   substitute), a `Tell`/`Faction`-target picker UI (both remain
-//!   command-typed only), and full Fluent rendering of non-plain `Content`
-//!   (server-side `render_content` fallback covers it — EM-5.16's job).
+//!   (Say/Region/Group/Faction/World) plus **Whisper** (view filter only —
+//!   sending a `Tell` is reachable by typing `/tell <alias> <message>`).
+//! - Text input: Enter sends; a leading `/` sends a raw
+//!   [`ChatSendRequest::Command`]; Tab cycles command-name completions; Up/Down
+//!   recall sent-line history; Home/End/arrows/Backspace/Delete move and edit;
+//!   Cmd/Ctrl+A/C/X/V select-all/copy/cut/paste.
+//! - A simple `@mention` highlight (whole-row tint).
 
 use bevy::{
     color::Alpha as _,
     input::keyboard::{Key, KeyboardInput},
     input_focus::{FocusCause, InputFocus},
+    picking::events::{Click, Pointer},
     prelude::*,
-    text::EditableText,
     window::PrimaryWindow,
 };
 use xindeler_input::{ActionState, GameInput};
@@ -51,102 +72,55 @@ use xindeler_ui::{
 
 use crate::hud_layout;
 
-/// Scrollback cap (BL-82 EM-5.4's own "bounded" requirement). 200 lines is
-/// comfortably more than a player reads back in one session before it
-/// scrolls off anyway (legacy's own chat history isn't infinite either —
-/// this is the same "keep enough to scroll back through a recent
-/// conversation, not the whole server's history" posture, just an explicit
-/// number instead of an implicit one).
+/// Scrollback cap (BL-82 EM-5.4's own "bounded" requirement).
 const MAX_CHAT_HISTORY: usize = 200;
 
-/// The panel's on-screen width (bottom-left, matching legacy's chat
-/// placement) — narrowed from the original `420.0` (BL-82
-/// HUD-responsive-scaling pass, Matías's explicit "make it narrower and
-/// taller" ask, alongside [`PANEL_BOTTOM_PX`]'s own overlap fix below).
+/// Sent-line recall history cap ([`ChatInput::history`]) — Up/Down cycles at
+/// most this many recently-sent lines, matching legacy `xindeler-old`'s own
+/// `history_max` (32).
+const CHAT_INPUT_HISTORY_MAX: usize = 32;
+
+/// The panel's on-screen width (bottom-left, matching legacy's chat placement).
 const PANEL_WIDTH: f32 = 320.0;
 
+/// The input line's minimum height (px) so the box is always a visible,
+/// clickable rectangle even while its text is empty — without an explicit
+/// floor a `Text` node with no glyphs collapses to ~0px and can neither be
+/// seen nor clicked.
+const INPUT_MIN_HEIGHT_PX: f32 = 26.0;
+
 /// Safety margin (px) [`PANEL_BOTTOM_PX`] adds on top of
-/// [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`] — a deliberate, visible gap
-/// rather than a flush/touching fit.
+/// [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`].
 const PANEL_BOTTOM_SAFETY_MARGIN_PX: f32 = 24.0;
 
-/// The panel's `bottom` offset (px, from the viewport's bottom edge) — **the
-/// actual fix** for Matías's live-testing report: "at a small/reduced window
-/// size, the health orb and the chat dialog box overlap; at a large/
-/// fullscreen window they don't."
-///
-/// This used to be a bare `Some(16.0)` (`anchored_panel_bundle`'s own
-/// `bottom` parameter) — 16px above the viewport's bottom edge, the SAME
-/// vertical band the bottom-CENTRE health-orb cluster occupied at the time
-/// (`hud_layout::CLUSTER_BOTTOM_PX` was `20px` then; BL-82 HUD polish round 3
-/// later moved it to `0px` so the cluster sits flush with the screen edge —
-/// see that constant's own doc comment — which only widens this fix's
-/// margin, it doesn't reintroduce the overlap). The cluster is centred and
-/// ~1196px wide (BL-82 HUD polish round 3 widened this from ~1013px — see
-/// `hud_layout::health_orb_screen_x`'s own doc comment) — at
-/// the game's own default 1280×720 window (`main.rs`'s
-/// `WindowResolution::new(1280, 720)`, itself already "small" by this
-/// cluster's standard) the health orb's left edge sits barely 57px in from
-/// the screen's left edge, well inside where even a NARROWED chat panel's
-/// width would reach. Shrinking the panel's WIDTH alone therefore cannot
-/// guarantee zero overlap across the window sizes players actually resize
-/// to (it would either stay too wide for genuinely small windows, or shrink
-/// to an unusably thin sliver at everyday ones) — the only way to guarantee
-/// **zero overlap at every window size**, without reshaping the whole
-/// orb/action-bar cluster, is to guarantee zero VERTICAL overlap instead:
-/// sit the entire chat panel above [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`]
-/// (the row's real top edge — orbs + the XP/level readout above them), plus
-/// [`PANEL_BOTTOM_SAFETY_MARGIN_PX`]. Two AABBs that don't overlap on one
-/// axis can never overlap at all, regardless of how their extents compare
-/// on the other axis — so this holds independent of window WIDTH entirely.
-///
-/// It also survives the new window-height-derived
-/// [`xindeler_ui::scale::window_derived_hud_scale`] `UiScale` (this same
-/// pass's fix for "everything stays tiny on a large window") untouched:
-/// `UiScale` multiplies every `Val::Px` conversion to physical pixels by the
-/// SAME global factor, and both this constant and every `hud_layout`
-/// constant it's built from are plain `Val::Px` figures — a strict `>`
-/// relationship between two quantities scaled by the same positive factor
-/// stays strict at ANY scale.
+/// The panel's `bottom` offset (px) — sits the whole chat panel above the
+/// bottom-centre health-orb cluster so the two AABBs never overlap on the Y
+/// axis at any window width (the BL-82 HUD-responsive-scaling fix; see the
+/// `chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size`
+/// test for the full argument).
 const PANEL_BOTTOM_PX: f32 = hud_layout::CLUSTER_TOTAL_HEIGHT_PX + PANEL_BOTTOM_SAFETY_MARGIN_PX;
 
 const PANEL_LEFT_PX: f32 = 16.0;
 
-/// [`chat_scroll_height`]'s clamp bounds (px) — taller than the original
-/// fixed `180.0` at every supported window size (Matías's "narrower and
-/// TALLER" ask), while never collapsing on a very short window nor growing
-/// unboundedly on a very tall one (`UiScale`, wired separately, already
-/// grows the WHOLE HUD together on a tall window — this is a modest, capped
-/// adjustment layered on top of that, not a second uncapped growth path).
+/// [`chat_scroll_height`]'s clamp bounds (px).
 const MIN_SCROLL_HEIGHT_PX: f32 = 220.0;
 const MAX_SCROLL_HEIGHT_PX: f32 = 320.0;
 
 /// The fraction of window height [`chat_scroll_height`] targets before
-/// clamping — chosen so the default 720px-tall reference window (the same
-/// one every `hud_layout` constant was tuned against, see
-/// `xindeler_ui::scale::REFERENCE_WINDOW_HEIGHT_PX`'s own doc comment) lands
-/// near the middle of the clamp range (`720.0 * 0.35 ≈ 252px`) rather than
-/// pinned to either bound.
+/// clamping.
 const SCROLL_HEIGHT_WINDOW_FRACTION: f32 = 0.35;
 
-/// The scrollback's height (px) for a given window height — see
-/// [`MIN_SCROLL_HEIGHT_PX`]/[`MAX_SCROLL_HEIGHT_PX`]'s own doc comment for
-/// why it's bounded rather than a raw fraction. Pure and directly
-/// unit-tested (BL-82 HUD-responsive-scaling pass), not only exercised
-/// through a live [`Window`] read — [`sync_chat_scroll_height_to_window`]
-/// is the thin ECS wrapper that actually applies it every time the window's
-/// real height changes.
+/// The scrollback's height (px) for a given window height, bounded so a tiny
+/// window doesn't collapse it and a huge one doesn't grow it without limit.
 #[must_use]
 fn chat_scroll_height(window_height_px: f32) -> f32 {
     (window_height_px * SCROLL_HEIGHT_WINDOW_FRACTION)
         .clamp(MIN_SCROLL_HEIGHT_PX, MAX_SCROLL_HEIGHT_PX)
 }
 
-/// The channel tabs shown, in order: `None` = "All" (view filter only, never
-/// a send target); every `Some(channel)` doubles as a filter AND (for the
-/// five [`NetChatChannel::send_command_name`]-bearing kinds) a send-channel
-/// selector. `Tell` is included as a VIEW filter only (see the module doc
-/// comment for why sending stays command-typed).
+/// The channel tabs shown, in order: `None` = "All" (view filter only); every
+/// `Some(channel)` doubles as a filter AND (for the five sendable kinds) a
+/// send-channel selector. `Tell` is a VIEW filter only.
 const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
     (None, "All"),
     (Some(NetChatChannel::Say), "Say"),
@@ -157,44 +131,21 @@ const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
     (Some(NetChatChannel::Tell), "Whisper"),
 ];
 
-/// Minimize button labels — plain ASCII (matching every other label this
-/// panel/screen renders, e.g. the full map's "M / Esc to close" hint) rather
-/// than a glyphic icon, since the HUD body font isn't verified to carry
-/// arrow/box-drawing glyphs.
+/// Minimize button labels — plain ASCII (the HUD body font isn't verified to
+/// carry arrow/box-drawing glyphs).
 ///
 /// **Keep in sync:** [`spawn_chat_panel`] spawns the button with
-/// [`CHAT_MINIMIZE_LABEL`] directly (not via [`sync_chat_collapsed`], which
-/// only relabels on a LATER `ChatUiState` change) — this is only correct
-/// because it matches [`ChatUiState::default`]'s `collapsed: false`. If
-/// either the default `collapsed` value or this spawn-time label ever
-/// change independently, the button would show the wrong label for one
-/// frame (until `sync_chat_collapsed` next runs on a real state change) with
-/// no compiler or test error to catch it — ecs-design-reviewer finding,
-/// BL-82 Phase 5 follow-up.
+/// [`CHAT_MINIMIZE_LABEL`] directly, which is only correct because it matches
+/// [`ChatUiState::default`]'s `collapsed: false`.
 const CHAT_MINIMIZE_LABEL: &str = "Hide";
 const CHAT_RESTORE_LABEL: &str = "Chat";
 
-/// Slash-command names the Tab-completion cycles through (BL-82 EM-5.4).
-/// The five channel keywords ([`NetChatChannel::send_command_name`]) plus
-/// `tell`/`w` (the two forms legacy's own `ServerChatCommand::Tell` keyword
-/// list documents — `common::cmd`).
+/// Slash-command names Tab-completion cycles through.
 const KNOWN_COMMANDS: &[&str] = &["say", "region", "group", "faction", "world", "tell", "w"];
 
-/// The chat panel's live UI state: which channel the scrollback is currently
-/// FILTERED to (`None` = show every channel), which channel a plain
-/// (non-`/command`) line sends to next, and whether the panel is currently
-/// minimized (BL-82 Phase 5 follow-up: a real play session found the chat
-/// window had no minimize control at all — every OTHER Phase-5 screen either
-/// toggles via `HudAction`/`HudState` (a real secondary window, e.g. the map)
-/// or, like this panel, is an always-on ambient overlay; a bounded scrollback
-/// panel wants to shrink out of the way without fully closing, so `collapsed`
-/// lives HERE rather than as a `HudWindow` variant — `HudState.open_window`
-/// is a single mutually-exclusive slot (opening Map/Inventory/etc. closes
-/// whatever else was open), which is the wrong shape for "minimize this
-/// always-visible panel while nothing else is open"). `collapsed` is
-/// session-only (not persisted to `settings.ron`) for v1 — a documented
-/// follow-up, matching legacy's own `settings.interface.toggle_chat`, not a
-/// silently dropped requirement.
+/// The chat panel's live UI state: the view filter, the next plain-line send
+/// channel, and whether the panel is minimized. `collapsed` is session-only
+/// (not persisted) for v1.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatUiState {
     view_filter: Option<NetChatChannel>,
@@ -213,51 +164,185 @@ impl Default for ChatUiState {
     }
 }
 
+/// The self-owned chat input line — the heart of the rewrite (see the module
+/// doc comment for why we don't lean on `EditableText`). Holds the text being
+/// typed, the caret, a small "select-all" flag, sent-line recall history, and
+/// the Tab-completion cursor. [`read_chat_input`] mutates it from real
+/// [`KeyboardInput`]; [`render_chat_input`] mirrors it into the on-screen
+/// [`ChatInputBox`] `Text`.
+#[derive(Resource, Debug, Default)]
+struct ChatInput {
+    /// The current line (UTF-8). The caret [`cursor`](Self::cursor) is a byte
+    /// index into this that always lands on a `char` boundary.
+    buffer: String,
+    /// Caret byte-offset into [`buffer`](Self::buffer) (`0..=buffer.len()`).
+    cursor: usize,
+    /// Single-line "select all" flag (Cmd/Ctrl+A). Any caret move or a fresh
+    /// insert/paste clears it; while set, Copy/Cut act on the whole line and
+    /// the next insert/paste replaces it. A pragmatic single-line stand-in for
+    /// a full selection model (v1) — enough for the practical
+    /// select-all→copy / select-all→type gestures.
+    select_all: bool,
+    /// Sent lines, oldest-first, for Up/Down recall.
+    history: Vec<String>,
+    /// Cursor into [`history`](Self::history) while recalling (`None` = editing
+    /// a fresh line, not browsing history).
+    history_pos: Option<usize>,
+    /// Tab-completion cycle index.
+    completion_cycle: usize,
+}
+
+impl ChatInput {
+    /// Empties the line and resets every edit-cursor. Used after a send and by
+    /// Cmd/Ctrl+X on a whole-line selection.
+    fn clear_line(&mut self) {
+        self.buffer.clear();
+        self.cursor = 0;
+        self.select_all = false;
+        self.history_pos = None;
+        self.completion_cycle = 0;
+    }
+
+    /// Replaces the whole line with `s`, caret at the end. Does NOT touch
+    /// `history_pos` (history recall calls this while still browsing).
+    fn set_line(&mut self, s: String) {
+        self.cursor = s.len();
+        self.buffer = s;
+        self.select_all = false;
+        self.completion_cycle = 0;
+    }
+
+    /// Inserts `s` at the caret (replacing the whole line first if a select-all
+    /// is pending), filtering out control characters and collapsing newlines to
+    /// spaces (this is a single-line field).
+    fn insert_str(&mut self, s: &str) {
+        if self.select_all {
+            self.buffer.clear();
+            self.cursor = 0;
+            self.select_all = false;
+        }
+        let filtered: String = s
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        self.buffer.insert_str(self.cursor, &filtered);
+        self.cursor += filtered.len();
+        self.history_pos = None;
+        self.completion_cycle = 0;
+    }
+
+    /// Deletes the character before the caret (or the whole line if a
+    /// select-all is pending).
+    fn backspace(&mut self) {
+        if self.select_all {
+            self.clear_line();
+            return;
+        }
+        if self.cursor == 0 {
+            return;
+        }
+        let prev_len = self.buffer[..self.cursor]
+            .chars()
+            .next_back()
+            .map_or(0, char::len_utf8);
+        let start = self.cursor - prev_len;
+        self.buffer.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        self.completion_cycle = 0;
+    }
+
+    /// Deletes the character after the caret (or the whole line if a select-all
+    /// is pending).
+    fn delete(&mut self) {
+        if self.select_all {
+            self.clear_line();
+            return;
+        }
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        let next_len = self.buffer[self.cursor..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+        self.buffer
+            .replace_range(self.cursor..self.cursor + next_len, "");
+        self.completion_cycle = 0;
+    }
+
+    /// Moves the caret one character left.
+    fn move_left(&mut self) {
+        self.select_all = false;
+        if self.cursor > 0 {
+            let prev_len = self.buffer[..self.cursor]
+                .chars()
+                .next_back()
+                .map_or(0, char::len_utf8);
+            self.cursor -= prev_len;
+        }
+    }
+
+    /// Moves the caret one character right.
+    fn move_right(&mut self) {
+        self.select_all = false;
+        if self.cursor < self.buffer.len() {
+            let next_len = self.buffer[self.cursor..]
+                .chars()
+                .next()
+                .map_or(0, char::len_utf8);
+            self.cursor += next_len;
+        }
+    }
+
+    /// Moves the caret to the start of the line.
+    fn home(&mut self) {
+        self.select_all = false;
+        self.cursor = 0;
+    }
+
+    /// Moves the caret to the end of the line.
+    fn end(&mut self) {
+        self.select_all = false;
+        self.cursor = self.buffer.len();
+    }
+
+    /// The text a Copy/Cut should place on the clipboard: the whole line (the
+    /// single-line select-all model — see [`select_all`](Self::select_all)).
+    fn selection_text(&self) -> String { self.buffer.clone() }
+}
+
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatPanelRoot;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatScrollArea;
-/// `pub(crate)` (BL-82 EM-5.17 Phase 0): [`text_input_focused`] is called
-/// from other modules (`diary`/`inventory_ui`/`social_hud`/`map_view`) as a
-/// run condition, and its `Query<Entity, With<ChatInputBox>>` parameter type
-/// must be at least as visible as the function itself.
+/// The on-screen input line. `pub(crate)` because [`text_input_focused`] (a
+/// hotkey-typing guard other modules import) and `cursor.rs` both key off
+/// `With<ChatInputBox>`. It is a plain `Text` node (NOT an `EditableText`) —
+/// see the module doc comment.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct ChatInputBox;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatInputPlaceholder;
-/// Tags every element that hides when [`ChatUiState::collapsed`] is `true`
-/// (the tab row + the scrollback + the input row) — the minimize BUTTON
-/// itself is deliberately the ONLY thing NOT tagged, so a collapsed panel
-/// still shows a way to restore it (the sole visible/clickable restore
-/// affordance while collapsed).
-///
-/// BL-82 EM-5.17 Phase 0: the input row used to be deliberately excluded too
-/// (a "collapses to just the input bar" framing), but that left a
-/// "collapsed" chat panel still showing (and still typeable into) its input
-/// box + placeholder — reading as "doesn't hide" even though the code did
-/// exactly what it claimed. The input row is now tagged `ChatCollapsible`
-/// alongside the tab row/scrollback, so collapsing genuinely hides the WHOLE
-/// chat body and leaves only the minimize/restore button on screen.
+/// Tags every element that hides while [`ChatUiState::collapsed`] — the tab
+/// row, the scrollback, and the input row. The minimize/restore BUTTON is
+/// deliberately the only thing NOT tagged, so a collapsed panel still offers a
+/// way back.
 ///
 /// [`sync_chat_collapsed`] toggles these via `Node::display`
-/// (`Display::None`/`Flex`), NOT `Visibility::Hidden` — a deliberate
-/// deviation from this crate's usual hide/show idiom (`map_view.rs`/
-/// `controls_screen.rs`/`xindeler-ui`'s own widgets all use `Visibility`).
-/// `Visibility::Hidden` stops rendering but leaves an entity's LAYOUT
-/// footprint intact, which would leave the panel's overall height unchanged
-/// while collapsed — defeating "collapses to just the button" (the whole
-/// point of minimizing). `Node::display = Display::None` removes the tab
-/// row/scrollback/input row from layout entirely, so the panel genuinely
-/// shrinks. Do NOT "fix" this back to `Visibility` to match the rest of the
-/// codebase — it would silently reintroduce the footprint bug.
+/// (`Display::None`/`Flex`), NOT `Visibility::Hidden`, so a collapsed panel
+/// genuinely shrinks (a hidden node keeps its layout footprint). Do NOT swap
+/// this to `Visibility`.
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatCollapsible;
 /// The minimize/restore header button.
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatMinimizeButton;
-/// Tags a spawned chat-line row with the channel it belongs to, so
-/// [`apply_chat_filter`] can toggle its [`Visibility`] without re-reading
-/// [`NetChatMsg`] history (which is transient/already-drained).
+/// Tags a spawned chat-line row with its channel, so [`apply_chat_filter`] can
+/// toggle its visibility without re-reading transient [`NetChatMsg`] history.
 #[derive(Component, Debug, Clone, Copy)]
 struct ChatRow(NetChatChannel);
 /// Tags a tab button with which channel it selects (`None` = "All").
@@ -265,38 +350,21 @@ struct ChatRow(NetChatChannel);
 struct ChatTab(Option<NetChatChannel>);
 
 /// FIFO of spawned [`ChatRow`] entities, oldest-first — the bookkeeping
-/// [`ingest_chat_messages`] needs to evict/despawn the oldest row once
-/// [`MAX_CHAT_HISTORY`] is exceeded.
+/// [`ingest_chat_messages`] needs to evict/despawn the oldest past
+/// [`MAX_CHAT_HISTORY`].
 #[derive(Resource, Debug, Default)]
 struct ChatHistory(Vec<Entity>);
 
-/// Installs the whole chat panel: spawns it at `Startup` (after the theme),
-/// then keeps the scrollback/tabs/input synced every frame.
+/// Installs the whole chat panel.
 pub struct ChatViewPlugin;
 
 impl Plugin for ChatViewPlugin {
     fn build(&self, app: &mut App) {
-        // Registered here too (idempotent alongside `XindelerProtocolPlugin`'s
-        // own registration) so this plugin's tests don't need the whole
-        // protocol plugin — same convention `hud_toast.rs` follows for
-        // `HudToast`.
         app.add_message::<NetChatMsg>();
         app.add_message::<ChatSendRequest>();
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
-        // `XindelerUiPlugin` is a plain `Plugin` (`is_unique()` defaults to
-        // `true`), and `combat_hud::CombatHudViewPlugin` — added alongside
-        // this plugin in every real shell (`listen_server.rs`/`net_client.
-        // rs`) — ALSO adds it (behind the identical guard, following a
-        // bevy-migration-reviewer BLOCKER finding: an earlier version of this
-        // fix guarded only ONE of the two call sites, which only avoided the
-        // "plugin was already added" panic by accident of registration
-        // ORDER — reordering the two view plugins, or adding a third one
-        // ahead of `CombatHudViewPlugin`, silently reintroduced it). Both
-        // call sites now guard identically, so the add is truly
-        // order-independent — this crate's own
-        // `xindeler_ui::XindelerUiPlugin::build` guards its OWN inner
-        // `UiWidgetsPlugins` add the same way, for the same reason.
+        app.init_resource::<ChatInput>();
         if !app.is_plugin_added::<xindeler_ui::XindelerUiPlugin>() {
             app.add_plugins(xindeler_ui::XindelerUiPlugin);
         }
@@ -310,76 +378,33 @@ impl Plugin for ChatViewPlugin {
                 ingest_chat_messages,
                 apply_chat_filter,
                 sync_chat_tabs,
-                update_input_placeholder,
-                handle_chat_submit,
                 chat_smoke_verify,
-                // BL-82 HUD-responsive-scaling pass: keeps the scrollback
-                // TALLER on a taller window (Matías's ask) as the window is
-                // live-resized, not just at the size it happened to be at
-                // `Startup`.
                 sync_chat_scroll_height_to_window,
-                // Reads `ActionState` — must run after the frame's real
-                // input resolution (BL-82 EM-5.17 Phase 0, same fix as
-                // `diary::toggle_diary_window`/`controls_screen::
-                // toggle_controls_screen`).
+                // Reads `ActionState` — after the frame's real input resolution.
                 toggle_chat_via_hotkey.after(xindeler_input::InputResolveSet),
-                // The explicit blur path `text_input_focused`'s doc comment
-                // requires — ecs-design-reviewer BLOCKER fix, see
-                // `blur_chat_input_on_escape`'s own doc comment.
                 blur_chat_input_on_escape,
-                // Same blur, but for the OTHER transition that can hide the
-                // input box (minimizing the panel) — see
-                // `blur_chat_input_on_collapse`'s own doc comment for the
-                // live-tested regression this fixes. Ordered after the
-                // hotkey toggle so an F5 press collapses AND blurs in the
-                // SAME frame, not one frame late (the other collapse
-                // source, `handle_chat_minimize_click`, is an `Activate`
-                // observer, not an ordinary `Update` system, so it isn't
-                // orderable here the same way — its effect is picked up via
-                // the `Local<bool>` edge-detector on whichever frame runs
-                // next, which is what that detector is for).
                 blur_chat_input_on_collapse.after(toggle_chat_via_hotkey),
-                // The keyboard-only path back onto `InputFocus` — see its
-                // own doc comment for the permanent-lockout regression this
-                // closes. Must run after `handle_chat_submit` so a fresh
-                // Enter can never both refocus AND re-submit stale text in
-                // the same frame (see that ordering note there).
+                // The keyboard→buffer core. Runs BEFORE `focus_chat_via_hotkey`
+                // so that on the exact frame chat gains focus (via Enter), this
+                // system — still observing the pre-focus state — drains that
+                // Enter instead of typing/submitting it.
+                read_chat_input,
+                // The keyboard-only path onto `InputFocus`.
                 focus_chat_via_hotkey
                     .after(xindeler_input::InputResolveSet)
-                    .after(handle_chat_submit),
-                // BL-82 "chat still unusable" round 3 hardening: `sync_
-                // chat_collapsed` used to carry NO explicit ordering
-                // relative to `toggle_chat_via_hotkey`/`focus_chat_via_
-                // hotkey` — both of which can flip `ChatUiState::collapsed`
-                // this same frame. Without an edge, Bevy's scheduler is free
-                // to run `sync_chat_collapsed` BEFORE either of them on any
-                // given build/thread-scheduling, in which case its `state.
-                // is_changed()` check misses THIS frame's flip entirely and
-                // the visual collapse/expand lags a whole extra frame before
-                // self-correcting. Harmless at 30-60fps (imperceptible,
-                // self-heals next frame) but still a genuine ambiguous-
-                // ordering hazard this investigation's own instrumented
-                // smoke test (`chat_focus_smoke_verify`) needed real retry
-                // tolerance to look past — closed explicitly here rather
-                // than left to chance, since this exact bug CLASS has now
-                // shipped broken three times.
+                    .after(read_chat_input),
+                // Mirror the owned buffer into the on-screen input line + hint.
+                render_chat_input.after(read_chat_input),
+                update_input_placeholder.after(read_chat_input),
                 sync_chat_collapsed
                     .after(toggle_chat_via_hotkey)
                     .after(focus_chat_via_hotkey),
-                // BL-82 "chat still unusable" round 3 — the automated
-                // regression-catcher for the REAL keyboard-focus pipeline
-                // (see its own doc comment for why this is materially
-                // stronger evidence than the earlier fix's own tests).
-                // Ordered last among the chat systems so it always observes
-                // each frame's fully-settled `InputFocus`/`ChatUiState`/
-                // `EditableText` state before deciding its next scripted
-                // action.
                 chat_focus_smoke_verify
                     .after(focus_chat_via_hotkey)
                     .after(toggle_chat_via_hotkey)
+                    .after(read_chat_input)
                     .after(blur_chat_input_on_collapse)
                     .after(blur_chat_input_on_escape)
-                    .after(handle_chat_submit)
                     .after(sync_chat_collapsed)
                     .after(ingest_chat_messages),
             ),
@@ -387,17 +412,11 @@ impl Plugin for ChatViewPlugin {
     }
 }
 
-/// SCAFFOLDING for automated live verification (BL-82 EM-5.4), same spirit
-/// as `player_input::SmokeAutoMovePlugin`: gated by `XINDELER_SMOKE_CHAT_LINE`
-/// (a no-op, single cached env read, on every ordinary run where it's
-/// unset), this drives the EXACT round trip a human typing + pressing Enter
-/// would — write one [`ChatSendRequest`], then watch the REAL scrollback
-/// for the line to come back — proving the full client-send → embedded
-/// `client::Client` → real sim chat-command handling → broadcast →
-/// `NetChatMsg` → [`ingest_chat_messages`] path works, not a client-only
-/// echo (a client-only echo would never touch [`ChatSendRequest`]/
-/// [`NetChatMsg`] at all). Logs a clear PASS/FAIL and exits the process via
-/// `AppExit` either way, so a scripted run terminates on its own.
+/// SCAFFOLDING for automated live verification of the network round trip
+/// (BL-82 EM-5.4), gated by `XINDELER_SMOKE_CHAT_LINE`: writes one
+/// [`ChatSendRequest`] and watches the REAL scrollback for the line to come
+/// back — proving the full client-send → embedded sim → broadcast →
+/// [`NetChatMsg`] → [`ingest_chat_messages`] path works. Exits via `AppExit`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ChatSmokeStage {
     #[default]
@@ -406,13 +425,8 @@ enum ChatSmokeStage {
     Done,
 }
 
-/// Frames to wait, once sent, before declaring the round trip failed —
-/// generous (the embedded player's own tick + a real chat-command dispatch
-/// round trip in well under a second in practice; this is a safety net, not
-/// the expected path).
 const CHAT_SMOKE_TIMEOUT_FRAMES: u32 = 1800;
 
-#[allow(clippy::too_many_arguments)]
 fn chat_smoke_verify(
     mut configured_line: Local<Option<Option<String>>>,
     mut stage: Local<ChatSmokeStage>,
@@ -425,7 +439,7 @@ fn chat_smoke_verify(
     let line =
         configured_line.get_or_insert_with(|| std::env::var("XINDELER_SMOKE_CHAT_LINE").ok());
     let Some(line) = line else {
-        return; // unset: a cheap no-op every frame, exactly like every other pre-existing run.
+        return;
     };
 
     match *stage {
@@ -435,30 +449,18 @@ fn chat_smoke_verify(
                     channel: NetChatChannel::World,
                     text: line.clone(),
                 });
-                info!(
-                    line = %line,
-                    "smoke-chat: sent the scripted line, waiting for the real round-trip \
-                     broadcast to reach the scrollback"
-                );
+                info!(line = %line, "smoke-chat: sent the scripted line, waiting for the round trip");
                 *stage = ChatSmokeStage::Sent;
             }
         },
         ChatSmokeStage::Sent => {
             *frames_since_sent += 1;
             if rows.iter().any(|text| text.0.contains(line.as_str())) {
-                info!(
-                    line = %line,
-                    "smoke-chat: PASS — the scripted line round-tripped through the real sim \
-                     and appeared in the scrollback"
-                );
+                info!(line = %line, "smoke-chat: PASS — the scripted line round-tripped into the scrollback");
                 exit.write(AppExit::Success);
                 *stage = ChatSmokeStage::Done;
             } else if *frames_since_sent > CHAT_SMOKE_TIMEOUT_FRAMES {
-                error!(
-                    line = %line,
-                    "smoke-chat: FAIL — the scripted line never appeared in the scrollback \
-                     within the timeout"
-                );
+                error!(line = %line, "smoke-chat: FAIL — the scripted line never appeared in the scrollback");
                 exit.write(AppExit::error());
                 *stage = ChatSmokeStage::Done;
             }
@@ -467,67 +469,32 @@ fn chat_smoke_verify(
     }
 }
 
-/// SCAFFOLDING for automated live verification of the KEYBOARD-FOCUS
-/// lifecycle (BL-82, "chat still unusable" round 3 — the THIRD live-tested
-/// report of this exact bug class). Gated by `XINDELER_SMOKE_CHAT_FOCUS` (a
-/// no-op, single cached env read on every ordinary run where it's unset,
-/// same posture as [`chat_smoke_verify`]).
+/// SCAFFOLDING for automated live verification of the KEYBOARD-INPUT lifecycle
+/// (BL-82 chat rewrite). Gated by `XINDELER_SMOKE_CHAT_FOCUS`.
 ///
-/// ## Why this exists — and why it is NOT the same coverage as the module's
-/// own `#[cfg(test)]` suite
-/// Every existing test in this module either hand-inserts [`InputFocus`]
-/// directly (`InputFocus::from_entity(..)`) or drives `ButtonInput<KeyCode>`
-/// (`.press(KeyCode::Enter)`) and calls the system under test in isolation
-/// via `run_system_once`. Neither ever touches the REAL production dispatch
-/// path a genuine OS keypress goes through: `bevy_winit` emits a
-/// `bevy::input::keyboard::KeyboardInput` message → `bevy_input`'s
-/// `keyboard_input_system` folds it into `ButtonInput<KeyCode>` (PreUpdate)
-/// → `bevy_input_focus::InputDispatchPlugin`'s `dispatch_focused_input`
-/// (also PreUpdate, `.after(InputSystems)`) re-fires the SAME message as a
-/// `FocusedInput<KeyboardInput>` targeted at whatever `InputFocus` currently
-/// points at → `bevy_ui_widgets::EditableTextInputPlugin`'s
-/// `on_focused_keyboard_input` observer queues a `TextEdit` on the target
-/// `EditableText` → `bevy_text::TextPlugin`'s `apply_text_edits` (PostUpdate)
-/// commits it into `EditableText::value()`. A hand-set `InputFocus` or a
-/// bare `ButtonInput` press never exercises the dispatch hop in the middle —
-/// so a regression THERE (the exact class of bug this harness exists to
-/// catch) would sail through every pre-existing test in this file while
-/// still leaving chat completely unusable live, which is precisely what
-/// happened across the first two rounds of this bug. This harness sends the
-/// same [`bevy::input::keyboard::KeyboardInput`] message shape `bevy_winit`
-/// itself would construct from a genuine OS keypress, through the REAL
-/// `ChatViewPlugin` scheduled inside the REAL running app (not a bespoke
-/// minimal test app) — the strongest verification available without literal
-/// OS-level input injection.
+/// This is the harness that FIRST reproduced the "focus looks right, can't
+/// type" bug against a real window (the old version asserted
+/// `EditableText::value()`; it failed because IME swallowed the keystrokes —
+/// see the module doc comment). The rewritten harness asserts the new
+/// [`ChatInput::buffer`] instead, driving the exact production path a genuine
+/// keypress takes now: `bevy_winit` `KeyboardInput` → [`read_chat_input`] →
+/// [`ChatInput`]. It scripts:
+/// 1. Seed one scrollback line.
+/// 2. Enter ([`GameInput::Chat`]) → assert [`InputFocus`] lands on the input
+///    box.
+/// 3. Type `hi` one real `KeyboardInput` at a time → assert the buffer accrues
+///    it.
+/// 4. F5 ([`GameInput::ToggleChat`]) → assert every [`ChatCollapsible`] hides
+///    AND the seeded row + typed text both survive (collapse hides, never
+///    discards).
+/// 5. Enter again → assert the panel re-expands AND `InputFocus` returns with
+///    no click.
+/// 6. Type `yo` → assert it APPENDS (proving the refocused box is genuinely
+///    typable).
 ///
-/// ## The scripted sequence (mirrors Matías's own described repro + target UX)
-/// 1. Seed one scrollback line directly (this harness verifies LOCAL UI
-///    behaviour; the network round trip is [`chat_smoke_verify`]'s job).
-/// 2. Send a real `KeyboardInput` for [`GameInput::Chat`] (`Enter`) — assert
-///    [`InputFocus`] lands on the chat box.
-/// 3. Type [`CHAT_FOCUS_SMOKE_WORD_1`] one real `KeyboardInput` character at a
-///    time — assert `EditableText::value()` accumulates it.
-/// 4. Send a real `KeyboardInput` for [`GameInput::ToggleChat`] (`F5`) — assert
-///    every [`ChatCollapsible`] element hides (`Display::None`) AND the seeded
-///    scrollback row + the just-typed text BOTH still exist underneath
-///    (collapsing must hide, never discard, per Matías's own specified target
-///    UX).
-/// 5. Send `Enter` again — assert the panel un-collapses AND `InputFocus` lands
-///    back on the chat box with no click required.
-/// 6. Type [`CHAT_FOCUS_SMOKE_WORD_2`] — assert it APPENDS to the already-typed
-///    text (proving the refocus path lands on a genuinely typable box, not a
-///    cosmetic focus with a dead input pipeline behind it).
-///
-/// Logs a clear PASS/FAIL at whichever step fails (or on full completion)
-/// and exits the process via `AppExit` either way, so a scripted run
-/// terminates on its own — same contract as [`chat_smoke_verify`].
+/// Logs PASS/FAIL and exits via `AppExit`.
 const CHAT_FOCUS_SMOKE_WORD_1: &str = "hi";
 const CHAT_FOCUS_SMOKE_WORD_2: &str = "yo";
-
-/// Safety-net timeout (frames) — generous; every real step here is a single
-/// same-app-instance frame transition, not a network round trip, so this
-/// should never actually bind in practice (same "boot safety net" posture as
-/// [`CHAT_SMOKE_TIMEOUT_FRAMES`]).
 const CHAT_FOCUS_SMOKE_TIMEOUT_FRAMES: u32 = 1800;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -550,9 +517,8 @@ enum ChatFocusSmokeStage {
     Done,
 }
 
-/// Maps the lowercase ASCII letters [`CHAT_FOCUS_SMOKE_WORD_1`]/
-/// [`CHAT_FOCUS_SMOKE_WORD_2`] use to their physical [`KeyCode`] — sufficient
-/// for this harness's own fixed script, not a general text-input simulator.
+/// Maps the lowercase ASCII letters the two test words use to physical
+/// [`KeyCode`]s — sufficient for this harness's fixed script.
 fn key_code_for_ascii_lowercase(c: char) -> Option<KeyCode> {
     use KeyCode as K;
     Some(match c {
@@ -567,29 +533,10 @@ fn key_code_for_ascii_lowercase(c: char) -> Option<KeyCode> {
 }
 
 /// Writes a real press-then-release [`KeyboardInput`] PAIR — the exact shape
-/// `bevy_winit` constructs from a genuine OS key tap (`key_code` +
-/// `logical_key` + `text` + the real primary `window` entity) — so it is
-/// dispatched through the REAL `bevy_input_focus`/`bevy_ui_widgets`
-/// production pipeline exactly as a live keypress would be, not injected
-/// directly into `ButtonInput`/`InputFocus`.
-///
-/// **Must send BOTH edges, never a bare `Pressed`** (an earlier version of
-/// this harness only sent `Pressed` — a real regression-in-the-harness-itself
-/// this doc comment now pins): `bevy_input::ButtonInput::press` is
-/// `pressed.insert(..)`-gated — it only raises `just_pressed` on the
-/// true false→true edge, and does nothing (no `just_pressed`) if the key
-/// value was ALREADY marked pressed from an earlier, never-released tap.
-/// Scripting Enter → (no release) → Enter again therefore silently produces
-/// only ONE `just_pressed` edge for the WHOLE script, not two — this exact
-/// gap is what made [`ChatFocusSmokeStage::AwaitReexpanded`]'s second Enter
-/// (re-focusing chat after F5) spin forever waiting for a `just_pressed` edge
-/// that could structurally never fire, a false "chat can never be refocused"
-/// signal that was actually this harness's own missing `Released` event, not
-/// a production regression. Sending the release in the SAME frame (not a
-/// later one) still yields a valid single-frame `just_pressed` window —
-/// `ButtonInput::release` clears `pressed`/sets `just_released` but leaves
-/// `just_pressed` (already raised by the paired `press` processed the same
-/// `MessageReader::read()` pass) untouched, matching a real fast key tap.
+/// `bevy_winit` constructs from a genuine OS key tap — so it flows through the
+/// REAL production keyboard pipeline. Both edges are sent (never a bare
+/// `Pressed`) because `ButtonInput::press` only raises `just_pressed` on a true
+/// false→true edge; a never-released key produces no second edge.
 fn send_real_key_press(
     keyboard: &mut MessageWriter<KeyboardInput>,
     window: Entity,
@@ -615,22 +562,6 @@ fn send_real_key_press(
     });
 }
 
-/// Frames [`ChatFocusSmokeStage::AwaitCollapsed`] tolerates between
-/// [`ChatUiState::collapsed`] flipping `true` and every [`ChatCollapsible`]
-/// element actually reaching `Display::None`. `ChatViewPlugin::build` now
-/// gives `sync_chat_collapsed` an explicit `.after(toggle_chat_via_hotkey)
-/// .after(focus_chat_via_hotkey)` edge (this same investigation's fix —
-/// before it, the two shared no ordering at all, and this harness's FIRST
-/// run against the unordered version genuinely failed here), so the flip and
-/// the visual hide land in the SAME frame on every run now. This tolerance
-/// stays as defense-in-depth against a future accidental re-ordering (the
-/// same "commit lands a schedule-phase later" class of latency
-/// [`AwaitWord1Char`](ChatFocusSmokeStage::AwaitWord1Char) tolerates for
-/// `apply_text_edits`, which genuinely IS a different-schedule hop and can't
-/// be ordered away) — generous but still bounded, so a GENUINE regression
-/// (the hide never landing at all, or the ordering silently regressing)
-/// still fails loudly rather than hanging until the outer
-/// [`CHAT_FOCUS_SMOKE_TIMEOUT_FRAMES`] safety net.
 const AWAIT_COLLAPSED_DISPLAY_TOLERANCE_FRAMES: u32 = 10;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -640,8 +571,9 @@ fn chat_focus_smoke_verify(
     mut frames_waited: Local<u32>,
     mut collapse_display_wait: Local<u32>,
     windows: Query<Entity, With<PrimaryWindow>>,
-    inputs: Query<(Entity, &EditableText), With<ChatInputBox>>,
+    inputs: Query<Entity, With<ChatInputBox>>,
     collapsible: Query<&Node, With<ChatCollapsible>>,
+    chat: Res<ChatInput>,
     history: Res<ChatHistory>,
     focus: Res<InputFocus>,
     state: Res<ChatUiState>,
@@ -655,7 +587,7 @@ fn chat_focus_smoke_verify(
         return;
     }
     let Ok(window) = windows.single() else {
-        return; // Pre-`Startup`-ordering edge; self-heals next frame.
+        return;
     };
 
     let fail = |exit: &mut MessageWriter<AppExit>, stage: &ChatFocusSmokeStage, why: &str| {
@@ -670,8 +602,8 @@ fn chat_focus_smoke_verify(
         return;
     }
 
-    let Ok((input_entity, editable_text)) = inputs.single() else {
-        return; // Pre-`Startup`-ordering edge; self-heals next frame.
+    let Ok(input_entity) = inputs.single() else {
+        return;
     };
 
     match *stage {
@@ -689,7 +621,7 @@ fn chat_focus_smoke_verify(
         },
         ChatFocusSmokeStage::AwaitHistorySeeded => {
             if history.0.is_empty() {
-                return; // one more frame for `ingest_chat_messages` to run.
+                return;
             }
             *stage = ChatFocusSmokeStage::PressEnter;
         },
@@ -699,14 +631,7 @@ fn chat_focus_smoke_verify(
         },
         ChatFocusSmokeStage::AwaitFocused => {
             if focus.get() != Some(input_entity) {
-                fail(
-                    &mut exit,
-                    &stage,
-                    "Enter (GameInput::Chat) did not focus the chat input box — the exact 'cannot \
-                     type anything' symptom",
-                );
-                *stage = ChatFocusSmokeStage::Done;
-                return;
+                return; // one more frame for `focus_chat_via_hotkey` to run.
             }
             *stage = ChatFocusSmokeStage::TypeWord1(0);
         },
@@ -731,29 +656,18 @@ fn chat_focus_smoke_verify(
         },
         ChatFocusSmokeStage::AwaitWord1Char(i) => {
             let expected = &CHAT_FOCUS_SMOKE_WORD_1[..=i];
-            let current = editable_text.value().to_string();
-            if current == expected {
+            if chat.buffer == expected {
                 *stage = ChatFocusSmokeStage::TypeWord1(i + 1);
                 return;
             }
-            // `TextEdit`s queued by `bevy_ui_widgets`'s `on_focused_keyboard_input`
-            // observer (PreUpdate) are only COMMITTED into `EditableText::value()`
-            // by `bevy_text::apply_text_edits`, which runs in `PostUpdate` — a
-            // whole schedule phase AFTER this `Update`-scheduled check. So the
-            // very first frame after sending the keystroke, `current` is still
-            // the PRE-edit value (a strict prefix of `expected`, one character
-            // short) — that is expected async latency, not a failure. Only fail
-            // once `current` can no longer possibly become `expected` by simply
-            // waiting (i.e. it isn't even a prefix of it) — a real corruption,
-            // not a timing artifact.
-            if expected.starts_with(current.as_str()) {
-                return; // one (or a few) more frames for `apply_text_edits` to commit.
+            if expected.starts_with(chat.buffer.as_str()) {
+                return; // a frame or two for `read_chat_input` to fold the key in.
             }
             fail(
                 &mut exit,
                 &stage,
-                "a real KeyboardInput character never reached EditableText::value() while focused \
-                 — the dispatch pipeline is broken even though InputFocus looked correct",
+                "a real KeyboardInput character never reached the chat buffer while focused — the \
+                 keyboard→buffer path is broken even though InputFocus looked correct",
             );
             *stage = ChatFocusSmokeStage::Done;
         },
@@ -763,28 +677,28 @@ fn chat_focus_smoke_verify(
         },
         ChatFocusSmokeStage::AwaitCollapsed => {
             if !state.collapsed {
-                return; // one more frame for `toggle_chat_via_hotkey` to run.
+                return;
             }
             if collapsible.iter().any(|node| node.display != Display::None) {
                 *collapse_display_wait += 1;
                 if *collapse_display_wait <= AWAIT_COLLAPSED_DISPLAY_TOLERANCE_FRAMES {
-                    return; // a few more frames for `sync_chat_collapsed` to catch up.
+                    return;
                 }
                 fail(
                     &mut exit,
                     &stage,
-                    "F5 (ToggleChat) did not hide every ChatCollapsible element",
+                    "F5 did not hide every ChatCollapsible element",
                 );
                 *stage = ChatFocusSmokeStage::Done;
                 return;
             }
             *collapse_display_wait = 0;
-            if history.0.is_empty() || editable_text.value() != CHAT_FOCUS_SMOKE_WORD_1 {
+            if history.0.is_empty() || chat.buffer != CHAT_FOCUS_SMOKE_WORD_1 {
                 fail(
                     &mut exit,
                     &stage,
                     "collapsing chat discarded scrollback history or in-progress text instead of \
-                     only hiding it — Matías's exact 'looks disconnected/lost' report",
+                     only hiding it",
                 );
                 *stage = ChatFocusSmokeStage::Done;
                 return;
@@ -797,14 +711,13 @@ fn chat_focus_smoke_verify(
         },
         ChatFocusSmokeStage::AwaitReexpanded => {
             if state.collapsed {
-                return; // one more frame for `focus_chat_via_hotkey` to run.
+                return;
             }
             if focus.get() != Some(input_entity) {
                 fail(
                     &mut exit,
                     &stage,
-                    "Enter did not refocus the chat input box after a collapse — the 'once chat \
-                     loses focus I can never type in it again' regression",
+                    "Enter did not refocus the chat input box after a collapse",
                 );
                 *stage = ChatFocusSmokeStage::Done;
                 return;
@@ -835,30 +748,26 @@ fn chat_focus_smoke_verify(
                 "{CHAT_FOCUS_SMOKE_WORD_1}{}",
                 &CHAT_FOCUS_SMOKE_WORD_2[..=i]
             );
-            let current = editable_text.value().to_string();
-            if current == expected {
+            if chat.buffer == expected {
                 *stage = ChatFocusSmokeStage::TypeWord2(i + 1);
                 return;
             }
-            // Same async-commit latency as `AwaitWord1Char` above (`TextEdit`
-            // commits in `PostUpdate`, a phase after this `Update` check) — only
-            // fail once `current` can no longer become `expected` by waiting.
-            if expected.starts_with(current.as_str()) {
+            if expected.starts_with(chat.buffer.as_str()) {
                 return;
             }
             fail(
                 &mut exit,
                 &stage,
-                "a real KeyboardInput character never reached EditableText::value() after the \
+                "a real KeyboardInput character never reached the chat buffer after the \
                  collapse/re-expand round trip",
             );
             *stage = ChatFocusSmokeStage::Done;
         },
         ChatFocusSmokeStage::Pass => {
             info!(
-                "smoke-chat-focus: PASS — Enter focused the chat box, real keystrokes reached \
-                 EditableText, F5 collapsed without discarding history, and Enter refocused a \
-                 genuinely typable box afterward"
+                "smoke-chat-focus: PASS — Enter focused the box, real keystrokes reached the chat \
+                 buffer, F5 collapsed without discarding history, and Enter refocused a genuinely \
+                 typable box afterward"
             );
             exit.write(AppExit::Success);
             *stage = ChatFocusSmokeStage::Done;
@@ -868,19 +777,12 @@ fn chat_focus_smoke_verify(
 }
 
 /// Window height assumed when the real primary window isn't queryable yet
-/// (a pre-`Startup`-ordering edge — winit's window creation isn't guaranteed
-/// to have run before an early `Startup` system) — matches
-/// `xindeler_ui::scale::REFERENCE_WINDOW_HEIGHT_PX` / `main.rs`'s own
-/// default `WindowResolution::new(1280, 720)`.
+/// (a pre-`Startup`-ordering edge).
 const FALLBACK_WINDOW_HEIGHT_PX: f32 = 720.0;
 
-/// Spawns the panel root (bottom-left, using the real themed
-/// [`anchored_panel_bundle`] primitive — border/background/radius, not a
-/// bare `Node`), the tab row, the scrollable message log, and the input row
-/// (placeholder label + `EditableText` box). The panel's `left`/`bottom`
-/// offsets ([`PANEL_LEFT_PX`]/[`PANEL_BOTTOM_PX`]) and its initial scrollback
-/// height ([`chat_scroll_height`]) are the BL-82 HUD-responsive-scaling
-/// pass's fix — see those constants' own doc comments.
+/// Spawns the panel root (bottom-left), the header (minimize button), the tab
+/// row, the scrollback, and the input row (a plain [`ChatInputBox`] `Text`
+/// line + an overlaid placeholder hint).
 fn spawn_chat_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -895,35 +797,11 @@ fn spawn_chat_panel(
     let root = commands
         .spawn((
             ChatPanelRoot,
-            // BL-82 EM-5.17 z-scheme (spec §4.4): the chat panel MUST carry
-            // `GlobalZIndex(zlayer::CHAT)` = 30 — the "chat sits above the
-            // ambient HUD chrome so it can be interacted with while other
-            // chrome is visible" tier. Without it the panel sat in the default
-            // z-partition (0), BELOW the orbs/action-bar/hotbar/party-frames
-            // that all gained `GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)` = 20
-            // during EM-5.17. Since `bevy_ui`'s picking backend resolves the
-            // highest z-partition FIRST and treats a node without
-            // `Pickable::IGNORE` as blocking everything below it (see
-            // `combat_hud.rs`'s damage-vignette comment for the same picking
-            // model), the health orb + left action-bar half — which, at the
-            // 1280×720 default, geometrically overlap the bottom-left chat
-            // panel including most of its `EditableText` input box — silently
-            // swallowed the click meant to focus the box. `bevy_ui_widgets`'
-            // text-input focus is set ONLY by that pointer-press landing on the
-            // box (see `text_input_focused`'s doc comment), so `InputFocus`
-            // never pointed at the chat box and typing did nothing at all. This
-            // is the SAME click-routing bug class already fixed for the damage
-            // vignette (PR #122) and the modal windows (PR #131) — the chat
-            // panel was the remaining unfixed instance (PR #131's review noted
-            // `zlayer::CHAT` was defined but never applied to `ChatPanelRoot`,
-            // out of that PR's scope). `CHAT` = 30 stays below
-            // `MODAL_WINDOWS` = 100, so an open diary/inventory/full-map still
-            // correctly draws and picks over the chat panel.
+            // The chat panel MUST carry `GlobalZIndex(zlayer::CHAT)` = 30 so it
+            // sits above the ambient HUD chrome (orbs/action-bar at 20) whose
+            // geometry overlaps the bottom-left panel — otherwise that chrome
+            // silently swallows clicks meant to focus the input box.
             bevy::ui::GlobalZIndex(xindeler_ui::zlayer::CHAT),
-            // BL-82 HUD-responsive-scaling pass: `PANEL_LEFT_PX`/
-            // `PANEL_BOTTOM_PX` (not the old fixed `16.0`/`16.0`) — see those
-            // constants' own doc comments for why the bottom offset is the
-            // actual chat/health-orb overlap fix.
             xindeler_ui::panel::anchored_panel_bundle(
                 &theme,
                 None,
@@ -933,20 +811,15 @@ fn spawn_chat_panel(
             ),
         ))
         .id();
-    // `.entry::<Node>().and_modify(..)` mutates the EXISTING `Node`
-    // `anchored_panel_bundle` already inserted, in place — a second
-    // `insert(Node { .. })` would REPLACE it wholesale and silently discard
-    // its border/radius/background sizing, exactly the regression
-    // `combat_hud.rs`'s own `spawn_combat_hud_keeps_every_bars_sizing_from_
-    // spawn_bar_intact` test documents.
+    // Mutate the EXISTING `Node` in place (a fresh `insert(Node{..})` would
+    // discard the panel's border/radius/background sizing).
     commands
         .entity(root)
         .entry::<Node>()
         .and_modify(|mut node| node.flex_direction = FlexDirection::Column);
     commands.entity(root).with_children(|parent| {
-        // Header row: the minimize/restore button — deliberately OUTSIDE
-        // `ChatCollapsible` (a sibling, not a child, of the tab row) so it
-        // stays visible and clickable even while the panel is collapsed.
+        // Header row: the minimize/restore button — OUTSIDE `ChatCollapsible`
+        // so it stays visible while the panel is collapsed.
         parent
             .spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -987,14 +860,10 @@ fn spawn_chat_panel(
             ))
             .insert((ChatScrollArea, ChatCollapsible));
 
-        // Input row: placeholder label (shown only while empty) +
-        // EditableText box. Tagged `ChatCollapsible` (BL-82 EM-5.17 Phase 0)
-        // — the header row/minimize button stays the ONLY thing outside
-        // `ChatCollapsible` (see that marker's own doc comment); before this
-        // fix, only the tab row + scrollback were tagged, so a "collapsed"
-        // chat panel still showed its input box and could still be typed
-        // into, which read as "doesn't hide" even though the code did
-        // exactly what it claimed to.
+        // Input row: the `ChatInputBox` text line (bg + border + a min height so
+        // it is always a visible, clickable rectangle even while empty) with an
+        // overlaid placeholder hint on top. The hint is `Pickable::IGNORE` so a
+        // click passes THROUGH it to the box, which focuses chat.
         parent
             .spawn((ChatCollapsible, Node {
                 position_type: PositionType::Relative,
@@ -1004,7 +873,30 @@ fn spawn_chat_panel(
             }))
             .with_children(|row| {
                 row.spawn((
+                    ChatInputBox,
+                    Text(String::new()),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(16.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                    Node {
+                        width: Val::Px(PANEL_WIDTH),
+                        min_height: Val::Px(INPUT_MIN_HEIGHT_PX),
+                        padding: UiRect::all(Val::Px(4.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..Default::default()
+                    },
+                    BackgroundColor(theme.palette.panel_bg),
+                    bevy::ui::BorderColor::all(theme.palette.panel_border),
+                ))
+                .observe(focus_chat_on_click);
+
+                row.spawn((
                     ChatInputPlaceholder,
+                    // Never intercept the click meant to focus the box beneath.
+                    bevy::picking::Pickable::IGNORE,
                     Text("Type a message… (/ for commands)".to_owned()),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
@@ -1014,41 +906,18 @@ fn spawn_chat_panel(
                     TextColor(theme.palette.text_muted),
                     Node {
                         position_type: PositionType::Absolute,
-                        top: Val::Px(4.0),
-                        left: Val::Px(6.0),
+                        top: Val::Px(6.0),
+                        left: Val::Px(8.0),
                         ..Default::default()
                     },
-                ));
-                row.spawn((
-                    ChatInputBox,
-                    EditableText::new(""),
-                    TextFont {
-                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(16.0),
-                        ..Default::default()
-                    },
-                    TextColor(theme.palette.text),
-                    Node {
-                        width: Val::Px(PANEL_WIDTH),
-                        padding: UiRect::all(Val::Px(4.0)),
-                        border: UiRect::all(Val::Px(1.0)),
-                        ..Default::default()
-                    },
-                    BackgroundColor(theme.palette.panel_bg),
-                    bevy::ui::BorderColor::all(theme.palette.panel_border),
                 ));
             });
     });
 }
 
-/// Keeps the scrollback's height tracking [`chat_scroll_height`] as the
-/// REAL primary window is live-resized — `spawn_chat_panel` only sets the
-/// height ONCE, at `Startup`, off whatever size the window happened to be
-/// at that moment; without this, resizing the window afterward would leave
-/// the scrollback pinned at its initial height instead of genuinely growing
-/// on a taller window. A no-op write-guard (`if node.height != desired`)
-/// avoids marking the `Node` changed (and re-triggering `bevy_ui` layout)
-/// every single frame when the window hasn't actually resized.
+/// Keeps the scrollback height tracking [`chat_scroll_height`] as the real
+/// window is live-resized (a no-op write-guard avoids re-triggering layout
+/// every frame).
 fn sync_chat_scroll_height_to_window(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut areas: Query<&mut Node, With<ChatScrollArea>>,
@@ -1064,9 +933,7 @@ fn sync_chat_scroll_height_to_window(
     }
 }
 
-/// A tab button's channel colour tag, rendered as a short bracketed prefix on
-/// each scrollback line — cheap differentiation without a second `Text`
-/// span per row (v1; see the module doc comment).
+/// A short bracketed channel prefix for each scrollback line.
 fn channel_tag(channel: NetChatChannel) -> &'static str {
     match channel {
         NetChatChannel::Say => "Say",
@@ -1080,9 +947,7 @@ fn channel_tag(channel: NetChatChannel) -> &'static str {
     }
 }
 
-/// Renders one [`NetChatMsg`] to its scrollback line text: `[Tag] alias:
-/// text` (or `[Tag] text` when there's no resolvable sender — a system line
-/// or an NPC the sim couldn't name).
+/// Renders one [`NetChatMsg`] to its scrollback line text.
 fn format_chat_line(msg: &NetChatMsg) -> String {
     let tag = channel_tag(msg.channel);
     match &msg.sender_alias {
@@ -1091,23 +956,16 @@ fn format_chat_line(msg: &NetChatMsg) -> String {
     }
 }
 
-/// A crude but real "mentions" signal (spec §2 EM-5.4): any whitespace-
-/// separated token starting with `@` (and at least one character after it)
-/// counts as a mention — highlighting the whole ROW rather than the token
-/// itself (v1; see the module doc comment for why per-token colouring is
-/// deferred).
+/// A crude "mentions" signal: any whitespace-separated `@token` (with at least
+/// one character after the `@`).
 fn contains_mention(text: &str) -> bool {
     text.split_whitespace()
         .any(|token| token.starts_with('@') && token.len() > 1)
 }
 
-/// Drains arriving [`NetChatMsg`]s, spawning one text row per line (tinted
-/// if it looks like a mention — [`contains_mention`]), applying the CURRENT
-/// [`ChatUiState::view_filter`] to its initial visibility, and evicting the
-/// oldest row once [`MAX_CHAT_HISTORY`] is exceeded (bounded history — see
-/// the module doc comment). A no-op (messages simply aren't consumed into
-/// history) if the scroll-area entity doesn't exist yet (pre-`Startup`
-/// ordering edge, self-heals next frame).
+/// Drains arriving [`NetChatMsg`]s, spawning one row each (tinted if it looks
+/// like a mention), applying the current view filter, and evicting the oldest
+/// past [`MAX_CHAT_HISTORY`].
 fn ingest_chat_messages(
     mut commands: Commands,
     mut incoming: MessageReader<NetChatMsg>,
@@ -1163,21 +1021,13 @@ fn ingest_chat_messages(
         }
     }
 
-    // Auto-scroll to the bottom whenever a new line arrived — an
-    // over-large target is harmless (bevy_ui's own layout clamps
-    // `ScrollPosition` against the real content height every frame; this
-    // system doesn't know that height without an extra query, so it just
-    // asks for "as far down as possible").
     if appended_any && let Ok(mut scroll) = scroll_positions.single_mut() {
         scroll.y = f32::MAX / 2.0;
     }
 }
 
-/// Re-applies [`ChatUiState::view_filter`] to every [`ChatRow`]'s
-/// [`Node::display`] whenever the filter changes (a tab click) — does NOT
-/// touch rows spawned this same frame twice (`ingest_chat_messages` already
-/// applied the filter at spawn time; this system is `Changed`-gated on
-/// [`ChatUiState`], not `NetChatMsg` arrival, so the two never fight).
+/// Re-applies the view filter to every [`ChatRow`]'s [`Node::display`] whenever
+/// the filter changes (a tab click).
 fn apply_chat_filter(filter: Res<ChatUiState>, mut rows: Query<(&ChatRow, &mut Node)>) {
     if !filter.is_changed() {
         return;
@@ -1192,8 +1042,7 @@ fn apply_chat_filter(filter: Res<ChatUiState>, mut rows: Query<(&ChatRow, &mut N
     }
 }
 
-/// Highlights the currently-ACTIVE view-filter tab (background swap) so the
-/// player can see which tab is selected.
+/// Highlights the currently-active view-filter tab (background swap).
 fn sync_chat_tabs(
     filter: Res<ChatUiState>,
     theme: Res<HudTheme>,
@@ -1211,10 +1060,9 @@ fn sync_chat_tabs(
     }
 }
 
-/// A tab click updates [`ChatUiState`]: `None` ("All") only changes the view
-/// filter; a sendable channel changes BOTH the filter and the active send
-/// channel (see the module doc comment); `Tell`/`Npc`/`System` (view-only
-/// kinds) only change the filter.
+/// A tab click updates [`ChatUiState`]: "All" only changes the view filter; a
+/// sendable channel changes both filter and send channel; view-only kinds
+/// (`Tell`) only change the filter.
 fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: ResMut<ChatUiState>) {
     let Ok(tab) = tabs.get(activate.entity) else {
         return;
@@ -1227,47 +1075,15 @@ fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: Re
     }
 }
 
-/// Whether the chat input box currently has keyboard focus
-/// ([`InputFocus`]) — the shared "don't fire a hotkey while the player is
-/// typing" predicate BL-82 EM-5.17 Phase 0 introduces.
+/// Whether the chat input box currently holds keyboard focus ([`InputFocus`]) —
+/// the shared "don't fire a hotkey while the player is typing" predicate other
+/// modules (`diary`/`inventory_ui`/`social_hud`/`map_view`) compose with
+/// `.run_if(not(crate::chat::text_input_focused))`.
 ///
-/// Why this exists: legacy `xindeler-old` gates every hotkey handler on `if
-/// !self.typing()` (`Hud::typing()` — a single boolean answering "is a
-/// text-edit widget currently capturing keyboard input") so that typing "i"
-/// while chatting doesn't ALSO open the inventory. The Bevy port had no
-/// equivalent — verified by reading every `HudAction`-emitting toggle system
-/// in this crate (`diary`/`inventory_ui`/`social_hud`/`map_view`/
-/// `controls_screen`), none checked chat focus. Rather than invent a new
-/// focus-tracking mechanism, this reuses the [`InputFocus`] resource
-/// `chat.rs` already maintains for its own Enter/Tab handling
-/// ([`handle_chat_submit`]) together with the [`ChatInputBox`] marker — the
-/// two already say everything "is the player typing" needs to know.
-///
-/// A plain `Fn(..) -> bool` system, composable with
-/// `.run_if(not(crate::chat::text_input_focused))` on any `Update` system
-/// (see `diary::DiaryUiPlugin`/`inventory_ui::InventoryUiPlugin`/
-/// `social_hud::SocialHudViewPlugin`/`map_view::MapViewPlugin` for the
-/// wiring).
-///
-/// **This predicate is only correct alongside a blur path** —
-/// [`blur_chat_input_on_escape`] below. `InputFocus` is only ever SET in
-/// this codebase: automatically, by `bevy_ui_widgets::text_input`'s own
-/// pointer-press observer (vendored library behaviour, not code we wrote)
-/// the first time the player clicks into the chat input box. Nothing
-/// UN-sets it on its own — not `handle_chat_submit` (clears the TEXT on
-/// Enter, never `InputFocus`), not `EditableText`'s own Escape handling
-/// (only collapses the text selection, doesn't blur), not the chat tabs/
-/// minimize button (plain `Button`/`Activate` widgets, same as every other
-/// HUD button — none touch `InputFocus`). An ecs-design-reviewer BLOCKER
-/// finding on an earlier version of this fix: without an explicit blur
-/// path, the FIRST chat message of a session would make this predicate
-/// return `true` forever after, permanently (not intermittently)
-/// suppressing every gated hotkey (P/I/M/O). [`blur_chat_input_on_escape`]
-/// closes that gap — Escape while chat holds focus clears [`InputFocus`],
-/// matching legacy `xindeler-old`'s own `Hud::typing()`/
-/// `focus_widget(None)` precedent this doc comment already cited (the
-/// "gate hotkeys on typing" half was ported first; this is the "give the
-/// player a way out of typing" half).
+/// The signal is still [`InputFocus`] pointed at the [`ChatInputBox`] entity
+/// even though that box is now a plain `Text` node rather than an
+/// `EditableText` — [`focus_chat_via_hotkey`]/[`focus_chat_on_click`] set it,
+/// and [`blur_chat_input_on_escape`]/[`blur_chat_input_on_collapse`] clear it.
 pub(crate) fn text_input_focused(
     focus: Res<InputFocus>,
     inputs: Query<Entity, With<ChatInputBox>>,
@@ -1278,15 +1094,12 @@ pub(crate) fn text_input_focused(
     focus.get() == Some(input_entity)
 }
 
-/// Clears [`InputFocus`] when Escape is pressed WHILE the chat input box
-/// holds it — the explicit blur path [`text_input_focused`]'s own doc
-/// comment requires (BL-82 EM-5.17 Phase 0, ecs-design-reviewer BLOCKER
-/// fix). Without this, `InputFocus` is only ever set (by `bevy_ui_widgets`'
-/// own click-to-focus behaviour) and never cleared, so the typing-focus
-/// guard would permanently suppress every gated hotkey after the first chat
-/// message of a session, for good. A no-op if the input box isn't currently
-/// focused (Escape then falls through to whatever else reads it, e.g.
-/// `camera.rs`'s cursor-release handling).
+/// Clears [`InputFocus`] when Escape is pressed while the chat input box holds
+/// it — the explicit blur path [`text_input_focused`] requires (nothing else
+/// un-sets focus on its own, so without this the typing guard would suppress
+/// every gated hotkey forever after the first time chat was focused). A no-op
+/// if the box isn't focused (Escape then falls through to camera
+/// cursor-release).
 fn blur_chat_input_on_escape(
     keys: Res<ButtonInput<KeyCode>>,
     mut focus: ResMut<InputFocus>,
@@ -1303,52 +1116,16 @@ fn blur_chat_input_on_escape(
     }
 }
 
-/// Clears [`InputFocus`] the moment [`ChatUiState::collapsed`] transitions to
-/// `true` WHILE the input box holds it — the same "a state transition hid the
-/// focused widget, so drop the now-stale focus reference" fix
-/// [`blur_chat_input_on_escape`] already applies to Escape, ported to the
-/// OTHER transition that hides the box: minimizing the panel (the header
-/// button click, [`handle_chat_minimize_click`], or the
-/// [`GameInput::ToggleChat`] hotkey, [`toggle_chat_via_hotkey`] — both only
-/// flip the same `bool`, so watching the resource for the edge covers either
-/// source uniformly).
+/// Clears [`InputFocus`] the moment [`ChatUiState::collapsed`] flips `true`
+/// while the box holds it — the same "a transition hid the focused widget, drop
+/// the stale focus" fix as [`blur_chat_input_on_escape`], for minimizing.
+/// Without it, `text_input_focused` and `cursor.rs`'s mirrored `chat_focused`
+/// would keep reporting the hidden box as focused, forcing the OS cursor free
+/// forever (camera looks unresponsive). A `Local<bool>` edge-detector fires
+/// exactly once on the real false→true transition.
 ///
-/// **Root cause this closes** (BL-82, live-tested regression, Matías: "after
-/// I minimize/hide chat, the camera stops responding"): before this fix,
-/// `sync_chat_collapsed` set the input row's `Node::display = Display::None`
-/// but left [`InputFocus`] untouched. [`text_input_focused`] and
-/// `crate::cursor::update_cursor_free`'s mirrored `chat_focused` predicate
-/// only compare entity IDs, not visibility — so both kept reporting the
-/// (now-hidden, unreachable) box as "focused" indefinitely. Since
-/// `update_cursor_free` frees the OS cursor whenever `chat_focused` is `true`,
-/// the cursor stayed permanently free/ungrabbed (never re-grabbing for
-/// mouselook) for as long as that stale focus lingered — camera control
-/// looked "unresponsive" because it genuinely was blocked, not laggy. The
-/// player could previously only escape this by discovering that Escape (an
-/// UNRELATED code path, [`blur_chat_input_on_escape`]) happened to also clear
-/// it; this system fixes the actual transition directly, so minimizing chat
-/// restores camera control immediately, with no detour required.
-///
-/// A `Local<bool>` edge-detector (not `ChatUiState::is_changed()` + the
-/// current value) is deliberate: `is_changed()` also fires on unrelated field
-/// writes (a tab click updating `view_filter`/`send_channel`) while
-/// `collapsed` happens to ALREADY be `true` from an earlier frame — reacting
-/// to the CURRENT value on every such change would re-clear focus on every
-/// unrelated `ChatUiState` write made while collapsed, not only on the actual
-/// collapse transition. The edge-detector fires exactly once, on the real
-/// false-to-true transition, regardless of which system caused it.
-///
-/// `pub(crate)` (BL-82 "chat still unusable" round 3 hardening,
-/// bevy-migration-reviewer finding): `crate::cursor::update_cursor_free`
-/// reads [`InputFocus`] this same frame to decide whether the OS cursor
-/// should be free, but carried no explicit ordering relative to this system
-/// — so on the exact frame chat collapses, `update_cursor_free` could run
-/// BEFORE this system clears the stale focus, leaving the cursor free one
-/// extra (self-healing, imperceptible) frame. `cursor.rs`'s own
-/// `CursorControlPlugin` orders `update_cursor_free.after(Self)` to close
-/// that ambiguity explicitly, the same "don't leave this bug CLASS to
-/// scheduling chance a fourth time" motivation as `sync_chat_collapsed`'s own
-/// new ordering edge just above in [`ChatViewPlugin::build`].
+/// `pub(crate)`: `cursor.rs`'s `CursorControlPlugin` orders
+/// `update_cursor_free.after(Self)` so it reads the same-frame cleared focus.
 pub(crate) fn blur_chat_input_on_collapse(
     state: Res<ChatUiState>,
     mut focus: ResMut<InputFocus>,
@@ -1368,43 +1145,15 @@ pub(crate) fn blur_chat_input_on_collapse(
     }
 }
 
-/// [`GameInput::Chat`] (`Enter` by default) focuses the chat input box
-/// directly — ported from legacy `xindeler-old`'s own
-/// `WinEvent::InputUpdate(GameInput::Chat, true)` handler
-/// (`voxygen/src/hud/mod.rs`), which calls `Hud::focus_widget(Some(self.ids.
-/// chat))` on the exact same key. This is the ONLY keyboard-driven path onto
-/// [`InputFocus`] this whole module has: every other way it's ever set is
-/// `bevy_ui_widgets`'s own pointer-press observer — a CLICK, which only works
-/// while the OS cursor is free.
-///
-/// **Root cause this closes** (BL-82, live-tested regression, Matías: "once
-/// chat loses focus, I can never type in it again for the rest of the
-/// session"): `crate::cursor::update_cursor_free` only frees the cursor for
-/// chat's sake WHILE the input box already holds focus, or while some
-/// unrelated `HudState` window happens to be open — chat itself is
-/// deliberately NOT a `HudState` window (see [`ChatUiState`]'s own doc
-/// comment), so nothing else ever frees the cursor on the panel's behalf.
-/// The instant the box loses focus (for ANY reason) while the cursor is
-/// grabbed for mouselook and nothing else is open, a mouse click can never
-/// reach the box again: the cursor is hidden/locked, so no click lands on
-/// the always-visible minimize/restore button or the box itself, and
-/// nothing re-frees the cursor purely for chat — a genuine, permanent
-/// dead end, exactly as reported. Legacy never had this problem because its
-/// equivalent key focuses the widget directly, bypassing the cursor
-/// entirely; this system ports that same fix. Once it sets [`InputFocus`]
-/// here, the very next frame's `update_cursor_free` observes `chat_focused =
-/// true` and frees the cursor for real — no click required to close the
-/// loop.
-///
-/// Un-collapses the panel first if it was minimized (Enter "just works"
-/// regardless of visibility, matching legacy's single unified key). A no-op
-/// while the box is ALREADY focused — [`handle_chat_submit`]'s own raw
-/// `KeyCode::Enter` check owns THAT case (it submits the line); ordering
-/// this system `.after(handle_chat_submit)` guarantees the two never fight
-/// over the same keypress; on the frame chat is refocused,
-/// `handle_chat_submit` still observes the PRE-refocus state and correctly
-/// no-ops (not yet focused), so a fresh Enter can never both refocus AND
-/// immediately re-submit stale leftover text in the same frame.
+/// [`GameInput::Chat`] (`Enter` by default) focuses the chat input box directly
+/// — ported from legacy `xindeler-old`'s own
+/// `Hud::focus_widget(Some(self.ids.chat))` on the same key. This is the
+/// primary keyboard-driven entry: it works regardless of the OS cursor's grab
+/// state (the mouse click path only works while the cursor is already free).
+/// Un-collapses the panel first if it was minimized. A no-op while the box is
+/// ALREADY focused ([`read_chat_input`] owns the Enter-submit case then);
+/// ordering this `.after(read_chat_input)` guarantees a single Enter can never
+/// both refocus AND immediately submit stale text.
 fn focus_chat_via_hotkey(
     action_state: Res<ActionState>,
     mut state: ResMut<ChatUiState>,
@@ -1426,30 +1175,43 @@ fn focus_chat_via_hotkey(
     focus.set(input_entity, FocusCause::Navigated);
 }
 
+/// A click on the input box focuses chat — the mouse counterpart of
+/// [`focus_chat_via_hotkey`]. Only reachable while the OS cursor is free (a
+/// menu open, or chat already focused); during mouselook the keyboard path is
+/// the way in, exactly as in legacy. Because the box is a plain `Text` node,
+/// `bevy_ui_widgets`' own `EditableText` click-to-focus observer does NOT apply
+/// — this is our explicit replacement.
+fn focus_chat_on_click(
+    _click: On<Pointer<Click>>,
+    mut focus: ResMut<InputFocus>,
+    mut state: ResMut<ChatUiState>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    if state.collapsed {
+        state.collapsed = false;
+    }
+    focus.set(input_entity, FocusCause::Pressed);
+}
+
 /// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
-/// Deliberately a direct `Activate` observer mutating this screen's own
-/// `Resource` — the SAME shape [`handle_tab_click`] right above already uses
-/// for this exact panel, rather than routing through the generic
-/// `HudAction`/`HudState` bus (reserved for real mutually-exclusive
-/// secondary windows, per [`ChatUiState`]'s own doc comment).
 fn handle_chat_minimize_click(_activate: On<Activate>, mut state: ResMut<ChatUiState>) {
     state.collapsed = !state.collapsed;
 }
 
-/// [`GameInput::ToggleChat`] (`F5` by default, rebindable) does the SAME
-/// thing as clicking the minimize/restore button — flips
-/// [`ChatUiState::collapsed`]. BL-82 EM-5.17 Phase 0: nothing previously read
-/// `GameInput::ToggleChat` at all despite it existing in the keymap.
+/// [`GameInput::ToggleChat`] (`F5` by default) flips [`ChatUiState::collapsed`]
+/// — the same effect as clicking the minimize/restore button, from the
+/// keyboard.
 fn toggle_chat_via_hotkey(action_state: Res<ActionState>, mut state: ResMut<ChatUiState>) {
     if action_state.just_pressed(GameInput::ToggleChat) {
         state.collapsed = !state.collapsed;
     }
 }
 
-/// Hides every [`ChatCollapsible`] element (tab row + scrollback + input row)
-/// while [`ChatUiState::collapsed`] is `true`, and relabels the minimize
-/// button (`"Hide"` <-> `"Chat"`) to reflect which action it will perform
-/// next.
+/// Hides every [`ChatCollapsible`] element while collapsed and relabels the
+/// minimize button (`"Hide"` <-> `"Chat"`).
 fn sync_chat_collapsed(
     state: Res<ChatUiState>,
     mut collapsible: Query<&mut Node, With<ChatCollapsible>>,
@@ -1480,33 +1242,210 @@ fn sync_chat_collapsed(
     }
 }
 
-/// Shows/hides the placeholder label based on whether the input box is
-/// empty (`EditableText::value()`) — `EditableText` itself doesn't support a
-/// native placeholder in Bevy 0.19 (the EM-5.1 survey's own noted gap), so
-/// this is the "faded overlay label" workaround that doc comment names.
+/// Shows the placeholder hint only while the input line is empty AND unfocused
+/// — once focused, the caret ([`render_chat_input`]) shows instead.
 fn update_input_placeholder(
-    inputs: Query<&EditableText, With<ChatInputBox>>,
+    focus: Res<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    chat: Res<ChatInput>,
     mut placeholders: Query<&mut Visibility, With<ChatInputPlaceholder>>,
 ) {
-    let Ok(input) = inputs.single() else {
-        return;
-    };
+    let focused = inputs
+        .single()
+        .is_ok_and(|entity| focus.get() == Some(entity));
     let Ok(mut visibility) = placeholders.single_mut() else {
         return;
     };
-    *visibility = if input.value().to_string().is_empty() {
+    *visibility = if chat.buffer.is_empty() && !focused {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
 }
 
-/// Splits a leading `/command args…` line into `(name, args)`, or `None` if
-/// `raw` doesn't start with `/` (a plain channel-tab line instead). Args are
-/// split on whitespace — sufficient for `/tell <alias> <message words…>`
-/// (the server rejoins `args[1..]` itself, see `xindeler-sim-bridge::chat`'s
-/// doc comment) and for the single-target admin commands legacy supports;
-/// NOT quote-aware (a v1 cut, matching the scope note at the top).
+/// Mirrors the owned [`ChatInput::buffer`] into the on-screen [`ChatInputBox`]
+/// `Text`, drawing a caret (`|`) at the cursor position while focused. Uses a
+/// no-op write-guard so an unchanged line doesn't re-trigger text layout.
+fn render_chat_input(
+    focus: Res<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    chat: Res<ChatInput>,
+    mut texts: Query<&mut Text, With<ChatInputBox>>,
+) {
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    let focused = focus.get() == Some(input_entity);
+    let Ok(mut text) = texts.single_mut() else {
+        return;
+    };
+    let desired = if focused {
+        // `cursor` is always a char boundary, so `split_at` cannot panic.
+        let (pre, post) = chat.buffer.split_at(chat.cursor);
+        format!("{pre}|{post}")
+    } else {
+        chat.buffer.clone()
+    };
+    if text.0 != desired {
+        text.0 = desired;
+    }
+}
+
+/// **The heart of the rewrite.** Folds real [`KeyboardInput`] directly into the
+/// owned [`ChatInput`] buffer while the box holds focus — no `EditableText`, no
+/// `FocusedInput` dispatch, no IME (see the module doc comment for why the
+/// `EditableText` path left the box untypable on macOS). Handles Enter
+/// (submit), editing/navigation keys, Tab completion, Up/Down history recall,
+/// and Cmd/Ctrl+A/C/X/V against the engine [`bevy::clipboard::Clipboard`].
+///
+/// While UNfocused it drains its reader so a burst of keys pressed the same
+/// frame chat gains focus can't spill into the box.
+#[allow(clippy::too_many_arguments)]
+fn read_chat_input(
+    focus: Res<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    mut keyboard: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut chat: ResMut<ChatInput>,
+    mut clipboard: ResMut<bevy::clipboard::Clipboard>,
+    mut send: MessageWriter<ChatSendRequest>,
+    state: Res<ChatUiState>,
+) {
+    let focused = inputs
+        .single()
+        .is_ok_and(|entity| focus.get() == Some(entity));
+    if !focused {
+        keyboard.read().for_each(drop);
+        return;
+    }
+
+    // The Command modifier: Cmd on macOS, Ctrl elsewhere — but accept EITHER so
+    // the shortcuts work regardless of platform/keyboard.
+    let cmd = keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight);
+
+    for ev in keyboard.read() {
+        if !ev.state.is_pressed() {
+            continue;
+        }
+        match &ev.logical_key {
+            Key::Enter => submit_chat_line(&mut chat, &mut send, &state),
+            Key::Backspace => chat.backspace(),
+            Key::Delete => chat.delete(),
+            Key::ArrowLeft => chat.move_left(),
+            Key::ArrowRight => chat.move_right(),
+            Key::Home => chat.home(),
+            Key::End => chat.end(),
+            Key::ArrowUp => history_recall_prev(&mut chat),
+            Key::ArrowDown => history_recall_next(&mut chat),
+            Key::Tab => complete_command(&mut chat),
+            Key::Character(s) if cmd => match s.to_lowercase().as_str() {
+                "a" => chat.select_all = true,
+                "c" => {
+                    let _ = clipboard.set_text(chat.selection_text());
+                },
+                "x" => {
+                    let _ = clipboard.set_text(chat.selection_text());
+                    chat.clear_line();
+                },
+                "v" => paste_from_clipboard(&mut chat, &mut clipboard),
+                _ => {},
+            },
+            Key::Character(s) => chat.insert_str(s.as_str()),
+            Key::Space => chat.insert_str(" "),
+            _ => {},
+        }
+    }
+}
+
+/// Sends the current line (a `/command` or a plain channel line), records it in
+/// recall history, and clears the buffer — keeping focus so the player can keep
+/// chatting (Escape leaves). A no-op on an empty/whitespace line.
+fn submit_chat_line(
+    chat: &mut ChatInput,
+    send: &mut MessageWriter<ChatSendRequest>,
+    state: &ChatUiState,
+) {
+    let trimmed = chat.buffer.trim().to_owned();
+    if trimmed.is_empty() {
+        return;
+    }
+    let request = match parse_slash_command(&trimmed) {
+        Some((name, args)) => ChatSendRequest::Command { name, args },
+        None => ChatSendRequest::Channel {
+            channel: state.send_channel,
+            text: trimmed.clone(),
+        },
+    };
+    send.write(request);
+    if chat.history.last().map(String::as_str) != Some(trimmed.as_str()) {
+        chat.history.push(trimmed);
+        if chat.history.len() > CHAT_INPUT_HISTORY_MAX {
+            chat.history.remove(0);
+        }
+    }
+    chat.clear_line();
+}
+
+/// Up-arrow: recall the previous (older) sent line.
+fn history_recall_prev(chat: &mut ChatInput) {
+    if chat.history.is_empty() {
+        return;
+    }
+    let new_pos = match chat.history_pos {
+        None => chat.history.len() - 1,
+        Some(0) => 0,
+        Some(p) => p - 1,
+    };
+    let line = chat.history[new_pos].clone();
+    chat.set_line(line);
+    chat.history_pos = Some(new_pos);
+}
+
+/// Down-arrow: recall the next (newer) sent line, or drop back to a fresh empty
+/// line past the newest.
+fn history_recall_next(chat: &mut ChatInput) {
+    match chat.history_pos {
+        None => {},
+        Some(p) if p + 1 < chat.history.len() => {
+            let line = chat.history[p + 1].clone();
+            chat.set_line(line);
+            chat.history_pos = Some(p + 1);
+        },
+        Some(_) => chat.clear_line(),
+    }
+}
+
+/// Tab: cycle command-name completions for a `/command` line, replacing only
+/// the command-name token.
+fn complete_command(chat: &mut ChatInput) {
+    if let Some((name, _)) = parse_slash_command(&chat.buffer) {
+        let matches = matching_commands(&name);
+        if !matches.is_empty() {
+            let next = matches[chat.completion_cycle % matches.len()];
+            chat.completion_cycle = chat.completion_cycle.wrapping_add(1);
+            let replaced = replace_command_name(&chat.buffer, next);
+            chat.buffer = replaced;
+            chat.cursor = chat.buffer.len();
+        }
+    }
+}
+
+/// Cmd/Ctrl+V: insert the clipboard's text at the caret. On native targets the
+/// read resolves synchronously; a still-pending read (only possible on wasm) is
+/// simply dropped this frame (v1 — a documented limitation, not a silent skip).
+fn paste_from_clipboard(chat: &mut ChatInput, clipboard: &mut bevy::clipboard::Clipboard) {
+    let mut read = clipboard.fetch_text();
+    if let Some(Ok(text)) = read.poll_result() {
+        chat.insert_str(&text);
+    }
+}
+
+/// Splits a leading `/command args…` into `(name, args)`, or `None` if `raw`
+/// doesn't start with `/`. Args split on whitespace (not quote-aware — a v1
+/// cut).
 fn parse_slash_command(raw: &str) -> Option<(String, Vec<String>)> {
     let rest = raw.strip_prefix('/')?;
     let mut parts = rest.split_whitespace();
@@ -1515,9 +1454,7 @@ fn parse_slash_command(raw: &str) -> Option<(String, Vec<String>)> {
     Some((name, args))
 }
 
-/// The command-name completions matching `prefix` (case-sensitive, matching
-/// [`KNOWN_COMMANDS`]' own lowercase convention), in [`KNOWN_COMMANDS`]'s
-/// declared order.
+/// The command-name completions matching `prefix`, in [`KNOWN_COMMANDS`] order.
 fn matching_commands(prefix: &str) -> Vec<&'static str> {
     KNOWN_COMMANDS
         .iter()
@@ -1526,78 +1463,13 @@ fn matching_commands(prefix: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Replaces the command-name token (the part right after `/`, before the
-/// first space) of `raw` with `replacement`, leaving everything from the
-/// first space onward untouched. `raw` must start with `/` (callers only
-/// call this once [`parse_slash_command`] confirms it does).
+/// Replaces the command-name token of `raw` with `replacement`, leaving
+/// everything from the first space onward untouched.
 fn replace_command_name(raw: &str, replacement: &str) -> String {
     match raw.find(char::is_whitespace) {
         Some(space) => format!("/{replacement}{}", &raw[space..]),
         None => format!("/{replacement}"),
     }
-}
-
-/// Enter submits the input box's current text; Tab, while typing a
-/// `/command`, cycles through [`KNOWN_COMMANDS`] completions. Both only act
-/// while the input box actually has keyboard focus ([`InputFocus`]) — this
-/// system reads global key state directly (not an `EditableText` keyboard
-/// observer) so it works regardless of `EditableTextInputPlugin`'s own
-/// Enter-propagation behaviour (Enter falls through un-consumed when
-/// `allow_newlines` is `false`, which this input box's default already is).
-fn handle_chat_submit(
-    keys: Res<ButtonInput<KeyCode>>,
-    focus: Res<InputFocus>,
-    mut inputs: Query<(Entity, &mut EditableText), With<ChatInputBox>>,
-    mut send: MessageWriter<ChatSendRequest>,
-    state: Res<ChatUiState>,
-    mut completion_cycle: Local<usize>,
-) {
-    let Ok((entity, mut input)) = inputs.single_mut() else {
-        return;
-    };
-    if focus.get() != Some(entity) {
-        return;
-    }
-
-    if keys.just_pressed(KeyCode::Tab) {
-        let raw = input.value().to_string();
-        if let Some((name, _)) = parse_slash_command(&raw) {
-            let matches = matching_commands(&name);
-            if !matches.is_empty() {
-                let next = matches[*completion_cycle % matches.len()];
-                *completion_cycle = completion_cycle.wrapping_add(1);
-                let replaced = replace_command_name(&raw, next);
-                // `EditableText::new` re-seeds the editor with fresh text AND
-                // moves the cursor to the end — a full-content replace via
-                // documented public API only (no `parley`/`PlainEditor`
-                // internals), matching how the Enter-path below also treats
-                // the box's content as an opaque value it replaces wholesale.
-                *input = EditableText::new(replaced);
-            }
-        }
-        return;
-    }
-
-    if !keys.just_pressed(KeyCode::Enter) {
-        return;
-    }
-
-    let raw = input.value().to_string();
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    let request = match parse_slash_command(trimmed) {
-        Some((name, args)) => ChatSendRequest::Command { name, args },
-        None => ChatSendRequest::Channel {
-            channel: state.send_channel,
-            text: trimmed.to_owned(),
-        },
-    };
-    send.write(request);
-    input.clear();
-    *completion_cycle = 0;
 }
 
 #[cfg(test)]
@@ -1619,15 +1491,216 @@ mod tests {
         });
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
-        // Needed by `handle_chat_submit`'s tests — `MinimalPlugins` doesn't
-        // register `ButtonInput<KeyCode>` (that's `InputPlugin`, part of
-        // `DefaultPlugins`).
+        app.init_resource::<ChatInput>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app
     }
 
-    /// [`format_chat_line`]: a resolved sender renders `[Tag] alias: text`;
-    /// an unresolved one drops the `alias:` part.
+    // ---- ChatInput editing helpers -----------------------------------------
+
+    /// Typing inserts at the caret and advances it; the buffer accrues in
+    /// order.
+    #[test]
+    fn insert_str_appends_and_advances_the_caret() {
+        let mut ci = ChatInput::default();
+        ci.insert_str("h");
+        ci.insert_str("i");
+        assert_eq!(ci.buffer, "hi");
+        assert_eq!(ci.cursor, 2);
+    }
+
+    /// Inserting mid-line respects the caret; newlines collapse to spaces and
+    /// control chars are dropped (single-line field).
+    #[test]
+    fn insert_str_is_caret_aware_and_single_line() {
+        let mut ci = ChatInput::default();
+        ci.set_line("ac".to_owned());
+        ci.cursor = 1;
+        ci.insert_str("b");
+        assert_eq!(ci.buffer, "abc");
+        ci.set_line(String::new());
+        ci.insert_str("x\ny");
+        assert_eq!(ci.buffer, "x y", "newlines must collapse to spaces");
+    }
+
+    /// Backspace/Delete/Home/End/arrows behave like a standard single-line
+    /// editor, on char boundaries (exercised here with a multi-byte char).
+    #[test]
+    fn editing_keys_operate_on_char_boundaries() {
+        let mut ci = ChatInput::default();
+        ci.set_line("aé b".to_owned()); // 'é' is 2 bytes
+        ci.end();
+        ci.backspace();
+        assert_eq!(ci.buffer, "aé ");
+        ci.home();
+        ci.move_right(); // past 'a'
+        ci.delete(); // deletes 'é' (both bytes)
+        assert_eq!(ci.buffer, "a ");
+    }
+
+    /// Cmd/Ctrl+A then typing replaces the whole line (single-line select-all).
+    #[test]
+    fn select_all_then_insert_replaces_the_line() {
+        let mut ci = ChatInput::default();
+        ci.set_line("old text".to_owned());
+        ci.select_all = true;
+        ci.insert_str("new");
+        assert_eq!(ci.buffer, "new");
+        assert_eq!(ci.cursor, 3);
+    }
+
+    // ---- read_chat_input end-to-end (headless, real KeyboardInput) ---------
+
+    /// The **core regression test for the rewrite**: a real [`KeyboardInput`]
+    /// character reaches the buffer while focused — the exact delivery the old
+    /// `EditableText` path silently dropped under macOS IME. Drives the real
+    /// production [`read_chat_input`] system (not a helper) via a genuine
+    /// `KeyboardInput` message through a focused `InputFocus`, no window/IME
+    /// needed.
+    #[test]
+    fn read_chat_input_folds_a_real_keypress_into_the_buffer_while_focused() {
+        let mut app = new_app();
+        app.init_resource::<InputFocus>();
+        app.add_message::<KeyboardInput>();
+        app.insert_resource(bevy::clipboard::Clipboard::default());
+        let window = app.world_mut().spawn_empty().id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
+        app.insert_resource(InputFocus::from_entity(input));
+
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::KeyH,
+            logical_key: Key::Character("h".into()),
+            state: bevy::input::ButtonState::Pressed,
+            text: Some("h".into()),
+            repeat: false,
+            window,
+        });
+        app.world_mut()
+            .run_system_once(read_chat_input)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().resource::<ChatInput>().buffer,
+            "h",
+            "a real focused keypress must reach the owned buffer — the whole point of the rewrite"
+        );
+    }
+
+    /// While UNfocused, `read_chat_input` must NOT accept keystrokes (and must
+    /// drain them so they can't spill in the instant focus is gained).
+    #[test]
+    fn read_chat_input_ignores_keys_while_unfocused() {
+        let mut app = new_app();
+        app.init_resource::<InputFocus>(); // nothing focused
+        app.add_message::<KeyboardInput>();
+        app.insert_resource(bevy::clipboard::Clipboard::default());
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn(ChatInputBox);
+
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::KeyH,
+            logical_key: Key::Character("h".into()),
+            state: bevy::input::ButtonState::Pressed,
+            text: Some("h".into()),
+            repeat: false,
+            window,
+        });
+        app.world_mut()
+            .run_system_once(read_chat_input)
+            .expect("system runs");
+
+        assert!(
+            app.world().resource::<ChatInput>().buffer.is_empty(),
+            "keys typed while chat isn't focused must not enter the buffer"
+        );
+    }
+
+    /// Enter on a plain line sends a `Channel` request with the current send
+    /// channel and clears the buffer.
+    #[test]
+    fn submit_on_a_plain_line_sends_a_channel_request_and_clears() {
+        let mut app = new_app();
+        app.world_mut().resource_mut::<ChatUiState>().send_channel = NetChatChannel::Region;
+        let mut ci = ChatInput::default();
+        ci.set_line("hello there".to_owned());
+        app.insert_resource(ci);
+
+        app.world_mut()
+            .run_system_once(
+                |mut chat: ResMut<ChatInput>,
+                 mut send: MessageWriter<ChatSendRequest>,
+                 state: Res<ChatUiState>| {
+                    submit_chat_line(&mut chat, &mut send, &state);
+                },
+            )
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChatSendRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![ChatSendRequest::Channel {
+            channel: NetChatChannel::Region,
+            text: "hello there".to_owned(),
+        }]);
+        assert!(
+            app.world().resource::<ChatInput>().buffer.is_empty(),
+            "the input line must clear after sending"
+        );
+    }
+
+    /// A leading `/` bypasses the channel tabs and sends a raw `Command`.
+    #[test]
+    fn submit_on_a_slash_command_sends_a_command_request() {
+        let mut app = new_app();
+        let mut ci = ChatInput::default();
+        ci.set_line("/tell Bob hi".to_owned());
+        app.insert_resource(ci);
+
+        app.world_mut()
+            .run_system_once(
+                |mut chat: ResMut<ChatInput>,
+                 mut send: MessageWriter<ChatSendRequest>,
+                 state: Res<ChatUiState>| {
+                    submit_chat_line(&mut chat, &mut send, &state);
+                },
+            )
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ChatSendRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![ChatSendRequest::Command {
+            name: "tell".to_owned(),
+            args: vec!["Bob".to_owned(), "hi".to_owned()],
+        }]);
+    }
+
+    /// Up/Down recall the sent-line history.
+    #[test]
+    fn history_recall_walks_sent_lines() {
+        let mut ci = ChatInput {
+            history: vec!["first".to_owned(), "second".to_owned()],
+            ..Default::default()
+        };
+        history_recall_prev(&mut ci);
+        assert_eq!(ci.buffer, "second", "Up recalls the newest line first");
+        history_recall_prev(&mut ci);
+        assert_eq!(ci.buffer, "first");
+        history_recall_next(&mut ci);
+        assert_eq!(ci.buffer, "second");
+        history_recall_next(&mut ci);
+        assert!(
+            ci.buffer.is_empty(),
+            "past the newest, Down returns to a fresh line"
+        );
+    }
+
+    // ---- scrollback / tabs / filter / collapse -----------------------------
+
     #[test]
     fn formats_lines_with_and_without_a_resolved_sender() {
         let with_sender = NetChatMsg {
@@ -1647,8 +1720,6 @@ mod tests {
         assert_eq!(format_chat_line(&without_sender), "[System] server started");
     }
 
-    /// [`contains_mention`]: an `@token` anywhere in the message counts; a
-    /// bare `@` with nothing after it, or no `@` at all, does not.
     #[test]
     fn detects_at_mentions() {
         assert!(contains_mention("hey @Hero check this out"));
@@ -1656,9 +1727,6 @@ mod tests {
         assert!(!contains_mention("a lone @ with nothing after"));
     }
 
-    /// [`ingest_chat_messages`] spawns a real `ChatRow` per arriving message,
-    /// tags it with the message's channel, and puts it in the scrollback's
-    /// child list.
     #[test]
     fn ingest_spawns_a_tagged_row_per_message_and_parents_it_to_the_scroll_area() {
         let mut app = new_app();
@@ -1694,9 +1762,6 @@ mod tests {
         );
     }
 
-    /// The scrollback is BOUNDED: pushing more than [`MAX_CHAT_HISTORY`]
-    /// lines despawns the oldest row(s) rather than growing forever — the
-    /// task's own explicit requirement.
     #[test]
     fn scrollback_evicts_the_oldest_row_past_the_cap() {
         let mut app = new_app();
@@ -1721,7 +1786,6 @@ mod tests {
             MAX_CHAT_HISTORY,
             "history must never exceed the cap"
         );
-        // The oldest surviving line must be #5 (0..5 evicted), not #0.
         let oldest = *history.0.first().expect("at least one row remains");
         assert_eq!(
             app.world().get::<Text>(oldest).map(|t| t.0.clone()),
@@ -1729,9 +1793,6 @@ mod tests {
         );
     }
 
-    /// A tab click updates the view filter; clicking a SENDABLE channel also
-    /// updates the send channel, but clicking "All" (`None`) only changes
-    /// the filter, leaving the previous send channel intact.
     #[test]
     fn tab_click_updates_filter_and_conditionally_the_send_channel() {
         let mut app = new_app();
@@ -1758,8 +1819,6 @@ mod tests {
         assert_eq!(state.view_filter, Some(NetChatChannel::Say));
         assert_eq!(state.send_channel, NetChatChannel::Say);
 
-        // Selecting a view-only channel (Tell) leaves the send channel where
-        // Say left it.
         let tell_tab = app
             .world_mut()
             .spawn(ChatTab(Some(NetChatChannel::Tell)))
@@ -1786,9 +1845,6 @@ mod tests {
         );
     }
 
-    /// [`apply_chat_filter`] hides rows that don't match the current view
-    /// filter and shows rows that do, without touching rows created after
-    /// the filter last changed... (exercised here as a direct before/after).
     #[test]
     fn filter_change_hides_non_matching_rows_and_shows_matching_ones() {
         let mut app = new_app();
@@ -1816,33 +1872,17 @@ mod tests {
         );
     }
 
-    /// [`ChatUiState`] starts NOT collapsed — the panel is visible by
-    /// default, matching every other always-on HUD element (BL-82 Phase 5
-    /// follow-up regression test: a real play session found no way to
-    /// minimize the chat panel at all).
     #[test]
     fn chat_starts_uncollapsed() {
         assert!(!ChatUiState::default().collapsed);
     }
 
-    /// The [`ChatPanelRoot`] MUST carry `GlobalZIndex(zlayer::CHAT)` (spec
-    /// §4.4) — the click-routing regression this test pins. Without it the
-    /// panel sits in the default z-partition (0), below the orbs/action-bar/
-    /// hotbar/party-frames that all carry
-    /// `GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)` = 20; since `bevy_ui`
-    /// picking resolves the highest z-partition first and a node without
-    /// `Pickable::IGNORE` blocks everything below it, that ambient chrome
-    /// (which geometrically overlaps the bottom-left chat panel at the default
-    /// window size) silently swallowed the click meant to focus the input box,
-    /// so `InputFocus` never pointed at it and typing did nothing. Matches the
-    /// same z-index regression guard
-    /// `diary.rs`/`esc_menu.rs`/`inventory_ui.rs`/ `map_view.rs` each carry
-    /// for their own roots (the SAME bug class fixed for the damage
-    /// vignette (PR #122) and the modal windows (PR #131)).
+    /// The [`ChatPanelRoot`] MUST carry `GlobalZIndex(zlayer::CHAT)` — the
+    /// click-routing regression guard (without it the ambient HUD chrome
+    /// overlapping the bottom-left panel swallows the click meant to focus the
+    /// input box).
     #[test]
     fn spawn_chat_panel_puts_the_root_on_the_chat_z_layer() {
-        use bevy::ecs::system::RunSystemOnce;
-
         let mut app = new_app();
         app.world_mut()
             .run_system_once(spawn_chat_panel)
@@ -1856,24 +1896,36 @@ mod tests {
         let z_index = world
             .get::<bevy::ui::GlobalZIndex>(root)
             .expect("ChatPanelRoot carries a GlobalZIndex");
-        assert_eq!(
-            z_index.0,
-            xindeler_ui::zlayer::CHAT,
-            "the chat panel must sit on the CHAT z-layer, above the ambient HUD chrome that would \
-             otherwise swallow clicks meant to focus its input box"
+        assert_eq!(z_index.0, xindeler_ui::zlayer::CHAT);
+    }
+
+    /// The input box must be spawned as a plain `Text` node, NOT an
+    /// `EditableText` — the regression guard for the whole rewrite. If a future
+    /// change re-introduces `EditableText` on the input box, `bevy_ui_widgets`
+    /// will re-enable IME on focus and macOS typing breaks again.
+    #[test]
+    fn input_box_is_a_plain_text_node_not_an_editable_text() {
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+
+        let world = app.world_mut();
+        let input = world
+            .query_filtered::<Entity, With<ChatInputBox>>()
+            .single(world)
+            .expect("ChatInputBox exists");
+        assert!(
+            world.get::<Text>(input).is_some(),
+            "the input box must be a plain Text node"
+        );
+        assert!(
+            world.get::<bevy::text::EditableText>(input).is_none(),
+            "the input box must NOT be an EditableText — that re-enables IME and breaks macOS \
+             typing"
         );
     }
 
-    /// [`sync_chat_collapsed`]: collapsing hides every [`ChatCollapsible`]
-    /// element (tab row + scrollback + input row) but leaves anything NOT
-    /// tagged (the minimize button itself) untouched, and relabels the
-    /// button; un-collapsing restores all three.
-    ///
-    /// BL-82 EM-5.17 Phase 0: `input_row` is new here — before this fix, the
-    /// input row wasn't tagged `ChatCollapsible` at all, so a "collapsed"
-    /// chat panel still showed (and could still be typed into) its input box
-    /// and placeholder, which read as "doesn't hide" even though the code
-    /// did exactly what it claimed to.
     #[test]
     fn sync_chat_collapsed_hides_collapsible_elements_and_relabels_the_button() {
         let mut app = new_app();
@@ -1902,27 +1954,22 @@ mod tests {
 
         assert_eq!(
             app.world().get::<Node>(tab_row).unwrap().display,
-            Display::None,
-            "the tab row must hide while collapsed"
+            Display::None
         );
         assert_eq!(
             app.world().get::<Node>(scroll_area).unwrap().display,
-            Display::None,
-            "the scrollback must hide while collapsed"
+            Display::None
         );
         assert_eq!(
             app.world().get::<Node>(input_row).unwrap().display,
             Display::None,
-            "the input row must ALSO hide while collapsed — only the minimize/restore button \
-             stays visible"
+            "the input row must ALSO hide while collapsed"
         );
         assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
-            CHAT_RESTORE_LABEL,
-            "the button must relabel to the restore action"
+            CHAT_RESTORE_LABEL
         );
 
-        // Un-collapse: everything comes back.
         app.world_mut().resource_mut::<ChatUiState>().collapsed = false;
         app.world_mut()
             .run_system_once(sync_chat_collapsed)
@@ -1938,7 +1985,9 @@ mod tests {
         );
         assert_eq!(
             app.world().get::<Node>(input_row).unwrap().display,
-            Display::Flex
+            Display::Flex,
+            "re-expanding must restore the input row to Display::Flex — the 'collapsed box stays \
+             blank on re-expand' symptom guard"
         );
         assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
@@ -1946,26 +1995,13 @@ mod tests {
         );
     }
 
-    /// [`toggle_chat_via_hotkey`]: [`GameInput::ToggleChat`] (`F5` by
-    /// default) flips [`ChatUiState::collapsed`] — the same effect as
-    /// clicking the minimize button, but from the keyboard (BL-82 EM-5.17
-    /// Phase 0: nothing previously read this `GameInput` at all). Driven
-    /// through the REAL `xindeler_input::action_state::update_action_state`
-    /// resolver (not a hand-built `ActionState`, whose fields are private) —
-    /// the same "real input → real resolver → real system" shape
-    /// `controls_screen.rs`'s own
-    /// `end_to_end_rebind_persists_to_disk_and_flags_a_conflict` test uses.
     #[test]
     fn toggle_chat_via_hotkey_flips_collapsed() {
-        use bevy::input::keyboard::KeyCode;
         use xindeler_input::{KeyMap, action_state::update_action_state};
 
         let mut app = new_app();
         app.insert_resource(KeyMap::default());
         app.insert_resource(ActionState::default());
-        // `new_app()` already inits `ButtonInput<KeyCode>` (for
-        // `handle_chat_submit`'s own tests); `update_action_state` also
-        // reads mouse buttons, which nothing else in this test module needs.
         app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
         app.add_systems(
             Update,
@@ -1978,13 +2014,8 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::F5);
         app.update();
-        assert!(
-            app.world().resource::<ChatUiState>().collapsed,
-            "F5 (ToggleChat) must collapse the chat panel"
-        );
+        assert!(app.world().resource::<ChatUiState>().collapsed);
 
-        // Fresh press edge for the second toggle (a still-held key has no
-        // NEW `just_pressed` edge next frame).
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .reset(KeyCode::F5);
@@ -1992,37 +2023,23 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::F5);
         app.update();
-        assert!(
-            !app.world().resource::<ChatUiState>().collapsed,
-            "a second F5 press must restore it"
-        );
+        assert!(!app.world().resource::<ChatUiState>().collapsed);
     }
 
-    /// BL-82 EM-5.17 Phase 0 regression (ecs-design-reviewer BLOCKER): once
-    /// the chat input box gains [`InputFocus`], [`text_input_focused`] must
-    /// stay `true` forever UNLESS something explicitly blurs it —
-    /// [`blur_chat_input_on_escape`] is that path. Unlike the other new
-    /// tests in this module (which hand-insert focus and never simulate
-    /// "focus, then look away"), this one drives the full
-    /// focus → suppressed → Escape → un-suppressed lifecycle the reviewer
-    /// found nothing previously covered.
+    // ---- focus lifecycle ---------------------------------------------------
+
     #[test]
     fn escape_blurs_the_chat_input_and_lifts_the_typing_guard() {
         let mut app = new_app();
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("")))
-            .id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.insert_resource(InputFocus::from_entity(input));
 
         assert!(
             app.world_mut()
                 .run_system_once(text_input_focused)
-                .expect("condition runs"),
-            "text_input_focused must be true while the chat input holds focus"
+                .expect("condition runs")
         );
 
-        // Escape, while chat holds focus, must blur it.
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::Escape);
@@ -2034,19 +2051,14 @@ mod tests {
             !app.world_mut()
                 .run_system_once(text_input_focused)
                 .expect("condition runs"),
-            "Escape must clear InputFocus, lifting the typing guard so gated hotkeys \
-             (Diary/Inventory/Map/Social) fire again — without this, the FIRST chat message of a \
-             session would suppress them permanently"
+            "Escape must clear InputFocus, lifting the typing guard"
         );
     }
 
-    /// [`blur_chat_input_on_escape`] must be a no-op when the chat input
-    /// does NOT currently hold focus — it must not clear an unrelated
-    /// widget's focus, nor panic when nothing is focused at all.
     #[test]
     fn escape_without_chat_focus_does_not_clear_an_unrelated_focus() {
         let mut app = new_app();
-        app.world_mut().spawn((ChatInputBox, EditableText::new("")));
+        app.world_mut().spawn(ChatInputBox);
         let other = app.world_mut().spawn_empty().id();
         app.insert_resource(InputFocus::from_entity(other));
 
@@ -2057,48 +2069,16 @@ mod tests {
             .run_system_once(blur_chat_input_on_escape)
             .expect("system runs");
 
-        assert_eq!(
-            app.world().resource::<InputFocus>().get(),
-            Some(other),
-            "Escape must only blur the CHAT input, not whatever else happens to be focused"
-        );
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(other));
     }
 
-    /// [`handle_chat_minimize_click`] flips [`ChatUiState::collapsed`] on
-    /// each activation (a toggle, not a one-way close) — verified directly
-    /// rather than via a real `Activate` trigger (matching this file's own
-    /// `tab_click_updates_filter_and_conditionally_the_send_channel` test,
-    /// which exercises `handle_tab_click`'s logic the same indirect way).
-    #[test]
-    fn minimize_click_toggles_collapsed_each_time() {
-        let mut app = new_app();
-        assert!(!app.world().resource::<ChatUiState>().collapsed);
-
-        app.world_mut()
-            .run_system_once(|mut state: ResMut<ChatUiState>| state.collapsed = !state.collapsed)
-            .expect("system runs");
-        assert!(app.world().resource::<ChatUiState>().collapsed);
-
-        app.world_mut()
-            .run_system_once(|mut state: ResMut<ChatUiState>| state.collapsed = !state.collapsed)
-            .expect("system runs again");
-        assert!(!app.world().resource::<ChatUiState>().collapsed);
-    }
-
-    /// **The root-cause regression test for "minimizing chat leaves the
-    /// camera unresponsive."** [`blur_chat_input_on_collapse`] must clear
-    /// [`InputFocus`] the moment [`ChatUiState::collapsed`] flips `true`
-    /// WHILE the input box holds it — before this fix, nothing cleared it at
-    /// all, so `text_input_focused`/`update_cursor_free`'s `chat_focused`
-    /// kept reporting the hidden box as focused forever, permanently forcing
-    /// the OS cursor free.
+    /// **Root-cause regression test for "minimizing chat leaves the camera
+    /// unresponsive."** Collapsing while the box holds focus must clear
+    /// `InputFocus`.
     #[test]
     fn collapsing_chat_blurs_the_focused_input_box() {
         let mut app = new_app();
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("")))
-            .id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.insert_resource(InputFocus::from_entity(input));
 
         app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
@@ -2109,76 +2089,40 @@ mod tests {
         assert_eq!(
             app.world().resource::<InputFocus>().get(),
             None,
-            "minimizing chat while it holds focus must clear InputFocus, or the cursor stays \
-             stuck free/ungrabbed forever (camera never responds)"
+            "minimizing chat while it holds focus must clear InputFocus"
         );
     }
 
-    /// [`blur_chat_input_on_collapse`] must be a no-op while the panel is
-    /// NOT collapsed (must not clear focus just because the resource
-    /// happened to change for some other reason), and must not panic when
-    /// the box isn't focused in the first place.
     #[test]
     fn blur_on_collapse_is_a_no_op_while_expanded_or_unfocused() {
         let mut app = new_app();
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("")))
-            .id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.insert_resource(InputFocus::from_entity(input));
 
-        // Still expanded: must not touch focus.
         app.world_mut()
             .run_system_once(blur_chat_input_on_collapse)
             .expect("system runs");
         assert_eq!(app.world().resource::<InputFocus>().get(), Some(input));
 
-        // Collapsed but focus already elsewhere: must not panic or clobber it.
         let other = app.world_mut().spawn_empty().id();
         app.insert_resource(InputFocus::from_entity(other));
         app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
         app.world_mut()
             .run_system_once(blur_chat_input_on_collapse)
             .expect("system runs");
-        assert_eq!(
-            app.world().resource::<InputFocus>().get(),
-            Some(other),
-            "collapsing must only ever clear the CHAT input's own focus"
-        );
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(other));
     }
 
-    /// [`blur_chat_input_on_collapse`]'s edge-detector must fire exactly
-    /// once on the real false-to-true transition — a later unrelated
-    /// `ChatUiState` write made while ALREADY collapsed must not re-run the
-    /// blur (which would otherwise clobber a focus the player legitimately
-    /// re-acquired via [`focus_chat_via_hotkey`] while still collapsed, e.g.
-    /// mid-frame ordering edges).
-    ///
-    /// Driven via `add_systems` + repeated `app.update()` (NOT
-    /// `run_system_once`, called twice): the `Local<bool>` edge-detector only
-    /// persists across real scheduled frames — a fresh `run_system_once`
-    /// call constructs a brand-new system (and a fresh, defaulted `Local`)
-    /// every time, which would silently defeat the exact edge-vs-level
-    /// distinction this test exists to pin.
     #[test]
     fn blur_on_collapse_only_fires_on_the_edge_not_every_frame_while_collapsed() {
         let mut app = new_app();
         app.init_resource::<InputFocus>();
         app.add_systems(Update, blur_chat_input_on_collapse);
 
-        // Frame 1: collapse for the first time — the edge-detector consumes it.
         app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
         app.update();
 
-        // Frame 2: focus chat again while STILL collapsed (e.g.
-        // `focus_chat_via_hotkey` ran earlier this same frame in the real
-        // app), then make an UNRELATED `ChatUiState` write (a tab click's
-        // view filter). `collapsed` never went false-then-true again, so
-        // the edge-detector must not re-fire and clobber this focus.
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("")))
-            .id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.insert_resource(InputFocus::from_entity(input));
         app.world_mut().resource_mut::<ChatUiState>().view_filter = Some(NetChatChannel::Say);
         app.update();
@@ -2190,16 +2134,11 @@ mod tests {
         );
     }
 
-    /// **The root-cause regression test for "chat can never be refocused
-    /// again."** [`focus_chat_via_hotkey`] ([`GameInput::Chat`], `Enter` by
-    /// default) must set [`InputFocus`] onto the chat input box directly —
-    /// the ONLY keyboard-only path onto it — and un-collapse the panel first
-    /// if it was minimized. Driven through the REAL
-    /// `xindeler_input::action_state::update_action_state` resolver, matching
-    /// `toggle_chat_via_hotkey_flips_collapsed`'s own test shape.
+    /// **Root-cause regression test for "chat can never be refocused again."**
+    /// Enter ([`GameInput::Chat`]) sets `InputFocus` onto the box directly and
+    /// un-collapses the panel — the only keyboard-only path in.
     #[test]
     fn enter_focuses_the_chat_input_and_uncollapses_the_panel() {
-        use bevy::input::keyboard::KeyCode;
         use xindeler_input::{KeyMap, action_state::update_action_state};
 
         let mut app = new_app();
@@ -2207,10 +2146,7 @@ mod tests {
         app.insert_resource(ActionState::default());
         app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
         app.init_resource::<InputFocus>();
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("")))
-            .id();
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
         app.add_systems(Update, (update_action_state, focus_chat_via_hotkey).chain());
 
@@ -2222,38 +2158,162 @@ mod tests {
         assert_eq!(
             app.world().resource::<InputFocus>().get(),
             Some(input),
-            "Enter must focus the chat input box directly, with no click required — the only way \
-             back in once the mouse cursor is grabbed for mouselook and nothing else is open"
+            "Enter must focus the chat input box directly, no click required"
         );
         assert!(
             !app.world().resource::<ChatUiState>().collapsed,
-            "Enter must also un-collapse a minimized panel — the key always \"just works\", \
-             matching legacy's single unified chat key"
+            "Enter must also un-collapse a minimized panel"
         );
     }
 
-    /// [`focus_chat_via_hotkey`] must be a no-op while the box is ALREADY
-    /// focused — [`handle_chat_submit`]'s own Enter path owns that case
-    /// (submitting the line), so the two must never fight over the same
-    /// keypress. Driven through the real resolver, same shape as
-    /// [`enter_focuses_the_chat_input_and_uncollapses_the_panel`].
+    /// Fires a synthetic [`Pointer<Click>`] at `entity` through the REAL
+    /// entity-scoped observer wiring (`world.trigger(..)`), matching this
+    /// crate's established convention (see `inventory_ui`'s own
+    /// `fire_pointer_click`). It exercises the observer plus its focus logic on
+    /// the genuinely-spawned box entity — a deliberate step above the prior
+    /// attempts' "hand-set `InputFocus` and assert" — without needing a live
+    /// window, camera, or picking-backend hit-test (the inert
+    /// `NormalizedRenderTarget::None` target and `Entity::PLACEHOLDER` hit are
+    /// placeholders). The fully-real pixel-to-picking-to-click path is covered
+    /// live by `chat_focus_smoke_verify`.
+    fn fire_pointer_click(world: &mut World, entity: Entity) {
+        use bevy::picking::{
+            backend::HitData,
+            pointer::{Location, PointerButton, PointerId},
+        };
+
+        let location = Location {
+            target: bevy::camera::NormalizedRenderTarget::None {
+                width: 0,
+                height: 0,
+            },
+            position: Vec2::ZERO,
+        };
+        let click = Click {
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        };
+        world.trigger(Pointer::new_without_propagate(
+            PointerId::Mouse,
+            location,
+            click,
+            entity,
+        ));
+    }
+
+    /// **The click-driven focus path — the coverage every one of the three
+    /// prior "fixes" (PRs #102/#141/#149) was missing.** They only ever tested
+    /// Enter-driven focus; Matías reported the box being unfocusable by *click*
+    /// specifically. A real `Pointer<Click>` at the actually-spawned input box
+    /// must set `InputFocus` onto it AND un-collapse a minimized panel — the
+    /// mouse counterpart to
+    /// `enter_focuses_the_chat_input_and_uncollapses_the_panel`.
+    #[test]
+    fn clicking_the_input_box_focuses_chat_and_uncollapses_the_panel() {
+        let mut app = new_app();
+        app.init_resource::<InputFocus>();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+
+        let input = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<ChatInputBox>>()
+                .single(world)
+                .expect("ChatInputBox exists")
+        };
+        // Start from the worst case: collapsed AND unfocused.
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            None,
+            "precondition: nothing focused"
+        );
+
+        fire_pointer_click(app.world_mut(), input);
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(input),
+            "a real Pointer<Click> on the input box must focus it — the click path, not just Enter"
+        );
+        assert!(
+            !app.world().resource::<ChatUiState>().collapsed,
+            "clicking the box must also un-collapse the panel"
+        );
+    }
+
+    /// A click can only *reach* the input box if the placeholder overlaid on
+    /// top of it does not intercept the pointer. The placeholder must carry
+    /// `Pickable::IGNORE` and the box must stay default-pickable (no `Pickable`
+    /// override) — the component-level guard for the click pass-through the
+    /// live picking backend relies on.
+    #[test]
+    fn placeholder_ignores_pointer_so_the_click_reaches_the_box() {
+        use bevy::picking::Pickable;
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+
+        let world = app.world_mut();
+        let placeholder = world
+            .query_filtered::<Entity, With<ChatInputPlaceholder>>()
+            .single(world)
+            .expect("placeholder exists");
+        let input = world
+            .query_filtered::<Entity, With<ChatInputBox>>()
+            .single(world)
+            .expect("input box exists");
+
+        assert_eq!(
+            world.get::<Pickable>(placeholder).copied(),
+            Some(Pickable::IGNORE),
+            "the placeholder must be Pickable::IGNORE so a click passes through to the box"
+        );
+        assert!(
+            world.get::<Pickable>(input).is_none(),
+            "the input box must stay default-pickable (no Pickable override) so the picking \
+             backend hit-tests it"
+        );
+    }
+
+    /// The blank/0px root cause of "the box renders empty and can't be
+    /// clicked": an empty `Text` node collapses to ~0px. The box must carry
+    /// a `min_height` floor so it is always a visible, clickable rectangle
+    /// even while empty.
+    #[test]
+    fn input_box_has_a_min_height_floor_so_it_is_clickable_while_empty() {
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+
+        let world = app.world_mut();
+        let input = world
+            .query_filtered::<Entity, With<ChatInputBox>>()
+            .single(world)
+            .expect("input box exists");
+        assert_eq!(
+            world.get::<Node>(input).unwrap().min_height,
+            Val::Px(INPUT_MIN_HEIGHT_PX),
+            "the empty input box must keep a non-zero min height or it collapses to an \
+             unclickable, invisible 0px line"
+        );
+    }
+
     #[test]
     fn enter_while_already_focused_does_not_reset_the_focus_cause() {
-        use bevy::input::keyboard::KeyCode;
         use xindeler_input::{KeyMap, action_state::update_action_state};
 
         let mut app = new_app();
         app.insert_resource(KeyMap::default());
         app.insert_resource(ActionState::default());
         app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("hello")))
-            .id();
-        // `FocusCause::Pressed` (as a real click would leave it) — if
-        // `focus_chat_via_hotkey` wrongly re-focused, it would flip this to
-        // `Navigated`, which downstream widget behaviour (e.g. select-all-on-
-        // navigate) treats differently.
+        let input = app.world_mut().spawn(ChatInputBox).id();
         app.insert_resource(InputFocus::default());
         app.world_mut()
             .resource_mut::<InputFocus>()
@@ -2265,13 +2325,11 @@ mod tests {
             .press(KeyCode::Enter);
         app.update();
 
-        // Focus is unchanged (still Pressed on the same entity) — no-op.
         assert_eq!(app.world().resource::<InputFocus>().get(), Some(input));
     }
 
-    /// [`parse_slash_command`]: a leading `/` splits into a command name +
-    /// whitespace-separated args; anything without a leading `/` is `None`
-    /// (a plain channel-tab line instead).
+    // ---- command parsing / completion --------------------------------------
+
     #[test]
     fn parses_slash_commands_and_rejects_plain_lines() {
         assert_eq!(
@@ -2289,17 +2347,10 @@ mod tests {
         assert_eq!(parse_slash_command("hello there"), None);
     }
 
-    /// [`matching_commands`]/[`replace_command_name`]: Tab-completion finds
-    /// every candidate starting with the typed prefix and swaps ONLY the
-    /// command-name token, leaving the rest of the line untouched.
     #[test]
     fn command_completion_matches_prefix_and_preserves_the_rest_of_the_line() {
-        let matches = matching_commands("s");
-        assert_eq!(matches, vec!["say"]);
-
-        let matches_r = matching_commands("r");
-        assert_eq!(matches_r, vec!["region"]);
-
+        assert_eq!(matching_commands("s"), vec!["say"]);
+        assert_eq!(matching_commands("r"), vec!["region"]);
         assert_eq!(
             replace_command_name("/w Bob hello", "world"),
             "/world Bob hello"
@@ -2307,146 +2358,33 @@ mod tests {
         assert_eq!(replace_command_name("/sa", "say"), "/say");
     }
 
-    /// [`handle_chat_submit`]'s Enter path: a plain line (no leading `/`)
-    /// sends a `Channel` request using the CURRENT `send_channel`; the input
-    /// box is cleared afterward.
+    /// Tab completion cycles the command-name token in place on the buffer.
     #[test]
-    fn enter_on_a_plain_line_sends_a_channel_request_and_clears_the_box() {
-        let mut app = new_app();
-        app.world_mut().resource_mut::<ChatUiState>().send_channel = NetChatChannel::Region;
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("hello there")))
-            .id();
-        app.insert_resource(InputFocus::from_entity(input));
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
-
-        app.world_mut()
-            .run_system_once(handle_chat_submit)
-            .expect("system runs");
-
-        let sent: Vec<_> = app
-            .world_mut()
-            .resource_mut::<Messages<ChatSendRequest>>()
-            .drain()
-            .collect();
-        assert_eq!(sent, vec![ChatSendRequest::Channel {
-            channel: NetChatChannel::Region,
-            text: "hello there".to_owned(),
-        }]);
-        assert_eq!(
-            app.world()
-                .get::<EditableText>(input)
-                .unwrap()
-                .value()
-                .to_string(),
-            "",
-            "the input box must clear after sending"
-        );
+    fn tab_completion_cycles_the_command_name_on_the_buffer() {
+        let mut ci = ChatInput::default();
+        ci.set_line("/w hi".to_owned());
+        complete_command(&mut ci);
+        assert_eq!(ci.buffer, "/world hi");
+        assert_eq!(ci.cursor, ci.buffer.len());
     }
 
-    /// A leading `/` bypasses the channel tabs entirely and sends a raw
-    /// `Command` request.
-    #[test]
-    fn enter_on_a_slash_command_sends_a_command_request() {
-        let mut app = new_app();
-        let input = app
-            .world_mut()
-            .spawn((ChatInputBox, EditableText::new("/tell Bob hi")))
-            .id();
-        app.insert_resource(InputFocus::from_entity(input));
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
+    // ---- responsive sizing -------------------------------------------------
 
-        app.world_mut()
-            .run_system_once(handle_chat_submit)
-            .expect("system runs");
-
-        let sent: Vec<_> = app
-            .world_mut()
-            .resource_mut::<Messages<ChatSendRequest>>()
-            .drain()
-            .collect();
-        assert_eq!(sent, vec![ChatSendRequest::Command {
-            name: "tell".to_owned(),
-            args: vec!["Bob".to_owned(), "hi".to_owned()],
-        }]);
-    }
-
-    /// Enter is ignored while the input box does NOT have keyboard focus —
-    /// no message is sent.
-    #[test]
-    fn enter_without_focus_sends_nothing() {
-        let mut app = new_app();
-        app.world_mut()
-            .spawn((ChatInputBox, EditableText::new("hello")));
-        // Deliberately no `InputFocus` pointing at the input box.
-        app.init_resource::<InputFocus>();
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
-
-        app.world_mut()
-            .run_system_once(handle_chat_submit)
-            .expect("system runs");
-
-        let sent: Vec<_> = app
-            .world_mut()
-            .resource_mut::<Messages<ChatSendRequest>>()
-            .drain()
-            .collect();
-        assert!(sent.is_empty(), "no message may send without focus");
-    }
-
-    /// [`chat_scroll_height`]: grows with window height but stays within
-    /// [`MIN_SCROLL_HEIGHT_PX`]/[`MAX_SCROLL_HEIGHT_PX`] at both extremes —
-    /// the "taller" half of Matías's "narrower and taller" ask, bounded so a
-    /// tiny window doesn't collapse the scrollback to nothing and a huge one
-    /// doesn't grow it without limit (BL-82 HUD-responsive-scaling pass).
     #[test]
     fn chat_scroll_height_clamps_and_grows_with_window_height() {
         assert_eq!(chat_scroll_height(100.0), MIN_SCROLL_HEIGHT_PX);
         assert_eq!(chat_scroll_height(4000.0), MAX_SCROLL_HEIGHT_PX);
-
         let short = chat_scroll_height(600.0);
         let tall = chat_scroll_height(900.0);
         assert!(
             tall > short,
-            "a taller window must yield a taller scrollback ({tall} was not > {short})"
+            "a taller window must yield a taller scrollback"
         );
     }
 
-    /// **The BL-82 HUD-responsive-scaling pass's core acceptance test**:
-    /// Matías's live-testing report was "at a small/reduced window size, the
-    /// health orb and the chat dialog box overlap." This asserts the chat
-    /// panel's real on-screen AABB (`PANEL_LEFT_PX`/`PANEL_BOTTOM_PX`/
-    /// `PANEL_WIDTH` + a total height built from `chat_scroll_height` plus a
-    /// generous chrome overestimate for the header/tab/input rows
-    /// `spawn_chat_panel` also spawns) never intersects the KNOWN health-orb
-    /// bounding box (`hud_layout::health_orb_screen_x` +
-    /// `hud_layout::CLUSTER_BOTTOM_PX`/`ORB_SIZE_PX`) at a spread of window
-    /// sizes: the project's own default (1280×720), a couple of
-    /// progressively smaller "reduced" sizes, and a genuinely tiny one.
     #[test]
     fn chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size() {
-        // Deliberately generous (an overestimate, never an underestimate) —
-        // `spawn_chat_panel`'s header row (button + margin) + tab row
-        // (button + margin) + input row (text/box + padding) on top of the
-        // scrollback itself. Erring tall here only ever makes this test
-        // STRICTER than the real spawned panel, never looser.
         const CHROME_HEIGHT_PX: f32 = 140.0;
-
-        // (width, height) — 1280x720 is the project's own literal default
-        // (`main.rs`'s `WindowResolution::new(1280, 720)`) and already reads
-        // as "small" against the ~1196px-wide orb cluster (BL-82 HUD polish
-        // round 3 widened this from ~1013px — see
-        // `hud_layout::health_orb_screen_x`'s doc comment) — exactly the
-        // size Matías's report was reproducing against. 960x540 and 800x600
-        // are progressively more "reduced"; 480x320 is the genuinely tiny
-        // floor this test also covers.
         let window_sizes: &[(f32, f32)] = &[
             (1280.0, 720.0),
             (960.0, 540.0),
@@ -2471,17 +2409,11 @@ mod tests {
 
             assert!(
                 !(x_overlaps && y_overlaps),
-                "chat panel [{chat_left}, {chat_right}] x [{chat_bottom_from_bottom}, \
-                 {chat_top_from_bottom}] overlaps the health orb [{orb_left}, {orb_right}] x \
-                 [{orb_bottom_from_bottom}, {orb_top_from_bottom}] at window size {width}x{height}"
+                "chat panel overlaps the health orb at window size {width}x{height}"
             );
         }
     }
 
-    /// [`sync_chat_scroll_height_to_window`]: a LIVE window resize (not just
-    /// the size at `Startup`) updates the scroll area's real `Node::height`
-    /// — without this, `spawn_chat_panel`'s one-shot height would stay
-    /// pinned at whatever the window was when the app booted.
     #[test]
     fn sync_chat_scroll_height_to_window_tracks_a_live_resize() {
         let mut app = new_app();
@@ -2500,8 +2432,6 @@ mod tests {
             }))
             .id();
 
-        // Resize to a much taller window — the scrollback must grow to
-        // match (clamped at `MAX_SCROLL_HEIGHT_PX`).
         app.world_mut()
             .get_mut::<Window>(window_entity)
             .unwrap()
@@ -2511,10 +2441,6 @@ mod tests {
             .expect("system runs");
 
         let node = app.world().get::<Node>(scroll_area).unwrap();
-        assert_eq!(
-            node.height,
-            Val::Px(chat_scroll_height(2000.0)),
-            "the scrollback must track a LIVE window resize, not just the size at Startup"
-        );
+        assert_eq!(node.height, Val::Px(chat_scroll_height(2000.0)));
     }
 }
