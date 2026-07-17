@@ -34,7 +34,10 @@
 //!   (server-side `render_content` fallback covers it — EM-5.16's job).
 
 use bevy::{
-    color::Alpha as _, input_focus::InputFocus, prelude::*, text::EditableText,
+    color::Alpha as _,
+    input_focus::{FocusCause, InputFocus},
+    prelude::*,
+    text::EditableText,
     window::PrimaryWindow,
 };
 use xindeler_input::{ActionState, GameInput};
@@ -320,6 +323,26 @@ impl Plugin for ChatViewPlugin {
                 // requires — ecs-design-reviewer BLOCKER fix, see
                 // `blur_chat_input_on_escape`'s own doc comment.
                 blur_chat_input_on_escape,
+                // Same blur, but for the OTHER transition that can hide the
+                // input box (minimizing the panel) — see
+                // `blur_chat_input_on_collapse`'s own doc comment for the
+                // live-tested regression this fixes. Ordered after the
+                // hotkey toggle so an F5 press collapses AND blurs in the
+                // SAME frame, not one frame late (the other collapse
+                // source, `handle_chat_minimize_click`, is an `Activate`
+                // observer, not an ordinary `Update` system, so it isn't
+                // orderable here the same way — its effect is picked up via
+                // the `Local<bool>` edge-detector on whichever frame runs
+                // next, which is what that detector is for).
+                blur_chat_input_on_collapse.after(toggle_chat_via_hotkey),
+                // The keyboard-only path back onto `InputFocus` — see its
+                // own doc comment for the permanent-lockout regression this
+                // closes. Must run after `handle_chat_submit` so a fresh
+                // Enter can never both refocus AND re-submit stale text in
+                // the same frame (see that ordering note there).
+                focus_chat_via_hotkey
+                    .after(xindeler_input::InputResolveSet)
+                    .after(handle_chat_submit),
             ),
         );
     }
@@ -839,6 +862,117 @@ fn blur_chat_input_on_escape(
     if focus.get() == Some(input_entity) {
         focus.clear();
     }
+}
+
+/// Clears [`InputFocus`] the moment [`ChatUiState::collapsed`] transitions to
+/// `true` WHILE the input box holds it — the same "a state transition hid the
+/// focused widget, so drop the now-stale focus reference" fix
+/// [`blur_chat_input_on_escape`] already applies to Escape, ported to the
+/// OTHER transition that hides the box: minimizing the panel (the header
+/// button click, [`handle_chat_minimize_click`], or the
+/// [`GameInput::ToggleChat`] hotkey, [`toggle_chat_via_hotkey`] — both only
+/// flip the same `bool`, so watching the resource for the edge covers either
+/// source uniformly).
+///
+/// **Root cause this closes** (BL-82, live-tested regression, Matías: "after
+/// I minimize/hide chat, the camera stops responding"): before this fix,
+/// `sync_chat_collapsed` set the input row's `Node::display = Display::None`
+/// but left [`InputFocus`] untouched. [`text_input_focused`] and
+/// `crate::cursor::update_cursor_free`'s mirrored `chat_focused` predicate
+/// only compare entity IDs, not visibility — so both kept reporting the
+/// (now-hidden, unreachable) box as "focused" indefinitely. Since
+/// `update_cursor_free` frees the OS cursor whenever `chat_focused` is `true`,
+/// the cursor stayed permanently free/ungrabbed (never re-grabbing for
+/// mouselook) for as long as that stale focus lingered — camera control
+/// looked "unresponsive" because it genuinely was blocked, not laggy. The
+/// player could previously only escape this by discovering that Escape (an
+/// UNRELATED code path, [`blur_chat_input_on_escape`]) happened to also clear
+/// it; this system fixes the actual transition directly, so minimizing chat
+/// restores camera control immediately, with no detour required.
+///
+/// A `Local<bool>` edge-detector (not `ChatUiState::is_changed()` + the
+/// current value) is deliberate: `is_changed()` also fires on unrelated field
+/// writes (a tab click updating `view_filter`/`send_channel`) while
+/// `collapsed` happens to ALREADY be `true` from an earlier frame — reacting
+/// to the CURRENT value on every such change would re-clear focus on every
+/// unrelated `ChatUiState` write made while collapsed, not only on the actual
+/// collapse transition. The edge-detector fires exactly once, on the real
+/// false-to-true transition, regardless of which system caused it.
+fn blur_chat_input_on_collapse(
+    state: Res<ChatUiState>,
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    mut was_collapsed: Local<bool>,
+) {
+    let just_collapsed = state.collapsed && !*was_collapsed;
+    *was_collapsed = state.collapsed;
+    if !just_collapsed {
+        return;
+    }
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    if focus.get() == Some(input_entity) {
+        focus.clear();
+    }
+}
+
+/// [`GameInput::Chat`] (`Enter` by default) focuses the chat input box
+/// directly — ported from legacy `xindeler-old`'s own
+/// `WinEvent::InputUpdate(GameInput::Chat, true)` handler
+/// (`voxygen/src/hud/mod.rs`), which calls `Hud::focus_widget(Some(self.ids.
+/// chat))` on the exact same key. This is the ONLY keyboard-driven path onto
+/// [`InputFocus`] this whole module has: every other way it's ever set is
+/// `bevy_ui_widgets`'s own pointer-press observer — a CLICK, which only works
+/// while the OS cursor is free.
+///
+/// **Root cause this closes** (BL-82, live-tested regression, Matías: "once
+/// chat loses focus, I can never type in it again for the rest of the
+/// session"): `crate::cursor::update_cursor_free` only frees the cursor for
+/// chat's sake WHILE the input box already holds focus, or while some
+/// unrelated `HudState` window happens to be open — chat itself is
+/// deliberately NOT a `HudState` window (see [`ChatUiState`]'s own doc
+/// comment), so nothing else ever frees the cursor on the panel's behalf.
+/// The instant the box loses focus (for ANY reason) while the cursor is
+/// grabbed for mouselook and nothing else is open, a mouse click can never
+/// reach the box again: the cursor is hidden/locked, so no click lands on
+/// the always-visible minimize/restore button or the box itself, and
+/// nothing re-frees the cursor purely for chat — a genuine, permanent
+/// dead end, exactly as reported. Legacy never had this problem because its
+/// equivalent key focuses the widget directly, bypassing the cursor
+/// entirely; this system ports that same fix. Once it sets [`InputFocus`]
+/// here, the very next frame's `update_cursor_free` observes `chat_focused =
+/// true` and frees the cursor for real — no click required to close the
+/// loop.
+///
+/// Un-collapses the panel first if it was minimized (Enter "just works"
+/// regardless of visibility, matching legacy's single unified key). A no-op
+/// while the box is ALREADY focused — [`handle_chat_submit`]'s own raw
+/// `KeyCode::Enter` check owns THAT case (it submits the line); ordering
+/// this system `.after(handle_chat_submit)` guarantees the two never fight
+/// over the same keypress; on the frame chat is refocused,
+/// `handle_chat_submit` still observes the PRE-refocus state and correctly
+/// no-ops (not yet focused), so a fresh Enter can never both refocus AND
+/// immediately re-submit stale leftover text in the same frame.
+fn focus_chat_via_hotkey(
+    action_state: Res<ActionState>,
+    mut state: ResMut<ChatUiState>,
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
+    if !action_state.just_pressed(GameInput::Chat) {
+        return;
+    }
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    if focus.get() == Some(input_entity) {
+        return;
+    }
+    if state.collapsed {
+        state.collapsed = false;
+    }
+    focus.set(input_entity, FocusCause::Navigated);
 }
 
 /// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
@@ -1498,6 +1632,190 @@ mod tests {
             .run_system_once(|mut state: ResMut<ChatUiState>| state.collapsed = !state.collapsed)
             .expect("system runs again");
         assert!(!app.world().resource::<ChatUiState>().collapsed);
+    }
+
+    /// **The root-cause regression test for "minimizing chat leaves the
+    /// camera unresponsive."** [`blur_chat_input_on_collapse`] must clear
+    /// [`InputFocus`] the moment [`ChatUiState::collapsed`] flips `true`
+    /// WHILE the input box holds it — before this fix, nothing cleared it at
+    /// all, so `text_input_focused`/`update_cursor_free`'s `chat_focused`
+    /// kept reporting the hidden box as focused forever, permanently forcing
+    /// the OS cursor free.
+    #[test]
+    fn collapsing_chat_blurs_the_focused_input_box() {
+        let mut app = new_app();
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.insert_resource(InputFocus::from_entity(input));
+
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_collapse)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            None,
+            "minimizing chat while it holds focus must clear InputFocus, or the cursor stays \
+             stuck free/ungrabbed forever (camera never responds)"
+        );
+    }
+
+    /// [`blur_chat_input_on_collapse`] must be a no-op while the panel is
+    /// NOT collapsed (must not clear focus just because the resource
+    /// happened to change for some other reason), and must not panic when
+    /// the box isn't focused in the first place.
+    #[test]
+    fn blur_on_collapse_is_a_no_op_while_expanded_or_unfocused() {
+        let mut app = new_app();
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.insert_resource(InputFocus::from_entity(input));
+
+        // Still expanded: must not touch focus.
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_collapse)
+            .expect("system runs");
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(input));
+
+        // Collapsed but focus already elsewhere: must not panic or clobber it.
+        let other = app.world_mut().spawn_empty().id();
+        app.insert_resource(InputFocus::from_entity(other));
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.world_mut()
+            .run_system_once(blur_chat_input_on_collapse)
+            .expect("system runs");
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(other),
+            "collapsing must only ever clear the CHAT input's own focus"
+        );
+    }
+
+    /// [`blur_chat_input_on_collapse`]'s edge-detector must fire exactly
+    /// once on the real false-to-true transition — a later unrelated
+    /// `ChatUiState` write made while ALREADY collapsed must not re-run the
+    /// blur (which would otherwise clobber a focus the player legitimately
+    /// re-acquired via [`focus_chat_via_hotkey`] while still collapsed, e.g.
+    /// mid-frame ordering edges).
+    ///
+    /// Driven via `add_systems` + repeated `app.update()` (NOT
+    /// `run_system_once`, called twice): the `Local<bool>` edge-detector only
+    /// persists across real scheduled frames — a fresh `run_system_once`
+    /// call constructs a brand-new system (and a fresh, defaulted `Local`)
+    /// every time, which would silently defeat the exact edge-vs-level
+    /// distinction this test exists to pin.
+    #[test]
+    fn blur_on_collapse_only_fires_on_the_edge_not_every_frame_while_collapsed() {
+        let mut app = new_app();
+        app.init_resource::<InputFocus>();
+        app.add_systems(Update, blur_chat_input_on_collapse);
+
+        // Frame 1: collapse for the first time — the edge-detector consumes it.
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.update();
+
+        // Frame 2: focus chat again while STILL collapsed (e.g.
+        // `focus_chat_via_hotkey` ran earlier this same frame in the real
+        // app), then make an UNRELATED `ChatUiState` write (a tab click's
+        // view filter). `collapsed` never went false-then-true again, so
+        // the edge-detector must not re-fire and clobber this focus.
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.insert_resource(InputFocus::from_entity(input));
+        app.world_mut().resource_mut::<ChatUiState>().view_filter = Some(NetChatChannel::Say);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(input),
+            "an unrelated ChatUiState write while already collapsed must not re-clear focus"
+        );
+    }
+
+    /// **The root-cause regression test for "chat can never be refocused
+    /// again."** [`focus_chat_via_hotkey`] ([`GameInput::Chat`], `Enter` by
+    /// default) must set [`InputFocus`] onto the chat input box directly —
+    /// the ONLY keyboard-only path onto it — and un-collapse the panel first
+    /// if it was minimized. Driven through the REAL
+    /// `xindeler_input::action_state::update_action_state` resolver, matching
+    /// `toggle_chat_via_hotkey_flips_collapsed`'s own test shape.
+    #[test]
+    fn enter_focuses_the_chat_input_and_uncollapses_the_panel() {
+        use bevy::input::keyboard::KeyCode;
+        use xindeler_input::{KeyMap, action_state::update_action_state};
+
+        let mut app = new_app();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+        app.init_resource::<InputFocus>();
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("")))
+            .id();
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.add_systems(Update, (update_action_state, focus_chat_via_hotkey).chain());
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(input),
+            "Enter must focus the chat input box directly, with no click required — the only way \
+             back in once the mouse cursor is grabbed for mouselook and nothing else is open"
+        );
+        assert!(
+            !app.world().resource::<ChatUiState>().collapsed,
+            "Enter must also un-collapse a minimized panel — the key always \"just works\", \
+             matching legacy's single unified chat key"
+        );
+    }
+
+    /// [`focus_chat_via_hotkey`] must be a no-op while the box is ALREADY
+    /// focused — [`handle_chat_submit`]'s own Enter path owns that case
+    /// (submitting the line), so the two must never fight over the same
+    /// keypress. Driven through the real resolver, same shape as
+    /// [`enter_focuses_the_chat_input_and_uncollapses_the_panel`].
+    #[test]
+    fn enter_while_already_focused_does_not_reset_the_focus_cause() {
+        use bevy::input::keyboard::KeyCode;
+        use xindeler_input::{KeyMap, action_state::update_action_state};
+
+        let mut app = new_app();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+        let input = app
+            .world_mut()
+            .spawn((ChatInputBox, EditableText::new("hello")))
+            .id();
+        // `FocusCause::Pressed` (as a real click would leave it) — if
+        // `focus_chat_via_hotkey` wrongly re-focused, it would flip this to
+        // `Navigated`, which downstream widget behaviour (e.g. select-all-on-
+        // navigate) treats differently.
+        app.insert_resource(InputFocus::default());
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(input, FocusCause::Pressed);
+        app.add_systems(Update, (update_action_state, focus_chat_via_hotkey).chain());
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        app.update();
+
+        // Focus is unchanged (still Pressed on the same entity) — no-op.
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(input));
     }
 
     /// [`parse_slash_command`]: a leading `/` splits into a command name +
