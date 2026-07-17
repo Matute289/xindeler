@@ -144,12 +144,18 @@ fn spawn_combat_hud(
     // ellipse sizing bug (BL-82 EM-5.17 Phase 0 follow-up) by cropping each
     // source PNG's wide canvas down to the square sub-region that actually
     // holds the circular art before it's stretched onto this square orb box.
+    // `hud_layout::ORB_FRAME_SOURCE_CROP` (tighter than the liquid's own
+    // crop) + `hud_layout::LIQUID_INSET_PX` fix the follow-up "liquid sits
+    // smaller than the frame's window" sizing mismatch (BL-82 EM-5.17 Phase 0
+    // SECOND follow-up) — see those constants' own doc comments.
     let health_orb = spawn_orb_bar(
         &mut commands,
         &theme,
         images.get(HudImageKey::HealthLiquid),
         Some(images.get(HudImageKey::OrbFrameAngel)),
         Some(hud_layout::ORB_SOURCE_CROP),
+        Some(hud_layout::ORB_FRAME_SOURCE_CROP),
+        hud_layout::LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -179,6 +185,8 @@ fn spawn_combat_hud(
         images.get(HudImageKey::StaminaLiquid),
         Some(images.get(HudImageKey::OrbFrameStamina)),
         Some(hud_layout::ORB_SOURCE_CROP),
+        Some(hud_layout::ORB_FRAME_SOURCE_CROP),
+        hud_layout::LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -203,6 +211,8 @@ fn spawn_combat_hud(
         images.get(HudImageKey::ManaLiquid),
         Some(images.get(HudImageKey::OrbFrameCuthulhu)),
         Some(hud_layout::ORB_SOURCE_CROP),
+        Some(hud_layout::ORB_FRAME_SOURCE_CROP),
+        hud_layout::LIQUID_INSET_PX,
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -894,6 +904,8 @@ mod tests {
                 images.get(HudImageKey::HealthLiquid),
                 Some(images.get(HudImageKey::OrbFrameAngel)),
                 Some(hud_layout::ORB_SOURCE_CROP),
+                Some(hud_layout::ORB_FRAME_SOURCE_CROP),
+                hud_layout::LIQUID_INSET_PX,
                 hud_layout::ORB_SIZE_PX,
                 hud_layout::ORB_SIZE_PX,
                 BarValue::new(50.0, 100.0),
@@ -942,15 +954,15 @@ mod tests {
             })
             .expect("a HudOrbBarFill grandchild exists");
         let fill_node = app.world().get::<Node>(fill_entity).unwrap();
+        let inset_size = hud_layout::ORB_SIZE_PX - 2.0 * hud_layout::LIQUID_INSET_PX;
         assert_eq!(
             (fill_node.width, fill_node.height),
-            (
-                Val::Px(hud_layout::ORB_SIZE_PX),
-                Val::Px(hud_layout::ORB_SIZE_PX)
-            ),
-            "the liquid image must stay at the orb's FULL fixed size, never the shrinking \
-             fraction — this is the regression this screen's real call site must never reintroduce"
+            (Val::Px(inset_size), Val::Px(inset_size)),
+            "the liquid image must stay at its FIXED inset size, never the shrinking fraction — \
+             this is the regression this screen's real call site must never reintroduce"
         );
+        assert_eq!(fill_node.left, Val::Px(hud_layout::LIQUID_INSET_PX));
+        assert_eq!(fill_node.bottom, Val::Px(hud_layout::LIQUID_INSET_PX));
     }
 
     /// The EM-5.2 acceptance bar (spec §6): spawning a `NetLocalPlayer`
