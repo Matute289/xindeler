@@ -815,8 +815,8 @@ mod tests {
         assert_eq!(
             fill_fraction_of(&mut app, container),
             LOW_FRACTION,
-            "the material's fill_fraction must equal the real fraction even at a low value with \
-             a nonzero liquid_inset_px — this mechanism has no separate clip-window geometry that \
+            "the material's fill_fraction must equal the real fraction even at a low value with a \
+             nonzero liquid_inset_px — this mechanism has no separate clip-window geometry that \
              could go out of sync with the inset, unlike the old CPU-clip mechanism PR #142 fixed"
         );
     }
