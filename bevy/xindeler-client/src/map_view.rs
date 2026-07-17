@@ -635,11 +635,21 @@ fn spawn_map_screens(
         });
 
     // --- Full map: centered overlay, hidden until toggled. ---
+    // BL-82 EM-5.17/5.18 click-routing fix: this is a MODAL window per the
+    // zlayer scheme's own doc comment (diary/inventory/full-map), but it was
+    // spawned WITHOUT the `GlobalZIndex(MODAL_WINDOWS)` its siblings
+    // (`DiaryWindowRoot`) already carry — it sat in the default z-partition
+    // (0), BELOW the always-on ambient chrome that gained its own higher
+    // z-index this phase (hotbar/orbs = ORBS_ACTION_BAR_PARTY_MINIMAP=20).
+    // `bevy_ui` picking resolves the highest z-partition first, so
+    // wherever the full map panel visually overlapped that ambient chrome,
+    // clicks resolved to the chrome in front rather than the map underneath.
     let (fw, fh) = FULL_MAP_PANEL_PX;
     commands
         .spawn((
             FullMapRoot,
             Visibility::Hidden,
+            bevy::ui::GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Percent(50.0),
@@ -1379,6 +1389,35 @@ mod tests {
             .expect("the minimap panel root exists")
             .0;
         assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+    }
+
+    /// BL-82 EM-5.17/5.18 click-routing fix regression: [`FullMapRoot`] is
+    /// one of the three consumers the zlayer scheme's own doc comment names
+    /// for `MODAL_WINDOWS` (diary/inventory/full-map) — pins that it now
+    /// actually carries that `GlobalZIndex`, matching `diary.rs`'s
+    /// `spawn_diary_window_uses_skill_tree_bg_and_modal_z_index` test for
+    /// `DiaryWindowRoot`. Before this fix `FullMapRoot` had NO `GlobalZIndex`
+    /// at all (default z-partition 0), which sat BELOW the ambient chrome
+    /// this same phase gave its own higher z-indices (the minimap panel
+    /// itself included, at `ORBS_ACTION_BAR_PARTY_MINIMAP`=20 — see
+    /// `minimap_panel_carries_the_ambient_chrome_z_index` just above) —
+    /// wherever the full map panel visually overlapped that chrome,
+    /// `bevy_ui` picking (highest z-partition first) routed clicks to the
+    /// chrome in front instead of the map underneath.
+    #[test]
+    fn full_map_root_carries_the_modal_windows_z_index() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&bevy::ui::GlobalZIndex, With<FullMapRoot>>()
+            .single(world)
+            .expect("FullMapRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
     }
 
     /// Regression test for the Phase 3 follow-up (see the module doc's

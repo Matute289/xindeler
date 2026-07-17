@@ -39,6 +39,7 @@ use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
+    zlayer,
 };
 
 /// The curated action set this v1 screen surfaces, grouped for the layout.
@@ -175,6 +176,18 @@ fn sync_window_visibility(
 /// [`CURATED_ACTIONS`] entry, each with a name label, a keyboard/mouse rebind
 /// button, a gamepad rebind button, and an (initially empty) conflict
 /// warning label.
+///
+/// BL-82 EM-5.17/5.18 click-routing fix follow-up: `ControlsScreenRoot` is a
+/// full-screen modal backdrop structurally identical to `DiaryWindowRoot`/
+/// `InventoryWindowRoot`/`EscMenuRoot`/`FullMapRoot` (`Visibility::Hidden`,
+/// `PositionType::Absolute` at 100%x100%, mutually exclusive with those via
+/// `HudState`'s single `open_window` slot) but was missed by that same pass
+/// — it too was spawned without `GlobalZIndex(zlayer::MODAL_WINDOWS)`, so it
+/// sat at the default z-partition (0), BELOW the always-on ambient chrome
+/// (hotbar/orbs = `ORBS_ACTION_BAR_PARTY_MINIMAP`=20): wherever the Controls
+/// screen visually overlapped that chrome, `bevy_ui` picking (highest
+/// z-partition first) routed clicks to the chrome in front instead of the
+/// Controls panel underneath.
 fn spawn_controls_screen(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -189,6 +202,7 @@ fn spawn_controls_screen(
         .spawn((
             ControlsScreenRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
@@ -456,7 +470,46 @@ fn gamepad_binding_label(binding: GamepadBinding) -> String {
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
+
+    /// BL-82 EM-5.17/5.18 click-routing fix regression: `ControlsScreenRoot`
+    /// is a full-screen modal backdrop structurally identical to
+    /// `DiaryWindowRoot`/`InventoryWindowRoot`/`EscMenuRoot`/`FullMapRoot`,
+    /// and pins that it now actually carries `GlobalZIndex(MODAL_WINDOWS)`,
+    /// matching `diary.rs`'s `spawn_diary_window_uses_skill_tree_bg_and_
+    /// modal_z_index` test. Before this fix `ControlsScreenRoot` had NO
+    /// `GlobalZIndex` at all (default z-partition 0) — a same-bug-class miss
+    /// from the pass that fixed the other three siblings — so it sat BELOW
+    /// the always-on ambient chrome (hotbar/orbs =
+    /// `ORBS_ACTION_BAR_PARTY_MINIMAP`=20): wherever the Controls screen
+    /// visually overlapped that chrome, `bevy_ui` picking (highest
+    /// z-partition first) routed clicks to the chrome in front instead of
+    /// the Controls panel underneath.
+    #[test]
+    fn controls_screen_root_carries_the_modal_windows_z_index() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(KeyMap::default());
+
+        app.world_mut()
+            .run_system_once(spawn_controls_screen)
+            .expect("spawn_controls_screen runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<ControlsScreenRoot>>()
+            .single(world)
+            .expect("ControlsScreenRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
 
     #[test]
     fn display_name_spaces_camel_case() {

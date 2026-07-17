@@ -77,6 +77,7 @@ use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
+    zlayer,
 };
 
 use crate::{camera::MainCamera, chat::text_input_focused, targeting::hard_lock_active};
@@ -213,6 +214,18 @@ fn sync_esc_menu_visibility(
 /// Spawns the centred pause panel: a "Game Menu" title, a Resume button, a
 /// "Video" section header, and one labelled toggle button per
 /// [`GraphicsControl`].
+///
+/// BL-82 EM-5.17/5.18 click-routing fix: `EscMenuRoot` is a full-screen modal
+/// backdrop exactly like `DiaryWindowRoot`/`InventoryWindowRoot`/`FullMapRoot`,
+/// but — unlike the diary — it was spawned without `GlobalZIndex(
+/// zlayer::MODAL_WINDOWS)`. Left at the default z-partition (0), it sat
+/// BELOW the always-on ambient HUD chrome once that chrome gained its own
+/// higher z-index this phase (hotbar/orbs = `ORBS_ACTION_BAR_PARTY_MINIMAP`
+/// =20): wherever the pause panel visually overlapped the hotbar,
+/// `bevy_ui` picking (which resolves the highest z-partition first)
+/// routed clicks to that ambient chrome instead of the pause menu underneath
+/// — i.e. opening ESC did not actually block hotbar interaction where they
+/// overlapped.
 fn spawn_esc_menu(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -224,6 +237,7 @@ fn spawn_esc_menu(
         .spawn((
             EscMenuRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
@@ -512,7 +526,46 @@ fn apply_graphics_settings(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
+
+    /// BL-82 EM-5.17/5.18 click-routing fix regression: `EscMenuRoot` is a
+    /// full-screen modal backdrop exactly like `DiaryWindowRoot`/
+    /// `InventoryWindowRoot`/`FullMapRoot`, and pins that it now actually
+    /// carries `GlobalZIndex(MODAL_WINDOWS)`, matching `diary.rs`'s
+    /// `spawn_diary_window_uses_skill_tree_bg_and_modal_z_index` test.
+    /// Before this fix `EscMenuRoot` had NO `GlobalZIndex` at all (default
+    /// z-partition 0) — it sat BELOW the always-on ambient chrome once that
+    /// chrome gained its own higher z-index this phase (hotbar/orbs =
+    /// `ORBS_ACTION_BAR_PARTY_MINIMAP`=20): wherever the pause panel
+    /// visually overlapped the hotbar, `bevy_ui` picking (highest
+    /// z-partition first) routed clicks to that ambient chrome instead of
+    /// the pause menu underneath — i.e. opening ESC did not actually block
+    /// hotbar interaction where they overlapped.
+    #[test]
+    fn esc_menu_root_carries_the_modal_windows_z_index() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+
+        app.world_mut()
+            .run_system_once(spawn_esc_menu)
+            .expect("spawn_esc_menu runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<EscMenuRoot>>()
+            .single(world)
+            .expect("EscMenuRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
 
     /// Escape with nothing open requests the pause menu; Escape with ANY
     /// window open (the pause menu OR another panel like the Diary) requests a
