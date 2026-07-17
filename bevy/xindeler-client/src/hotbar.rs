@@ -453,13 +453,28 @@ fn keybind_badge_bundle(theme: &HudTheme) -> impl Bundle {
 /// dark-mouse-silhouette-with-gold-highlighted-button icons, matching the
 /// HUD-D4 pack's own art style) rather than the `"LMB"`/`"RMB"` text glyph
 /// this replaces.
+///
+/// `Pickable::IGNORE` — same reasoning as [`SkillSlotBorderOverlay`]'s own
+/// doc comment (bevy_picking's default `Pickable` BLOCKS whatever's beneath
+/// an entity that doesn't carry one): without this, hovering exactly over
+/// this small icon would make IT (not the parent `HudSlot`) the hit entity,
+/// silently defeating the slot's own `Hovered` state under this ~20px
+/// corner. No hotbar feature reads `Hovered` today (no tooltip/hover-ring
+/// wired for this screen yet), so this is a latent-not-yet-visible gap
+/// fixed proactively — bevy-migration-reviewer flagged it during round 4's
+/// review — rather than a regression this round introduces.
 fn keybind_icon_bundle(icon: Handle<Image>) -> impl Bundle {
     const ICON_INSET_PX: f32 = 4.0;
-    (HotbarKeybindIcon, ImageNode::new(icon), Node {
-        width: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
-        height: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
-        ..Default::default()
-    })
+    (
+        HotbarKeybindIcon,
+        ImageNode::new(icon),
+        Node {
+            width: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
+            height: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
+            ..Default::default()
+        },
+        bevy::picking::Pickable::IGNORE,
+    )
 }
 
 /// A short, uppercase placeholder glyph for a dotted ability id (e.g.
@@ -789,6 +804,10 @@ fn sync_hotbar_slots(
                                 // clearly-numbered badges in Matías's
                                 // `skill-slots-1.png` reference).
                                 TextColor(theme.palette.text),
+                                // See `keybind_icon_bundle`'s own doc comment
+                                // for why this needs `Pickable::IGNORE` too —
+                                // same latent hover-blocking gap, same fix.
+                                bevy::picking::Pickable::IGNORE,
                             ));
                         });
                 },
