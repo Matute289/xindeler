@@ -550,6 +550,36 @@ fn short_glyph(ability_id: &str) -> String {
 /// writeup), applied as `bottom: Val::Px(CLUSTER_BOTTOM_PX - bottom_pad_px)`
 /// so the real opaque art (not the bounding box) lands flush with the
 /// screen's bottom edge instead of leaving a visible gap above it.
+///
+/// BL-82 HUD polish round 5 FOLLOW-UP — the actual root cause of "orb ↔
+/// action-bar gap is huge no matter what `hud_layout::CLUSTER_GAP_PX`/
+/// `*_MARGIN_PX` says": this `ImageNode` never set `image_mode`, so it
+/// defaulted to `NodeImageMode::Auto`. Per `bevy_ui_render`'s own extraction
+/// code (`extract_uinode_images`), `Auto` does NOT stretch the source image
+/// to the node's box — it scales the image to CONTAIN within the box
+/// (`source * (visual_box.size() / source).min_element()`) and centres the
+/// result, i.e. exactly a CSS `object-fit: contain` + `object-position:
+/// center`. `action_bar_bg_left.png`/`_right.png` are `1380×752` (aspect
+/// `≈1.835`) stretched into a `≈411×160` box (aspect `≈2.569`); `Auto`
+/// therefore renders them at `160 * 1.835 ≈ 293.6px` wide — `≈117px`
+/// NARROWER than the box — centred, leaving a real `≈59px` margin on BOTH
+/// sides no amount of `hud_layout` gap/margin tuning could ever close,
+/// because every one of round 5's `*_MARGIN_PX` constants assumes the art
+/// already fills its box edge-to-edge (true for the orb frames —
+/// `xindeler_ui::bar::spawn_orb_bar` already sets `Stretch` — and now true
+/// for `SkillSlotBorderOverlay` — but this piece was the one place in the
+/// whole cluster that still silently relied on the `Auto` default).
+/// Verified directly: a `--smoke-screenshot` before this line showed a
+/// `≈70-90px` real gap on every orb↔action-bar seam despite the per-seam
+/// `*_GAP_PX` constants computing to within `2px` of
+/// [`hud_layout::CLUSTER_GAP_PX`]; after adding `Stretch`, the same capture
+/// shows the real gaps collapsing to the low single-digit pixels those
+/// constants actually target. Explicit `Stretch` (not just relying on some
+/// future default change) — the SAME fix `spawn_orb_bar`'s frame overlay and
+/// `SkillSlotBorderOverlay` already apply, for the same reason: an
+/// `ImageNode` inside a `Node` with BOTH `width`/`height` already fixed via
+/// `Val::Px` must be told to fill that box, `Auto` never infers "fill" from
+/// fixed dimensions alone.
 fn spawn_action_bar_half(
     commands: &mut Commands,
     background: Handle<Image>,
@@ -561,6 +591,7 @@ fn spawn_action_bar_half(
             GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             ImageNode {
                 visual_box: bevy::ui::VisualBox::PaddingBox,
+                image_mode: bevy::ui::widget::NodeImageMode::Stretch,
                 ..ImageNode::new(background)
             },
             Node {
@@ -739,6 +770,16 @@ fn sync_hotbar_slots(
             // countdown text below) so those stay legible; see
             // `SkillSlotBorderOverlay`'s own doc comment for why this pack's
             // "overlay" art can't safely go on TOP without hiding everything.
+            //
+            // BL-82 HUD polish round 5: `hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP`
+            // crops the source PNG down to its own tight opaque bounding box
+            // before stretching it onto this slot's square box — see that
+            // constant's own doc comment for why the un-cropped full canvas
+            // (this used to be a plain `ImageNode::new` with no crop at all)
+            // made the real border art occupy only ~half of every rendered
+            // slot, which was the actual root cause of "big gaps between
+            // individual hotbar slots" no `HOTBAR_SLOT_GAP_PX` tuning could
+            // fix.
             parent.spawn((
                 SkillSlotBorderOverlay,
                 Node {
@@ -749,7 +790,11 @@ fn sync_hotbar_slots(
                     height: Val::Percent(100.0),
                     ..Default::default()
                 },
-                ImageNode::new(images.get(HudImageKey::SkillSlotBorder)),
+                ImageNode {
+                    rect: Some(hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP),
+                    image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+                    ..ImageNode::new(images.get(HudImageKey::SkillSlotBorder))
+                },
                 bevy::picking::Pickable::IGNORE,
             ));
             // BL-82 HUD polish round 4 (issue 3): bottom-left circular
@@ -1468,6 +1513,103 @@ mod tests {
              restore Color::NONE (not the opaque theme panel colours) once a drag touching this \
              slot ends/leaves/drops — see ChromelessSlot's own doc comment"
         );
+    }
+
+    /// BL-82 HUD polish round 5 — regression guard for the "half-empty slot"
+    /// bug ([`SkillSlotBorderOverlay`]'s own doc comment): the spawned
+    /// overlay's `ImageNode` must carry the tight
+    /// [`hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP`] rect with
+    /// `NodeImageMode::Stretch`, not a plain uncropped `ImageNode::new` — a
+    /// future regression back to the uncropped form would silently
+    /// reintroduce the big visible gaps between individual hotbar slots no
+    /// `HOTBAR_SLOT_GAP_PX` tuning alone can fix.
+    #[test]
+    fn skill_slot_border_overlay_uses_the_tight_opaque_crop() {
+        let mut app = new_app();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default()],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("sync_hotbar_slots runs");
+        app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        let slot_entity = slot_entities[0];
+
+        let world = app.world();
+        let children = world
+            .get::<Children>(slot_entity)
+            .expect("the slot has children");
+        let overlay = children
+            .iter()
+            .find(|&child| world.get::<SkillSlotBorderOverlay>(child).is_some())
+            .expect("the slot has a SkillSlotBorderOverlay child");
+
+        let image_node = world
+            .get::<ImageNode>(overlay)
+            .expect("the overlay carries an ImageNode");
+        assert_eq!(
+            image_node.rect,
+            Some(crate::hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP),
+            "the overlay must crop to the tight opaque bounding box, not render the full \
+             half-transparent canvas"
+        );
+        assert_eq!(
+            image_node.image_mode,
+            bevy::ui::widget::NodeImageMode::Stretch,
+            "the cropped rect must be stretched onto the slot's square box"
+        );
+    }
+
+    /// BL-82 HUD polish round 5 FOLLOW-UP — regression guard for the REAL
+    /// root cause of "orb ↔ action-bar gap stays huge no matter what
+    /// `hud_layout::CLUSTER_GAP_PX`/`*_MARGIN_PX` says" (see
+    /// `spawn_action_bar_half`'s own doc comment for the full
+    /// `NodeImageMode::Auto` vs `Stretch` root-cause writeup, discovered via
+    /// a live `--smoke-screenshot` pixel measurement AFTER the per-seam
+    /// margin constants were already in place and still showing a `≈70-90px`
+    /// real gap). Both action-bar-half `ImageNode`s must carry
+    /// `NodeImageMode::Stretch` — a future regression back to the `Auto`
+    /// default would silently reintroduce a real, uncloseable `≈117px`
+    /// contain-fit margin on both action-bar halves regardless of anything
+    /// `hud_layout`'s gap math computes.
+    #[test]
+    fn action_bar_halves_stretch_their_background_to_fill_the_box() {
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_hotbar)
+            .expect("spawn_hotbar runs");
+        app.update();
+
+        let world = app.world();
+        let left_half = world
+            .iter_entities()
+            .find(|e| world.get::<HotbarLeftHalf>(e.id()).is_some())
+            .expect("spawn_hotbar spawns a HotbarLeftHalf entity")
+            .id();
+        let right_half = world
+            .iter_entities()
+            .find(|e| world.get::<HotbarRightHalf>(e.id()).is_some())
+            .expect("spawn_hotbar spawns a HotbarRightHalf entity")
+            .id();
+
+        for (name, half) in [("left", left_half), ("right", right_half)] {
+            let image_node = world
+                .get::<ImageNode>(half)
+                .unwrap_or_else(|| panic!("the {name} action-bar half carries an ImageNode"));
+            assert_eq!(
+                image_node.image_mode,
+                bevy::ui::widget::NodeImageMode::Stretch,
+                "the {name} action-bar half's background must be NodeImageMode::Stretch — \
+                 NodeImageMode::Auto (the ImageNode default) contain-fits + centres the image \
+                 instead of filling the Node's explicit width/height box, reopening the exact \
+                 real-gap bug this round exists to close"
+            );
+        }
     }
 
     /// BL-82 EM-5.17 "5+5 slot-holders" follow-up: a LATER change to
