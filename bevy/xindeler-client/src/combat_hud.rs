@@ -417,6 +417,18 @@ fn spawn_combat_hud(
 /// combo/level text. Degrades clean (no panic, bars just keep their last
 /// value) when the local player's mirror hasn't arrived yet — spec §3.2's
 /// "a screen with no mirror data yet renders empty/loading, never panics".
+///
+/// Diffs before writing each `BarValue`/`Text` — this runs every frame (it's
+/// a plain `Update` system, not gated on `Changed<NetHealth>` etc.), and an
+/// unconditional `*value = ...`/`text.0 = ...` would mark the component
+/// `Changed` even when the value is identical to last frame, defeating
+/// `bar.rs`'s downstream `Changed<BarValue>`-gated fill-width update and
+/// forcing a text-layout re-measure every single frame regardless of whether
+/// the mirrored stats actually ticked — the same bug `boss_nameplate.rs`'s
+/// `sync_nameplate_content` had before its BL-82 EM-5.17 Phase 5 fix (this
+/// function follows that same diff-before-write discipline), and the same
+/// convention `hotbar.rs`'s `sync_cooldown_overlays` (`if text.0 !=
+/// countdown_text`) already uses elsewhere in this crate.
 #[allow(clippy::too_many_arguments)]
 fn sync_local_player_bars(
     player: Query<
@@ -475,34 +487,52 @@ fn sync_local_player_bars(
     if let Some(health) = health
         && let Ok(mut value) = health_bars.single_mut()
     {
-        *value = BarValue::new(health.current, health.max);
+        let new_value = BarValue::new(health.current, health.max);
+        if *value != new_value {
+            *value = new_value;
+        }
     }
     if let Some(energy) = energy
         && let Ok(mut value) = energy_bars.single_mut()
     {
-        *value = BarValue::new(energy.current, energy.max);
+        let new_value = BarValue::new(energy.current, energy.max);
+        if *value != new_value {
+            *value = new_value;
+        }
     }
     if let Some(poise) = poise
         && let Ok(mut value) = poise_bars.single_mut()
     {
-        *value = BarValue::new(poise.current, poise.max);
+        let new_value = BarValue::new(poise.current, poise.max);
+        if *value != new_value {
+            *value = new_value;
+        }
     }
     if let Some(xp) = xp {
         if let Ok(mut value) = xp_bars.single_mut() {
-            *value = BarValue::new(xp.xp_into_level as f32, xp.xp_for_level.max(1) as f32);
+            let new_value = BarValue::new(xp.xp_into_level as f32, xp.xp_for_level.max(1) as f32);
+            if *value != new_value {
+                *value = new_value;
+            }
         }
         if let Ok(mut text) = level_texts.single_mut() {
-            text.0 = format!("Lv. {}", xp.level);
+            let new_text = format!("Lv. {}", xp.level);
+            if text.0 != new_text {
+                text.0 = new_text;
+            }
         }
     }
     if let Some(combo) = combo
         && let Ok(mut text) = combo_texts.single_mut()
     {
-        text.0 = if combo.counter > 0 {
+        let new_text = if combo.counter > 0 {
             format!("{}x combo", combo.counter)
         } else {
             String::new()
         };
+        if text.0 != new_text {
+            text.0 = new_text;
+        }
     }
 }
 
@@ -1079,6 +1109,141 @@ mod tests {
             *app.world().get::<BarValue>(health_bar).unwrap(),
             BarValue::new(30.0, 100.0),
             "the bar must track the CHANGED health, not the stale first reading"
+        );
+    }
+
+    /// [`sync_local_player_bars`] must NOT re-mark its output components
+    /// `Changed` on a frame where the local player's mirrored stats haven't
+    /// actually changed — the same diff-before-write discipline
+    /// `boss_nameplate.rs`'s `sync_nameplate_content` establishes (and this
+    /// function now follows, per its own doc comment). This is a plain
+    /// `Update` system (not gated on `Changed<NetHealth>` etc.), so it runs
+    /// every frame regardless of whether the sim tick actually changed
+    /// anything; an unconditional `*value = ...`/`text.0 = ...` write would
+    /// mark the component `Changed` regardless of whether the value differs
+    /// (`Mut::deref_mut`'s documented behaviour), defeating `bar.rs`'s
+    /// downstream `Changed<BarValue>`-gated fill-width update and forcing a
+    /// text-layout re-measure every single frame.
+    ///
+    /// Proven via the same `World::clear_trackers` baseline-reset idiom
+    /// `boss_nameplate.rs`'s equivalent regression test uses: run once
+    /// (establishes real, non-default content — trivially marks `Changed`),
+    /// reset the tracking baseline, run again with the EXACT SAME mirrored
+    /// data, then assert `is_changed()` reads `false` for every bar/text this
+    /// system writes — i.e. the second run performed no redundant write.
+    #[test]
+    fn sync_local_player_bars_does_not_rewrite_unchanged_bars_or_text() {
+        let mut app = new_app();
+
+        let health_bar = app
+            .world_mut()
+            .spawn((HealthBarTag, BarValue::new(1.0, 1.0)))
+            .id();
+        let energy_bar = app
+            .world_mut()
+            .spawn((EnergyBarTag, BarValue::new(1.0, 1.0)))
+            .id();
+        let poise_bar = app
+            .world_mut()
+            .spawn((PoiseBarTag, BarValue::new(1.0, 1.0)))
+            .id();
+        let xp_bar = app
+            .world_mut()
+            .spawn((XpBarTag, BarValue::new(0.0, 1.0)))
+            .id();
+        let combo_text = app.world_mut().spawn((ComboText, Text(String::new()))).id();
+        let level_text = app
+            .world_mut()
+            .spawn((LevelText, Text("Lv. 1".to_owned())))
+            .id();
+
+        app.world_mut().spawn((
+            NetLocalPlayer,
+            NetHealth {
+                current: 80.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 40.0,
+                max: 100.0,
+            },
+            NetPoise {
+                current: 5.0,
+                max: 10.0,
+            },
+            NetXp {
+                level: 3,
+                xp_into_level: 50,
+                xp_for_level: 200,
+            },
+            NetCombo { counter: 4 },
+        ));
+
+        // Run 1: establishes real content (definitely differs from the
+        // spawn-time defaults above, so this run's writes legitimately mark
+        // `Changed` — not the thing under test).
+        app.world_mut()
+            .run_system_once(sync_local_player_bars)
+            .expect("first run succeeds");
+
+        // Reset the tracking baseline so a SUBSEQUENT no-op write (if the
+        // bug is present) is the only thing that could show up as `Changed`
+        // below.
+        app.world_mut().clear_trackers();
+
+        // Run 2: same mirrored player data, nothing should change.
+        app.world_mut()
+            .run_system_once(sync_local_player_bars)
+            .expect("second run succeeds");
+
+        let world = app.world();
+        assert!(
+            !world
+                .entity(health_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "health bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(energy_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "energy bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(poise_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "poise bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(xp_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "xp bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(combo_text)
+                .get_ref::<Text>()
+                .unwrap()
+                .is_changed(),
+            "combo text was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(level_text)
+                .get_ref::<Text>()
+                .unwrap()
+                .is_changed(),
+            "level text was rewritten even though its value didn't change"
         );
     }
 
