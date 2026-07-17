@@ -356,9 +356,23 @@ fn spawn_combat_hud(
     // with — a near-death warning is a crisis-state overlay, not a normal
     // HUD panel, and must stay visible over the orb cluster/action bar
     // rather than tinting underneath them.
+    //
+    // `Pickable::IGNORE` is LOAD-BEARING, not cosmetic: this node is spawned
+    // `Visibility::Visible` (only its alpha is 0 at full health) and, since
+    // the EM-5.17 z scheme, carries `GlobalZIndex(MODAL_WINDOWS)` = 100. Bevy's
+    // UI picking backend (`bevy_ui::picking_backend`) hit-tests on geometry
+    // ALONE (a transparent background still picks), treats a node WITHOUT a
+    // `Pickable` as *blocking* everything below it, and resolves the highest
+    // z-partition first. Without this, the vignette sat above the ESC menu and
+    // inventory window (both un-indexed → z-partition 0) and silently swallowed
+    // EVERY click — no button anywhere in the HUD responded (Matías, live).
+    // `IGNORE` (`should_block_lower: false`) makes picks pass straight through
+    // to the panel beneath, matching the hotbar/boss-nameplate/social
+    // full-screen overlays that already opt out this way.
     commands.spawn((
         DamageVignette,
         GlobalZIndex(zlayer::MODAL_WINDOWS),
+        bevy::picking::Pickable::IGNORE,
         Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -793,6 +807,51 @@ mod tests {
             .iter(app.world())
             .count();
         assert_eq!(count, 1, "exactly one LevelText readout must exist");
+    }
+
+    /// Regression test for the total UI-interaction breakage Matías hit live
+    /// (BL-82, after the EM-5.17 z-index scheme + EM-5.18 landed): NO button
+    /// worked anywhere — the ESC pause menu opened but its options were
+    /// unclickable, and inventory slots/buttons were dead too. Root cause: the
+    /// always-present, fully-transparent [`DamageVignette`] full-screen overlay
+    /// is spawned `Visibility::Visible` (only its alpha is 0) and, in the
+    /// EM-5.17 z scheme, carries `GlobalZIndex(MODAL_WINDOWS)` = 100 — yet it
+    /// has NO [`bevy::picking::Pickable`] component. Bevy's UI picking backend
+    /// (`bevy_ui::picking_backend`) treats a node WITHOUT a `Pickable` as
+    /// *blocking* the nodes below it, hit-tests on pure geometry (background
+    /// alpha is irrelevant), and processes the highest z-partition first. The
+    /// ESC menu and inventory window roots have NO `GlobalZIndex` (default
+    /// z-partition 0), so they sit BELOW the vignette at z=100 — the vignette
+    /// was the first hit under every click and the picking loop `break`ed on it
+    /// before the panel's own buttons were ever considered. The vignette is a
+    /// passive visual tint and must NEVER intercept picks: it carries
+    /// `Pickable::IGNORE`, exactly like the other full-screen HUD overlays
+    /// (hotbar backdrop, boss-nameplate container, social-panel backdrop).
+    #[test]
+    fn damage_vignette_ignores_picking_so_it_never_blocks_ui_clicks() {
+        let mut app = new_app_with_images();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_combat_hud)
+            .expect("spawn_combat_hud runs");
+
+        let vignette = app
+            .world_mut()
+            .query_filtered::<Entity, With<DamageVignette>>()
+            .single(app.world())
+            .expect("the damage vignette exists");
+        let pickable = app.world().get::<bevy::picking::Pickable>(vignette);
+        assert_eq!(
+            pickable,
+            Some(&bevy::picking::Pickable::IGNORE),
+            "the transparent full-screen damage vignette must carry Pickable::IGNORE so it never \
+             intercepts clicks meant for the ESC menu / inventory below it (bevy_ui picking \
+             treats a node WITHOUT a Pickable as blocking every node beneath it)"
+        );
     }
 
     /// A resource orb spawned through this screen's own real
