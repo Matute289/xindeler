@@ -176,17 +176,21 @@ pub struct FarTerrainExtension {
     #[uniform(104)]
     pub sky_color: Vec4,
     /// BL-82 EM-3.11 round 24: horizontal (XZ) camera-relative radius, in
-    /// world metres, inside which the fragment shader discards — the near
-    /// real-terrain band (the far sheet's own `hole_radius`, set at material
-    /// construction: `far_terrain::retile_far_mesh` for the sheet,
-    /// `lod_objects::receive_lod_zones` for the shared LOD-object material).
-    /// For the far sheet it's a no-op (its geometry is already CPU-culled
-    /// inside the hole); for the LOD-object zone meshes it removes the
-    /// simplified pyramid/box proxies that would otherwise draw ON TOP of the
-    /// real near-terrain trees/houses and z-fight them into the silhouette-
-    /// shaped flicker rounds 20-23 mis-attributed to shadows. `0.0` disables
-    /// it — the [`Default`] value used by bare test apps that build the
-    /// material without a [`CullingConfig`].
+    /// world metres, inside which BOTH the main-pass fragment shader
+    /// (`far_terrain_material.wgsl`) and the prepass fragment shader
+    /// (`far_terrain_material_prepass.wgsl`) discard — the near real-terrain
+    /// band. Set at material construction ONLY by
+    /// `lod_objects::receive_lod_zones` (the shared LOD-object material, to
+    /// its `hole_radius`); it removes the simplified pyramid/box proxies that
+    /// would otherwise draw ON TOP of the real near-terrain trees/houses and
+    /// z-fight them into the silhouette-shaped flicker rounds 20-23
+    /// mis-attributed to shadows. `far_terrain::retile_far_mesh` (the far
+    /// sheet itself) deliberately leaves this at the [`Default`]'s `0.0` — see
+    /// that call site's doc comment for why a camera-centred discard would be
+    /// a worse, approximate substitute for the sheet's own exact CPU-culled
+    /// hole, not a helpful no-op. `0.0` disables the discard entirely — also
+    /// the value bare test apps get from [`Default`] without a
+    /// [`CullingConfig`].
     #[uniform(105)]
     pub near_band: f32,
 }
@@ -217,6 +221,23 @@ impl MaterialExtension for FarTerrainExtension {
 
     fn fragment_shader() -> ShaderRef {
         "embedded://xindeler_client/far_terrain_material.wgsl".into()
+    }
+
+    // BL-82 EM-3.11 round 24 (bevy-migration-reviewer + rust-perf-reviewer
+    // finding): without this override, the depth/normal prepass — active
+    // whenever TAA or occlusion culling is on (`crate::camera`'s
+    // `DepthPrepass`/`OcclusionCulling`) — falls back to `ShaderRef::Default`,
+    // i.e. StandardMaterial's stock prepass shader, which has no `near_band`
+    // discard. A near-band LOD-object proxy would then still WRITE DEPTH
+    // during the prepass even though its main-pass fragment discards, letting
+    // it depth-reject the real near-terrain fragment that was supposed to
+    // render there (reverse-Z `GreaterEqual`) — turning the z-fight into a
+    // background-coloured hole rather than removing it. See
+    // `far_terrain_material_prepass.wgsl`'s module doc for the full design (a
+    // SEPARATE embedded file, not a second `fragment` in this one — wgpu
+    // requires exactly one fragment entry point per requested module).
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://xindeler_client/far_terrain_material_prepass.wgsl".into()
     }
 
     fn specialize(
@@ -251,6 +272,7 @@ pub(crate) struct FarTerrainMaterialPlugin;
 impl Plugin for FarTerrainMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "far_terrain_material.wgsl");
+        embedded_asset!(app, "far_terrain_material_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FarTerrainMaterial>::default())
             .add_systems(Update, sync_far_terrain_material);
     }
