@@ -19,12 +19,12 @@ use bevy::{
     math::Rect,
     picking::Pickable,
     ui::{
-        BackgroundColor, Node, PositionType, Val,
+        BackgroundColor, GlobalZIndex, Node, PositionType, Val,
         widget::{ImageNode, NodeImageMode},
     },
 };
 
-use crate::theme::HudTheme;
+use crate::{theme::HudTheme, zlayer};
 
 /// The value a bar displays: `current` / `max`. Any caller (an EM-5.2 HUD
 /// system reading `NetHealth`/`NetEnergy`/etc.) writes this; [`update_bars`]
@@ -147,9 +147,12 @@ pub struct HudOrbBarFill;
 /// fixed-size glass" look, the CSS `clip-path`/`overflow:hidden` idiom
 /// applied to `bevy_ui`'s own `Overflow::clip()` primitive. This is a SECOND,
 /// INNER clip layer, nested inside the `container`'s own outer
-/// `overflow: Overflow::clip()` (which only masks the square box's corners
-/// against the circular frame art, spawn-time only, never resized) — the two
-/// clips serve different jobs and neither can substitute for the other.
+/// `overflow: Overflow::clip_y()` (BL-82 orb crop round 3 narrowed this from
+/// both-axis `clip()` to `y`-only, so a wider-than-square frame overlay can
+/// spill past the container horizontally — see `spawn_orb_bar`'s own doc
+/// comment on `frame_width_px`; this inner clip window is unaffected, since
+/// it only ever needs to clip vertically anyway) — the two clips serve
+/// different jobs and neither can substitute for the other.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudOrbBarFillClip;
 
@@ -228,6 +231,32 @@ pub struct HudOrbBar;
 /// constant, since a single shared value clipped some variants' decorative
 /// art while still under/over-sizing others' liquid; see `hud_layout`'s
 /// `ANGEL_FRAME_SOURCE_CROP` doc comment for the full story.
+///
+/// ## `frame_width_px` — BL-82 orb crop round 3: the frame is NOT forced
+/// square any more
+/// Round 2's own doc comment on `hud_layout::ANGEL_FRAME_SOURCE_CROP`
+/// admitted the square-crop approach was geometrically incomplete: the
+/// angel/cuthulhu frame art's decorative wings genuinely span more pixels
+/// than the canvas is tall (angel `879px`, cuthulhu `1165px` wide vs a
+/// `768px`-tall canvas), so ANY square crop, no matter how loose, still
+/// clips real wing pixels — confirmed live (Matías's round-3 report: the
+/// angel/cuthulhu orbs are still visibly missing wing/tentacle art after
+/// round 2 shipped). The only real fix is to stop rendering the frame into
+/// the same square `width_px`×`height_px` box the liquid/hit-box use:
+/// `frame_width_px`, when it differs from `width_px`, sizes the frame
+/// overlay's OWN `Node` to `frame_width_px`×`height_px` (still undistorted,
+/// since the caller derives it from the crop's real aspect ratio at the
+/// same scale factor `height_px` uses) and centres it horizontally on the
+/// container, so a wider frame spills symmetrically past both the left and
+/// right edges instead of being squeezed into them. This deliberately
+/// escapes the container's own `overflow: Overflow::clip_y()` (below) on
+/// the x axis — see [`zlayer::AMBIENT_CHROME_OVERLAY`] for why the overlay
+/// also gets its own explicit `GlobalZIndex` so the spillover always paints
+/// over whichever ambient-chrome sibling (e.g. the action bar background)
+/// it now visually overlaps. Passing `frame_width_px == width_px` (every
+/// pre-round-3 call site that doesn't need the wider box, and every
+/// variant whose art already fits, e.g. the stamina orb) reproduces the
+/// exact old square-frame behaviour byte-for-byte.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_orb_bar(
@@ -237,6 +266,7 @@ pub fn spawn_orb_bar(
     frame_image: Option<Handle<Image>>,
     fill_source_crop: Option<Rect>,
     frame_source_crop: Option<Rect>,
+    frame_width_px: f32,
     liquid_inset_px: f32,
     width_px: f32,
     height_px: f32,
@@ -252,11 +282,17 @@ pub fn spawn_orb_bar(
         .spawn((HudOrbBar, value, Node {
             width: Val::Px(width_px),
             height: Val::Px(height_px),
-            overflow: bevy::ui::Overflow::clip(),
-            // A liquid-fill orb is circular in the final art (the frame
-            // PNG's alpha carves the circle) — a plain square clip
-            // region is enough since the frame overlay masks the
-            // corners; see the module doc comment above.
+            // BL-82 orb crop round 3: only `y` clips now — the liquid/
+            // hit-box stay contained vertically (unchanged from before),
+            // but `x` must stay `Visible` so a `frame_width_px` wider than
+            // `width_px` can spill past the container's own left/right
+            // edges instead of being clipped back into a square (see
+            // `spawn_orb_bar`'s own doc comment on `frame_width_px`). A
+            // liquid-fill orb is circular in the final art (the frame
+            // PNG's alpha carves the circle) — clipping is enough since
+            // the frame overlay masks the corners; see the module doc
+            // comment above.
+            overflow: bevy::ui::Overflow::clip_y(),
             border_radius: bevy::ui::BorderRadius::all(Val::Px(theme.radius.sm)),
             ..Default::default()
         }))
@@ -319,13 +355,22 @@ pub fn spawn_orb_bar(
             frame_image_node.rect = Some(rect);
             frame_image_node.image_mode = NodeImageMode::Stretch;
         }
+        // BL-82 orb crop round 3: `frame_width_px` may be WIDER than
+        // `width_px` (see `spawn_orb_bar`'s own doc comment) — `overhang`
+        // is how far the frame spills past the container on EACH side,
+        // negative `left` pulling it out symmetrically so it stays centred
+        // on the same hole the liquid/hit-box are centred on. When
+        // `frame_width_px == width_px` (every variant/call site that
+        // doesn't need the wider box) `overhang` is exactly `0.0`,
+        // reproducing the old flush square overlay byte-for-byte.
+        let overhang = (frame_width_px - width_px) / 2.0;
         commands.entity(container).with_children(|parent| {
             parent.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
+                    left: Val::Px(-overhang),
                     top: Val::Px(0.0),
-                    width: Val::Percent(100.0),
+                    width: Val::Px(frame_width_px),
                     height: Val::Percent(100.0),
                     ..Default::default()
                 },
@@ -334,6 +379,15 @@ pub fn spawn_orb_bar(
                 // never intercept pointer events meant for whatever's
                 // beneath it (the orb's own hover/tooltip, if any).
                 Pickable::IGNORE,
+                // A wider-than-`width_px` frame now visually spills onto
+                // whichever ambient-chrome sibling sits next to this orb
+                // (e.g. the action bar background) — an explicit
+                // `GlobalZIndex` above the shared ambient-chrome layer
+                // makes that spillover deterministically paint on top
+                // instead of depending on the two independent `Startup`
+                // plugins' unspecified spawn order (see
+                // [`zlayer::AMBIENT_CHROME_OVERLAY`]'s own doc comment).
+                GlobalZIndex(zlayer::AMBIENT_CHROME_OVERLAY),
             ));
         });
     }
@@ -624,6 +678,7 @@ mod tests {
                 Some(Handle::default()),
                 None,
                 None,
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -685,6 +740,7 @@ mod tests {
                 Some(Handle::default()),
                 None,
                 None,
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -763,6 +819,7 @@ mod tests {
                 Some(Handle::default()),
                 Some(crop),
                 Some(crop),
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -832,6 +889,7 @@ mod tests {
                 Some(Handle::default()),
                 Some(fill_crop),
                 Some(frame_crop),
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -899,6 +957,7 @@ mod tests {
                 Some(Handle::default()),
                 None,
                 None,
+                160.0,
                 8.0,
                 160.0,
                 160.0,
@@ -954,6 +1013,7 @@ mod tests {
                 Some(Handle::default()),
                 None,
                 None,
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -997,6 +1057,7 @@ mod tests {
                 None,
                 None,
                 None,
+                160.0,
                 0.0,
                 160.0,
                 160.0,
@@ -1017,6 +1078,63 @@ mod tests {
             children.len(),
             1,
             "only the clip-window child, no frame overlay"
+        );
+    }
+
+    /// BL-82 orb crop round 3 — the regression guard for the actual fix:
+    /// `frame_width_px` WIDER than `width_px` must render the frame overlay
+    /// as its own wider `Node`, centred symmetrically (equal overhang on
+    /// both sides) on the container rather than squeezed into it, AND that
+    /// overlay must carry its own [`GlobalZIndex`] (so it deterministically
+    /// paints over a sibling ambient-chrome element it now visually spills
+    /// onto — see [`crate::zlayer::AMBIENT_CHROME_OVERLAY`]'s doc comment).
+    /// This is exactly the mechanism `hud_layout::CUTHULHU_FRAME_WIDTH_PX`
+    /// relies on to show the mana orb's wing art in full instead of the
+    /// square-crop clipping round 2 shipped.
+    #[test]
+    fn orb_bar_wider_frame_overlay_spills_symmetrically_with_its_own_z_index() {
+        let mut app = new_orb_app();
+        let theme = HudTheme::default();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_orb_bar(
+                &mut commands,
+                &theme,
+                Handle::default(),
+                Some(Handle::default()),
+                None,
+                None,
+                200.0,
+                0.0,
+                160.0,
+                160.0,
+                BarValue::new(1.0, 1.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        let frame_entity = children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
+            .expect("orb bar has a frame overlay child");
+
+        let node = app.world().get::<Node>(frame_entity).unwrap();
+        assert_eq!(node.width, Val::Px(200.0));
+        // (200 - 160) / 2 == 20 px overhang on each side.
+        assert_eq!(node.left, Val::Px(-20.0));
+
+        assert_eq!(
+            *app.world().get::<GlobalZIndex>(frame_entity).unwrap(),
+            GlobalZIndex(zlayer::AMBIENT_CHROME_OVERLAY)
         );
     }
 

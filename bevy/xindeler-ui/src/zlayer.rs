@@ -14,10 +14,11 @@
 //! otherwise invent its own ad-hoc z-index numbers, risking silent
 //! collisions between e.g. Phase 2's action bar and Phase 4's party frames.
 //!
-//! ## The scheme (spec §4.4, verbatim ordering)
+//! ## The scheme (spec §4.4, verbatim ordering, + round-3 addition below)
 //! ```text
 //! WORLD_OVERLAY (0)
 //!   < ORBS / ACTION_BAR / PARTY_FRAMES / MINIMAP (20)
+//!   < AMBIENT_CHROME_OVERLAY (21)
 //!   < BOSS_NAMEPLATE (25)
 //!   < CHAT (30)
 //!   < MODAL_WINDOWS (100)
@@ -26,8 +27,11 @@
 //! ```
 //! Rationale for the ordering: always-on ambient HUD chrome (orbs, action
 //! bar, party frames, minimap) sits just above anything rendered as a
-//! world-space overlay (e.g. in-world overhead health bars, EM-5.2); the
-//! boss nameplate sits one notch above that ambient layer so it's never
+//! world-space overlay (e.g. in-world overhead health bars, EM-5.2); a
+//! decorative element that deliberately overlaps a SIBLING within that same
+//! ambient layer (BL-82 EM-5.17 orb-crop round 3 — see
+//! [`AMBIENT_CHROME_OVERLAY`]'s own doc comment) sits one notch above it, the
+//! same way the boss nameplate sits one notch above THAT so it's never
 //! occluded by it; chat sits above the ambient layer too (it can be
 //! interacted with while other HUD chrome is visible) but below anything
 //! that should temporarily own the whole screen (modal windows — diary,
@@ -53,6 +57,31 @@ pub const WORLD_OVERLAY: i32 = 0;
 /// none of them should ever occlude another; they live in disjoint screen
 /// regions by layout, not by z-order.
 pub const ORBS_ACTION_BAR_PARTY_MINIMAP: i32 = 20;
+
+/// A decorative element that intentionally spills PAST its own entity's
+/// bounding box onto a NEIGHBOURING ambient-chrome sibling — BL-82 EM-5.17
+/// orb-crop round 3: the resource orbs' `orb_frame_*.png` art is a wide,
+/// asymmetric statue/gargoyle-wing/tentacle illustration around a circular
+/// hole, genuinely wider than the orb's own square hit-box (measured:
+/// angel `879px`, cuthulhu `1165px` art vs the `768px`-tall canvas a square
+/// crop is bounded by) — no square crop can show the full wings without
+/// clipping them (see `xindeler-client::hud_layout`'s `*_FRAME_SOURCE_CROP`
+/// doc comments for the measurements). The round-3 fix renders the frame in
+/// its own NON-square, wider-than-the-orb box instead of forcing a square
+/// crop, which means the wings now genuinely overlap the neighbouring
+/// action-bar background piece (or, for the mana orb's outward-facing wing,
+/// empty space) by design. Since `combat_hud.rs`'s orbs and `hotbar.rs`'s
+/// action-bar backgrounds are two INDEPENDENT `Startup`-spawn plugins with
+/// no ordering between them (see `hud_layout.rs`'s own module doc comment),
+/// both currently carry the SAME [`ORBS_ACTION_BAR_PARTY_MINIMAP`]
+/// `GlobalZIndex` — leaving the now-overlapping wing's paint order to
+/// undefined sibling tie-breaking would make the wing randomly render
+/// UNDER the action bar background on some runs (looking exactly like the
+/// clipping bug this fix exists to solve). This tier, one notch above the
+/// ambient layer for the same "never occluded by a sibling" reason
+/// [`BOSS_NAMEPLATE`] already sits one notch above it, makes the overlap
+/// deterministic: the decorative overlay always wins.
+pub const AMBIENT_CHROME_OVERLAY: i32 = ORBS_ACTION_BAR_PARTY_MINIMAP + 1;
 
 /// The boss/target nameplate (Phase 5) — one notch above the ambient layer
 /// so it's never hidden behind it even if a future layout change causes an
@@ -97,6 +126,7 @@ mod tests {
         let ordered = [
             WORLD_OVERLAY,
             ORBS_ACTION_BAR_PARTY_MINIMAP,
+            AMBIENT_CHROME_OVERLAY,
             BOSS_NAMEPLATE,
             CHAT,
             MODAL_WINDOWS,
