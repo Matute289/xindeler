@@ -508,8 +508,20 @@ pub fn facing_look_toward(player_pos: Vec3, target_pos: Vec3) -> Option<Vec3> {
 /// rather than lagging a frame: missing/dead/out-of-`release_range`.
 /// `.chain()`-ordered ahead of `update_soft_target` in
 /// [`TargetSelectionPlugin`].
+///
+/// `pub(crate)` (BL-82 EM-5.19 Phase 3, bevy-migration-reviewer finding on
+/// PR #120): `esc_menu::toggle_esc_menu` names it in an explicit
+/// `.after(release_invalid_hard_lock)` edge, closing an otherwise-undeclared
+/// scheduling ambiguity — this system lives in [`xindeler_app::MirrorSet`],
+/// while `toggle_esc_menu`/`hard_lock_active`/`clear_hard_lock_on_escape`
+/// are plain `Update` systems with no inherited ordering against
+/// `MirrorSet` (only `MirrorSet -> GameplaySet` is chained,
+/// `xindeler_app::sets::configure`). Without this edge, "the locked target
+/// dies/leaves range AND the player presses Escape the same frame" is a
+/// genuine (if narrow, and not actually bug-causing either way) race between
+/// this system's `HardLock` write and `hard_lock_active`'s read.
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
-fn release_invalid_hard_lock(
+pub(crate) fn release_invalid_hard_lock(
     config: Res<TargetingConfig>,
     local_player: Query<(&Transform, Option<&Interpolated>), With<NetLocalPlayer>>,
     candidates: Query<(&Transform, Option<&Interpolated>, &NetHealth), With<NetUid>>,

@@ -86,12 +86,21 @@ impl Plugin for EscMenuPlugin {
                 // `.after(toggle_esc_menu)` so it reads this SAME frame's
                 // pre-clear lock state — see that system's own doc comment
                 // for the full ordering argument) and must NOT also open/
-                // close the pause menu on that same press. Ordered BEFORE
-                // `apply_hud_actions` so the open/close it requests lands the
-                // SAME frame (the atomic cursor-free chain
-                // `cursor::update_cursor_free` relies on).
+                // close the pause menu on that same press. Also ordered
+                // `.after(targeting::release_invalid_hard_lock)`
+                // (bevy-migration-reviewer finding on PR #120): that system
+                // lives in `MirrorSet`, which has no inherited ordering vs.
+                // this plain `Update` system (only `MirrorSet -> GameplaySet`
+                // is chained), so without this edge "the locked target
+                // dies/leaves range AND Escape is pressed the same frame"
+                // would race `hard_lock_active`'s read against the auto-
+                // release's `HardLock` write with no scheduling guarantee.
+                // Ordered BEFORE `apply_hud_actions` so the open/close it
+                // requests lands the SAME frame (the atomic cursor-free
+                // chain `cursor::update_cursor_free` relies on).
                 toggle_esc_menu
                     .after(xindeler_input::InputResolveSet)
+                    .after(crate::targeting::release_invalid_hard_lock)
                     .before(xindeler_ui::hud_state::apply_hud_actions)
                     .run_if(not(text_input_focused))
                     .run_if(not(hard_lock_active)),
