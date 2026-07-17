@@ -3,17 +3,47 @@
 //! EM-5.11's `xindeler-input` keymap, and cooldown greying/wipe reading the
 //! `xindeler-sim-bridge::hotbar` mirror.
 //!
-//! ## Slot count (not a hardcoded 10)
-//! `xindeler_protocol::NetAbilities::slots` is exactly however many
-//! auxiliary-ability slots the sim currently supports for the local
-//! player's weapon context (`ActiveAbilities::limit`, `Some(5)` by default —
-//! see that mirror's own doc comment). This screen renders exactly that
-//! many real, currently-usable slots, keybind-labelled from
-//! `GameInput::Slot{n}` for `n <= 10` — it does NOT pad to a fake 10-slot
-//! row, so a future skill/perk that raises the limit shows up automatically.
-//! M1/M2 (primary/secondary) are separate, non-draggable indicators — the
+//! ## Slot count — 10 HOLDERS always rendered, 5+5 split (BL-82 EM-5.17
+//! ## Phase 3: "5+5 slot-holders" follow-up)
+//! Matías's original ask (under-scoped by the Phase 0/2 bugfixes above, which
+//! only fixed rendering bugs without changing the *count*): the action bar
+//! must show 5 skill-holder slots on the LEFT background piece and 5 on the
+//! RIGHT (10 total), one per `GameInput::Slot1..Slot10` — the 10 independently
+//! rebindable ability-slot inputs the keymap defines (`Primary`/`Secondary`,
+//! i.e. M1/M2, are a SEPARATE pair of fixed, non-draggable indicators — see
+//! below — not part of this 10).
+//!
+//! [`HOTBAR_SLOT_COUNT`] slot HOLDERS are now spawned UNCONDITIONALLY,
+//! independent of `xindeler_protocol::NetAbilities::slots.len()` — which is
+//! only however many auxiliary-ability slots the sim currently grants the
+//! local player (`ActiveAbilities::limit`, hardcoded to
+//! `common::comp::ability::BASE_ABILITY_LIMIT == 5` for every player
+//! character at creation today, `server/src/character_creator.rs` +
+//! `server/src/state_ext.rs` — there is no skill/level/perk path that raises
+//! it yet). Indices `< abilities.slots.len()` show that slot's real content
+//! (icon glyph/tooltip/cooldown/drag-drop, unchanged from before); indices
+//! `>= abilities.slots.len()` render as an EMPTY placeholder holder — same
+//! chromeless frame + border art, no icon/tooltip, and (already, for free)
+//! harmless as a drag-drop target: `xindeler-sim-bridge`'s
+//! `ChangeAbilityEvent` handler (`common::comp::ability::ActiveAbilities::
+//! change_ability`, via `Vec::get_mut`) silently no-ops for any slot index
+//! `>= limit`, so a drop onto a placeholder simply does nothing server-side,
+//! not a crash or a mis-bind. This reserves the full 10-slot visual budget
+//! today and needs no further client change the day a game-design lever
+//! (skill tree, class perk, etc.) raises `ActiveAbilities::limit` past 5 —
+//! the newly-real slots just start showing content, the layout already fits
+//! them.
+//!
+//! [`sync_slot_half_parenting`] splits the FIXED [`HOTBAR_SLOT_COUNT`] (not
+//! the sim-reported count) via `div_ceil(2)`, so it is always an exact 5/5 —
+//! previously, with only `abilities.slots.len()` (5) entities existing, the
+//! same `div_ceil` math gave an uneven 3/2 split (`ceil(5/2) == 3`), which is
+//! the literal bug this phase fixes.
+//!
+//! M1/M2 (primary/secondary) remain separate, non-draggable indicators — the
 //! sim's `PrimaryAbility`/`SecondaryAbility` are fixed to "whatever's
-//! wielded", not user-rebindable, so there is no slot address for them.
+//! wielded", not user-rebindable, so there is no slot address for them; this
+//! phase does not touch [`sync_primary_secondary_indicators`].
 //!
 //! ## Real drag-to-assign, todays scope
 //! The `xindeler-ui::slot` drag-drop primitive is wired end-to-end: dragging
@@ -129,13 +159,38 @@ const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 /// `pub(crate)` (not private) so `hud_layout.rs`'s own regression test can
 /// pin `ACTION_BAR_HALF_WIDTH_PX` against the real slot size, instead of a
 /// second hardcoded literal silently drifting out of sync with this one.
-pub(crate) const SLOT_SIZE_PX: f32 = 44.0;
+///
+/// BL-82 EM-5.17 "5+5 slot-holders" follow-up: bumped `44.0` -> `46.0`, the
+/// largest size that still fits [`SLOTS_PER_HALF`] (5) slots + 4 of the
+/// theme's `HudSpacing::xs` (4px) gaps inside `hud_layout::
+/// ACTION_BAR_HALF_WIDTH_PX` (measured ≈258.4px against the new slot-less
+/// `action_bar_bg_left.png`/`action_bar_bg_right.png`, `1380×752` on disk) —
+/// `5*46 + 4*4 == 246`, leaving ≈6px of margin on each side (see
+/// `hud_layout::tests::five_slots_per_half_fit_inside_the_action_bar_half_width`
+/// for the pinned regression). `ACTION_BAR_HALF_WIDTH_PX` itself is a fixed
+/// function of `ORB_SIZE_PX`/the art's aspect ratio/`ACTION_BAR_WIDTH_TRIM`
+/// (untouched by this phase — that trim was Matías's own explicit "more
+/// breathing room" request, see that constant's doc comment), so this is the
+/// real geometric ceiling for 5-across at this row's current width, not a
+/// guessed increase — going bigger would require also widening
+/// `ACTION_BAR_HALF_WIDTH_PX`, out of this phase's scope.
+pub(crate) const SLOT_SIZE_PX: f32 = 46.0;
 
-/// The keybind each rendered slot index (0-based) is labelled with, for
-/// indices `< 10` — beyond that a slot still works (drag/cooldown/fire all
-/// function), it just shows no keybind glyph (documented, not a crash: the
-/// sim's `ActiveAbilities::limit` could in principle exceed 10, though
-/// nothing does today).
+/// Number of ability-slot HOLDERS rendered per action-bar half (BL-82
+/// EM-5.17 "5+5 slot-holders" follow-up) — Matías's explicit ask: 5 on the
+/// left piece, 5 on the right, 10 total, regardless of how many of them the
+/// sim currently populates with real content (see the module doc comment).
+pub(crate) const SLOTS_PER_HALF: usize = 5;
+
+/// Total slot holders always rendered — matches [`SLOT_INPUTS`]'s length
+/// (one holder per `GameInput::Slot1..Slot10`) and is asserted equal to it in
+/// [`tests::hotbar_slot_count_matches_the_keybind_table`].
+const HOTBAR_SLOT_COUNT: usize = SLOTS_PER_HALF * 2;
+
+/// The keybind each rendered slot index (0-based) is labelled with — every
+/// one of the [`HOTBAR_SLOT_COUNT`] holders has a real entry here today
+/// (`Slot1..Slot10`), so every holder shows a keybind glyph, not just the
+/// ones the sim currently populates with content.
 const SLOT_INPUTS: [GameInput; 10] = [
     GameInput::Slot1,
     GameInput::Slot2,
@@ -330,8 +385,11 @@ fn spawn_hotbar(
     ));
 }
 
-/// Resizes [`HotbarSlotEntities`] to match [`NetAbilities::slots`]'s real
-/// length and writes each slot's [`SlotContents`].
+/// Resizes [`HotbarSlotEntities`] to the FIXED [`HOTBAR_SLOT_COUNT`] (BL-82
+/// EM-5.17 "5+5 slot-holders" follow-up — no longer
+/// [`NetAbilities::slots`]'s real, sim-driven length; see the module doc
+/// comment) and writes each slot's [`SlotContents`] — real content for
+/// indices `< abilities.slots.len()`, an empty placeholder for the rest.
 ///
 /// ## Why this reads `NetAbilities` unconditionally every frame, not gated
 /// ## on `Changed<NetAbilities>` (a real bug this fixed)
@@ -377,7 +435,7 @@ fn sync_hotbar_slots(
     // bottom of this function for the split this requires.
     let old_len = slot_entities.0.len();
 
-    while slot_entities.0.len() < abilities.slots.len() {
+    while slot_entities.0.len() < HOTBAR_SLOT_COUNT {
         let index = slot_entities.0.len();
         let slot_entity = commands
             .spawn(slot_bundle(
@@ -502,30 +560,46 @@ fn sync_hotbar_slots(
         // for why a freshly-spawned slot isn't parented here directly.
         slot_entities.0.push(slot_entity);
     }
-    while slot_entities.0.len() > abilities.slots.len() {
+    // Defensive only — `HOTBAR_SLOT_COUNT` is a fixed constant today, so this
+    // never actually pops anything; kept symmetric with the grow loop above
+    // in case a future change makes the holder count itself dynamic again.
+    while slot_entities.0.len() > HOTBAR_SLOT_COUNT {
         if let Some(extra) = slot_entities.0.pop() {
             commands.entity(extra).despawn();
         }
     }
 
-    for (index, slot) in abilities.slots.iter().enumerate() {
+    for index in 0..HOTBAR_SLOT_COUNT {
         let Some(&entity) = slot_entities.0.get(index) else {
             continue;
         };
-        let new_contents = SlotContents {
-            icon_text: slot
-                .ability_id
-                .as_deref()
-                .map(short_glyph)
-                .unwrap_or_default(),
-            // Hotbar slots hold abilities, not stackable items — no
-            // quantity badge (`xindeler_ui::slot`'s own field for EM-5.6's
-            // bag/trade screens).
-            quantity: None,
-            tooltip: slot
-                .ability_id
-                .clone()
-                .unwrap_or_else(|| "Empty".to_owned()),
+        // `abilities.slots.get(index)` is `None` for every index at/beyond
+        // the sim's real, currently-granted slot count (`ActiveAbilities::
+        // limit`, `Some(5)` today — see the module doc comment) — those
+        // holders render as an empty placeholder: no icon glyph, a neutral
+        // "Empty" tooltip (same text an in-range-but-unassigned slot already
+        // shows), same chromeless frame/border art as every other holder.
+        let new_contents = match abilities.slots.get(index) {
+            Some(slot) => SlotContents {
+                icon_text: slot
+                    .ability_id
+                    .as_deref()
+                    .map(short_glyph)
+                    .unwrap_or_default(),
+                // Hotbar slots hold abilities, not stackable items — no
+                // quantity badge (`xindeler_ui::slot`'s own field for EM-5.6's
+                // bag/trade screens).
+                quantity: None,
+                tooltip: slot
+                    .ability_id
+                    .clone()
+                    .unwrap_or_else(|| "Empty".to_owned()),
+            },
+            None => SlotContents {
+                icon_text: String::new(),
+                quantity: None,
+                tooltip: "Empty".to_owned(),
+            },
         };
         if index < old_len {
             // Pre-existing entity: a live `Query` sees it right now, so
@@ -738,6 +812,15 @@ fn sync_cooldown_overlays(
 /// A drop involving any OTHER group is silently ignored — not mis-applied —
 /// exactly the module doc comment's original posture, just narrowed to the
 /// groups that don't yet have a handler.
+///
+/// BL-82 EM-5.17 "5+5 slot-holders" follow-up: a diary-ability drop targeting
+/// a PLACEHOLDER holder (`to_index >= abilities.slots.len()`, i.e. beyond the
+/// sim's current `ActiveAbilities::limit`) is now also skipped here, client
+/// side — `xindeler-sim-bridge`'s `ChangeAbilityEvent` handler already
+/// no-ops that same request server-side (`Vec::get_mut` returns `None`
+/// beyond the vec's real length), so this guard changes no OBSERVABLE
+/// behaviour; it just avoids sending a request the server would silently
+/// discard anyway.
 fn handle_hotbar_drag_drop(
     mut drops: MessageReader<SlotDropped>,
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
@@ -753,6 +836,9 @@ fn handle_hotbar_drag_drop(
 
         if drop.from_group == crate::diary::DIARY_ABILITY_GROUP {
             let to_index = drop.to_address.raw() as usize;
+            if abilities.slots.get(to_index).is_none() {
+                continue;
+            }
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "hotbar slot indices are a handful, never near u32::MAX"
@@ -827,13 +913,15 @@ mod tests {
         assert_eq!(short_glyph("m1"), "M1");
     }
 
-    /// The T56.15 acceptance bar (spec: "10 slots show bound abilities +
-    /// keybind labels ... persist"): a real `NetAbilities` with N slots
-    /// drives exactly N spawned slot entities, each with the right
-    /// [`SlotContents`] — and the slot count is NOT hardcoded to 10, it
-    /// tracks whatever the mirror reports.
+    /// BL-82 EM-5.17 "5+5 slot-holders" follow-up (Matías's ask: 5 holders on
+    /// each background piece, 10 total, regardless of how many the sim
+    /// currently populates): a real `NetAbilities` with FEWER than
+    /// [`HOTBAR_SLOT_COUNT`] real slots still drives exactly
+    /// [`HOTBAR_SLOT_COUNT`] spawned slot HOLDER entities — the extra ones
+    /// beyond the mirror's real length render as empty placeholders (no
+    /// icon/tooltip content), not as missing entities.
     #[test]
-    fn sync_hotbar_slots_spawns_exactly_as_many_slots_as_the_mirror_reports() {
+    fn sync_hotbar_slots_always_spawns_hotbar_slot_count_holders() {
         let mut app = new_app();
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
             primary: Some("common.abilities.sword.primary".to_owned()),
@@ -862,8 +950,8 @@ mod tests {
         let slot_entities = app.world().resource::<HotbarSlotEntities>();
         assert_eq!(
             slot_entities.0.len(),
-            3,
-            "must match the mirror's real slot count"
+            HOTBAR_SLOT_COUNT,
+            "must always spawn the fixed 10-holder budget, not just the mirror's 3 real slots"
         );
 
         let world = app.world();
@@ -874,6 +962,30 @@ mod tests {
         let empty_contents = world.get::<SlotContents>(slot_entities.0[1]).unwrap();
         assert_eq!(empty_contents.icon_text, "");
         assert_eq!(empty_contents.tooltip, "Empty");
+
+        // Indices 3..HOTBAR_SLOT_COUNT are beyond the mirror's real 3 slots
+        // — placeholder holders, same empty content as an in-range-but-
+        // unassigned slot, not missing/uninitialized.
+        for index in 3..HOTBAR_SLOT_COUNT {
+            let placeholder = world.get::<SlotContents>(slot_entities.0[index]).unwrap();
+            assert_eq!(
+                placeholder.icon_text, "",
+                "placeholder slot {index} must show no icon"
+            );
+            assert_eq!(
+                placeholder.tooltip, "Empty",
+                "placeholder slot {index} must show the neutral empty tooltip"
+            );
+        }
+    }
+
+    /// [`HOTBAR_SLOT_COUNT`] matches [`SLOT_INPUTS`]'s length — every rendered
+    /// holder has a real keybind entry (`Slot1..Slot10`), not just the ones
+    /// the sim currently populates with content.
+    #[test]
+    fn hotbar_slot_count_matches_the_keybind_table() {
+        assert_eq!(HOTBAR_SLOT_COUNT, SLOT_INPUTS.len());
+        assert_eq!(HOTBAR_SLOT_COUNT, SLOTS_PER_HALF * 2);
     }
 
     /// Regression test for the "two overlapping rectangles" bug (Matías's
@@ -907,8 +1019,13 @@ mod tests {
             .expect("sync_hotbar_slots runs");
         app.update();
 
+        // BL-82 EM-5.17 "5+5 slot-holders" follow-up: always HOTBAR_SLOT_COUNT
+        // holders now, regardless of the mirror's real (here: 1) slot count —
+        // see that constant's own doc comment. This test only cares about
+        // entity 0's chrome, so the exact total isn't its focus, but the
+        // assertion must match reality.
         let slot_entities = app.world().resource::<HotbarSlotEntities>();
-        assert_eq!(slot_entities.0.len(), 1);
+        assert_eq!(slot_entities.0.len(), HOTBAR_SLOT_COUNT);
         let slot_entity = slot_entities.0[0];
 
         let world = app.world();
@@ -940,11 +1057,14 @@ mod tests {
         );
     }
 
-    /// A LATER change to `NetAbilities` (fewer slots — e.g. a weapon swap to
-    /// a context with a shorter aux set) despawns the extra slot entities
-    /// rather than leaving stale ones behind.
+    /// BL-82 EM-5.17 "5+5 slot-holders" follow-up: a LATER change to
+    /// `NetAbilities` (fewer real slots — e.g. a weapon swap to a context
+    /// with a shorter aux set) does NOT despawn any holder entities anymore
+    /// — the entity count stays pinned at [`HOTBAR_SLOT_COUNT`] regardless;
+    /// only the CONTENT of the now-out-of-range slots reverts to an empty
+    /// placeholder.
     #[test]
-    fn sync_hotbar_slots_shrinks_when_the_mirror_reports_fewer_slots() {
+    fn sync_hotbar_slots_keeps_all_holders_and_clears_content_when_the_mirror_shrinks() {
         let mut app = new_app();
         let player = app
             .world_mut()
@@ -952,7 +1072,10 @@ mod tests {
                 primary: None,
                 secondary: None,
                 slots: vec![
-                    NetHotbarSlot::default(),
+                    NetHotbarSlot {
+                        aux: NetAuxiliaryAbility::Innate(0),
+                        ability_id: Some("class.warrior.rally".to_owned()),
+                    },
                     NetHotbarSlot::default(),
                     NetHotbarSlot::default(),
                 ],
@@ -962,7 +1085,10 @@ mod tests {
             .run_system_once(sync_hotbar_slots)
             .expect("first run");
         app.update();
-        assert_eq!(app.world().resource::<HotbarSlotEntities>().0.len(), 3);
+        assert_eq!(
+            app.world().resource::<HotbarSlotEntities>().0.len(),
+            HOTBAR_SLOT_COUNT
+        );
 
         app.world_mut()
             .get_mut::<NetAbilities>(player)
@@ -970,13 +1096,22 @@ mod tests {
             .slots = vec![NetHotbarSlot::default()];
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("second run shrinks");
+            .expect("second run");
         app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>();
         assert_eq!(
-            app.world().resource::<HotbarSlotEntities>().0.len(),
-            1,
-            "extra slot entities must be despawned, not left stale"
+            slot_entities.0.len(),
+            HOTBAR_SLOT_COUNT,
+            "holder entities must never be despawned — only their content changes"
         );
+        let world = app.world();
+        let now_placeholder = world.get::<SlotContents>(slot_entities.0[0]).unwrap();
+        assert_eq!(
+            now_placeholder.icon_text, "",
+            "a slot that lost its real content when the mirror shrank must clear to a placeholder"
+        );
+        assert_eq!(now_placeholder.tooltip, "Empty");
     }
 
     /// A [`SlotDropped`] entirely within the hotbar group swaps the two
@@ -1234,12 +1369,17 @@ mod tests {
         assert_eq!(background.0, Color::srgba(0.1, 0.9, 0.1, 0.5));
     }
 
-    /// BL-82 EM-5.17 Phase 2 (T57 action-bar split): with an odd slot count,
-    /// the first `ceil(n/2)` slots parent into the LEFT action-bar half and
-    /// the rest into the RIGHT half — spec §3.1's "first half of slots in
-    /// left, rest in right".
+    /// BL-82 EM-5.17 "5+5 slot-holders" follow-up (Matías's ask: 5 holders on
+    /// each background piece, 10 total): [`HOTBAR_SLOT_COUNT`] is now FIXED
+    /// at 10, so `div_ceil(2)` always gives an exact 5/5 split — even when
+    /// the mirror currently reports FEWER real slots than that (here: 3),
+    /// the first 5 HOLDER entities (3 real + 2 placeholder) go to the LEFT
+    /// half and the last 5 (all placeholder) go to the RIGHT half. This is
+    /// also the literal regression guard for the bug this phase fixes: with
+    /// the OLD "entity count == mirror length" behaviour, `ceil(3/2) == 2`
+    /// would have put only 2 entities in the left half and 1 in the right.
     #[test]
-    fn slot_half_parenting_splits_slots_left_then_right() {
+    fn slot_half_parenting_splits_five_and_five_regardless_of_mirror_length() {
         let mut app = new_app();
         let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
         let right_half = app.world_mut().spawn(HotbarRightHalf).id();
@@ -1250,14 +1390,12 @@ mod tests {
                 NetHotbarSlot::default(),
                 NetHotbarSlot::default(),
                 NetHotbarSlot::default(),
-                NetHotbarSlot::default(),
-                NetHotbarSlot::default(),
             ],
         }));
 
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("spawn 5 slots");
+            .expect("spawn 10 holders (3 real + 7 placeholder)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
@@ -1265,7 +1403,7 @@ mod tests {
         app.update();
 
         let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
-        assert_eq!(slot_entities.len(), 5);
+        assert_eq!(slot_entities.len(), HOTBAR_SLOT_COUNT);
 
         let left_children: Vec<Entity> = app
             .world()
@@ -1280,16 +1418,21 @@ mod tests {
             .iter()
             .collect();
 
-        // ceil(5/2) == 3 slots in the left half, 2 in the right.
-        assert_eq!(left_children, slot_entities[0..3]);
-        assert_eq!(right_children, slot_entities[3..5]);
+        assert_eq!(left_children, slot_entities[0..SLOTS_PER_HALF]);
+        assert_eq!(
+            right_children,
+            slot_entities[SLOTS_PER_HALF..HOTBAR_SLOT_COUNT]
+        );
     }
 
-    /// A LATER slot-count change re-splits the halves from scratch (not a
-    /// stale assignment from the previous count) — the reactive half of the
-    /// T57 acceptance bar.
+    /// A LATER change to the mirror's real slot COUNT (e.g. a weapon swap)
+    /// must NOT change the 5/5 split — unlike the pre-fix behaviour (where
+    /// the entity count itself tracked the mirror and a count change could
+    /// shift the `div_ceil` boundary), the holder count is fixed today, so
+    /// the same 5 entities stay in each half no matter how `NetAbilities`
+    /// changes.
     #[test]
-    fn slot_half_parenting_resplits_when_slot_count_changes() {
+    fn slot_half_parenting_stays_five_and_five_when_mirror_length_changes() {
         let mut app = new_app();
         let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
         let right_half = app.world_mut().spawn(HotbarRightHalf).id();
@@ -1304,20 +1447,19 @@ mod tests {
 
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("spawn 2 slots");
+            .expect("spawn 10 holders (2 real + 8 placeholder)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
             .expect("split across halves");
         app.update();
-        // ceil(2/2) == 1 slot in each half.
         assert_eq!(
             app.world()
                 .get::<Children>(left_half)
                 .unwrap()
                 .iter()
                 .count(),
-            1
+            SLOTS_PER_HALF
         );
         assert_eq!(
             app.world()
@@ -1325,7 +1467,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .count(),
-            1
+            SLOTS_PER_HALF
         );
 
         app.world_mut()
@@ -1338,21 +1480,21 @@ mod tests {
         ];
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("grow to 3 slots");
+            .expect("still 10 holders (3 real + 7 placeholder)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
-            .expect("re-split across halves");
+            .expect("split stays stable");
         app.update();
 
-        // ceil(3/2) == 2 slots now belong in the left half, 1 in the right.
         assert_eq!(
             app.world()
                 .get::<Children>(left_half)
                 .unwrap()
                 .iter()
                 .count(),
-            2
+            SLOTS_PER_HALF,
+            "the split must stay 5/5 even after the mirror's real slot count changes"
         );
         assert_eq!(
             app.world()
@@ -1360,7 +1502,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .count(),
-            1
+            SLOTS_PER_HALF
         );
     }
 }
