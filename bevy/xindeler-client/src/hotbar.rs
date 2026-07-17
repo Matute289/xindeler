@@ -68,6 +68,31 @@
 //! literal — see that field's own doc comment in `xindeler-ui::theme` for the
 //! luminance-floor regression test that pins this.
 //!
+//! ### Bugfix: every slot showed two overlapping rectangles
+//! Matías's screenshot after the Phase 2 art landed showed each numbered
+//! slot with what looked like two stacked rectangle graphics. Root cause:
+//! [`xindeler_ui::slot::slot_bundle`] gives every slot a generic flat
+//! `BackgroundColor`/`BorderColor` panel (a bright gold 2px border) by
+//! default, and [`SkillSlotBorderOverlay`] then spawns as a CHILD sized to
+//! the slot's padding box (inside that border, not covering it) — so the
+//! flat border ring stayed visible as its own square, nested around the
+//! ornate `skill_slot_border.png` art. Fixed in [`sync_hotbar_slots`] by
+//! overriding both render components to `Color::NONE` right after spawning
+//! `slot_bundle`, the same "drop the flat chrome, let the art be the only
+//! frame" treatment PR #112 (`map_view.rs`'s `MinimapPanelRoot`) used for
+//! the minimap's analogous square-frame bug. Scoped to the hotbar only —
+//! bag/equip/trade slots have no overlay art of their own, so their flat
+//! chrome is their only frame and stays unchanged.
+//!
+//! Reviewing this fix surfaced a second, latent instance of the same bug:
+//! `xindeler_ui::slot`'s global drag observers hardcoded the theme's opaque
+//! panel colours as the "resting" state to restore once a drag ends/leaves/
+//! drops, so the FIRST drag touching a hotbar slot (it supports real
+//! rearranging — see [`apply_hotbar_drop`]) would silently re-opaque it.
+//! Fixed at the source via the [`xindeler_ui::slot::ChromelessSlot`] marker
+//! (inserted alongside the `Color::NONE` override below) — see that
+//! marker's own doc comment for the observer-by-observer detail.
+//!
 //! Compiled only under `listen-server`/`net-client` — same posture as every
 //! other `xindeler_protocol`-consuming module in this crate.
 //!
@@ -89,7 +114,7 @@ use xindeler_protocol::{
 };
 use xindeler_ui::{
     images::{HudImageKey, HudImages},
-    slot::{SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
+    slot::{ChromelessSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
     zlayer,
 };
@@ -101,7 +126,10 @@ use crate::{controls_screen::key_label, hud_layout};
 /// what a group number means).
 const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 
-const SLOT_SIZE_PX: f32 = 44.0;
+/// `pub(crate)` (not private) so `hud_layout.rs`'s own regression test can
+/// pin `ACTION_BAR_HALF_WIDTH_PX` against the real slot size, instead of a
+/// second hardcoded literal silently drifting out of sync with this one.
+pub(crate) const SLOT_SIZE_PX: f32 = 44.0;
 
 /// The keybind each rendered slot index (0-based) is labelled with, for
 /// indices `< 10` — beyond that a slot still works (drag/cooldown/fire all
@@ -359,6 +387,45 @@ fn sync_hotbar_slots(
                 SLOT_SIZE_PX,
             ))
             .id();
+        // BL-82 EM-5.17 Phase 0 review follow-up (Matías's screenshot: every
+        // numbered slot showed two overlapping rectangles). Root cause:
+        // `slot_bundle`'s generic flat `BackgroundColor(panel_bg)`/
+        // `BorderColor(panel_border)` chrome (a bright gold 2px square
+        // outline drawn by the slot's OWN Node) sat directly underneath
+        // `SkillSlotBorderOverlay`'s `skill_slot_border.png` child spawned
+        // just below — that child is absolutely positioned/sized to the
+        // slot's PADDING box (inside the 2px border, per bevy_ui's
+        // CSS-like absolute-positioning containing block), so the ornate art
+        // never covers the border ring; both rendered at once as two nested
+        // squares. Same "drop the flat chrome, let the art be the only
+        // frame" treatment PR #112 (`map_view.rs`'s `MinimapPanelRoot`) used
+        // for the minimap's square-frame bug: override both render
+        // components to `Color::NONE` right after spawning `slot_bundle`,
+        // rather than inventing a chromeless bundle variant. Only the hotbar
+        // does this — bag/equip/trade slots (`inventory_ui.rs`/
+        // `trade_ui.rs`/`diary.rs`) call plain `slot_bundle` with no overlay
+        // art of their own, so they keep the flat chrome unchanged (it's
+        // their ONLY frame; scoped to what was actually reported).
+        //
+        // The hotbar also supports real drag-and-drop rearrangement
+        // (`apply_hotbar_drop` below) — `xindeler_ui::slot`'s drag observers
+        // are registered GLOBALLY against every `HudSlot`, and originally
+        // hardcoded the theme's OPAQUE `panel_bg`/`panel_border` as the
+        // "resting" colour to restore once a drag ends/leaves/drops. Without
+        // more, the FIRST drag touching a hotbar slot (as either end) would
+        // silently re-opaque it, reintroducing this exact doubled-rectangle
+        // bug from then on — caught while reviewing this fix, not in the
+        // original report. Fixed at the source: `ChromelessSlot` is a marker
+        // `xindeler_ui::slot`'s observers check to restore `Color::NONE`
+        // instead for a slot that opted out of the flat chrome, so it's
+        // inserted here alongside the one-off `Color::NONE` override (see
+        // that marker's own doc comment for the full before/after per
+        // observer).
+        commands.entity(slot_entity).insert((
+            BackgroundColor(Color::NONE),
+            BorderColor::all(Color::NONE),
+            ChromelessSlot,
+        ));
         commands.entity(slot_entity).with_children(|parent| {
             // BL-82 EM-5.17 Phase 2: `skill_slot_border.png` overlay — spawned
             // FIRST (i.e. rendered UNDER the keybind label/cooldown veil/
@@ -807,6 +874,70 @@ mod tests {
         let empty_contents = world.get::<SlotContents>(slot_entities.0[1]).unwrap();
         assert_eq!(empty_contents.icon_text, "");
         assert_eq!(empty_contents.tooltip, "Empty");
+    }
+
+    /// Regression test for the "two overlapping rectangles" bug (Matías's
+    /// screenshot, this module doc comment's own "Bugfix" section): a spawned
+    /// hotbar slot's `BackgroundColor`/`BorderColor` — the flat chrome
+    /// `slot_bundle` gives every slot by default — must be fully transparent,
+    /// NOT the opaque `theme.palette.panel_bg`/`panel_border` bag/equip/trade
+    /// slots keep (`xindeler_ui::slot`'s own default). Only the hotbar
+    /// overrides these to `Color::NONE`, since [`SkillSlotBorderOverlay`]'s
+    /// `skill_slot_border.png` is already the slot's ONLY intended frame —
+    /// same "drop the flat chrome, let the art be the only frame" treatment
+    /// PR #112 (`map_view.rs`'s `MinimapPanelRoot`) used for the minimap's
+    /// analogous square-frame bug. Also asserts the
+    /// [`xindeler_ui::slot::ChromelessSlot`] marker is present, so the
+    /// global drag observers restore this same `Color::NONE` resting state
+    /// (not the opaque theme colours) after a drag ends on this slot — see
+    /// that marker's own doc comment.
+    #[test]
+    fn sync_hotbar_slots_carries_no_generic_panel_chrome() {
+        use bevy::color::Alpha;
+
+        let mut app = new_app();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default()],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("sync_hotbar_slots runs");
+        app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>();
+        assert_eq!(slot_entities.0.len(), 1);
+        let slot_entity = slot_entities.0[0];
+
+        let world = app.world();
+        let background = world
+            .get::<BackgroundColor>(slot_entity)
+            .expect("Node requires BackgroundColor to be present (as a component)");
+        assert!(
+            background.0.is_fully_transparent(),
+            "a hotbar slot's BackgroundColor must be fully transparent, got {:?} — an opaque fill \
+             here draws a second flat rectangle underneath SkillSlotBorderOverlay's ornate frame \
+             art",
+            background.0
+        );
+
+        let border = world
+            .get::<BorderColor>(slot_entity)
+            .expect("Node requires BorderColor to be present (as a component)");
+        assert!(
+            border.is_fully_transparent(),
+            "a hotbar slot's BorderColor must be fully transparent, got {border:?} — same \
+             doubled-rectangle bug as the background chrome"
+        );
+
+        assert!(
+            world.get::<ChromelessSlot>(slot_entity).is_some(),
+            "a hotbar slot must carry ChromelessSlot so xindeler_ui::slot's global drag observers \
+             restore Color::NONE (not the opaque theme panel colours) once a drag touching this \
+             slot ends/leaves/drops — see ChromelessSlot's own doc comment"
+        );
     }
 
     /// A LATER change to `NetAbilities` (fewer slots — e.g. a weapon swap to
