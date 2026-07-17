@@ -14,38 +14,63 @@
 //! `Crosshair` node already uses) — no shared parent entity is needed across
 //! the two plugins, so spawn-order between them never matters.
 //!
-//! ## A real asset gap found while wiring this phase (flagged, not silently
-//! ## worked around)
-//! Every "frame"/"border" PNG this phase composites OVER a liquid fill or a
-//! slot (`orb_frame_angel.png`, `orb_frame_stamina.png`,
-//! `orb_frame_cuthulhu.png`, `action_bar_bg_left.png`,
-//! `action_bar_bg_right.png`, `skill_slot_border.png`) is a **plain opaque
-//! RGB PNG with no alpha channel at all** — verified directly (not assumed):
-//! every one of these files opens as PIL mode `"RGB"` (no `"A"` channel), and
-//! their circular/rectangular "cutout" regions sample as fully opaque black,
-//! not transparent. Both the design spec (§3.1: "the frame PNGs in the
-//! HUD-D4 pack have an alpha-transparent centre") and
-//! `xindeler_ui::bar::spawn_orb_bar`'s own doc comment assumed real alpha
-//! transparency there so the liquid fill would show through the frame's
-//! circular cutout — that assumption does not hold for the actual files on
-//! disk. This phase still wires the mechanism EXACTLY as Phase 1 designed it
-//! (`spawn_orb_bar`'s frame-overlay parameter, `skill_slot_border` layered
-//! onto the slot) since regenerating/re-cutting the art pack is outside a
-//! code phase's scope — but the visual result (confirmed in this phase's own
-//! smoke screenshot) is that the opaque frame fully occludes whatever's
-//! beneath it, so the orbs' liquid fill never visibly changes with the
-//! underlying resource value today. Flagged as the primary follow-up this
-//! phase surfaces, not silently patched over.
-use bevy::ui::Val;
+//! ## A real asset gap found while wiring this phase — RESOLVED, see below
+//! *(Historical note, BL-82 EM-5.17 Phase 2)* This doc comment originally
+//! flagged every orb "frame"/"border" PNG as a plain opaque RGB PNG with no
+//! alpha channel at all, meaning the frame would fully occlude the liquid
+//! fill underneath it. **That is no longer true of the assets on disk** —
+//! re-verified directly (BL-82 EM-5.17 Phase 0 follow-up, Matías's HUD
+//! art-alignment report): `orb_frame_angel.png`/`orb_frame_cuthulhu.png`/
+//! `orb_frame_stamina.png` and the `*_liquid.png` files are all real 8-bit
+//! RGBA PNGs today, with a genuine transparent circular cutout in the frame
+//! art and a genuine circular liquid blob in the fill art (the art pack was
+//! re-cut at some point after this comment was written). The remaining real
+//! issue this module now fixes is SIZING, not occlusion: every one of these
+//! files is a wide `1408×768`-ish canvas with the actual circular art
+//! centred in a narrower sub-region (padding left/right for the gargoyle-
+//! wing frame extensions) — see [`ORB_SOURCE_CROP`]'s own doc comment for
+//! the exact measured bounding boxes and the crop that fixes it.
+use bevy::{math::Rect, ui::Val};
 
 /// Size (px, both axes) of each of the three resource orbs — spec §3.1's
 /// "~160×160". The source `orb_frame_*.png`/`*_liquid.png` files are a wider
 /// `1408×768`-ish canvas (not literally square, see the module doc comment's
-/// asset-gap note) — `ImageNode`'s default stretch-to-fit means a plain
-/// square box does mildly squash the circular artwork; a follow-up can crop
-/// the source art or switch to `ImageNode::with_mode` cover-fit once that's
-/// worth the extra code.
+/// asset-gap note) — [`ORB_SOURCE_CROP`] fixes the squash this used to cause
+/// by cropping a square sub-region of the source BEFORE it's stretched onto
+/// this square box.
 pub const ORB_SIZE_PX: f32 = 160.0;
+
+/// BL-82 EM-5.17 Phase 0 follow-up (Matías's HUD art-alignment report) — the
+/// SQUARE pixel-space sub-rect of the HUD-D4 orb pack's native canvas that
+/// every `spawn_orb_bar` call for the three resource orbs passes as
+/// `xindeler_ui::bar::spawn_orb_bar`'s `source_crop` parameter.
+///
+/// Verified directly against the actual on-disk PNGs (all `1408×768`,
+/// except `orb_frame_cuthulhu.png` at `1407×768` — a 1px rounding
+/// difference, negligible): every orb frame/liquid file is a WIDE canvas
+/// where the real circular art sits centred in a narrower square-ish
+/// sub-region, not spanning the full width — the artist left transparent
+/// padding left/right for the gargoyle-wing frame extensions. Measured
+/// bounding boxes: the liquid art's own opaque content is
+/// `x[354,1055] y[28,727]` (≈701×699px); the frame's enclosed circular
+/// cutout is `x[523,896] y[197,577]` (≈372×380px). Both are centred within a
+/// few px of the canvas's own horizontal centre (`x≈704-710` of ~1408) —
+/// close enough (a handful of px on a ~700px-wide circle) that ONE shared
+/// crop rect serves the frame, angel/stamina/cuthulhu variants, and all four
+/// liquid variants alike (this doesn't need to be pixel-exact — see
+/// `spawn_orb_bar`'s own doc comment).
+///
+/// This crop keeps the FULL canvas height (`0..768`, already tight around
+/// the circle) and crops the width down to match it (`768px` wide, centred
+/// on `x≈704`, i.e. `[320,1088]`) — producing a genuinely SQUARE sub-rect.
+/// Stretching a square crop onto `spawn_orb_bar`'s square
+/// [`ORB_SIZE_PX`]×[`ORB_SIZE_PX`] box distorts nothing (uniform scale);
+/// stretching the whole non-square canvas onto that same square box (the
+/// pre-fix behaviour) squashed the circle into an ellipse.
+pub const ORB_SOURCE_CROP: Rect = Rect {
+    min: bevy::math::Vec2::new(320.0, 0.0),
+    max: bevy::math::Vec2::new(1088.0, 768.0),
+};
 
 /// Height (px) of each action-bar-half background. Matches [`ORB_SIZE_PX`]
 /// so the whole cluster's bottom edge lines up in one row.

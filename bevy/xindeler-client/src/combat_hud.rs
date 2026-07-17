@@ -140,13 +140,16 @@ fn spawn_combat_hud(
     // placement comes from `crate::hud_layout::CLUSTER`, the SAME arithmetic
     // `hotbar.rs`'s two action-bar-half backgrounds use, so the two
     // independent plugins render as one contiguous row (see that module's
-    // doc comment — including its asset-opacity finding, which means the
-    // liquid fill underneath each frame does not currently show through it).
+    // doc comment). `Some(hud_layout::ORB_SOURCE_CROP)` fixes the squashed-
+    // ellipse sizing bug (BL-82 EM-5.17 Phase 0 follow-up) by cropping each
+    // source PNG's wide canvas down to the square sub-region that actually
+    // holds the circular art before it's stretched onto this square orb box.
     let health_orb = spawn_orb_bar(
         &mut commands,
         &theme,
         images.get(HudImageKey::HealthLiquid),
         Some(images.get(HudImageKey::OrbFrameAngel)),
+        Some(hud_layout::ORB_SOURCE_CROP),
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -175,6 +178,7 @@ fn spawn_combat_hud(
         &theme,
         images.get(HudImageKey::StaminaLiquid),
         Some(images.get(HudImageKey::OrbFrameStamina)),
+        Some(hud_layout::ORB_SOURCE_CROP),
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -198,6 +202,7 @@ fn spawn_combat_hud(
         &theme,
         images.get(HudImageKey::ManaLiquid),
         Some(images.get(HudImageKey::OrbFrameCuthulhu)),
+        Some(hud_layout::ORB_SOURCE_CROP),
         hud_layout::ORB_SIZE_PX,
         hud_layout::ORB_SIZE_PX,
         BarValue::new(1.0, 1.0),
@@ -796,18 +801,26 @@ mod tests {
     }
 
     /// A resource orb spawned through this screen's own real
-    /// `spawn_orb_bar` call site (same image handles/size `spawn_combat_hud`
-    /// uses for the health orb) carries the correct [`BarValue`] and a real
-    /// fill child (`HudOrbBarFill`) whose height reflects the fraction it
-    /// was spawned with — mirrors `xindeler_ui::bar`'s own
-    /// `orb_bar_fill_tracks_value_changes_by_height` acceptance bar. This
-    /// tests the SPAWN-time fraction (not a later `BarValue` mutation): the
-    /// system that resizes the fill child on a LATER change
+    /// `spawn_orb_bar` call site (same image handles/size/crop
+    /// `spawn_combat_hud` uses for the health orb) carries the correct
+    /// [`BarValue`] and a real fraction-reveal CLIP WINDOW
+    /// (`HudOrbBarFillClip`) whose height reflects the fraction it was
+    /// spawned with — mirrors `xindeler_ui::bar`'s own
+    /// `orb_bar_fill_tracks_value_changes_by_height` acceptance bar.
+    /// Updated for the BL-82 EM-5.17 Phase 0 follow-up clip-reveal rework:
+    /// the fraction now lives on the clip WRAPPER (a direct child of the
+    /// orb), not the liquid image itself (`HudOrbBarFill`, now nested one
+    /// level deeper inside that wrapper) — this test also pins the liquid
+    /// image's `Node` to a FIXED `Val::Px` matching the orb's full size, the
+    /// regression this screen's own real call site must never reintroduce
+    /// (Matías's "shrinks instead of drains" report). This tests the
+    /// SPAWN-time fraction (not a later `BarValue` mutation): the system
+    /// that resizes the clip window on a LATER change
     /// (`xindeler_ui::bar::update_orb_bars`) is `pub(crate)` to
     /// `xindeler-ui` and already covered by that crate's own tests; from
     /// `xindeler-client` the observable contract is "the orb this screen
-    /// spawns is a real `spawn_orb_bar` at the value it's given," which this
-    /// asserts directly.
+    /// spawns is a real `spawn_orb_bar` at the value/crop it's given," which
+    /// this asserts directly.
     #[test]
     fn health_orb_spawns_with_correct_value_and_half_height_fill() {
         let mut app = new_app_with_images();
@@ -821,6 +834,7 @@ mod tests {
                 &theme,
                 images.get(HudImageKey::HealthLiquid),
                 Some(images.get(HudImageKey::OrbFrameAngel)),
+                Some(hud_layout::ORB_SOURCE_CROP),
                 hud_layout::ORB_SIZE_PX,
                 hud_layout::ORB_SIZE_PX,
                 BarValue::new(50.0, 100.0),
@@ -838,20 +852,45 @@ mod tests {
         let children: Vec<Entity> = app
             .world()
             .get::<Children>(health_orb_entity)
-            .expect("the orb has fill/frame children")
+            .expect("the orb has clip-window/frame children")
             .iter()
             .collect();
-        let fill_entity = children
+        let clip_entity = children
+            .into_iter()
+            .find(|&e| {
+                app.world()
+                    .get::<xindeler_ui::bar::HudOrbBarFillClip>(e)
+                    .is_some()
+            })
+            .expect("a HudOrbBarFillClip child exists");
+        assert_eq!(
+            app.world().get::<Node>(clip_entity).unwrap().height,
+            Val::Percent(50.0)
+        );
+
+        let clip_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(clip_entity)
+            .expect("the clip window has a fill-image grandchild")
+            .iter()
+            .collect();
+        let fill_entity = clip_children
             .into_iter()
             .find(|&e| {
                 app.world()
                     .get::<xindeler_ui::bar::HudOrbBarFill>(e)
                     .is_some()
             })
-            .expect("a HudOrbBarFill child exists");
+            .expect("a HudOrbBarFill grandchild exists");
+        let fill_node = app.world().get::<Node>(fill_entity).unwrap();
         assert_eq!(
-            app.world().get::<Node>(fill_entity).unwrap().height,
-            Val::Percent(50.0)
+            (fill_node.width, fill_node.height),
+            (
+                Val::Px(hud_layout::ORB_SIZE_PX),
+                Val::Px(hud_layout::ORB_SIZE_PX)
+            ),
+            "the liquid image must stay at the orb's FULL fixed size, never the shrinking \
+             fraction — this is the regression this screen's real call site must never reintroduce"
         );
     }
 
