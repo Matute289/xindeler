@@ -432,6 +432,17 @@ fn sync_nameplate_lock_style(
 /// [`NetXp`]/[`NetBody`]/[`NetUid`] and updates the panel's bars/text.
 /// Degrades clean (a target with no mirrored health/poise/xp yet, or no
 /// target at all) — never panics (spec §3.2).
+///
+/// Diffs before writing each `BarValue`/`Text`: this runs every frame a
+/// target is selected (EM-5.18's soft-target scan made target selection
+/// continuous, not edge-triggered), and an unconditional `*bar = ...`/
+/// `text.0 = ...` would mark the component `Changed` even when the value is
+/// identical, defeating `bar.rs`'s downstream `Changed<BarValue>`-gated
+/// fill-width update and forcing a text-layout re-measure every frame — the
+/// same discipline `hotbar.rs`'s `sync_cooldown_overlays` (`if text.0 !=
+/// countdown_text`) uses, and this file's own `sync_nameplate_visibility`/
+/// `sync_nameplate_lock_style` apply at the resource level via
+/// `is_changed()`.
 fn sync_nameplate_content(
     target: Res<SelectedTarget>,
     entities: Query<(
@@ -460,22 +471,34 @@ fn sync_nameplate_content(
     };
 
     if let Ok(mut bar) = health_bars.single_mut() {
-        *bar = health
+        let new_bar = health
             .map(|h| BarValue::new(h.current, h.max))
             .unwrap_or(BarValue::new(0.0, 0.0));
+        if *bar != new_bar {
+            *bar = new_bar;
+        }
     }
     if let Ok(mut bar) = stagger_bars.single_mut() {
-        *bar = poise
+        let new_bar = poise
             .map(|p| BarValue::new(p.current, p.max))
             .unwrap_or(BarValue::new(0.0, 0.0));
+        if *bar != new_bar {
+            *bar = new_bar;
+        }
     }
     if let Ok(mut text) = name_text.single_mut() {
-        text.0 = body
+        let new_name = body
             .map(|b| placeholder_name(&b.0))
             .unwrap_or_else(|| format!("TARGET #{}", uid.map(|u| u.0).unwrap_or_default()));
+        if text.0 != new_name {
+            text.0 = new_name;
+        }
     }
     if let Ok(mut text) = level_text.single_mut() {
-        text.0 = xp.map(|x| format!("{}", x.level)).unwrap_or_default();
+        let new_level = xp.map(|x| format!("{}", x.level)).unwrap_or_default();
+        if text.0 != new_level {
+            text.0 = new_level;
+        }
     }
 }
 
@@ -626,6 +649,119 @@ mod tests {
     #[test]
     fn placeholder_name_uppercases_a_coarse_body_label() {
         assert_eq!(placeholder_name(&Body::default()), "SMALL BEAST");
+    }
+
+    /// [`sync_nameplate_content`] must NOT re-mark its output components
+    /// `Changed` on a frame where the target's mirrored data hasn't actually
+    /// changed — the same diff-before-write discipline
+    /// `hotbar.rs`'s `sync_cooldown_overlays` (`if text.0 != countdown_text`)
+    /// already establishes elsewhere in this crate. An unconditional `*bar =
+    /// ...`/`text.0 = ...` write marks the component `Changed` regardless of
+    /// whether the value differs (`Mut::deref_mut`'s documented behaviour),
+    /// which would defeat `bar.rs`'s downstream `Changed<BarValue>`-gated
+    /// fill-width update and force a text-layout re-measure every single
+    /// frame a target is selected — this is now a continuous, not edge-
+    /// triggered, code path since BL-82 EM-5.18's soft-target scan.
+    ///
+    /// Proven via the standard `World::clear_trackers` baseline-reset idiom:
+    /// run once (establishes real, non-default content — trivially marks
+    /// `Changed`), reset the tracking baseline, run again with the EXACT
+    /// SAME target data, then assert `is_changed()` reads `false` — i.e. the
+    /// second run performed no redundant write.
+    #[test]
+    fn sync_nameplate_content_does_not_rewrite_unchanged_bars_or_text() {
+        let mut app = new_app();
+        app.world_mut().spawn(NameplateRoot);
+        let health_bar = app
+            .world_mut()
+            .spawn((NameplateHealthBarTag, BarValue::new(1.0, 1.0)))
+            .id();
+        let stagger_bar = app
+            .world_mut()
+            .spawn((NameplateStaggerBarTag, BarValue::new(1.0, 1.0)))
+            .id();
+        let name_text = app
+            .world_mut()
+            .spawn((NameplateNameText, Text(String::new())))
+            .id();
+        let level_text = app
+            .world_mut()
+            .spawn((NameplateLevelText, Text(String::new())))
+            .id();
+
+        let target_entity = app
+            .world_mut()
+            .spawn((
+                NetUid(42),
+                NetHealth {
+                    current: 40.0,
+                    max: 100.0,
+                },
+                NetPoise {
+                    current: 5.0,
+                    max: 50.0,
+                },
+                NetXp {
+                    level: 7,
+                    xp_into_level: 0,
+                    xp_for_level: 1,
+                },
+                NetBody(Body::default()),
+            ))
+            .id();
+        app.insert_resource(SelectedTarget(Some(target_entity)));
+
+        // Run 1: establishes real content (definitely differs from the
+        // spawn-time defaults above, so this run's writes legitimately mark
+        // `Changed` — not the thing under test).
+        app.world_mut()
+            .run_system_once(sync_nameplate_content)
+            .expect("first run succeeds");
+
+        // Reset the tracking baseline so a SUBSEQUENT no-op write (if the
+        // bug is present) is the only thing that could show up as `Changed`
+        // below — the standard idiom for asserting "no redundant write" in
+        // Bevy's own change-detection tests.
+        app.world_mut().clear_trackers();
+
+        // Run 2: same target, same mirrored data — nothing should change.
+        app.world_mut()
+            .run_system_once(sync_nameplate_content)
+            .expect("second run succeeds");
+
+        let world = app.world();
+        assert!(
+            !world
+                .entity(health_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "health bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(stagger_bar)
+                .get_ref::<BarValue>()
+                .unwrap()
+                .is_changed(),
+            "stagger bar was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(name_text)
+                .get_ref::<Text>()
+                .unwrap()
+                .is_changed(),
+            "name text was rewritten even though its value didn't change"
+        );
+        assert!(
+            !world
+                .entity(level_text)
+                .get_ref::<Text>()
+                .unwrap()
+                .is_changed(),
+            "level text was rewritten even though its value didn't change"
+        );
     }
 
     /// The stagger bar is built via
