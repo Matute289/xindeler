@@ -208,6 +208,14 @@ pub const ORB_SOURCE_CROP: Rect = Rect {
 /// [`STAMINA_FRAME_WIDTH_PX`] for the corresponding rendered-box widths, and
 /// [`crate::zlayer::AMBIENT_CHROME_OVERLAY`] for why the now-overlapping
 /// frame needs its own explicit `GlobalZIndex`.
+///
+/// ## HUD polish round 3 — this overhang is also the root cause of issue 1
+/// (Matías's `captura2.png` report, asymmetric gap): see
+/// [`CUTHULHU_EXTRA_GAP_PX`]'s own doc comment for how the very different
+/// overhangs computed here (angel `19.58px`/side vs cuthulhu `50.31px`/side)
+/// explain why the right action-bar half's gap to the mana orb read
+/// noticeably tighter than the left half's gap to the stamina orb, even
+/// though [`CLUSTER_GAP_PX`] itself was already identical on both sides.
 pub const ANGEL_FRAME_SOURCE_CROP: Rect = Rect {
     min: bevy::math::Vec2::new(233.0, 0.0),
     max: bevy::math::Vec2::new(1189.0, 768.0),
@@ -253,6 +261,38 @@ pub const CUTHULHU_FRAME_WIDTH_PX: f32 = (1337.0 - 86.0) * ORB_SIZE_PX / 768.0;
 /// square crop); still routed through the same `frame_width_px` mechanism as
 /// the other two variants rather than special-cased to `ORB_SIZE_PX`.
 pub const STAMINA_FRAME_WIDTH_PX: f32 = (1089.0 - 330.0) * ORB_SIZE_PX / 768.0;
+
+/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 1): extra
+/// clearance (px) added ONLY between the right action-bar half and the mana
+/// orb, on top of the normal [`CLUSTER_GAP_PX`] every other adjacent pair in
+/// the row shares.
+///
+/// Root cause: [`CLUSTER_GAP_PX`] is genuinely the SAME `4.0px` on every
+/// adjacent pair in the row (`cluster_is_symmetric_around_centre` already
+/// pinned this) — the visible asymmetry Matías reported (the right half's gap
+/// to the cuthulhu/mana orb reads noticeably tighter than the left half's gap
+/// to the stamina orb) comes entirely from [`CUTHULHU_FRAME_WIDTH_PX`]'s own
+/// overhang being far bigger than [`ANGEL_FRAME_WIDTH_PX`]'s: the cuthulhu
+/// frame spills `(260.63 - 160.0) / 2 ≈ 50.31px` past the orb's own hit-box on
+/// each side, vs the angel frame's `(199.17 - 160.0) / 2 ≈ 19.58px` — both
+/// bigger than the `4px` gap, so BOTH overhangs already paint over some of
+/// their neighbouring half's background art (by design, see
+/// `ANGEL_FRAME_SOURCE_CROP`'s round-3 doc comment — that overlap is an
+/// accepted trade-off of letting the wide decorative wing art render
+/// uncropped), but the cuthulhu side overlaps roughly `2.5×` further into the
+/// right half than the angel side does into the left half, which is what
+/// reads as "no breathing room" in the screenshot.
+///
+/// This constant equalizes that overlap rather than eliminating it outright
+/// (a full elimination would need `~50px` of extra clearance, visibly
+/// breaking the "one contiguous row" look this cluster exists to keep — see
+/// `hud_layout`'s own module doc comment): it is exactly the DELTA between
+/// the two overhangs, so after shifting the mana orb this far right (see
+/// [`CLUSTER`]'s `mana_orb_left` computation), the cuthulhu frame overlaps
+/// the right half by the SAME amount the angel frame already overlaps the
+/// left half — "both gaps match," Matías's own framing, applied as "a little
+/// breathing room" rather than a full redesign.
+pub const CUTHULHU_EXTRA_GAP_PX: f32 = (CUTHULHU_FRAME_WIDTH_PX - ANGEL_FRAME_WIDTH_PX) / 2.0;
 
 /// BL-82 EM-5.17 Phase 0 second follow-up — companion to
 /// [`ANGEL_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s
@@ -332,7 +372,33 @@ pub const ACTION_BAR_HALF_HEIGHT_PX: f32 = ORB_SIZE_PX;
 /// exact arithmetic);
 /// [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`]
 /// pins this so a future change to either constant can't silently overflow.
-pub const ACTION_BAR_WIDTH_TRIM: f32 = 0.88;
+///
+/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issues 2/3):
+/// nudged `0.88 -> 0.95` — a modest re-widening, NOT a reversion of the
+/// original "more breathing room" trim (still noticeably below `1.0`, the
+/// pure aspect-derived width) — to make room for flush/adjacent slots at a
+/// legibly bigger [`crate::hotbar::SLOT_SIZE_PX`] (`46.0 -> 52.0`) without
+/// spreading them across the piece.
+///
+/// Same round, POST-REVIEW follow-up: bumped again, `0.95 -> 1.14` —
+/// this one genuinely does cross `1.0` (the pure aspect-derived width),
+/// stretching the art slightly wider than its native aspect ratio rather
+/// than squashing it, the first time this constant has gone that direction.
+/// Necessary to make room for `crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX`
+/// (a fix for a SEPARATE bug that same live `--smoke-screenshot` check
+/// caught: the row's first slot rendering under the background art's own
+/// corner curl — see that constant's own doc comment for the pixel-measured
+/// proof, and for why the inset itself is a full slot pitch rather than a
+/// smaller value) without shrinking `SLOT_SIZE_PX` back down and undoing
+/// issue 3's fix. At this still-modest a stretch (14% over native aspect,
+/// similar order of magnitude to the original 12% squash) the distortion
+/// reads the same as the original trim's own squash did: imperceptible
+/// against the ornate, already-irregular frame art. See
+/// [`crate::hotbar::SLOT_SIZE_PX`]'s doc comment for the exact fit
+/// arithmetic this trim now supports and
+/// [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`] for
+/// the pinned regression.
+pub const ACTION_BAR_WIDTH_TRIM: f32 = 1.14;
 pub const ACTION_BAR_HALF_WIDTH_PX: f32 =
     ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0) * ACTION_BAR_WIDTH_TRIM;
 
@@ -356,7 +422,23 @@ pub const CLUSTER_GAP_PX: f32 = 4.0;
 
 /// Distance (px) from the viewport's bottom edge to the bottom of the whole
 /// orb/action-bar row.
-pub const CLUSTER_BOTTOM_PX: f32 = 20.0;
+///
+/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 5): was
+/// `20.0`, leaving a visible gap down to the floor texture in live gameplay
+/// frames. Every orb container's own frame-crop already spans the FULL
+/// vertical extent of its source canvas (`y[0, 768]` — see
+/// `ANGEL_FRAME_SOURCE_CROP`'s/`STAMINA_FRAME_SOURCE_CROP`'s own doc
+/// comments), so whatever sits at the very bottom row of each frame's art
+/// (including the stamina orb's decorative pointed bottom spike) already
+/// renders flush with the orb container's OWN bottom edge — there is no
+/// separate vertical inset/overhang mechanism (unlike
+/// [`ANGEL_FRAME_WIDTH_PX`]'s horizontal one) that would need a matching
+/// change here. Setting this to `0.0` therefore puts every orb's true bottom
+/// pixel (angel/cuthulhu/stamina alike) flush with the screen's own bottom
+/// edge — exactly Matías's ask, composing correctly with `HudScalePlugin`'s
+/// `UiScale` (a uniform multiplier over every `Val::Px` in this module,
+/// `0.0 * scale` staying `0.0` at any window size).
+pub const CLUSTER_BOTTOM_PX: f32 = 0.0;
 
 /// Gap (px) between the top of the orb/action-bar row and the XP-bar+level
 /// cluster sitting just above it (spec §3.1's "between/above the orbs and
@@ -402,6 +484,11 @@ pub const ACTION_BAR_TOTAL_WIDTH_PX: f32 =
 /// Computed once, left-to-right, from the centre Stamina orb outward, so
 /// both `combat_hud.rs` and `hotbar.rs` derive their own pieces' placement
 /// from the exact same arithmetic.
+///
+/// BL-82 HUD polish round 3: `mana_orb_left` is the one deliberate exception
+/// to the otherwise-mirrored left/right arithmetic — see
+/// [`CUTHULHU_EXTRA_GAP_PX`]'s own doc comment for why the mana orb needs
+/// its own extra clearance the health orb doesn't.
 pub struct ClusterOffsets {
     pub health_orb_left: f32,
     pub action_bar_left_half_left: f32,
@@ -417,7 +504,11 @@ pub const CLUSTER: ClusterOffsets = {
     let stamina_orb_right = ORB_SIZE_PX / 2.0;
     let action_bar_right_half_left = stamina_orb_right + CLUSTER_GAP_PX;
     let action_bar_right_half_right = action_bar_right_half_left + ACTION_BAR_HALF_WIDTH_PX;
-    let mana_orb_left = action_bar_right_half_right + CLUSTER_GAP_PX;
+    // BL-82 HUD polish round 3 (issue 1): the mana orb gets
+    // CUTHULHU_EXTRA_GAP_PX of clearance ON TOP of the shared CLUSTER_GAP_PX
+    // every other adjacent pair uses — see that constant's own doc comment
+    // for why only this one pairing needs it.
+    let mana_orb_left = action_bar_right_half_right + CLUSTER_GAP_PX + CUTHULHU_EXTRA_GAP_PX;
     let action_bar_left_half_right = stamina_orb_left - CLUSTER_GAP_PX;
     let action_bar_left_half_left = action_bar_left_half_right - ACTION_BAR_HALF_WIDTH_PX;
     let health_orb_left = action_bar_left_half_left - CLUSTER_GAP_PX - ORB_SIZE_PX;
@@ -449,7 +540,8 @@ pub const CENTER_LEFT: Val = Val::Percent(50.0);
 /// in non-test code needs this at runtime — `#[cfg(test)]` rather than
 /// `#[allow(dead_code)]`, since it's genuinely only ever called from tests.
 /// Can go negative (or spill past `width`) for a window narrower than the
-/// cluster's own ~1013px total span — the orb is simply partially or fully
+/// cluster's own ~1196px total span (BL-82 HUD polish round 3 widened this
+/// from the earlier ~1013px) — the orb is simply partially or fully
 /// off-screen at that point, a real but SEPARATE known limitation of this
 /// cluster's fixed-width design, not something this function hides.
 #[cfg(test)]
@@ -465,25 +557,49 @@ mod tests {
 
     /// The cluster is laid out symmetrically around screen centre: the
     /// Stamina orb (the centrepiece) straddles `x = 0` exactly, and the two
-    /// action-bar halves + outer orbs mirror each other in width — a
-    /// regression guard against a future constant tweak silently breaking
-    /// the "one contiguous row" contract this module exists to enforce.
+    /// action-bar halves mirror each other in width — a regression guard
+    /// against a future constant tweak silently breaking the "one
+    /// contiguous row" contract this module exists to enforce.
+    ///
+    /// BL-82 HUD polish round 3: the outer-orb gaps are DELIBERATELY no
+    /// longer identical raw numbers — [`CUTHULHU_EXTRA_GAP_PX`]'s own doc
+    /// comment explains why the mana side needs extra clearance the health
+    /// side doesn't (the cuthulhu frame's overhang is far bigger than the
+    /// angel frame's) — so this test now asserts the mana-side gap is
+    /// exactly [`CLUSTER_GAP_PX`] `+ CUTHULHU_EXTRA_GAP_PX` bigger than the
+    /// health-side gap, not that the two are equal.
     #[test]
     fn cluster_is_symmetric_around_centre() {
         assert_eq!(CLUSTER.stamina_orb_left, -ORB_SIZE_PX / 2.0);
 
         let left_bar_width =
             CLUSTER.stamina_orb_left - CLUSTER_GAP_PX - CLUSTER.action_bar_left_half_left;
-        let right_bar_width =
-            CLUSTER.mana_orb_left - CLUSTER_GAP_PX - CLUSTER.action_bar_right_half_left;
+        let right_bar_width = CLUSTER.mana_orb_left
+            - CLUSTER_GAP_PX
+            - CUTHULHU_EXTRA_GAP_PX
+            - CLUSTER.action_bar_right_half_left;
         assert!((left_bar_width - right_bar_width).abs() < f32::EPSILON);
         assert!((left_bar_width - ACTION_BAR_HALF_WIDTH_PX).abs() < f32::EPSILON);
 
         // Health orb's right edge must sit exactly `CLUSTER_GAP_PX` before
-        // the left bar half's left edge (and symmetrically for Mana/right).
+        // the left bar half's left edge.
         let health_orb_right = CLUSTER.health_orb_left + ORB_SIZE_PX;
         assert!(
             (health_orb_right + CLUSTER_GAP_PX - CLUSTER.action_bar_left_half_left).abs() < 0.01
+        );
+
+        // Mana orb's left edge must sit exactly `CLUSTER_GAP_PX +
+        // CUTHULHU_EXTRA_GAP_PX` past the right bar half's right edge — the
+        // one intentionally-asymmetric gap in the whole cluster (issue 1).
+        let action_bar_right_half_right =
+            CLUSTER.action_bar_right_half_left + ACTION_BAR_HALF_WIDTH_PX;
+        assert!(
+            (CLUSTER.mana_orb_left
+                - CLUSTER_GAP_PX
+                - CUTHULHU_EXTRA_GAP_PX
+                - action_bar_right_half_right)
+                .abs()
+                < 0.01
         );
     }
 
@@ -509,7 +625,7 @@ mod tests {
 
     /// [`health_orb_screen_x`]: the orb's edges sit exactly
     /// `width / 2.0 + CLUSTER.health_orb_left` .. `+ ORB_SIZE_PX` — and, for
-    /// a window narrower than the cluster's own ~1013px total span, the left
+    /// a window narrower than the cluster's own ~1196px total span, the left
     /// edge genuinely goes negative (the orb spills off-screen) rather than
     /// being silently clamped — callers must handle that themselves.
     #[test]
@@ -528,25 +644,37 @@ mod tests {
 
     /// Regression guard for [`ACTION_BAR_WIDTH_TRIM`] (BL-82 EM-5.17 "5+5
     /// slot-holders" follow-up, superseding the old "worst case 3 slots"
-    /// version of this test): each action-bar half ALWAYS renders
+    /// version of this test; updated BL-82 HUD polish round 3 for the
+    /// flush/adjacent slot layout — issues 2/3 of Matías's `captura2.png`
+    /// report): each action-bar half ALWAYS renders
     /// [`crate::hotbar::SLOTS_PER_HALF`] (5) holders now (not a sim-driven,
-    /// usually-shorter count) — this pins that the trimmed
-    /// [`ACTION_BAR_HALF_WIDTH_PX`] still fits exactly 5 `hotbar::
-    /// SLOT_SIZE_PX` slots + 4 of the theme's `HudSpacing::xs` gaps, so a
-    /// future change to any of `ACTION_BAR_WIDTH_TRIM`/`SLOT_SIZE_PX`/
-    /// `HudSpacing::xs` can't silently make the row overflow the background
-    /// art's own width.
+    /// usually-shorter count) — this pins that the re-trimmed
+    /// [`ACTION_BAR_HALF_WIDTH_PX`] still fits [`crate::hotbar::
+    /// HOTBAR_ROW_LEADING_INSET_PX`] (round-3 post-review follow-up — the
+    /// corner-clearing left inset, see that constant's own doc comment) plus
+    /// exactly 5 `hotbar::SLOT_SIZE_PX` slots + 4 of `hotbar::
+    /// HOTBAR_SLOT_GAP_PX` gaps (no longer the theme's generic
+    /// `HudSpacing::xs` — round 3 gave the hotbar its own dedicated, tighter
+    /// gap constant, matching `xindeler-old`'s own `slot_offset = 3.0`
+    /// reference layout), so a future change to any of
+    /// `ACTION_BAR_WIDTH_TRIM`/`HOTBAR_ROW_LEADING_INSET_PX`/`SLOT_SIZE_PX`/
+    /// `HOTBAR_SLOT_GAP_PX` can't silently make the row overflow the
+    /// background art's own width.
     #[test]
     fn five_slots_per_half_fit_inside_the_action_bar_half_width() {
-        let xs_gap = xindeler_ui::theme::HudSpacing::default().xs;
+        let leading_inset = crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX;
+        let slot_gap = crate::hotbar::HOTBAR_SLOT_GAP_PX;
         let slots_per_half = crate::hotbar::SLOTS_PER_HALF as f32;
-        let row_width =
-            slots_per_half * crate::hotbar::SLOT_SIZE_PX + (slots_per_half - 1.0) * xs_gap;
+        let row_width = leading_inset
+            + slots_per_half * crate::hotbar::SLOT_SIZE_PX
+            + (slots_per_half - 1.0) * slot_gap;
         assert!(
             ACTION_BAR_HALF_WIDTH_PX >= row_width,
-            "ACTION_BAR_HALF_WIDTH_PX ({ACTION_BAR_HALF_WIDTH_PX}) must fit {slots_per_half} \
-             hotbar slots + gaps ({row_width}) — a future change to ACTION_BAR_WIDTH_TRIM, \
-             SLOT_SIZE_PX, or HudSpacing::xs shrank this below that floor"
+            "ACTION_BAR_HALF_WIDTH_PX ({ACTION_BAR_HALF_WIDTH_PX}) must fit the \
+             HOTBAR_ROW_LEADING_INSET_PX-shifted {slots_per_half} hotbar slots + gaps \
+             ({row_width}) — a future change to ACTION_BAR_WIDTH_TRIM, \
+             HOTBAR_ROW_LEADING_INSET_PX, SLOT_SIZE_PX, or HOTBAR_SLOT_GAP_PX shrank this below \
+             that floor"
         );
     }
 }

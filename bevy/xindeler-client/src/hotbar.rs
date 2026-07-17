@@ -8,10 +8,12 @@
 //! Matías's original ask (under-scoped by the Phase 0/2 bugfixes above, which
 //! only fixed rendering bugs without changing the *count*): the action bar
 //! must show 5 skill-holder slots on the LEFT background piece and 5 on the
-//! RIGHT (10 total), one per `GameInput::Slot1..Slot10` — the 10 independently
-//! rebindable ability-slot inputs the keymap defines (`Primary`/`Secondary`,
-//! i.e. M1/M2, are a SEPARATE pair of fixed, non-draggable indicators — see
-//! below — not part of this 10).
+//! RIGHT (10 total), one per drag-drop ability-slot address — 10
+//! independently rebindable slots regardless of which `GameInput` labels
+//! each one shows (see the "Keybind LABELS" section below for the round-3
+//! numbering scheme; `Primary`/`Secondary` i.e. M1/M2 as a SEPARATE pair of
+//! fixed, non-draggable indicators are unrelated — see below — not part of
+//! this 10).
 //!
 //! [`HOTBAR_SLOT_COUNT`] slot HOLDERS are now spawned UNCONDITIONALLY,
 //! independent of `xindeler_protocol::NetAbilities::slots.len()` — which is
@@ -44,6 +46,22 @@
 //! sim's `PrimaryAbility`/`SecondaryAbility` are fixed to "whatever's
 //! wielded", not user-rebindable, so there is no slot address for them; this
 //! phase does not touch [`sync_primary_secondary_indicators`].
+//!
+//! ## Keybind LABELS — 1-8 across both halves + mouse for the last two (BL-82
+//! ## HUD polish round 3, issue 4)
+//! [`SLOT_INPUTS`] used to be a straight `Slot1..Slot10` run (one numbered
+//! keybind label per holder). Matías's `captura2.png` review asked for 1-8
+//! spanning BOTH halves combined, with the rightmost 2 holders (the last 2 of
+//! the RIGHT half) showing the LEFT/RIGHT mouse buttons instead of 9/10 —
+//! reusing `xindeler_input::GameInput::Primary`/`Secondary` (already bound to
+//! `MouseButton::Left`/`Right` by default, `keybind.rs::default_binding`) for
+//! the LABEL only, same as every other slot. This is a pure relabelling: no
+//! new input plumbing, since nothing today actually triggers a hotbar slot
+//! FROM a `GameInput` press (that wiring is a documented future step —
+//! [`SLOT_INPUTS`] only ever feeds [`sync_keybind_labels`]'s keymap lookup,
+//! never an activation path), so reusing `Primary`/`Secondary` here can't
+//! double-fire against the separate M1/M2 indicators above (those read the
+//! WIELDED weapon's ability id, not this array).
 //!
 //! ## Real drag-to-assign, todays scope
 //! The `xindeler-ui::slot` drag-drop primitive is wired end-to-end: dragging
@@ -161,20 +179,64 @@ const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 /// second hardcoded literal silently drifting out of sync with this one.
 ///
 /// BL-82 EM-5.17 "5+5 slot-holders" follow-up: bumped `44.0` -> `46.0`, the
-/// largest size that still fits [`SLOTS_PER_HALF`] (5) slots + 4 of the
-/// theme's `HudSpacing::xs` (4px) gaps inside `hud_layout::
-/// ACTION_BAR_HALF_WIDTH_PX` (measured ≈258.4px against the new slot-less
-/// `action_bar_bg_left.png`/`action_bar_bg_right.png`, `1380×752` on disk) —
-/// `5*46 + 4*4 == 246`, leaving ≈6px of margin on each side (see
+/// largest size that still fit [`SLOTS_PER_HALF`] (5) slots + 4 of the
+/// theme's `HudSpacing::xs` (4px) gaps inside the THEN-current
+/// `hud_layout::ACTION_BAR_HALF_WIDTH_PX`.
+///
+/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 3 — the
+/// slot numbers/outlines were "quite small and hard to make out"): bumped
+/// again, `46.0 -> 52.0`. This phase also (issue 2) moved the row off the
+/// generic theme spacing onto its own dedicated [`HOTBAR_SLOT_GAP_PX`] (3px,
+/// matching `xindeler-old`'s own `skillbar.rs` reference layout's
+/// `slot_offset = 3.0`) and re-trimmed `hud_layout::ACTION_BAR_WIDTH_TRIM`
+/// (originally `0.88 -> 0.95`, then `-> 1.14` in the same round's post-review
+/// follow-up — see [`HOTBAR_ROW_LEADING_INSET_PX`]'s own doc comment) for
+/// room — together these raise the fit ceiling from `246px` (`5*46 + 4*4`)
+/// to [`HOTBAR_ROW_LEADING_INSET_PX`] `+ 5*52 + 4*3 == 327px`, comfortably
+/// inside the re-trimmed `ACTION_BAR_HALF_WIDTH_PX` (≈334.7px, see
 /// `hud_layout::tests::five_slots_per_half_fit_inside_the_action_bar_half_width`
-/// for the pinned regression). `ACTION_BAR_HALF_WIDTH_PX` itself is a fixed
-/// function of `ORB_SIZE_PX`/the art's aspect ratio/`ACTION_BAR_WIDTH_TRIM`
-/// (untouched by this phase — that trim was Matías's own explicit "more
-/// breathing room" request, see that constant's doc comment), so this is the
-/// real geometric ceiling for 5-across at this row's current width, not a
-/// guessed increase — going bigger would require also widening
-/// `ACTION_BAR_HALF_WIDTH_PX`, out of this phase's scope.
-pub(crate) const SLOT_SIZE_PX: f32 = 46.0;
+/// for the pinned regression) with a few px of margin to spare on the
+/// trailing edge (the row is left-anchored, not centred — see
+/// `spawn_action_bar_half`'s own doc comment).
+pub(crate) const SLOT_SIZE_PX: f32 = 52.0;
+
+/// BL-82 HUD polish round 3 (issue 2): the gap (px) between adjacent hotbar
+/// slots within one action-bar half — a dedicated, MUCH tighter constant
+/// than the theme's generic `HudSpacing::xs` (4px) this row used to share
+/// with every other HUD widget, chosen to match `xindeler-old`'s own
+/// `voxygen/src/hud/skillbar.rs` reference layout (`let slot_offset = 3.0;`,
+/// slots placed `RightFrom(prev_slot, slot_offset)` — i.e. flush/adjacent,
+/// not spread out) that Matías explicitly pointed to ("fijate como es esa
+/// parte en xindeler-old"). Paired with `JustifyContent::FlexStart` in
+/// [`spawn_action_bar_half`] (not `Center`) so the row hugs one edge of the
+/// piece instead of being centred with generous space on both sides.
+pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 3.0;
+
+/// BL-82 HUD polish round 3 FOLLOW-UP (post-review live `--smoke-screenshot`
+/// check): `FlexStart` with zero leading margin put the FIRST slot of each
+/// half (index 0/`Slot1` and index 5/`Slot6`) directly under
+/// `action_bar_bg_left.png`/`_right.png`'s own decorative corner curl on that
+/// side — chunkier than the corner on the opposite (trailing) side, so slot 0
+/// rendered as a barely-legible partial square while slots 1-4 (already clear
+/// of it — confirmed the SAME way, by rendering `--smoke-screenshot` and
+/// inspecting the actual pixels, not just eyeballing the source art) looked
+/// fine.
+///
+/// Deliberately defined AS exactly one slot pitch (`SLOT_SIZE_PX +
+/// HOTBAR_SLOT_GAP_PX`, `== 52 + 3 == 55.0` today) — not a bare `55.0`
+/// literal that could silently drift out of sync with either of those if
+/// one changes later — NOT a smaller hand-tuned guess: an earlier, smaller
+/// value (`40.0`) was tried first and re-verified against a fresh
+/// `--smoke-screenshot` — still not enough clearance, slot 0 was STILL
+/// partially under the corner. One full slot pitch instead moves slot 0 to
+/// EXACTLY where slot 1 used to sit pre-fix (empirically already confirmed
+/// clean in that same screenshot), rather than trying to guess the corner's
+/// exact pixel extent a second time. Paired with `ACTION_BAR_WIDTH_TRIM`'s
+/// matching bump (see that constant's own doc comment) so the trailing slack
+/// the right-anchored edge already enjoyed (see [`SLOT_SIZE_PX`]'s doc
+/// comment) isn't eaten by this — only the row's start moves, not the
+/// inter-slot gaps.
+pub(crate) const HOTBAR_ROW_LEADING_INSET_PX: f32 = SLOT_SIZE_PX + HOTBAR_SLOT_GAP_PX;
 
 /// Number of ability-slot HOLDERS rendered per action-bar half (BL-82
 /// EM-5.17 "5+5 slot-holders" follow-up) — Matías's explicit ask: 5 on the
@@ -182,15 +244,24 @@ pub(crate) const SLOT_SIZE_PX: f32 = 46.0;
 /// sim currently populates with real content (see the module doc comment).
 pub(crate) const SLOTS_PER_HALF: usize = 5;
 
-/// Total slot holders always rendered — matches [`SLOT_INPUTS`]'s length
-/// (one holder per `GameInput::Slot1..Slot10`) and is asserted equal to it in
+/// Total slot holders always rendered — matches [`SLOT_INPUTS`]'s length and
+/// is asserted equal to it in
 /// [`tests::hotbar_slot_count_matches_the_keybind_table`].
 const HOTBAR_SLOT_COUNT: usize = SLOTS_PER_HALF * 2;
 
 /// The keybind each rendered slot index (0-based) is labelled with — every
-/// one of the [`HOTBAR_SLOT_COUNT`] holders has a real entry here today
-/// (`Slot1..Slot10`), so every holder shows a keybind glyph, not just the
-/// ones the sim currently populates with content.
+/// one of the [`HOTBAR_SLOT_COUNT`] holders has a real entry here, so every
+/// holder shows a keybind glyph, not just the ones the sim currently
+/// populates with content.
+///
+/// BL-82 HUD polish round 3 (issue 4): the first 8 (indices `0..8`, spanning
+/// BOTH halves — `Slot1..Slot5` in the left half, `Slot6..Slot8` in the first
+/// 3 of the right half) show plain numbers `1..8`; the LAST TWO holders
+/// (indices `8`/`9`, the trailing 2 slots of the right half) show
+/// `Primary`/`Secondary` instead of `Slot9`/`Slot10` — [`key_label`] already
+/// renders those as `"LMB"`/`"RMB"` (their default bindings, `keybind.rs`'s
+/// `default_binding`), so no display-layer change was needed beyond swapping
+/// which `GameInput` this array names for those two indices.
 const SLOT_INPUTS: [GameInput; 10] = [
     GameInput::Slot1,
     GameInput::Slot2,
@@ -200,8 +271,8 @@ const SLOT_INPUTS: [GameInput; 10] = [
     GameInput::Slot6,
     GameInput::Slot7,
     GameInput::Slot8,
-    GameInput::Slot9,
-    GameInput::Slot10,
+    GameInput::Primary,
+    GameInput::Secondary,
 ];
 
 /// Installs the hotbar: spawns the (initially empty) slot row + M1/M2
@@ -307,16 +378,63 @@ fn short_glyph(ability_id: &str) -> String {
 /// positioned per `crate::hud_layout::CLUSTER` — the SAME arithmetic
 /// `combat_hud.rs`'s orbs use, so the two independently-`Startup`-spawned
 /// plugins line up into one contiguous row.
+///
+/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 2 — the
+/// numbered slots read as spread out across almost the full width of the
+/// ornate frame, instead of sitting snug against one another):
+/// `justify_content` changed `Center -> FlexStart` and `column_gap` changed
+/// from the theme's generic `HudSpacing::xs` to the dedicated, tighter
+/// [`HOTBAR_SLOT_GAP_PX`]. `FlexStart` anchors BOTH halves' slot rows to their
+/// own piece's LEFT edge (not centred with generous space on both sides) — this
+/// reads as one continuous "1 2 3 4 5 [orb] 6 7 8 9 10" sequence (each half
+/// starts its own run of numbers flush against its own left edge) rather than
+/// two independently-centred islands, matching the "flush and adjacent,
+/// anchored to one edge" reference layout Matías pointed to in `xindeler-old`'s
+/// `voxygen/src/hud/skillbar.rs` (`BottomLeftWithMarginsOn(frame, 0.0, 0.0)`
+/// then `RightFrom(prev, slot_offset)`). A useful side effect for the right
+/// half specifically: its own leftover slack now sits on its TRAILING
+/// (right, mana-orb-facing) edge as plain ornate frame art rather than being
+/// split as extra inter-slot gaps — reinforcing issue 1's fix (the mana orb
+/// getting more visual breathing room from the busy numbered content).
+///
+/// POST-REVIEW FOLLOW-UP (same round, caught by a live `--smoke-screenshot`
+/// check after the above landed): plain `FlexStart` with no leading padding
+/// put the row's very first slot directly under the background art's own
+/// chunky corner curl on that side — see [`HOTBAR_ROW_LEADING_INSET_PX`]'s
+/// doc comment for the pixel-measured proof and reasoning. `padding.left`
+/// (not a bigger `column_gap`, which would also space out every OTHER pair)
+/// shifts only the row's start, keeping every inter-slot gap exactly
+/// [`HOTBAR_SLOT_GAP_PX`].
+///
+/// A first attempt at this padding-only fix rendered as a complete no-op —
+/// re-verified with bevy's own resolved `ComputedNode`/`UiGlobalTransform`
+/// (not just eyeballing screenshots) that the row's geometry WAS shifting
+/// correctly. Root cause: [`ImageNode`]'s `visual_box` defaults to
+/// `VisualBox::ContentBox`, so the background art ITSELF was being confined
+/// to (and stretched into) the padded content box right along with the
+/// slots — the corner curl shifted right by the exact same amount the slots
+/// did, so their relative overlap never changed no matter how big the
+/// padding got. Explicitly setting `visual_box: VisualBox::PaddingBox` pins
+/// the artwork to the padding-independent box while `padding.left` still only
+/// affects where the flex-row CHILDREN start — the two finally move relative
+/// to each other, which is what actually clears the corner. `PaddingBox`
+/// specifically (not `BorderBox`) — this `Node` sets no `border` width, so
+/// both variants render byte-identically today (`ComputedNode::border` is
+/// zero either way), but `PaddingBox` is the more semantically precise pick
+/// ("ignore only my own padding") and stays correct if a `border` is ever
+/// added to this node later.
 fn spawn_action_bar_half(
     commands: &mut Commands,
-    theme: &HudTheme,
     background: Handle<Image>,
     left_offset_px: f32,
 ) -> Entity {
     commands
         .spawn((
             GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
-            ImageNode::new(background),
+            ImageNode {
+                visual_box: bevy::ui::VisualBox::PaddingBox,
+                ..ImageNode::new(background)
+            },
             Node {
                 position_type: PositionType::Absolute,
                 left: hud_layout::CENTER_LEFT,
@@ -324,10 +442,11 @@ fn spawn_action_bar_half(
                 margin: UiRect::left(Val::Px(left_offset_px)),
                 width: Val::Px(hud_layout::ACTION_BAR_HALF_WIDTH_PX),
                 height: Val::Px(hud_layout::ACTION_BAR_HALF_HEIGHT_PX),
+                padding: UiRect::left(Val::Px(HOTBAR_ROW_LEADING_INSET_PX)),
                 flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::Center,
+                justify_content: JustifyContent::FlexStart,
                 align_items: AlignItems::Center,
-                column_gap: Val::Px(theme.spacing.xs),
+                column_gap: Val::Px(HOTBAR_SLOT_GAP_PX),
                 ..Default::default()
             },
         ))
@@ -342,7 +461,6 @@ fn spawn_hotbar(
 ) {
     let left_half = spawn_action_bar_half(
         &mut commands,
-        &theme,
         images.get(HudImageKey::ActionBarBgLeft),
         hud_layout::CLUSTER.action_bar_left_half_left,
     );
@@ -350,7 +468,6 @@ fn spawn_hotbar(
 
     let right_half = spawn_action_bar_half(
         &mut commands,
-        &theme,
         images.get(HudImageKey::ActionBarBgRight),
         hud_layout::CLUSTER.action_bar_right_half_left,
     );
@@ -994,6 +1111,69 @@ mod tests {
     fn hotbar_slot_count_matches_the_keybind_table() {
         assert_eq!(HOTBAR_SLOT_COUNT, SLOT_INPUTS.len());
         assert_eq!(HOTBAR_SLOT_COUNT, SLOTS_PER_HALF * 2);
+    }
+
+    /// BL-82 HUD polish round 3 (issue 4): the first 8 slot holders are
+    /// labelled `Slot1..Slot8` (numbers `1..8`, spanning both halves) and the
+    /// LAST TWO (the trailing 2 of the right half) are `Primary`/`Secondary`
+    /// (mouse LMB/RMB) — not `Slot9`/`Slot10`. Regression guard against a
+    /// future edit silently reverting to the old all-numeric scheme.
+    #[test]
+    fn last_two_slot_inputs_are_mouse_buttons_not_slot9_and_slot10() {
+        assert_eq!(&SLOT_INPUTS[..8], &[
+            GameInput::Slot1,
+            GameInput::Slot2,
+            GameInput::Slot3,
+            GameInput::Slot4,
+            GameInput::Slot5,
+            GameInput::Slot6,
+            GameInput::Slot7,
+            GameInput::Slot8,
+        ]);
+        assert_eq!(SLOT_INPUTS[8], GameInput::Primary);
+        assert_eq!(SLOT_INPUTS[9], GameInput::Secondary);
+    }
+
+    /// The same round-3 change, verified end-to-end through
+    /// [`sync_keybind_labels`]: the last two rendered slot holders (indices 8
+    /// and 9, the trailing 2 of the right half) show `"LMB"`/`"RMB"` — the
+    /// default `Primary`/`Secondary` bindings formatted via `key_label` —
+    /// while holder 7 (the last plain number) still shows `"8"`.
+    #[test]
+    fn last_two_hotbar_slots_show_mouse_button_labels() {
+        let mut app = new_app();
+        app.insert_resource(xindeler_input::KeyMap::default());
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("spawn all 10 holders");
+        app.update();
+        app.world_mut()
+            .run_system_once(sync_keybind_labels)
+            .expect("labels sync from the live KeyMap");
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        let label_text_of = |app: &mut App, slot_entity: Entity| -> String {
+            app.world()
+                .get::<Children>(slot_entity)
+                .expect("slot has children")
+                .iter()
+                .find_map(|child| {
+                    app.world()
+                        .get::<HotbarKeybindLabel>(child)
+                        .map(|_| app.world().get::<Text>(child).unwrap().0.clone())
+                })
+                .expect("slot has a keybind label child")
+        };
+
+        assert_eq!(label_text_of(&mut app, slot_entities[7]), "8");
+        assert_eq!(label_text_of(&mut app, slot_entities[8]), "LMB");
+        assert_eq!(label_text_of(&mut app, slot_entities[9]), "RMB");
     }
 
     /// Regression test for the "two overlapping rectangles" bug (Matías's
