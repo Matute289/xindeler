@@ -35,6 +35,7 @@
 
 use bevy::{
     color::Alpha as _,
+    input::keyboard::{Key, KeyboardInput},
     input_focus::{FocusCause, InputFocus},
     prelude::*,
     text::EditableText,
@@ -309,7 +310,6 @@ impl Plugin for ChatViewPlugin {
                 ingest_chat_messages,
                 apply_chat_filter,
                 sync_chat_tabs,
-                sync_chat_collapsed,
                 update_input_placeholder,
                 handle_chat_submit,
                 chat_smoke_verify,
@@ -347,6 +347,41 @@ impl Plugin for ChatViewPlugin {
                 focus_chat_via_hotkey
                     .after(xindeler_input::InputResolveSet)
                     .after(handle_chat_submit),
+                // BL-82 "chat still unusable" round 3 hardening: `sync_
+                // chat_collapsed` used to carry NO explicit ordering
+                // relative to `toggle_chat_via_hotkey`/`focus_chat_via_
+                // hotkey` — both of which can flip `ChatUiState::collapsed`
+                // this same frame. Without an edge, Bevy's scheduler is free
+                // to run `sync_chat_collapsed` BEFORE either of them on any
+                // given build/thread-scheduling, in which case its `state.
+                // is_changed()` check misses THIS frame's flip entirely and
+                // the visual collapse/expand lags a whole extra frame before
+                // self-correcting. Harmless at 30-60fps (imperceptible,
+                // self-heals next frame) but still a genuine ambiguous-
+                // ordering hazard this investigation's own instrumented
+                // smoke test (`chat_focus_smoke_verify`) needed real retry
+                // tolerance to look past — closed explicitly here rather
+                // than left to chance, since this exact bug CLASS has now
+                // shipped broken three times.
+                sync_chat_collapsed
+                    .after(toggle_chat_via_hotkey)
+                    .after(focus_chat_via_hotkey),
+                // BL-82 "chat still unusable" round 3 — the automated
+                // regression-catcher for the REAL keyboard-focus pipeline
+                // (see its own doc comment for why this is materially
+                // stronger evidence than the earlier fix's own tests).
+                // Ordered last among the chat systems so it always observes
+                // each frame's fully-settled `InputFocus`/`ChatUiState`/
+                // `EditableText` state before deciding its next scripted
+                // action.
+                chat_focus_smoke_verify
+                    .after(focus_chat_via_hotkey)
+                    .after(toggle_chat_via_hotkey)
+                    .after(blur_chat_input_on_collapse)
+                    .after(blur_chat_input_on_escape)
+                    .after(handle_chat_submit)
+                    .after(sync_chat_collapsed)
+                    .after(ingest_chat_messages),
             ),
         );
     }
@@ -429,6 +464,406 @@ fn chat_smoke_verify(
             }
         },
         ChatSmokeStage::Done => {},
+    }
+}
+
+/// SCAFFOLDING for automated live verification of the KEYBOARD-FOCUS
+/// lifecycle (BL-82, "chat still unusable" round 3 — the THIRD live-tested
+/// report of this exact bug class). Gated by `XINDELER_SMOKE_CHAT_FOCUS` (a
+/// no-op, single cached env read on every ordinary run where it's unset,
+/// same posture as [`chat_smoke_verify`]).
+///
+/// ## Why this exists — and why it is NOT the same coverage as the module's
+/// own `#[cfg(test)]` suite
+/// Every existing test in this module either hand-inserts [`InputFocus`]
+/// directly (`InputFocus::from_entity(..)`) or drives `ButtonInput<KeyCode>`
+/// (`.press(KeyCode::Enter)`) and calls the system under test in isolation
+/// via `run_system_once`. Neither ever touches the REAL production dispatch
+/// path a genuine OS keypress goes through: `bevy_winit` emits a
+/// `bevy::input::keyboard::KeyboardInput` message → `bevy_input`'s
+/// `keyboard_input_system` folds it into `ButtonInput<KeyCode>` (PreUpdate)
+/// → `bevy_input_focus::InputDispatchPlugin`'s `dispatch_focused_input`
+/// (also PreUpdate, `.after(InputSystems)`) re-fires the SAME message as a
+/// `FocusedInput<KeyboardInput>` targeted at whatever `InputFocus` currently
+/// points at → `bevy_ui_widgets::EditableTextInputPlugin`'s
+/// `on_focused_keyboard_input` observer queues a `TextEdit` on the target
+/// `EditableText` → `bevy_text::TextPlugin`'s `apply_text_edits` (PostUpdate)
+/// commits it into `EditableText::value()`. A hand-set `InputFocus` or a
+/// bare `ButtonInput` press never exercises the dispatch hop in the middle —
+/// so a regression THERE (the exact class of bug this harness exists to
+/// catch) would sail through every pre-existing test in this file while
+/// still leaving chat completely unusable live, which is precisely what
+/// happened across the first two rounds of this bug. This harness sends the
+/// same [`bevy::input::keyboard::KeyboardInput`] message shape `bevy_winit`
+/// itself would construct from a genuine OS keypress, through the REAL
+/// `ChatViewPlugin` scheduled inside the REAL running app (not a bespoke
+/// minimal test app) — the strongest verification available without literal
+/// OS-level input injection.
+///
+/// ## The scripted sequence (mirrors Matías's own described repro + target UX)
+/// 1. Seed one scrollback line directly (this harness verifies LOCAL UI
+///    behaviour; the network round trip is [`chat_smoke_verify`]'s job).
+/// 2. Send a real `KeyboardInput` for [`GameInput::Chat`] (`Enter`) — assert
+///    [`InputFocus`] lands on the chat box.
+/// 3. Type [`CHAT_FOCUS_SMOKE_WORD_1`] one real `KeyboardInput` character at a
+///    time — assert `EditableText::value()` accumulates it.
+/// 4. Send a real `KeyboardInput` for [`GameInput::ToggleChat`] (`F5`) — assert
+///    every [`ChatCollapsible`] element hides (`Display::None`) AND the seeded
+///    scrollback row + the just-typed text BOTH still exist underneath
+///    (collapsing must hide, never discard, per Matías's own specified target
+///    UX).
+/// 5. Send `Enter` again — assert the panel un-collapses AND `InputFocus` lands
+///    back on the chat box with no click required.
+/// 6. Type [`CHAT_FOCUS_SMOKE_WORD_2`] — assert it APPENDS to the already-typed
+///    text (proving the refocus path lands on a genuinely typable box, not a
+///    cosmetic focus with a dead input pipeline behind it).
+///
+/// Logs a clear PASS/FAIL at whichever step fails (or on full completion)
+/// and exits the process via `AppExit` either way, so a scripted run
+/// terminates on its own — same contract as [`chat_smoke_verify`].
+const CHAT_FOCUS_SMOKE_WORD_1: &str = "hi";
+const CHAT_FOCUS_SMOKE_WORD_2: &str = "yo";
+
+/// Safety-net timeout (frames) — generous; every real step here is a single
+/// same-app-instance frame transition, not a network round trip, so this
+/// should never actually bind in practice (same "boot safety net" posture as
+/// [`CHAT_SMOKE_TIMEOUT_FRAMES`]).
+const CHAT_FOCUS_SMOKE_TIMEOUT_FRAMES: u32 = 1800;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ChatFocusSmokeStage {
+    #[default]
+    WaitForPanel,
+    SeedHistory,
+    AwaitHistorySeeded,
+    PressEnter,
+    AwaitFocused,
+    TypeWord1(usize),
+    AwaitWord1Char(usize),
+    PressF5,
+    AwaitCollapsed,
+    PressEnterAgain,
+    AwaitReexpanded,
+    TypeWord2(usize),
+    AwaitWord2Char(usize),
+    Pass,
+    Done,
+}
+
+/// Maps the lowercase ASCII letters [`CHAT_FOCUS_SMOKE_WORD_1`]/
+/// [`CHAT_FOCUS_SMOKE_WORD_2`] use to their physical [`KeyCode`] — sufficient
+/// for this harness's own fixed script, not a general text-input simulator.
+fn key_code_for_ascii_lowercase(c: char) -> Option<KeyCode> {
+    use KeyCode as K;
+    Some(match c {
+        'a' => K::KeyA,
+        'e' => K::KeyE,
+        'h' => K::KeyH,
+        'i' => K::KeyI,
+        'o' => K::KeyO,
+        'y' => K::KeyY,
+        _ => return None,
+    })
+}
+
+/// Writes a real press-then-release [`KeyboardInput`] PAIR — the exact shape
+/// `bevy_winit` constructs from a genuine OS key tap (`key_code` +
+/// `logical_key` + `text` + the real primary `window` entity) — so it is
+/// dispatched through the REAL `bevy_input_focus`/`bevy_ui_widgets`
+/// production pipeline exactly as a live keypress would be, not injected
+/// directly into `ButtonInput`/`InputFocus`.
+///
+/// **Must send BOTH edges, never a bare `Pressed`** (an earlier version of
+/// this harness only sent `Pressed` — a real regression-in-the-harness-itself
+/// this doc comment now pins): `bevy_input::ButtonInput::press` is
+/// `pressed.insert(..)`-gated — it only raises `just_pressed` on the
+/// true false→true edge, and does nothing (no `just_pressed`) if the key
+/// value was ALREADY marked pressed from an earlier, never-released tap.
+/// Scripting Enter → (no release) → Enter again therefore silently produces
+/// only ONE `just_pressed` edge for the WHOLE script, not two — this exact
+/// gap is what made [`ChatFocusSmokeStage::AwaitReexpanded`]'s second Enter
+/// (re-focusing chat after F5) spin forever waiting for a `just_pressed` edge
+/// that could structurally never fire, a false "chat can never be refocused"
+/// signal that was actually this harness's own missing `Released` event, not
+/// a production regression. Sending the release in the SAME frame (not a
+/// later one) still yields a valid single-frame `just_pressed` window —
+/// `ButtonInput::release` clears `pressed`/sets `just_released` but leaves
+/// `just_pressed` (already raised by the paired `press` processed the same
+/// `MessageReader::read()` pass) untouched, matching a real fast key tap.
+fn send_real_key_press(
+    keyboard: &mut MessageWriter<KeyboardInput>,
+    window: Entity,
+    key_code: KeyCode,
+    logical_key: Key,
+    text: Option<&str>,
+) {
+    keyboard.write(KeyboardInput {
+        key_code,
+        logical_key: logical_key.clone(),
+        state: bevy::input::ButtonState::Pressed,
+        text: text.map(Into::into),
+        repeat: false,
+        window,
+    });
+    keyboard.write(KeyboardInput {
+        key_code,
+        logical_key,
+        state: bevy::input::ButtonState::Released,
+        text: None,
+        repeat: false,
+        window,
+    });
+}
+
+/// Frames [`ChatFocusSmokeStage::AwaitCollapsed`] tolerates between
+/// [`ChatUiState::collapsed`] flipping `true` and every [`ChatCollapsible`]
+/// element actually reaching `Display::None`. `ChatViewPlugin::build` now
+/// gives `sync_chat_collapsed` an explicit `.after(toggle_chat_via_hotkey)
+/// .after(focus_chat_via_hotkey)` edge (this same investigation's fix —
+/// before it, the two shared no ordering at all, and this harness's FIRST
+/// run against the unordered version genuinely failed here), so the flip and
+/// the visual hide land in the SAME frame on every run now. This tolerance
+/// stays as defense-in-depth against a future accidental re-ordering (the
+/// same "commit lands a schedule-phase later" class of latency
+/// [`AwaitWord1Char`](ChatFocusSmokeStage::AwaitWord1Char) tolerates for
+/// `apply_text_edits`, which genuinely IS a different-schedule hop and can't
+/// be ordered away) — generous but still bounded, so a GENUINE regression
+/// (the hide never landing at all, or the ordering silently regressing)
+/// still fails loudly rather than hanging until the outer
+/// [`CHAT_FOCUS_SMOKE_TIMEOUT_FRAMES`] safety net.
+const AWAIT_COLLAPSED_DISPLAY_TOLERANCE_FRAMES: u32 = 10;
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn chat_focus_smoke_verify(
+    mut enabled: Local<Option<bool>>,
+    mut stage: Local<ChatFocusSmokeStage>,
+    mut frames_waited: Local<u32>,
+    mut collapse_display_wait: Local<u32>,
+    windows: Query<Entity, With<PrimaryWindow>>,
+    inputs: Query<(Entity, &EditableText), With<ChatInputBox>>,
+    collapsible: Query<&Node, With<ChatCollapsible>>,
+    history: Res<ChatHistory>,
+    focus: Res<InputFocus>,
+    state: Res<ChatUiState>,
+    mut keyboard: MessageWriter<KeyboardInput>,
+    mut net_chat: MessageWriter<NetChatMsg>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let enabled = *enabled
+        .get_or_insert_with(|| std::env::var("XINDELER_SMOKE_CHAT_FOCUS").is_ok_and(|v| v != "0"));
+    if !enabled {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return; // Pre-`Startup`-ordering edge; self-heals next frame.
+    };
+
+    let fail = |exit: &mut MessageWriter<AppExit>, stage: &ChatFocusSmokeStage, why: &str| {
+        error!(?stage, why, "smoke-chat-focus: FAIL");
+        exit.write(AppExit::error());
+    };
+
+    *frames_waited += 1;
+    if *frames_waited > CHAT_FOCUS_SMOKE_TIMEOUT_FRAMES && *stage != ChatFocusSmokeStage::Done {
+        fail(&mut exit, &stage, "timed out mid-sequence");
+        *stage = ChatFocusSmokeStage::Done;
+        return;
+    }
+
+    let Ok((input_entity, editable_text)) = inputs.single() else {
+        return; // Pre-`Startup`-ordering edge; self-heals next frame.
+    };
+
+    match *stage {
+        ChatFocusSmokeStage::WaitForPanel => {
+            *stage = ChatFocusSmokeStage::SeedHistory;
+        },
+        ChatFocusSmokeStage::SeedHistory => {
+            net_chat.write(NetChatMsg {
+                channel: NetChatChannel::World,
+                sender_uid: None,
+                sender_alias: None,
+                text: "smoke-chat-focus seeded history line".to_owned(),
+            });
+            *stage = ChatFocusSmokeStage::AwaitHistorySeeded;
+        },
+        ChatFocusSmokeStage::AwaitHistorySeeded => {
+            if history.0.is_empty() {
+                return; // one more frame for `ingest_chat_messages` to run.
+            }
+            *stage = ChatFocusSmokeStage::PressEnter;
+        },
+        ChatFocusSmokeStage::PressEnter => {
+            send_real_key_press(&mut keyboard, window, KeyCode::Enter, Key::Enter, None);
+            *stage = ChatFocusSmokeStage::AwaitFocused;
+        },
+        ChatFocusSmokeStage::AwaitFocused => {
+            if focus.get() != Some(input_entity) {
+                fail(
+                    &mut exit,
+                    &stage,
+                    "Enter (GameInput::Chat) did not focus the chat input box — the exact 'cannot \
+                     type anything' symptom",
+                );
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            }
+            *stage = ChatFocusSmokeStage::TypeWord1(0);
+        },
+        ChatFocusSmokeStage::TypeWord1(i) => {
+            let Some(c) = CHAT_FOCUS_SMOKE_WORD_1.chars().nth(i) else {
+                *stage = ChatFocusSmokeStage::PressF5;
+                return;
+            };
+            let Some(key_code) = key_code_for_ascii_lowercase(c) else {
+                fail(&mut exit, &stage, "harness bug: unmapped test character");
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            };
+            send_real_key_press(
+                &mut keyboard,
+                window,
+                key_code,
+                Key::Character(c.to_string().into()),
+                Some(&c.to_string()),
+            );
+            *stage = ChatFocusSmokeStage::AwaitWord1Char(i);
+        },
+        ChatFocusSmokeStage::AwaitWord1Char(i) => {
+            let expected = &CHAT_FOCUS_SMOKE_WORD_1[..=i];
+            let current = editable_text.value().to_string();
+            if current == expected {
+                *stage = ChatFocusSmokeStage::TypeWord1(i + 1);
+                return;
+            }
+            // `TextEdit`s queued by `bevy_ui_widgets`'s `on_focused_keyboard_input`
+            // observer (PreUpdate) are only COMMITTED into `EditableText::value()`
+            // by `bevy_text::apply_text_edits`, which runs in `PostUpdate` — a
+            // whole schedule phase AFTER this `Update`-scheduled check. So the
+            // very first frame after sending the keystroke, `current` is still
+            // the PRE-edit value (a strict prefix of `expected`, one character
+            // short) — that is expected async latency, not a failure. Only fail
+            // once `current` can no longer possibly become `expected` by simply
+            // waiting (i.e. it isn't even a prefix of it) — a real corruption,
+            // not a timing artifact.
+            if expected.starts_with(current.as_str()) {
+                return; // one (or a few) more frames for `apply_text_edits` to commit.
+            }
+            fail(
+                &mut exit,
+                &stage,
+                "a real KeyboardInput character never reached EditableText::value() while focused \
+                 — the dispatch pipeline is broken even though InputFocus looked correct",
+            );
+            *stage = ChatFocusSmokeStage::Done;
+        },
+        ChatFocusSmokeStage::PressF5 => {
+            send_real_key_press(&mut keyboard, window, KeyCode::F5, Key::F5, None);
+            *stage = ChatFocusSmokeStage::AwaitCollapsed;
+        },
+        ChatFocusSmokeStage::AwaitCollapsed => {
+            if !state.collapsed {
+                return; // one more frame for `toggle_chat_via_hotkey` to run.
+            }
+            if collapsible.iter().any(|node| node.display != Display::None) {
+                *collapse_display_wait += 1;
+                if *collapse_display_wait <= AWAIT_COLLAPSED_DISPLAY_TOLERANCE_FRAMES {
+                    return; // a few more frames for `sync_chat_collapsed` to catch up.
+                }
+                fail(
+                    &mut exit,
+                    &stage,
+                    "F5 (ToggleChat) did not hide every ChatCollapsible element",
+                );
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            }
+            *collapse_display_wait = 0;
+            if history.0.is_empty() || editable_text.value() != CHAT_FOCUS_SMOKE_WORD_1 {
+                fail(
+                    &mut exit,
+                    &stage,
+                    "collapsing chat discarded scrollback history or in-progress text instead of \
+                     only hiding it — Matías's exact 'looks disconnected/lost' report",
+                );
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            }
+            *stage = ChatFocusSmokeStage::PressEnterAgain;
+        },
+        ChatFocusSmokeStage::PressEnterAgain => {
+            send_real_key_press(&mut keyboard, window, KeyCode::Enter, Key::Enter, None);
+            *stage = ChatFocusSmokeStage::AwaitReexpanded;
+        },
+        ChatFocusSmokeStage::AwaitReexpanded => {
+            if state.collapsed {
+                return; // one more frame for `focus_chat_via_hotkey` to run.
+            }
+            if focus.get() != Some(input_entity) {
+                fail(
+                    &mut exit,
+                    &stage,
+                    "Enter did not refocus the chat input box after a collapse — the 'once chat \
+                     loses focus I can never type in it again' regression",
+                );
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            }
+            *stage = ChatFocusSmokeStage::TypeWord2(0);
+        },
+        ChatFocusSmokeStage::TypeWord2(i) => {
+            let Some(c) = CHAT_FOCUS_SMOKE_WORD_2.chars().nth(i) else {
+                *stage = ChatFocusSmokeStage::Pass;
+                return;
+            };
+            let Some(key_code) = key_code_for_ascii_lowercase(c) else {
+                fail(&mut exit, &stage, "harness bug: unmapped test character");
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            };
+            send_real_key_press(
+                &mut keyboard,
+                window,
+                key_code,
+                Key::Character(c.to_string().into()),
+                Some(&c.to_string()),
+            );
+            *stage = ChatFocusSmokeStage::AwaitWord2Char(i);
+        },
+        ChatFocusSmokeStage::AwaitWord2Char(i) => {
+            let expected = format!(
+                "{CHAT_FOCUS_SMOKE_WORD_1}{}",
+                &CHAT_FOCUS_SMOKE_WORD_2[..=i]
+            );
+            let current = editable_text.value().to_string();
+            if current == expected {
+                *stage = ChatFocusSmokeStage::TypeWord2(i + 1);
+                return;
+            }
+            // Same async-commit latency as `AwaitWord1Char` above (`TextEdit`
+            // commits in `PostUpdate`, a phase after this `Update` check) — only
+            // fail once `current` can no longer become `expected` by waiting.
+            if expected.starts_with(current.as_str()) {
+                return;
+            }
+            fail(
+                &mut exit,
+                &stage,
+                "a real KeyboardInput character never reached EditableText::value() after the \
+                 collapse/re-expand round trip",
+            );
+            *stage = ChatFocusSmokeStage::Done;
+        },
+        ChatFocusSmokeStage::Pass => {
+            info!(
+                "smoke-chat-focus: PASS — Enter focused the chat box, real keystrokes reached \
+                 EditableText, F5 collapsed without discarding history, and Enter refocused a \
+                 genuinely typable box afterward"
+            );
+            exit.write(AppExit::Success);
+            *stage = ChatFocusSmokeStage::Done;
+        },
+        ChatFocusSmokeStage::Done => {},
     }
 }
 
@@ -902,7 +1337,19 @@ fn blur_chat_input_on_escape(
 /// unrelated `ChatUiState` write made while collapsed, not only on the actual
 /// collapse transition. The edge-detector fires exactly once, on the real
 /// false-to-true transition, regardless of which system caused it.
-fn blur_chat_input_on_collapse(
+///
+/// `pub(crate)` (BL-82 "chat still unusable" round 3 hardening,
+/// bevy-migration-reviewer finding): `crate::cursor::update_cursor_free`
+/// reads [`InputFocus`] this same frame to decide whether the OS cursor
+/// should be free, but carried no explicit ordering relative to this system
+/// — so on the exact frame chat collapses, `update_cursor_free` could run
+/// BEFORE this system clears the stale focus, leaving the cursor free one
+/// extra (self-healing, imperceptible) frame. `cursor.rs`'s own
+/// `CursorControlPlugin` orders `update_cursor_free.after(Self)` to close
+/// that ambiguity explicitly, the same "don't leave this bug CLASS to
+/// scheduling chance a fourth time" motivation as `sync_chat_collapsed`'s own
+/// new ordering edge just above in [`ChatViewPlugin::build`].
+pub(crate) fn blur_chat_input_on_collapse(
     state: Res<ChatUiState>,
     mut focus: ResMut<InputFocus>,
     inputs: Query<Entity, With<ChatInputBox>>,

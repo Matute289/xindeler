@@ -44,12 +44,18 @@ use crate::{camera::CursorFree, chat::ChatInputBox};
 
 /// Installs the cursor-free aggregator. Ordered AFTER
 /// [`xindeler_ui::hud_state::apply_hud_actions`] (so it reads the `HudState`
-/// a window toggle produced THIS frame, not a frame-stale one) and BEFORE
-/// [`crate::camera::FlyCamSet`] (so [`crate::camera::cursor_grab`] reads the
-/// freshly-aggregated value the same frame). This same-frame chain is what
-/// lets a window opened by a keypress free the cursor with no visible
-/// one-frame lag, and lets the camera's re-grab latch fire correctly when it
-/// closes.
+/// a window toggle produced THIS frame, not a frame-stale one), AFTER
+/// [`crate::chat::blur_chat_input_on_collapse`] (BL-82 "chat still unusable"
+/// round 3 hardening, bevy-migration-reviewer finding: without this edge,
+/// `update_cursor_free` could read a STALE [`InputFocus`] still pointing at
+/// the just-hidden chat box on the very frame it collapses, leaving the
+/// cursor free one extra — self-healing, but needless — frame; ordering
+/// this after the blur guarantees it always observes the SAME frame's
+/// already-cleared focus), and BEFORE [`crate::camera::FlyCamSet`] (so
+/// [`crate::camera::cursor_grab`] reads the freshly-aggregated value the
+/// same frame). This same-frame chain is what lets a window opened by a
+/// keypress free the cursor with no visible one-frame lag, and lets the
+/// camera's re-grab latch fire correctly when it closes.
 pub struct CursorControlPlugin;
 
 impl Plugin for CursorControlPlugin {
@@ -58,6 +64,7 @@ impl Plugin for CursorControlPlugin {
             Update,
             update_cursor_free
                 .after(xindeler_ui::hud_state::apply_hud_actions)
+                .after(crate::chat::blur_chat_input_on_collapse)
                 .before(crate::camera::FlyCamSet),
         );
     }
