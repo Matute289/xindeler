@@ -398,9 +398,86 @@ pub const ACTION_BAR_HALF_HEIGHT_PX: f32 = ORB_SIZE_PX;
 /// arithmetic this trim now supports and
 /// [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`] for
 /// the pinned regression.
-pub const ACTION_BAR_WIDTH_TRIM: f32 = 1.14;
+///
+/// BL-82 HUD polish round 4 (issue 3, Matías's `skill-slots-1.png`
+/// reference): bumped again, `1.14 -> 1.40` — makes room for
+/// `crate::hotbar::SLOT_SIZE_PX`'s further bump (`52.0 -> 58.0`) at the
+/// reference's noticeably larger, more flush/adjacent slot squares.
+///
+/// ## A first attempt at `1.30` looked right on paper, was WRONG on screen
+/// The [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`]
+/// arithmetic only proves the 5-slot row fits inside
+/// [`ACTION_BAR_HALF_WIDTH_PX`]'s own BOUNDING BOX — it says nothing about
+/// whether that box's ART is actually OPAQUE all the way out to that width.
+/// A first pass at `1.30` (paired with `SLOT_SIZE_PX = 60.0`) passed that
+/// test but, verified via a real `--smoke-screenshot`, visibly showed the
+/// RIGHT half's last 1-2 holders (the mouse-click-icon slots) floating over
+/// bare green terrain — `action_bar_bg_right.png` has a prominent decorative
+/// ROUNDED END-CAP on its right side (the side away from the stamina orb,
+/// mirroring the ornate spiked caps the orb frames also have) whose opaque
+/// "flat plate" backing runs out well before the box's own right edge.
+/// Measured directly (Python + Pillow/NumPy, alpha-channel scan, `alpha >
+/// 10` threshold — same methodology as this module's other crop
+/// measurements — restricted to the ROW's own vertical band, i.e. the
+/// `crate::hotbar::SLOT_SIZE_PX`-tall strip a slot square actually occupies,
+/// not the whole `752px` canvas height, since a spike tip far above/below
+/// that band is irrelevant to whether a SLOT SQUARE has real backing): the
+/// right half's flat, ≥98%-opaque backing (within that band) holds from
+/// native `x=98` to `x≈1249` of its `1380px`-wide canvas, then collapses
+/// fast (`97.9%` at `x=1250` down to `21%` by `x=1290`). The row's content
+/// must end at or before that `x≈1249` boundary (scaled to whatever
+/// `ACTION_BAR_HALF_WIDTH_PX` renders at), which is a MUCH tighter
+/// constraint than "fits inside the box" — see
+/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]/
+/// [`ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX`] and
+/// [`tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
+/// for the constants/regression test this discovery adds. `1.40` (rather
+/// than `1.30`) is the smallest re-trim (given `SLOT_SIZE_PX = 58.0`,
+/// slightly pulled back from the first `60.0` attempt) that clears this
+/// tighter constraint with a real margin on BOTH halves, re-verified against
+/// a fresh `--smoke-screenshot` showing every one of the 10 holders — 1-8
+/// numbered plus the 2 mouse-click icons — sitting fully on the dark plate
+/// art, no green terrain visible through any of them.
+pub const ACTION_BAR_WIDTH_TRIM: f32 = 1.40;
 pub const ACTION_BAR_HALF_WIDTH_PX: f32 =
     ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0) * ACTION_BAR_WIDTH_TRIM;
+
+/// BL-82 HUD polish round 4 (issue 3) — the native-canvas x-coordinate (out
+/// of `action_bar_bg_right.png`'s `1380px` width) past which the RIGHT
+/// action-bar half's own flat plate art stops being reliably opaque within
+/// the hotbar row's own vertical band — see [`ACTION_BAR_WIDTH_TRIM`]'s doc
+/// comment for the full measurement methodology. A conservative reading of
+/// the measured data (opacity is still a genuine `100%` through `x=1240`,
+/// only starting its fast collapse at `x=1250`), not the absolute measured
+/// edge (`x≈1249`) — a few native px of margin here costs nothing and
+/// absorbs any small re-measurement error.
+///
+/// `#[cfg(test)]`: this constant is only ever read by
+/// [`tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
+/// — the real fix is [`ACTION_BAR_WIDTH_TRIM`]'s tuned value itself, this is
+/// the measured boundary that value must stay under. Ungated, it trips
+/// `-D dead-code` in the non-test build (this crate is a binary, so a `pub`
+/// item with no caller outside `#[cfg(test)]` is exactly as dead as a
+/// private one) — same pattern [`health_orb_screen_x`] above already uses.
+#[cfg(test)]
+pub const ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX: f32 = 1240.0;
+
+/// BL-82 HUD polish round 4 (issue 3) — the native-canvas x-coordinate (out
+/// of `action_bar_bg_left.png`'s `1380px` width) before which the LEFT
+/// action-bar half's own flat plate art is NOT yet reliably opaque within the
+/// hotbar row's own vertical band (the mirrored decorative corner curl this
+/// piece's own `HOTBAR_ROW_LEADING_INSET_PX` fix already targets — that fix
+/// predates this round's measurement but this pins the SAME real constraint
+/// numerically instead of by eye). Measured: opacity reaches a genuine
+/// `100%` at `x=150`, ramping up from `0%` at `x=20` — same conservative
+/// "round to where it's unambiguously flat" reading as
+/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`].
+///
+/// `#[cfg(test)]`: same reasoning as
+/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]'s own doc comment — test-only
+/// regression value, not read at runtime.
+#[cfg(test)]
+pub const ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX: f32 = 150.0;
 
 /// Horizontal gap (px) between adjacent cluster pieces — health orb / left
 /// action-bar half / stamina orb / right action-bar half / mana orb. Was a
@@ -418,7 +495,19 @@ pub const ACTION_BAR_HALF_WIDTH_PX: f32 =
 /// still THE single shared gap every adjacent pair in the row uses, so the
 /// row stays visually contiguous, just no longer touching. Revisit if a
 /// future asset re-cut changes the padding.
-pub const CLUSTER_GAP_PX: f32 = 4.0;
+///
+/// BL-82 HUD polish round 4 (issue 2, Matías's `captura4.png` report: "bring
+/// the action-bar halves + their orbs closer to the centre stamina orb —
+/// close, but not touching"): shrunk `4.0 -> 2.0`. Halved rather than zeroed
+/// out — Matías's own framing was "noticeably closer," not "flush" (that
+/// would read as one solid slab and lose the "5 distinct pieces in one row"
+/// look this whole cluster is built around), and round 3's own doc comment
+/// already established the precedent that a fully-touching (`0`/negative)
+/// gap reads as a mismatched art seam, not a clean line, given each piece's
+/// own opaque black border padding. [`cluster_is_symmetric_around_centre`]
+/// pins the new, smaller value — a shrink here is the whole point of this
+/// round's fix, not a regression.
+pub const CLUSTER_GAP_PX: f32 = 2.0;
 
 /// Distance (px) from the viewport's bottom edge to the bottom of the whole
 /// orb/action-bar row.
@@ -438,7 +527,90 @@ pub const CLUSTER_GAP_PX: f32 = 4.0;
 /// edge — exactly Matías's ask, composing correctly with `HudScalePlugin`'s
 /// `UiScale` (a uniform multiplier over every `Val::Px` in this module,
 /// `0.0 * scale` staying `0.0` at any window size).
+///
+/// ## BL-82 HUD polish round 4 (issue 1) — round 3's `0.0` was STILL not flush
+/// Matías's round-4 report (`captura4.png` + `record23.mov`, independently
+/// re-confirmed by extracting frames rather than trusting a single still):
+/// green ground/road is still visibly rendering BELOW the orb/action-bar row
+/// even with this constant at `0.0`. Round 3's own reasoning above was only
+/// half right: it correctly ruled out a SEPARATE vertical inset/overhang
+/// mechanism (there isn't one — `ORB_SOURCE_CROP`/`*_FRAME_SOURCE_CROP` really
+/// do span the full `y[0,768]` canvas height), but it never checked whether
+/// that FULL canvas height is itself free of transparent padding at its own
+/// bottom edge. Re-measured directly (Python + Pillow, alpha-channel
+/// column/row scan, `alpha > 10` threshold — same methodology as this
+/// module's own crop-measurement comments above) against the real on-disk
+/// PNGs: every one of the 5 cluster pieces has a real, contiguous band of
+/// fully-transparent pixels at the very bottom of its own canvas, BELOW the
+/// last row of genuinely opaque art:
+/// - `orb_frame_angel.png` (`768px` tall): last opaque row `y=756` → `11px`
+///   transparent below it.
+/// - `orb_frame_cuthulhu.png` (`768px` tall): last opaque row `y=754` → `13px`.
+/// - `orb_frame_stamina.png` (`768px` tall): last opaque row `y=753` → `14px`.
+/// - `action_bar_bg_left.png` (`752px` tall): last opaque row `y=728` → `23px`.
+/// - `action_bar_bg_right.png` (`752px` tall): last opaque row `y=725` →
+///   `26px`.
+///
+/// This is exactly the failure mode the round-4 brief predicted: a
+/// `bottom_px` constant positions the CONTAINER's bounding box, not the
+/// visible art's own lowest opaque pixel — no value of this one shared
+/// constant can compensate for a PER-ASSET amount of baked-in transparent
+/// margin, since the 5 pieces don't agree on how much they have (`11`-`26`
+/// raw px, not even close to uniform). At `CLUSTER_BOTTOM_PX == 0.0` every
+/// container's bottom edge sits exactly at the screen's bottom edge, but each
+/// container's real art ends `padding_px` ABOVE that line — precisely the gap
+/// Matías keeps reporting, and (composing with [`HudScalePlugin`]'s
+/// `UiScale`) one that GROWS at a larger window/UI scale rather than staying
+/// a fixed few px, matching why a still screenshot at a good size already
+/// shows it clearly.
+///
+/// The fix: [`ANGEL_FRAME_BOTTOM_PAD_PX`]/[`CUTHULHU_FRAME_BOTTOM_PAD_PX`]/
+/// [`STAMINA_FRAME_BOTTOM_PAD_PX`]/[`ACTION_BAR_LEFT_BOTTOM_PAD_PX`]/
+/// [`ACTION_BAR_RIGHT_BOTTOM_PAD_PX`] below — each piece's OWN measured
+/// padding, scaled from raw canvas px to real rendered px by the exact same
+/// factor its own height already uses (`render_height / native_height`, the
+/// same "scale the measurement, don't re-measure at render size" approach
+/// [`ANGEL_FRAME_WIDTH_PX`] already established). Every real spawn call site
+/// (`combat_hud.rs`'s 3 orbs, `hotbar.rs`'s 2 action-bar halves) now sets
+/// `bottom: Val::Px(CLUSTER_BOTTOM_PX - <that piece's own pad constant>)` —
+/// pushing each container down by exactly its own transparent margin so the
+/// REAL opaque pixel (not the bounding box) lands flush with the screen's
+/// bottom edge, verified directly via `--smoke-screenshot` (not just the
+/// arithmetic) against both `captura4.png` (the bug) and live gameplay.
+/// `CLUSTER_BOTTOM_PX` itself stays the shared "nominal" anchor every other
+/// derived offset (`CLUSTER_TOTAL_HEIGHT_PX`, the XP cluster's own bottom)
+/// already builds from — only the 5 real spawn sites apply the extra
+/// per-piece correction, so nothing downstream needs to change.
 pub const CLUSTER_BOTTOM_PX: f32 = 0.0;
+
+/// BL-82 HUD polish round 4 (issue 1) — [`orb_frame_angel.png`]'s own
+/// measured transparent bottom margin (`11` raw px out of its `768px`-tall
+/// canvas), scaled to real rendered px by the same `ORB_SIZE_PX / 768.0`
+/// factor every other orb constant in this module uses. See
+/// [`CLUSTER_BOTTOM_PX`]'s own doc comment for the full measurement
+/// methodology and why a single shared constant can't fix this.
+pub const ANGEL_FRAME_BOTTOM_PAD_PX: f32 = 11.0 * ORB_SIZE_PX / 768.0;
+
+/// Cuthulhu (mana orb) variant of [`ANGEL_FRAME_BOTTOM_PAD_PX`] — `13` raw px
+/// out of the same `768px`-tall canvas.
+pub const CUTHULHU_FRAME_BOTTOM_PAD_PX: f32 = 13.0 * ORB_SIZE_PX / 768.0;
+
+/// Stamina (centre orb) variant of [`ANGEL_FRAME_BOTTOM_PAD_PX`] — `14` raw
+/// px out of the same `768px`-tall canvas.
+pub const STAMINA_FRAME_BOTTOM_PAD_PX: f32 = 14.0 * ORB_SIZE_PX / 768.0;
+
+/// `action_bar_bg_left.png`'s own measured transparent bottom margin (`23`
+/// raw px out of its `752px`-tall canvas), scaled to real rendered px by the
+/// `ACTION_BAR_HALF_HEIGHT_PX / 752.0` factor (the action-bar halves' own
+/// native-height scale factor, distinct from the orbs' `768.0` canvas). See
+/// [`CLUSTER_BOTTOM_PX`]'s own doc comment for the measurement methodology.
+pub const ACTION_BAR_LEFT_BOTTOM_PAD_PX: f32 = 23.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0;
+
+/// `action_bar_bg_right.png` variant of [`ACTION_BAR_LEFT_BOTTOM_PAD_PX`] —
+/// `26` raw px out of the same `752px`-tall canvas (the two halves are
+/// mirrored art, not byte-identical, hence the slightly different measured
+/// value).
+pub const ACTION_BAR_RIGHT_BOTTOM_PAD_PX: f32 = 26.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0;
 
 /// Gap (px) between the top of the orb/action-bar row and the XP-bar+level
 /// cluster sitting just above it (spec §3.1's "between/above the orbs and
@@ -568,6 +740,12 @@ mod tests {
     /// angel frame's) — so this test now asserts the mana-side gap is
     /// exactly [`CLUSTER_GAP_PX`] `+ CUTHULHU_EXTRA_GAP_PX` bigger than the
     /// health-side gap, not that the two are equal.
+    ///
+    /// BL-82 HUD polish round 4 (issue 2): every assertion below reads
+    /// [`CLUSTER_GAP_PX`] directly rather than a hardcoded literal, so this
+    /// test keeps passing unchanged now that the constant shrank `4.0 ->
+    /// 2.0` — a SMALLER gap is this round's whole point, not a regression to
+    /// investigate.
     #[test]
     fn cluster_is_symmetric_around_centre() {
         assert_eq!(CLUSTER.stamina_orb_left, -ORB_SIZE_PX / 2.0);
@@ -623,6 +801,53 @@ mod tests {
         assert!((CLUSTER_TOTAL_HEIGHT_PX - expected).abs() < f32::EPSILON);
     }
 
+    /// BL-82 HUD polish round 4 (issue 1): every `*_BOTTOM_PAD_PX` constant
+    /// must be strictly positive (a real piece of the source art's own
+    /// transparent margin, not a zero/negative no-op) and small relative to
+    /// [`ORB_SIZE_PX`]/[`ACTION_BAR_HALF_HEIGHT_PX`] (a few px, not a large
+    /// fraction of the whole orb/action-bar height — a wildly larger value
+    /// here would signal a measurement bug, not a real transparent margin).
+    /// Also pins each constant's exact scaled value against the raw
+    /// measured px this module's own doc comments cite, so a future asset
+    /// re-cut that changes the padding is caught here rather than silently
+    /// reintroducing the flush-bottom gap.
+    #[test]
+    fn bottom_pad_constants_are_small_positive_fractions_of_their_own_render_height() {
+        // Computed with the EXACT SAME expression shape/order as each real
+        // `const` definition (`raw_px * ORB_SIZE_PX / 768.0`, not
+        // `raw_px * (ORB_SIZE_PX / 768.0)`) — f32 multiplication/division
+        // isn't associative, so reassociating would compare against a
+        // slightly different rounding and could spuriously fail even at a
+        // loose tolerance despite both sides being "the same formula"
+        // mathematically.
+        assert_eq!(ANGEL_FRAME_BOTTOM_PAD_PX, 11.0 * ORB_SIZE_PX / 768.0);
+        assert_eq!(CUTHULHU_FRAME_BOTTOM_PAD_PX, 13.0 * ORB_SIZE_PX / 768.0);
+        assert_eq!(STAMINA_FRAME_BOTTOM_PAD_PX, 14.0 * ORB_SIZE_PX / 768.0);
+        assert_eq!(
+            ACTION_BAR_LEFT_BOTTOM_PAD_PX,
+            23.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0
+        );
+        assert_eq!(
+            ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
+            26.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0
+        );
+
+        for pad in [
+            ANGEL_FRAME_BOTTOM_PAD_PX,
+            CUTHULHU_FRAME_BOTTOM_PAD_PX,
+            STAMINA_FRAME_BOTTOM_PAD_PX,
+            ACTION_BAR_LEFT_BOTTOM_PAD_PX,
+            ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
+        ] {
+            assert!(pad > 0.0, "a bottom pad must be a real positive margin");
+            assert!(
+                pad < ORB_SIZE_PX * 0.1,
+                "a bottom pad of {pad} is implausibly large relative to ORB_SIZE_PX \
+                 ({ORB_SIZE_PX}) — re-check the measurement"
+            );
+        }
+    }
+
     /// [`health_orb_screen_x`]: the orb's edges sit exactly
     /// `width / 2.0 + CLUSTER.health_orb_left` .. `+ ORB_SIZE_PX` — and, for
     /// a window narrower than the cluster's own ~1196px total span, the left
@@ -675,6 +900,53 @@ mod tests {
              ({row_width}) — a future change to ACTION_BAR_WIDTH_TRIM, \
              HOTBAR_ROW_LEADING_INSET_PX, SLOT_SIZE_PX, or HOTBAR_SLOT_GAP_PX shrank this below \
              that floor"
+        );
+    }
+
+    /// BL-82 HUD polish round 4 (issue 3) — the REAL regression guard the
+    /// bounding-box-only check above can't provide: the row's content must
+    /// land within each action-bar half's own FLAT, OPAQUE plate art (see
+    /// [`ACTION_BAR_WIDTH_TRIM`]'s doc comment for the full story of how a
+    /// trim that passed the box-fit test above still visibly overflowed onto
+    /// green terrain on the right half). Converts the row's rendered-px
+    /// start/end back to the SAME `1380px`-native-width coordinate space
+    /// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]/
+    /// [`ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX`] were measured against
+    /// (both source PNGs share that native width) and checks both real
+    /// constraints: the row must END at or before the RIGHT half's flat
+    /// backing runs out, and must START at or after the LEFT half's own
+    /// corner-curl clears.
+    #[test]
+    fn hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing() {
+        let leading_inset = crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX;
+        let slot_gap = crate::hotbar::HOTBAR_SLOT_GAP_PX;
+        let slot_size = crate::hotbar::SLOT_SIZE_PX;
+        let slots_per_half = crate::hotbar::SLOTS_PER_HALF as f32;
+        let row_end_rendered =
+            leading_inset + slots_per_half * slot_size + (slots_per_half - 1.0) * slot_gap;
+
+        // Both `action_bar_bg_left.png`/`_right.png` are `1380px` wide
+        // natively — this is the SAME scale factor `ACTION_BAR_HALF_WIDTH_PX`
+        // itself is derived from (`ACTION_BAR_HALF_HEIGHT_PX * (1380/752) *
+        // ACTION_BAR_WIDTH_TRIM`), just inverted back to native px.
+        let native_scale = ACTION_BAR_HALF_WIDTH_PX / 1380.0;
+        let row_end_native = row_end_rendered / native_scale;
+        let leading_inset_native = leading_inset / native_scale;
+
+        assert!(
+            row_end_native <= ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX,
+            "the hotbar row's content ends at native x={row_end_native:.1} on the RIGHT half, \
+             past the flat plate's own safe opaque boundary \
+             ({ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX}) — the last holder(s) will render over bare \
+             terrain instead of the plate art; increase ACTION_BAR_WIDTH_TRIM or shrink \
+             SLOT_SIZE_PX/HOTBAR_SLOT_GAP_PX"
+        );
+        assert!(
+            leading_inset_native >= ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX,
+            "the hotbar row's content starts at native x={leading_inset_native:.1} on the LEFT \
+             half, before the flat plate's own corner-curl clears \
+             ({ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX}) — the first holder will render under the \
+             piece's decorative corner"
         );
     }
 }

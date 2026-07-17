@@ -132,6 +132,13 @@ pub enum HudImageKey {
     InventoryBg,
     InventoryTooltipBg,
     ManaLiquid,
+    /// BL-82 HUD polish round 4 (issue 4) — a dedicated left-mouse-button
+    /// icon replacing the hotbar's last-two-slots `"LMB"` text label. See
+    /// `crate::images`'s own module doc comment convention: variant names
+    /// follow the source filename.
+    MouseClickLeft,
+    /// Right-mouse-button counterpart of [`Self::MouseClickLeft`].
+    MouseClickRight,
     NonObjectiveBullet,
     ObjectiveBullet,
     OrbFrameAngel,
@@ -200,6 +207,8 @@ impl HudImageKey {
         Self::InventoryBg,
         Self::InventoryTooltipBg,
         Self::ManaLiquid,
+        Self::MouseClickLeft,
+        Self::MouseClickRight,
         Self::NonObjectiveBullet,
         Self::ObjectiveBullet,
         Self::OrbFrameAngel,
@@ -268,6 +277,8 @@ impl HudImageKey {
             Self::InventoryBg => "inventory_bg.png",
             Self::InventoryTooltipBg => "inventory_tooltip_bg.png",
             Self::ManaLiquid => "mana_liquid.png",
+            Self::MouseClickLeft => "mouse_click_left.png",
+            Self::MouseClickRight => "mouse_click_right.png",
             Self::NonObjectiveBullet => "non_objective_bullet.png",
             Self::ObjectiveBullet => "objective_bullet.png",
             Self::OrbFrameAngel => "orb_frame_angel.png",
