@@ -329,6 +329,31 @@ fn spawn_chat_panel(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
     let root = commands
         .spawn((
             ChatPanelRoot,
+            // BL-82 EM-5.17 z-scheme (spec §4.4): the chat panel MUST carry
+            // `GlobalZIndex(zlayer::CHAT)` = 30 — the "chat sits above the
+            // ambient HUD chrome so it can be interacted with while other
+            // chrome is visible" tier. Without it the panel sat in the default
+            // z-partition (0), BELOW the orbs/action-bar/hotbar/party-frames
+            // that all gained `GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)` = 20
+            // during EM-5.17. Since `bevy_ui`'s picking backend resolves the
+            // highest z-partition FIRST and treats a node without
+            // `Pickable::IGNORE` as blocking everything below it (see
+            // `combat_hud.rs`'s damage-vignette comment for the same picking
+            // model), the health orb + left action-bar half — which, at the
+            // 1280×720 default, geometrically overlap the bottom-left chat
+            // panel including most of its `EditableText` input box — silently
+            // swallowed the click meant to focus the box. `bevy_ui_widgets`'
+            // text-input focus is set ONLY by that pointer-press landing on the
+            // box (see `text_input_focused`'s doc comment), so `InputFocus`
+            // never pointed at the chat box and typing did nothing at all. This
+            // is the SAME click-routing bug class already fixed for the damage
+            // vignette (PR #122) and the modal windows (PR #131) — the chat
+            // panel was the remaining unfixed instance (PR #131's review noted
+            // `zlayer::CHAT` was defined but never applied to `ChatPanelRoot`,
+            // out of that PR's scope). `CHAT` = 30 stays below
+            // `MODAL_WINDOWS` = 100, so an open diary/inventory/full-map still
+            // correctly draws and picks over the chat panel.
+            bevy::ui::GlobalZIndex(xindeler_ui::zlayer::CHAT),
             xindeler_ui::panel::anchored_panel_bundle(&theme, None, Some(16.0), None, Some(16.0)),
         ))
         .id();
@@ -1072,6 +1097,45 @@ mod tests {
     #[test]
     fn chat_starts_uncollapsed() {
         assert!(!ChatUiState::default().collapsed);
+    }
+
+    /// The [`ChatPanelRoot`] MUST carry `GlobalZIndex(zlayer::CHAT)` (spec
+    /// §4.4) — the click-routing regression this test pins. Without it the
+    /// panel sits in the default z-partition (0), below the orbs/action-bar/
+    /// hotbar/party-frames that all carry
+    /// `GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)` = 20; since `bevy_ui`
+    /// picking resolves the highest z-partition first and a node without
+    /// `Pickable::IGNORE` blocks everything below it, that ambient chrome
+    /// (which geometrically overlaps the bottom-left chat panel at the default
+    /// window size) silently swallowed the click meant to focus the input box,
+    /// so `InputFocus` never pointed at it and typing did nothing. Matches the
+    /// same z-index regression guard
+    /// `diary.rs`/`esc_menu.rs`/`inventory_ui.rs`/ `map_view.rs` each carry
+    /// for their own roots (the SAME bug class fixed for the damage
+    /// vignette (PR #122) and the modal windows (PR #131)).
+    #[test]
+    fn spawn_chat_panel_puts_the_root_on_the_chat_z_layer() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+
+        let world = app.world_mut();
+        let root = world
+            .query_filtered::<Entity, With<ChatPanelRoot>>()
+            .single(world)
+            .expect("ChatPanelRoot exists");
+        let z_index = world
+            .get::<bevy::ui::GlobalZIndex>(root)
+            .expect("ChatPanelRoot carries a GlobalZIndex");
+        assert_eq!(
+            z_index.0,
+            xindeler_ui::zlayer::CHAT,
+            "the chat panel must sit on the CHAT z-layer, above the ambient HUD chrome that would \
+             otherwise swallow clicks meant to focus its input box"
+        );
     }
 
     /// [`sync_chat_collapsed`]: collapsing hides every [`ChatCollapsible`]
