@@ -368,11 +368,25 @@ fn inventory_tab_label(tab: InventoryTab) -> &'static str {
 /// `sync_diary_tabs`, which reactively rebuilds a DYNAMIC tab list — the 2
 /// tab buttons spawn once, right here, with no reactive rebuild system
 /// needed.
+///
+/// BL-82 EM-5.17/5.18 click-routing fix: `InventoryWindowRoot` is one of the
+/// three consumers the zlayer scheme's own doc comment names for
+/// `MODAL_WINDOWS` (diary/inventory/full-map), and [`spawn_equip_picker_root`]
+/// below already assumed it carried that tier (its own doc comment says "one
+/// tier ABOVE `InventoryWindowRoot`'s own `MODAL_WINDOWS`") — but this spawn
+/// tuple never actually applied `GlobalZIndex(MODAL_WINDOWS)`, unlike
+/// `diary.rs`'s `DiaryWindowRoot`. Left at the default z-partition (0), this
+/// root sat BELOW the always-on ambient chrome once it gained its own higher
+/// z-index this phase (hotbar/orbs = `ORBS_ACTION_BAR_PARTY_MINIMAP`=20) —
+/// wherever the Inventory window visually overlapped that chrome,
+/// `bevy_ui` picking (which resolves the highest z-partition first) routed
+/// clicks to the chrome in front instead of the inventory panel underneath.
 fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     commands
         .spawn((
             InventoryWindowRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
@@ -1411,6 +1425,44 @@ mod tests {
     #[test]
     fn an_unknown_group_resolves_to_none() {
         assert!(address_to_slot(SlotGroup(99), SlotAddress(0)).is_none());
+    }
+
+    /// BL-82 EM-5.17/5.18 click-routing fix regression: `InventoryWindowRoot`
+    /// is one of the three consumers the zlayer scheme's own doc comment
+    /// names for `MODAL_WINDOWS` (diary/inventory/full-map) — pins that it
+    /// now actually carries that `GlobalZIndex`, matching `diary.rs`'s
+    /// `spawn_diary_window_uses_skill_tree_bg_and_modal_z_index` test for
+    /// `DiaryWindowRoot`. Before this fix `InventoryWindowRoot` had NO
+    /// `GlobalZIndex` at all (default z-partition 0) — even though
+    /// `spawn_equip_picker_root`'s own doc comment already assumed it did
+    /// ("one tier ABOVE `InventoryWindowRoot`'s own `MODAL_WINDOWS`"). Left
+    /// unindexed, it sat BELOW the always-on ambient chrome once that chrome
+    /// gained its own higher z-index this phase (hotbar/orbs =
+    /// `ORBS_ACTION_BAR_PARTY_MINIMAP`=20) — wherever the Inventory
+    /// window visually overlapped that chrome, `bevy_ui` picking (highest
+    /// z-partition first) routed clicks to the chrome in front instead of
+    /// the inventory panel underneath.
+    #[test]
+    fn inventory_window_root_carries_the_modal_windows_z_index() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_inventory_window)
+            .expect("spawn_inventory_window runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<InventoryWindowRoot>>()
+            .single(world)
+            .expect("InventoryWindowRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
     }
 
     /// BL-82 EM-5.17 T57.13 — pins the documented 8-tier-to-6-texture rarity
