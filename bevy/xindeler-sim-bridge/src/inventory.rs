@@ -658,4 +658,178 @@ mod tests {
         let coins = comp::Item::new_from_asset_expect("common.items.utility.coins");
         assert!(item_equippable_slots(&coins).is_empty());
     }
+
+    /// BL-82 EM-5.18 T58.17 — the P3 "end-to-end gap-closure confirm" the
+    /// plan calls for. `xindeler-client::inventory_ui`'s own
+    /// `picking_an_item_sends_swap_and_closes_picker` test already proves the
+    /// equip-picker's REAL click observer sends `InventoryActionRequest(
+    /// InventoryManip::Swap(Slot::Inventory(bag_slot),
+    /// Slot::Equip(open_slot)))`; this test starts from that EXACT wire
+    /// message and proves the other half of the loop this crate owns —
+    /// [`apply_inventory_action_requests`] resolving a real client connection
+    /// ([`PlayerDimensionSession`], the same path
+    /// `resolve_client_entity_uses_the_real_connection_when_present` already
+    /// proves) and re-emitting it as a real `InventoryManipEvent`, ONE real
+    /// sim tick (`Server::tick`, the exact call `crate::tick_sim` itself
+    /// makes) processing it through the sim's authoritative
+    /// `server::events::inventory_manip` handler, and
+    /// [`mirror_inventory_state`] re-mirroring the result — closing the
+    /// P1-only regression (`inventory_ui.rs`'s own module doc comment /
+    /// T58.4: "no cross-tab equip path exists between P1 merging and P2
+    /// merging") end to end, without ever needing a live network connection
+    /// or a second real client. A bare `Pos` is required on the sim entity:
+    /// `InventoryManip:: Swap`'s handler
+    /// (`server/src/events/inventory_manip.rs`) only performs the actual
+    /// `Inventory::swap` when `data.positions.get(entity)` is `Some` (it
+    /// needs somewhere to drop a bumped item, mirroring every other spawn
+    /// this crate's tests plant, e.g. `entity_factory.rs`'s
+    /// `comp::Pos(wpos)`) — omitting it would make this test pass for the
+    /// wrong reason (the event reaching the sim) while silently never
+    /// exercising the swap itself. See the `Anchor::Entity` inline comment
+    /// below for the second, non-obvious fixture requirement a real
+    /// `Server::tick()` imposes on any `Pos`-carrying test entity.
+    #[test]
+    fn equip_swap_request_round_trips_through_a_real_sim_tick_into_net_inventory() {
+        use common::comp::inventory::slot::Slot;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        app.add_message::<FromClient<InventoryActionRequest>>();
+
+        let sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let mut inventory = Inventory::with_empty();
+            inventory
+                .push(comp::Item::new_from_asset_expect(
+                    "common.items.testing.test_boots",
+                ))
+                .expect("space for the boots");
+            // A bare `Pos`-carrying, `Presence`-less entity with NO `Anchor`
+            // is culled by `Server::tick`'s "remove NPCs outside every
+            // player's view distance" pass THE VERY FIRST real tick (`lib.rs`
+            // L~970: `None => terrain.get_key_real(chunk_key).is_none()` — no
+            // player is around to have ever loaded a chunk at this test's
+            // made-up position, so it always reads "unloaded"). Anchoring to
+            // a second, permanently-alive, `Pos`-less dummy entity
+            // (`Anchor::Entity(anchor_entity) => !is_alive(anchor_entity)`)
+            // sidesteps that cull without needing this test to pull in
+            // `lib.rs`'s heavy "create a persister and wait up to 800 ticks
+            // for real terrain to generate" preamble — the dummy is never a
+            // `to_delete` candidate itself (that join requires `Pos`) and
+            // never triggers the sibling "anchor chain" panic (it carries no
+            // `Anchor` of its own).
+            let anchor_entity = ecs.create_entity().build();
+            let entity = ecs
+                .create_entity()
+                .with(inventory)
+                .with(comp::Pos(vek::Vec3::new(0.0, 0.0, 0.0)))
+                .with(common::comp::Anchor::Entity(anchor_entity))
+                .build();
+            let mut uids = ecs.write_storage::<Uid>();
+            let mut id_maps = ecs.write_resource::<common::uid::IdMaps>();
+            uids.insert(entity, id_maps.allocate(entity)).unwrap();
+            drop(uids);
+            drop(id_maps);
+            entity
+        };
+
+        let bevy_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(sim_entity, bevy_entity);
+
+        // First mirror pass: discover the boots' real bag-slot address —
+        // exactly what the client's own picker reads off `NetInventory`
+        // before it ever sends a swap (spec §3.3 step 3).
+        app.world_mut()
+            .run_system_once(mirror_inventory_state)
+            .expect("first mirror pass runs");
+        app.update();
+
+        let bag_slot = {
+            let net_inventory = app
+                .world()
+                .get::<NetInventory>(bevy_entity)
+                .expect("NetInventory must be mirrored before the swap");
+            net_inventory
+                .slots
+                .iter()
+                .find(|slot| slot.item.is_some())
+                .expect("the boots occupy exactly one bag slot")
+                .slot
+        };
+        let open_slot =
+            comp::inventory::slot::EquipSlot::Armor(comp::inventory::slot::ArmorSlot::Feet);
+
+        // The SAME connection-entity plumbing
+        // `resolve_client_entity_uses_the_real_connection_when_present`
+        // already proves resolves to a real sim entity — reused here so this
+        // test drives the SAME code path a genuine remote client's request
+        // takes, not the (heavier, loopback-`Client`-requiring)
+        // `EmbeddedPlayer` shortcut.
+        let connection_entity = app
+            .world_mut()
+            .spawn(PlayerDimensionSession(sim_entity))
+            .id();
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(connection_entity),
+            message: InventoryActionRequest(comp::InventoryManip::Swap(
+                Slot::Inventory(bag_slot),
+                Slot::Equip(open_slot),
+            )),
+        });
+
+        app.world_mut()
+            .run_system_once(apply_inventory_action_requests)
+            .expect("applicator runs");
+
+        // ONE real sim tick: the exact call `tick_sim` itself makes,
+        // processing the just-emitted `InventoryManipEvent` through the
+        // sim's REAL `server::events::inventory_manip` handler — the
+        // authoritative Swap logic this redesign deliberately never
+        // reimplements client-side (spec §1.5/§3.3).
+        {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            sim.server
+                .tick(
+                    server::Input::default(),
+                    std::time::Duration::from_millis(33),
+                )
+                .expect("sim tick processes the queued InventoryManipEvent");
+        }
+
+        app.world_mut()
+            .run_system_once(mirror_inventory_state)
+            .expect("second mirror pass runs");
+        app.update();
+
+        let net_inventory = app
+            .world()
+            .get::<NetInventory>(bevy_entity)
+            .expect("NetInventory must still be mirrored after the swap");
+        let equipped_feet = net_inventory
+            .equipped
+            .iter()
+            .find(|slot| slot.slot == open_slot)
+            .expect("Feet is always present in ALL_EQUIP_SLOTS")
+            .item
+            .as_ref();
+        assert!(
+            equipped_feet.is_some(),
+            "the boots must now be equipped in the Feet slot after the swap request round-trips \
+             through a real sim tick"
+        );
+        assert!(
+            net_inventory
+                .slots
+                .iter()
+                .find(|slot| slot.slot == bag_slot)
+                .expect("the bag slot still exists")
+                .item
+                .is_none(),
+            "the bag slot the boots came from must now be empty"
+        );
+    }
 }

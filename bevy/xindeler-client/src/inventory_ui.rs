@@ -292,6 +292,14 @@ impl Plugin for InventoryUiPlugin {
                     // `InventoryWindowRoot`, not nested inside it.
                     spawn_equip_picker_root.after(xindeler_ui::theme::init_theme),
                     force_open_inventory_for_smoke_capture,
+                    // BL-82 EM-5.18 T58.15 (P3 parity check) — the
+                    // Equipment-tab counterpart to
+                    // `force_open_inventory_for_smoke_capture`, so a live
+                    // `--smoke-screenshot` can capture the 18-slot
+                    // paper-doll specifically instead of only the default
+                    // Items tab (`--smoke-screenshot` has no real mouse to
+                    // click the Equipment tab button with).
+                    force_select_equipment_tab_for_smoke_capture,
                 ),
             )
             .add_systems(
@@ -727,6 +735,24 @@ fn bag_rarity_image_node(
 fn force_open_inventory_for_smoke_capture(mut state: ResMut<HudState>) {
     if std::env::var("XINDELER_SMOKE_OPEN_INVENTORY").is_ok_and(|v| v != "0") {
         state.toggle(HudWindow::Inventory);
+    }
+}
+
+/// BL-82 EM-5.18 T58.15 (P3 parity check) — forces `InventoryTab::Equipment`
+/// once at boot when `XINDELER_SMOKE_INVENTORY_TAB=equipment` is set, the
+/// same env-var-gated, smoke-only debug-override convention
+/// [`force_open_inventory_for_smoke_capture`] (immediately above) already
+/// establishes: `--smoke-screenshot` has no real mouse to click the
+/// Equipment tab button with, so this is how a live visual parity check
+/// against Phase 7's shipped, Matías-approved 18-slot paper-doll layout
+/// (spec/task T58.15) can capture the Equipment tab specifically, rather
+/// than only ever capturing the default (`InventoryTab::Items`) tab. A
+/// no-op (the tab stays on its `Default` value, `Items`) unless the env var
+/// is set to exactly `"equipment"` — harmless in every normal run, and in
+/// every OTHER smoke capture that doesn't set it.
+fn force_select_equipment_tab_for_smoke_capture(mut tab: ResMut<InventoryTab>) {
+    if std::env::var("XINDELER_SMOKE_INVENTORY_TAB").as_deref() == Ok("equipment") {
+        *tab = InventoryTab::Equipment;
     }
 }
 
@@ -1700,6 +1726,59 @@ mod tests {
             .collect();
         assert_eq!(sent, vec![InventoryActionRequest(
             common::comp::InventoryManip::Swap(Slot::Inventory(from_inv), Slot::Inventory(to_inv),)
+        )]);
+    }
+
+    /// BL-82 EM-5.18 T58.16 (P3 parity check) — the SAME regression coverage
+    /// as `same_tab_bag_to_bag_drag_still_produces_inventory_swap_request`,
+    /// but for the OTHER same-tab drag spec §3.6 explicitly calls out as kept
+    /// working: dragging one weapon-set slot onto its counterpart within the
+    /// Equipment tab (`ActiveMainhand` <-> `InactiveMainhand`) to swap
+    /// loadouts by hand. Both ends are `EQUIP_GROUP` — `handle_slot_drops`/
+    /// `address_to_slot` don't special-case direction, so this is the same
+    /// code path, just proven with the OTHER group this redesign's tab split
+    /// didn't touch either.
+    #[test]
+    fn same_tab_weapon_set_to_weapon_set_drag_still_produces_inventory_swap_request() {
+        use bevy::ecs::message::Messages;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<SlotDropped>();
+        app.add_message::<InventoryActionRequest>();
+
+        let active_mainhand_discriminant = ALL_EQUIP_SLOTS
+            .iter()
+            .position(|&s| s == EquipSlot::ActiveMainhand)
+            .expect("ActiveMainhand is in the canonical list")
+            as u32;
+        let inactive_mainhand_discriminant = ALL_EQUIP_SLOTS
+            .iter()
+            .position(|&s| s == EquipSlot::InactiveMainhand)
+            .expect("InactiveMainhand is in the canonical list")
+            as u32;
+
+        app.world_mut().write_message(SlotDropped {
+            from_group: EQUIP_GROUP,
+            from_address: SlotAddress::from_equip_slot_discriminant(active_mainhand_discriminant),
+            to_group: EQUIP_GROUP,
+            to_address: SlotAddress::from_equip_slot_discriminant(inactive_mainhand_discriminant),
+        });
+
+        app.world_mut()
+            .run_system_once(handle_slot_drops)
+            .expect("handler runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<InventoryActionRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![InventoryActionRequest(
+            common::comp::InventoryManip::Swap(
+                Slot::Equip(EquipSlot::ActiveMainhand),
+                Slot::Equip(EquipSlot::InactiveMainhand),
+            )
         )]);
     }
 
