@@ -249,8 +249,10 @@ impl Plugin for HotbarViewPlugin {
     }
 }
 
-/// index -> spawned slot entity, resized by [`sync_hotbar_slots`] to match
-/// [`NetAbilities::slots`]'s real (sim-driven) length.
+/// index -> spawned slot entity, resized by [`sync_hotbar_slots`] to the
+/// FIXED [`HOTBAR_SLOT_COUNT`] (BL-82 EM-5.17 "5+5 slot-holders" follow-up —
+/// no longer [`NetAbilities::slots`]'s real, sim-driven length; see the
+/// module doc comment).
 #[derive(Resource, Default)]
 struct HotbarSlotEntities(Vec<Entity>);
 
@@ -626,11 +628,17 @@ fn sync_hotbar_slots(
 /// whichever action-bar HALF it belongs to — the first `ceil(n/2)` slots go
 /// into the LEFT half (`action_bar_bg_left.png`), the rest into the RIGHT
 /// half (spec §3.1's "first half of slots in left, rest in right"). Runs
-/// AFTER [`sync_hotbar_slots`] so a LATER change in slot count (e.g. a weapon
-/// swap shortening/lengthening `NetAbilities::slots`, already handled by
-/// `sync_hotbar_slots`'s own resize logic) correctly re-splits which slots
-/// land in which half instead of leaving a stale assignment computed against
-/// a previous count.
+/// AFTER [`sync_hotbar_slots`] so it always sees that system's up-to-date
+/// [`HotbarSlotEntities`] for the current frame.
+///
+/// BL-82 EM-5.17 "5+5 slot-holders" follow-up: `n` is now the FIXED
+/// [`HOTBAR_SLOT_COUNT`] (10), not `NetAbilities::slots`'s real, sim-driven
+/// length — so `ceil(n/2)` is always an exact 5/5 split and this system no
+/// longer actually RE-splits anything in practice (the entity count never
+/// changes after the initial spawn; only `SlotContents` does when the
+/// mirror's real length changes — see [`sync_hotbar_slots`]'s own doc
+/// comment). The `is_changed()` gate below still only fires once, at the
+/// initial spawn.
 ///
 /// Gated on `slot_entities.is_changed()` — `Res<T>::is_changed` is true the
 /// frame `HotbarSlotEntities` itself is replaced/mutated (i.e. exactly when
@@ -1202,6 +1210,49 @@ mod tests {
             slot: 1,
             ability: dragged,
         }]);
+    }
+
+    /// BL-82 EM-5.17 "5+5 slot-holders" follow-up: a diary-ability drag onto
+    /// a PLACEHOLDER holder (`to_index >= abilities.slots.len()`, i.e. beyond
+    /// the mirror's real slot count) is a no-op — no `AssignHotbarSlot` is
+    /// sent — the client-side guard `handle_hotbar_drag_drop` added for
+    /// exactly this case (see its own doc comment: the server would silently
+    /// discard the same request anyway, so this just skips sending it).
+    #[test]
+    fn diary_ability_drag_onto_a_placeholder_slot_sends_nothing() {
+        let mut app = new_app();
+        app.add_message::<SlotDropped>();
+        app.add_message::<AssignHotbarSlot>();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default(), NetHotbarSlot::default()],
+        }));
+        let dragged = NetAuxiliaryAbility::Innate(3);
+        app.world_mut().write_message(SlotDropped {
+            from_group: crate::diary::DIARY_ABILITY_GROUP,
+            from_address: SlotAddress(dragged.to_slot_address_raw()),
+            to_group: HOTBAR_GROUP,
+            // Only 2 real slots exist (indices 0..1) — index 5 is a
+            // placeholder holder (well within HOTBAR_SLOT_COUNT == 10, so
+            // the entity itself exists, but the mirror has no real slot
+            // there).
+            to_address: SlotAddress(5),
+        });
+
+        app.world_mut()
+            .run_system_once(handle_hotbar_drag_drop)
+            .expect("handler runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<AssignHotbarSlot>>()
+            .drain()
+            .collect();
+        assert!(
+            sent.is_empty(),
+            "a drop onto a placeholder slot must not send AssignHotbarSlot"
+        );
     }
 
     /// A drop where either end is NOT in the hotbar group is ignored — no
