@@ -43,7 +43,7 @@ pub const ORB_SIZE_PX: f32 = 160.0;
 /// BL-82 EM-5.17 Phase 0 follow-up (Matías's HUD art-alignment report) — the
 /// SQUARE pixel-space sub-rect of the HUD-D4 orb pack's native canvas that
 /// every `spawn_orb_bar` call for the three resource orbs passes as
-/// `xindeler_ui::bar::spawn_orb_bar`'s `source_crop` parameter.
+/// `xindeler_ui::bar::spawn_orb_bar`'s `fill_source_crop` parameter.
 ///
 /// Verified directly against the actual on-disk PNGs (all `1408×768`,
 /// except `orb_frame_cuthulhu.png` at `1407×768` — a 1px rounding
@@ -67,10 +67,74 @@ pub const ORB_SIZE_PX: f32 = 160.0;
 /// [`ORB_SIZE_PX`]×[`ORB_SIZE_PX`] box distorts nothing (uniform scale);
 /// stretching the whole non-square canvas onto that same square box (the
 /// pre-fix behaviour) squashed the circle into an ellipse.
+///
+/// This is the crop for the LIQUID (`*_liquid.png`) images specifically —
+/// see [`ORB_FRAME_SOURCE_CROP`] for the frame's own (tighter) crop. It is
+/// already as tight as it can be: the liquid's own opaque content spans the
+/// full `699`–`700px` of the canvas's `768px` height (`y[28,727]`,
+/// re-verified directly against the on-disk PNGs), so there is no further
+/// square sub-region available within this canvas that both stays square AND
+/// keeps the whole liquid circle — any tighter crop would clip real liquid
+/// pixels. Making the liquid render SMALLER (BL-82 EM-5.17 Phase 0 second
+/// follow-up, see [`ORB_FRAME_SOURCE_CROP`]'s doc comment) therefore has to
+/// come from [`LIQUID_INSET_PX`] instead of a tighter crop here.
 pub const ORB_SOURCE_CROP: Rect = Rect {
     min: bevy::math::Vec2::new(320.0, 0.0),
     max: bevy::math::Vec2::new(1088.0, 768.0),
 };
+
+/// BL-82 EM-5.17 Phase 0 SECOND follow-up (Matías's live in-game report on
+/// `record20.mov`: the liquid circles sit visibly SMALLER than the frame's
+/// own circular window, leaving a dark ring of frame material between the
+/// liquid's edge and the frame — even though [`ORB_SOURCE_CROP`] already
+/// fixed the earlier "squashed ellipse" bug). Root cause, re-measured
+/// directly against the on-disk `orb_frame_angel.png`/`orb_frame_cuthulhu.png`/
+/// `orb_frame_stamina.png` (via a connected-component labelling of each
+/// PNG's alpha channel — a single-scanline probe gets fooled by the
+/// cuthulhu frame's asymmetric wing/tentacle art, which has its own internal
+/// opaque/transparent transitions on the same row/column as the real hole):
+/// [`spawn_orb_bar`](xindeler_ui::bar::spawn_orb_bar) used to stretch ONE
+/// SHARED crop onto both the liquid and the frame images. Since both then
+/// scale onto the exact same `width_px`×`height_px` box by the exact same
+/// factor, a shared crop can only ever preserve the two images' SOURCE pixel
+/// ratio — it can never change how big the liquid renders RELATIVE to the
+/// frame's own hole, no matter which square sub-region is chosen. This
+/// constant is a crop for the FRAME ALONE, cropped much tighter around the
+/// hole than [`ORB_SOURCE_CROP`], so the hole occupies more of the shared
+/// box independent of the liquid's own scale.
+///
+/// Measured hole bounding boxes (enclosed-component, alpha>10 threshold):
+/// angel `(525,197)-(896,577)`, cuthulhu `(529,199)-(893,576)`, stamina
+/// `(524,202)-(894,568)` — all centred within a couple px of `(710,387)`.
+/// Measured ring OUTER edge (opaque frame material, walking outward from the
+/// hole boundary along a non-wing-affected axis — vertical for all three,
+/// plus horizontal right for angel/stamina): the tightest of these is
+/// stamina's vertical top at `362px` from centre. This crop's half-size is
+/// `358px` (a small few-px safety margin below that tightest measurement) —
+/// tight enough to markedly enlarge the hole, without cropping into any of
+/// the three frames' own visible ring silhouette (which would show as an
+/// abrupt flat cut instead of the ring's own rounded edge). Centred on
+/// `(710,387)`, giving `x[352,1068] y[29,745]` — a `716×716` square.
+pub const ORB_FRAME_SOURCE_CROP: Rect = Rect {
+    min: bevy::math::Vec2::new(352.0, 29.0),
+    max: bevy::math::Vec2::new(1068.0, 745.0),
+};
+
+/// BL-82 EM-5.17 Phase 0 second follow-up — companion to
+/// [`ORB_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s
+/// `liquid_inset_px` parameter for the three resource orbs. [`ORB_SOURCE_CROP`]
+/// is already as tight as the liquid PNGs' own canvas allows (see its doc
+/// comment), so the liquid can't be shrunk any further via cropping — this
+/// insets the liquid's RENDERED box a few px on every side instead, centred
+/// within the orb's full [`ORB_SIZE_PX`]×[`ORB_SIZE_PX`] box, so its circular
+/// edge sits comfortably inside [`ORB_FRAME_SOURCE_CROP`]'s enlarged hole
+/// with deliberate slack rather than exactly flush with it — flush-fit only
+/// holds at one exact scale; a few px of margin means sub-pixel rounding at
+/// a different UI-scale factor can never read as the liquid overlapping the
+/// frame's ring. Tuned by eye against the Phase 0 second-follow-up smoke
+/// screenshot (a modest inset — the liquid is meant to fill MOST of the
+/// hole, just with breathing room at the very edge, not shrink dramatically).
+pub const LIQUID_INSET_PX: f32 = 6.0;
 
 /// Height (px) of each action-bar-half background. Matches [`ORB_SIZE_PX`]
 /// so the whole cluster's bottom edge lines up in one row.
@@ -83,13 +147,23 @@ pub const ACTION_BAR_HALF_HEIGHT_PX: f32 = ORB_SIZE_PX;
 /// instead of an arbitrary guessed width.
 pub const ACTION_BAR_HALF_WIDTH_PX: f32 = ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0);
 
-/// Horizontal gap (px) between adjacent cluster pieces. NEGATIVE (a small
-/// overlap): every piece's source PNG has a sizeable fully-opaque black
-/// border padding around its ornate art (see the module doc comment) — a
-/// small overlap keeps that padding from reading as a visible seam of double
-/// black between pieces. Tuned by eye against the Phase 2 smoke screenshot;
-/// revisit if a future asset re-cut changes the padding.
-pub const CLUSTER_GAP_PX: f32 = -32.0;
+/// Horizontal gap (px) between adjacent cluster pieces — health orb / left
+/// action-bar half / stamina orb / right action-bar half / mana orb. Was a
+/// NEGATIVE (`-32.0`) small overlap: every piece's source PNG has a sizeable
+/// fully-opaque black border padding around its ornate art (see the module
+/// doc comment), so pieces were pulled together to keep that padding from
+/// reading as a visible seam of double black between pieces. BL-82 EM-5.17
+/// Phase 0 THIRD follow-up (Matías's `record20.mov` review: "the whole row
+/// has zero breathing room, everything is pressed together") re-tunes this
+/// to a small POSITIVE gap instead — re-verified by eye against a live smoke
+/// screenshot that the exposed sliver of each piece's own opaque padding
+/// reads as a clean dark seam against the row's already-dark backdrop, not
+/// as a mismatched notch. Kept modest (a few px, not a wide gap) per
+/// Matías's own "small gap/margin... not a large redesign" framing — this is
+/// still THE single shared gap every adjacent pair in the row uses, so the
+/// row stays visually contiguous, just no longer touching. Revisit if a
+/// future asset re-cut changes the padding.
+pub const CLUSTER_GAP_PX: f32 = 4.0;
 
 /// Distance (px) from the viewport's bottom edge to the bottom of the whole
 /// orb/action-bar row.

@@ -187,7 +187,9 @@ pub struct HudOrbBar;
 /// to a sibling function instead of a wrapper since the fill AXIS itself
 /// differs, not just an extra parameter).
 ///
-/// ## `source_crop` — fixing the "squashed ellipse" sizing bug
+/// ## `fill_source_crop`/`frame_source_crop` — fixing the "squashed ellipse"
+/// sizing bug AND the follow-up "liquid doesn't fill the frame's window"
+/// sizing mismatch
 /// The HUD-D4 pack's `orb_frame_*.png`/`*_liquid.png` files are a wide
 /// `1408×768`-ish canvas, NOT a square crop of just the circle — the artist
 /// left a big transparent margin left/right of a centred circle (room for
@@ -198,28 +200,44 @@ pub struct HudOrbBar;
 /// px of the canvas's own horizontal centre (`x≈704-710` of 1407-1408).
 /// Stretching the FULL wide canvas onto a square `width_px`×`height_px` box
 /// (the old behaviour) squashes that circle into an ellipse — visibly
-/// mismatched against the reference mockup's round orbs. `source_crop`, when
-/// given, is a pixel-space `Rect` (in the SOURCE texture's own coordinates)
-/// applied to both `fill_image` and `frame_image` via `ImageNode::rect` +
-/// `NodeImageMode::Stretch` — passing a genuinely SQUARE sub-rect (e.g.
-/// `hud_layout::ORB_SOURCE_CROP`, the full canvas height with the width
-/// cropped to match) means that square crop stretches onto the square
-/// `width_px`×`height_px` box with NO distortion, keeping the circle round.
-/// `None` preserves the old "stretch the whole source image" behaviour
-/// (existing/mock call sites that don't care about real art alignment).
+/// mismatched against the reference mockup's round orbs. Each `*_source_crop`
+/// param, when given, is a pixel-space `Rect` (in that image's OWN SOURCE
+/// texture coordinates) applied via `ImageNode::rect` + `NodeImageMode::
+/// Stretch` — passing a genuinely SQUARE sub-rect means that square crop
+/// stretches onto the square `width_px`×`height_px` box with NO distortion,
+/// keeping the circle round. `None` preserves the old "stretch the whole
+/// source image" behaviour (existing/mock call sites that don't care about
+/// real art alignment).
+///
+/// The two crops are DELIBERATELY SEPARATE parameters, not one shared
+/// `source_crop` (BL-82 EM-5.17 Phase 0 second follow-up, Matías's HUD-D4
+/// art-alignment report: "the liquid sits smaller than the frame's circular
+/// window, a dark ring of frame material shows between them"). A single
+/// shared crop stretched onto the same square box preserves the SOURCE
+/// pixel ratio between the liquid's ≈701px circle and the frame's ≈372px
+/// hole no matter which square window is chosen — so tuning one shared
+/// `source_crop` can never change how big the liquid renders RELATIVE to
+/// the frame's own opening, only how much of each image's outer padding is
+/// visible. Cropping the frame image TIGHTER than the liquid image (see
+/// [`crate::bar`]'s callers in `hud_layout::ORB_FRAME_SOURCE_CROP` vs
+/// `hud_layout::ORB_SOURCE_CROP`) makes the frame's hole occupy more of the
+/// shared `width_px`×`height_px` box, independent of the liquid's own scale.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_orb_bar(
     commands: &mut Commands,
     theme: &HudTheme,
     fill_image: Handle<Image>,
     frame_image: Option<Handle<Image>>,
-    source_crop: Option<Rect>,
+    fill_source_crop: Option<Rect>,
+    frame_source_crop: Option<Rect>,
+    liquid_inset_px: f32,
     width_px: f32,
     height_px: f32,
     value: BarValue,
 ) -> bevy::ecs::entity::Entity {
     let mut fill_image_node = ImageNode::new(fill_image);
-    if let Some(rect) = source_crop {
+    if let Some(rect) = fill_source_crop {
         fill_image_node.rect = Some(rect);
         fill_image_node.image_mode = NodeImageMode::Stretch;
     }
@@ -253,25 +271,34 @@ pub fn spawn_orb_bar(
                     ..Default::default()
                 }))
                 .with_children(|clip_parent| {
-                    // The liquid graphic itself: FIXED `Val::Px` size
-                    // matching the orb's FULL `width_px`×`height_px` —
+                    // The liquid graphic itself: FIXED `Val::Px` size —
                     // deliberately NOT `Val::Percent(100.0)` of the
                     // (shrinking) clip window's own box, which would
                     // re-squash the texture right back into the exact bug
-                    // this rework fixes. Bottom-anchored inside the clip
-                    // window so its bottom edge always lines up with the
-                    // window's own bottom edge (which is itself pinned to
-                    // the container's bottom) — the window reveals the
-                    // BOTTOM `fraction` of this fixed image, never the
-                    // image's own scale.
+                    // this rework fixes. `liquid_inset_px` insets it
+                    // EQUALLY on all four sides (BL-82 EM-5.17 Phase 0
+                    // second follow-up), centring it a few px inside the
+                    // orb's full `width_px`×`height_px` box rather than
+                    // flush with it — see [`spawn_orb_bar`]'s own doc
+                    // comment for why the liquid needs to render a hair
+                    // SMALLER than the frame's hole rather than exactly
+                    // flush: a few px of deliberate slack means sub-pixel
+                    // rounding at different UI-scale factors can never read
+                    // as the liquid overlapping the frame's ring. Still
+                    // bottom-anchored (via the `bottom: Val::Px(liquid_inset_px)`
+                    // offset) inside the clip window so the window's
+                    // fraction-driven reveal still tracks a real "liquid
+                    // level," just measured from `liquid_inset_px` above the
+                    // container's true bottom instead of the container's
+                    // bottom exactly.
                     clip_parent.spawn((
                         HudOrbBarFill,
                         Node {
                             position_type: PositionType::Absolute,
-                            left: Val::Px(0.0),
-                            bottom: Val::Px(0.0),
-                            width: Val::Px(width_px),
-                            height: Val::Px(height_px),
+                            left: Val::Px(liquid_inset_px),
+                            bottom: Val::Px(liquid_inset_px),
+                            width: Val::Px((width_px - 2.0 * liquid_inset_px).max(0.0)),
+                            height: Val::Px((height_px - 2.0 * liquid_inset_px).max(0.0)),
                             ..Default::default()
                         },
                         fill_image_node,
@@ -282,7 +309,7 @@ pub fn spawn_orb_bar(
 
     if let Some(frame_image) = frame_image {
         let mut frame_image_node = ImageNode::new(frame_image);
-        if let Some(rect) = source_crop {
+        if let Some(rect) = frame_source_crop {
             frame_image_node.rect = Some(rect);
             frame_image_node.image_mode = NodeImageMode::Stretch;
         }
@@ -532,6 +559,8 @@ mod tests {
                 Handle::default(),
                 Some(Handle::default()),
                 None,
+                None,
+                0.0,
                 160.0,
                 160.0,
                 BarValue::new(50.0, 100.0),
@@ -591,6 +620,8 @@ mod tests {
                 Handle::default(),
                 Some(Handle::default()),
                 None,
+                None,
+                0.0,
                 160.0,
                 160.0,
                 BarValue::new(50.0, 100.0),
@@ -646,12 +677,13 @@ mod tests {
         );
     }
 
-    /// `source_crop`, when given, is applied to BOTH the fill and frame
-    /// `ImageNode`s as a pixel-space source `rect` + `NodeImageMode::Stretch`
-    /// — the fix for the "squashed ellipse" sizing bug (see `spawn_orb_bar`'s
-    /// own doc comment on the parameter). `None` leaves both `ImageNode`s at
-    /// their default `rect`/`image_mode` (whole-image stretch), preserving
-    /// the pre-fix behaviour for callers that don't pass real HUD-D4 art.
+    /// `fill_source_crop`/`frame_source_crop`, when given, are each applied
+    /// to their OWN `ImageNode` as a pixel-space source `rect` +
+    /// `NodeImageMode::Stretch` — the fix for the "squashed ellipse" sizing
+    /// bug (see `spawn_orb_bar`'s own doc comment on the parameters). `None`
+    /// leaves an `ImageNode` at its default `rect`/`image_mode` (whole-image
+    /// stretch), preserving the pre-fix behaviour for callers that don't
+    /// pass real HUD-D4 art.
     #[test]
     fn orb_bar_source_crop_applies_rect_and_stretch_to_fill_and_frame() {
         let mut app = new_orb_app();
@@ -666,6 +698,8 @@ mod tests {
                 Handle::default(),
                 Some(Handle::default()),
                 Some(crop),
+                Some(crop),
+                0.0,
                 160.0,
                 160.0,
                 BarValue::new(1.0, 1.0),
@@ -708,6 +742,137 @@ mod tests {
         }
     }
 
+    /// The fix for BL-82 EM-5.17 Phase 0's second follow-up (Matías's HUD-D4
+    /// art-alignment report — the liquid sat smaller than the frame's
+    /// circular window with a visible dark-ring gap): `fill_source_crop` and
+    /// `frame_source_crop` are genuinely INDEPENDENT — a caller may crop the
+    /// frame image tighter than the liquid image (making the frame's own
+    /// hole occupy more of the shared box) without that choice being forced
+    /// onto the liquid's crop too, unlike the old single shared `source_crop`
+    /// parameter this replaced (which could only scale both images by the
+    /// exact same factor — see [`spawn_orb_bar`]'s own doc comment on why
+    /// that made the frame/liquid RATIO untunable).
+    #[test]
+    fn orb_bar_fill_and_frame_source_crops_are_independent() {
+        let mut app = new_orb_app();
+        let theme = HudTheme::default();
+        let fill_crop = Rect::new(320.0, 0.0, 1088.0, 768.0);
+        let frame_crop = Rect::new(352.0, 29.0, 1068.0, 745.0);
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_orb_bar(
+                &mut commands,
+                &theme,
+                Handle::default(),
+                Some(Handle::default()),
+                Some(fill_crop),
+                Some(frame_crop),
+                0.0,
+                160.0,
+                160.0,
+                BarValue::new(1.0, 1.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let container_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        let clip_entity = container_children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
+            .expect("orb bar has a clip-window child");
+        let frame_entity = container_children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_none())
+            .expect("orb bar has a frame overlay child");
+        let clip_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(clip_entity)
+            .unwrap()
+            .iter()
+            .collect();
+        let fill_entity = clip_children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
+            .expect("clip window has a fill-image grandchild");
+
+        assert_eq!(
+            app.world().get::<ImageNode>(fill_entity).unwrap().rect,
+            Some(fill_crop)
+        );
+        assert_eq!(
+            app.world().get::<ImageNode>(frame_entity).unwrap().rect,
+            Some(frame_crop)
+        );
+    }
+
+    /// `liquid_inset_px` shrinks the liquid image EQUALLY on all four sides,
+    /// centring it inside the orb's full `width_px`×`height_px` box instead
+    /// of spawning it flush with the box edges — the other half of the
+    /// BL-82 EM-5.17 Phase 0 second follow-up fix (a tighter
+    /// `frame_source_crop` makes the frame's hole bigger; this inset makes
+    /// the liquid a hair smaller, so the liquid's edge sits fully inside
+    /// the hole with no overlap even under sub-pixel rounding).
+    #[test]
+    fn orb_bar_liquid_inset_shrinks_and_centers_fill_image() {
+        let mut app = new_orb_app();
+        let theme = HudTheme::default();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_orb_bar(
+                &mut commands,
+                &theme,
+                Handle::default(),
+                Some(Handle::default()),
+                None,
+                None,
+                8.0,
+                160.0,
+                160.0,
+                BarValue::new(1.0, 1.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let container_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(container)
+            .unwrap()
+            .iter()
+            .collect();
+        let clip_entity = container_children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
+            .expect("orb bar has a clip-window child");
+        let clip_children: Vec<Entity> = app
+            .world()
+            .get::<Children>(clip_entity)
+            .unwrap()
+            .iter()
+            .collect();
+        let fill_entity = clip_children
+            .into_iter()
+            .find(|&e| app.world().get::<HudOrbBarFill>(e).is_some())
+            .expect("clip window has a fill-image grandchild");
+
+        let node = app.world().get::<Node>(fill_entity).unwrap();
+        assert_eq!(node.left, Val::Px(8.0));
+        assert_eq!(node.bottom, Val::Px(8.0));
+        assert_eq!(node.width, Val::Px(144.0));
+        assert_eq!(node.height, Val::Px(144.0));
+    }
+
     /// The optional frame overlay, when given, spawns as a SECOND child
     /// carrying [`Pickable::IGNORE`] — the "decoration never blocks
     /// interaction with what's underneath" contract.
@@ -724,6 +889,8 @@ mod tests {
                 Handle::default(),
                 Some(Handle::default()),
                 None,
+                None,
+                0.0,
                 160.0,
                 160.0,
                 BarValue::new(1.0, 1.0),
@@ -765,6 +932,8 @@ mod tests {
                 Handle::default(),
                 None,
                 None,
+                None,
+                0.0,
                 160.0,
                 160.0,
                 BarValue::new(1.0, 1.0),
