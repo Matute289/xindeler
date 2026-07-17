@@ -63,6 +63,18 @@
 //! double-fire against the separate M1/M2 indicators above (those read the
 //! WIELDED weapon's ability id, not this array).
 //!
+//! BL-82 HUD polish round 4 (issue 4): round 3's `"LMB"`/`"RMB"` TEXT (via
+//! `key_label`) for those same last two holders is now a real
+//! [`HotbarKeybindIcon`] `ImageNode` instead — Matías's own dedicated
+//! `mouse_click_left.png`/`mouse_click_right.png` art (a dark mouse
+//! silhouette with the relevant button highlighted gold, matching the
+//! HUD-D4 pack's style). This is STILL a pure display swap: indices 8/9 keep
+//! reusing [`GameInput::Primary`]/[`GameInput::Secondary`] purely to select
+//! WHICH icon to show ([`sync_hotbar_slots`]'s spawn-time `match`), not to
+//! resync a live binding — see [`HotbarKeybindIcon`]'s own doc comment for
+//! why this icon (unlike the numbered text labels) never needs
+//! [`sync_keybind_labels`] to touch it again after spawn.
+//!
 //! ## Real drag-to-assign, todays scope
 //! The `xindeler-ui::slot` drag-drop primitive is wired end-to-end: dragging
 //! one hotbar slot onto another swaps their bindings via TWO
@@ -198,7 +210,22 @@ const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 /// for the pinned regression) with a few px of margin to spare on the
 /// trailing edge (the row is left-anchored, not centred — see
 /// `spawn_action_bar_half`'s own doc comment).
-pub(crate) const SLOT_SIZE_PX: f32 = 52.0;
+/// BL-82 HUD polish round 4 (Matías's `skill-slots-1.png` reference, issue
+/// 3 — round 3's `52.0` still read noticeably smaller/further apart than the
+/// reference's big, flush/adjacent slot squares): bumped `52.0 -> 58.0`,
+/// paired with a tighter [`HOTBAR_SLOT_GAP_PX`] (`3.0 -> 2.0`, closer to true
+/// "flush/adjacent" without the squares literally sharing a border) and a
+/// re-trimmed `hud_layout::ACTION_BAR_WIDTH_TRIM` (`1.14 -> 1.40`) so all 5
+/// slots + [`HOTBAR_ROW_LEADING_INSET_PX`] fit inside NOT JUST
+/// `hud_layout::ACTION_BAR_HALF_WIDTH_PX`'s bounding box but each half's own
+/// FLAT, OPAQUE plate art — see `hud_layout::ACTION_BAR_WIDTH_TRIM`'s own doc
+/// comment for why the box-fit test alone wasn't enough (a first attempt at
+/// `60.0`/`1.30` passed that test but still visibly overflowed onto green
+/// terrain on the right half; `58.0` is the pulled-back size that fits with a
+/// real margin at `1.40`) and
+/// [`hud_layout::tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
+/// for the pinned regression.
+pub(crate) const SLOT_SIZE_PX: f32 = 58.0;
 
 /// BL-82 HUD polish round 3 (issue 2): the gap (px) between adjacent hotbar
 /// slots within one action-bar half — a dedicated, MUCH tighter constant
@@ -210,7 +237,12 @@ pub(crate) const SLOT_SIZE_PX: f32 = 52.0;
 /// parte en xindeler-old"). Paired with `JustifyContent::FlexStart` in
 /// [`spawn_action_bar_half`] (not `Center`) so the row hugs one edge of the
 /// piece instead of being centred with generous space on both sides.
-pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 3.0;
+///
+/// BL-82 HUD polish round 4 (issue 3): shrunk again, `3.0 -> 2.0`, alongside
+/// [`SLOT_SIZE_PX`]'s bump — Matías's `skill-slots-1.png` reference shows the
+/// slot squares sitting essentially flush/adjacent to one another, tighter
+/// than round 3's `3.0` already was.
+pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 2.0;
 
 /// BL-82 HUD polish round 3 FOLLOW-UP (post-review live `--smoke-screenshot`
 /// check): `FlexStart` with zero leading margin put the FIRST slot of each
@@ -223,19 +255,21 @@ pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 3.0;
 /// fine.
 ///
 /// Deliberately defined AS exactly one slot pitch (`SLOT_SIZE_PX +
-/// HOTBAR_SLOT_GAP_PX`, `== 52 + 3 == 55.0` today) — not a bare `55.0`
-/// literal that could silently drift out of sync with either of those if
-/// one changes later — NOT a smaller hand-tuned guess: an earlier, smaller
-/// value (`40.0`) was tried first and re-verified against a fresh
-/// `--smoke-screenshot` — still not enough clearance, slot 0 was STILL
-/// partially under the corner. One full slot pitch instead moves slot 0 to
-/// EXACTLY where slot 1 used to sit pre-fix (empirically already confirmed
-/// clean in that same screenshot), rather than trying to guess the corner's
-/// exact pixel extent a second time. Paired with `ACTION_BAR_WIDTH_TRIM`'s
-/// matching bump (see that constant's own doc comment) so the trailing slack
-/// the right-anchored edge already enjoyed (see [`SLOT_SIZE_PX`]'s doc
-/// comment) isn't eaten by this — only the row's start moves, not the
-/// inter-slot gaps.
+/// HOTBAR_SLOT_GAP_PX`, `== 52 + 3 == 55.0` at the time this was written) —
+/// not a bare literal that could silently drift out of sync with either of
+/// those if one changes later (BL-82 HUD polish round 4 bumped both
+/// `SLOT_SIZE_PX`/`HOTBAR_SLOT_GAP_PX` again, to `58.0`/`2.0` — this constant
+/// tracks that automatically, `== 60.0` today) — NOT a smaller hand-tuned
+/// guess: an earlier, smaller value (`40.0`) was tried first and
+/// re-verified against a fresh `--smoke-screenshot` — still not enough
+/// clearance, slot 0 was STILL partially under the corner. One full slot
+/// pitch instead moves slot 0 to EXACTLY where slot 1 used to sit pre-fix
+/// (empirically already confirmed clean in that same screenshot), rather
+/// than trying to guess the corner's exact pixel extent a second time.
+/// Paired with `ACTION_BAR_WIDTH_TRIM`'s matching bump (see that constant's
+/// own doc comment) so the trailing slack the right-anchored edge already
+/// enjoyed (see [`SLOT_SIZE_PX`]'s doc comment) isn't eaten by this — only
+/// the row's start moves, not the inter-slot gaps.
 pub(crate) const HOTBAR_ROW_LEADING_INSET_PX: f32 = SLOT_SIZE_PX + HOTBAR_SLOT_GAP_PX;
 
 /// Number of ability-slot HOLDERS rendered per action-bar half (BL-82
@@ -353,10 +387,80 @@ struct HotbarSecondaryText;
 /// same acceptance bar EM-5.11's own controls screen established).
 #[derive(Component)]
 struct HotbarKeybindLabel(GameInput);
+/// BL-82 HUD polish round 4 (issue 4) — marks the small `ImageNode` child a
+/// mouse-click-icon holder (index 8/9, `GameInput::Primary`/`Secondary`)
+/// carries INSTEAD OF a [`HotbarKeybindLabel`]. Unlike the numbered text
+/// labels, this icon is a STATIC replacement for the old `"LMB"`/`"RMB"`
+/// glyph (`key_label`'s own rendering of those two bindings) — it never
+/// needs to be resynced from a live [`KeyMap`] rebind the way
+/// [`sync_keybind_labels`] resyncs the numbered text labels, since the icon
+/// depicts "the mouse button", not the CURRENT binding for `Primary`/
+/// `Secondary` (which stays fixed to the mouse in practice — see the module
+/// doc comment's "Keybind LABELS" section). Kept as a marker (not just an
+/// anonymous `ImageNode`) purely so tests can find it unambiguously.
+#[derive(Component)]
+struct HotbarKeybindIcon;
 #[derive(Component)]
 struct HotbarCooldownOverlay;
 #[derive(Component)]
 struct HotbarCooldownText;
+
+/// BL-82 HUD polish round 4 (issue 3): diameter (px) of the small circular
+/// keybind badge sitting in each slot's bottom-left corner — Matías's
+/// `skill-slots-1.png` reference shows each slot's keybind indicator as a
+/// distinct chip rather than bare unadorned text floating over the slot art.
+pub(crate) const KEYBIND_BADGE_SIZE_PX: f32 = 20.0;
+
+/// Distance (px) from the slot's own bottom/left edges to the badge's
+/// bottom/left edges (BL-82 HUD polish round 4, issue 3).
+pub(crate) const KEYBIND_BADGE_MARGIN_PX: f32 = 2.0;
+
+/// The keybind badge's own chip chrome — a small, circular
+/// (`border_radius == size / 2`) panel using the SAME `panel_bg`/
+/// `panel_border` theme roles [`xindeler_ui::slot::slot_bundle`] uses for its
+/// flat chrome, just sized down and rounded into a circle instead of a
+/// square. Centres its one child (either a [`HotbarKeybindLabel`] text node
+/// or a [`HotbarKeybindIcon`] image node) via flex `Center`/`Center`.
+/// `Pickable::IGNORE` — this is a passive decorative badge, never a drag-drop
+/// or click target of its own (unlike the slot it sits inside, which already
+/// carries real `Pickable` state for hotbar drag-and-drop).
+fn keybind_badge_bundle(theme: &HudTheme) -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(KEYBIND_BADGE_MARGIN_PX),
+            left: Val::Px(KEYBIND_BADGE_MARGIN_PX),
+            width: Val::Px(KEYBIND_BADGE_SIZE_PX),
+            height: Val::Px(KEYBIND_BADGE_SIZE_PX),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(KEYBIND_BADGE_SIZE_PX / 2.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..Default::default()
+        },
+        BackgroundColor(theme.palette.panel_bg),
+        BorderColor::all(theme.palette.panel_border),
+        bevy::picking::Pickable::IGNORE,
+    )
+}
+
+/// BL-82 HUD polish round 4 (issue 4): the mouse-click-icon bundle a keybind
+/// badge's child carries for index 8/9 (`GameInput::Primary`/`Secondary`)
+/// instead of a [`HotbarKeybindLabel`] text node — a small square `ImageNode`
+/// (a few px smaller than the badge itself, so the badge's own circular
+/// border/background still reads as a rim around it) showing the real
+/// `mouse_click_left.png`/`mouse_click_right.png` art (Matías's dedicated
+/// dark-mouse-silhouette-with-gold-highlighted-button icons, matching the
+/// HUD-D4 pack's own art style) rather than the `"LMB"`/`"RMB"` text glyph
+/// this replaces.
+fn keybind_icon_bundle(icon: Handle<Image>) -> impl Bundle {
+    const ICON_INSET_PX: f32 = 4.0;
+    (HotbarKeybindIcon, ImageNode::new(icon), Node {
+        width: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
+        height: Val::Px(KEYBIND_BADGE_SIZE_PX - ICON_INSET_PX),
+        ..Default::default()
+    })
+}
 
 /// A short, uppercase placeholder glyph for a dotted ability id (e.g.
 /// `"class.warrior.rally"` -> `"RALL"`) — the SAME "themed placeholder,
@@ -423,10 +527,19 @@ fn short_glyph(ability_id: &str) -> String {
 /// zero either way), but `PaddingBox` is the more semantically precise pick
 /// ("ignore only my own padding") and stays correct if a `border` is ever
 /// added to this node later.
+///
+/// BL-82 HUD polish round 4 (issue 1): `bottom_pad_px` is the ONE new
+/// parameter this round adds — `action_bar_bg_left.png`/`_right.png`'s own
+/// measured transparent bottom margin (see
+/// `hud_layout::CLUSTER_BOTTOM_PX`'s doc comment for the full root-cause
+/// writeup), applied as `bottom: Val::Px(CLUSTER_BOTTOM_PX - bottom_pad_px)`
+/// so the real opaque art (not the bounding box) lands flush with the
+/// screen's bottom edge instead of leaving a visible gap above it.
 fn spawn_action_bar_half(
     commands: &mut Commands,
     background: Handle<Image>,
     left_offset_px: f32,
+    bottom_pad_px: f32,
 ) -> Entity {
     commands
         .spawn((
@@ -438,7 +551,7 @@ fn spawn_action_bar_half(
             Node {
                 position_type: PositionType::Absolute,
                 left: hud_layout::CENTER_LEFT,
-                bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX),
+                bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX - bottom_pad_px),
                 margin: UiRect::left(Val::Px(left_offset_px)),
                 width: Val::Px(hud_layout::ACTION_BAR_HALF_WIDTH_PX),
                 height: Val::Px(hud_layout::ACTION_BAR_HALF_HEIGHT_PX),
@@ -463,6 +576,7 @@ fn spawn_hotbar(
         &mut commands,
         images.get(HudImageKey::ActionBarBgLeft),
         hud_layout::CLUSTER.action_bar_left_half_left,
+        hud_layout::ACTION_BAR_LEFT_BOTTOM_PAD_PX,
     );
     commands.entity(left_half).insert(HotbarLeftHalf);
 
@@ -470,6 +584,7 @@ fn spawn_hotbar(
         &mut commands,
         images.get(HudImageKey::ActionBarBgRight),
         hud_layout::CLUSTER.action_bar_right_half_left,
+        hud_layout::ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
     );
     commands.entity(right_half).insert(HotbarRightHalf);
 
@@ -622,23 +737,62 @@ fn sync_hotbar_slots(
                 ImageNode::new(images.get(HudImageKey::SkillSlotBorder)),
                 bevy::picking::Pickable::IGNORE,
             ));
-            if let Some(&input) = SLOT_INPUTS.get(index) {
-                parent.spawn((
-                    HotbarKeybindLabel(input),
-                    Text(String::new()),
-                    TextFont {
-                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(11.0),
-                        ..Default::default()
-                    },
-                    TextColor(theme.palette.text_muted),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: Val::Px(1.0),
-                        left: Val::Px(2.0),
-                        ..Default::default()
-                    },
-                ));
+            // BL-82 HUD polish round 4 (issue 3): bottom-left circular
+            // keybind badge, matching Matías's `skill-slots-1.png` reference
+            // (previously a bare top-left text label with no background
+            // chip) — see `keybind_badge_bundle`'s own doc comment.
+            //
+            // BL-82 HUD polish round 4 (issue 4): the last two holders
+            // (`GameInput::Primary`/`Secondary`) show a dedicated mouse-click
+            // ICON inside that same badge instead of the `"LMB"`/`"RMB"` text
+            // `key_label` used to render — see `HotbarKeybindIcon`'s own doc
+            // comment.
+            match SLOT_INPUTS.get(index).copied() {
+                Some(GameInput::Primary) => {
+                    parent
+                        .spawn(keybind_badge_bundle(&theme))
+                        .with_children(|badge| {
+                            badge.spawn(keybind_icon_bundle(
+                                images.get(HudImageKey::MouseClickLeft),
+                            ));
+                        });
+                },
+                Some(GameInput::Secondary) => {
+                    parent
+                        .spawn(keybind_badge_bundle(&theme))
+                        .with_children(|badge| {
+                            badge.spawn(keybind_icon_bundle(
+                                images.get(HudImageKey::MouseClickRight),
+                            ));
+                        });
+                },
+                Some(input) => {
+                    parent
+                        .spawn(keybind_badge_bundle(&theme))
+                        .with_children(|badge| {
+                            badge.spawn((
+                                HotbarKeybindLabel(input),
+                                Text(String::new()),
+                                TextFont {
+                                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                                    font_size: bevy::text::FontSize::Px(11.0),
+                                    ..Default::default()
+                                },
+                                // BL-82 HUD polish round 4 (issue 3): bumped
+                                // from `text_muted` to full-contrast `text` —
+                                // the old muted colour was tuned for a bare
+                                // number floating directly over the busy slot
+                                // art; now it sits inside its own solid
+                                // `keybind_badge_bundle` chip, so it needs
+                                // full contrast to stay legible against that
+                                // opaque background (matches the crisp,
+                                // clearly-numbered badges in Matías's
+                                // `skill-slots-1.png` reference).
+                                TextColor(theme.palette.text),
+                            ));
+                        });
+                },
+                None => {},
             }
             parent.spawn((
                 HotbarCooldownOverlay,
@@ -1134,13 +1288,51 @@ mod tests {
         assert_eq!(SLOT_INPUTS[9], GameInput::Secondary);
     }
 
-    /// The same round-3 change, verified end-to-end through
-    /// [`sync_keybind_labels`]: the last two rendered slot holders (indices 8
-    /// and 9, the trailing 2 of the right half) show `"LMB"`/`"RMB"` — the
-    /// default `Primary`/`Secondary` bindings formatted via `key_label` —
-    /// while holder 7 (the last plain number) still shows `"8"`.
+    /// BL-82 HUD polish round 4 (issue 3): every keybind label/icon now
+    /// lives ONE level deeper than before — nested inside its own
+    /// `keybind_badge_bundle` chip, not a direct child of the slot — so
+    /// these helpers walk grandchildren, not just children.
+    fn find_keybind_label_text(world: &World, slot_entity: Entity) -> Option<String> {
+        let children = world.get::<Children>(slot_entity)?;
+        for badge in children.iter() {
+            let Some(grandchildren) = world.get::<Children>(badge) else {
+                continue;
+            };
+            for child in grandchildren.iter() {
+                if world.get::<HotbarKeybindLabel>(child).is_some() {
+                    return Some(world.get::<Text>(child).unwrap().0.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// BL-82 HUD polish round 4 (issue 4): finds the [`HotbarKeybindIcon`]
+    /// image handle nested under a slot's badge, if any.
+    fn find_keybind_icon_handle(world: &World, slot_entity: Entity) -> Option<Handle<Image>> {
+        let children = world.get::<Children>(slot_entity)?;
+        for badge in children.iter() {
+            let Some(grandchildren) = world.get::<Children>(badge) else {
+                continue;
+            };
+            for child in grandchildren.iter() {
+                if world.get::<HotbarKeybindIcon>(child).is_some() {
+                    return Some(world.get::<ImageNode>(child).unwrap().image.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// The round-3 numbering scheme still holds through
+    /// [`sync_keybind_labels`]: holder 7 (the last plain number) shows
+    /// `"8"`. BL-82 HUD polish round 4 (issue 4) changed what the LAST TWO
+    /// holders (8/9, `Primary`/`Secondary`) show: no more `"LMB"`/`"RMB"`
+    /// text (they no longer carry a [`HotbarKeybindLabel`] at all) — instead
+    /// each shows a real [`HotbarKeybindIcon`] pointing at
+    /// `mouse_click_left.png`/`mouse_click_right.png`.
     #[test]
-    fn last_two_hotbar_slots_show_mouse_button_labels() {
+    fn last_two_hotbar_slots_show_mouse_click_icons_not_text_labels() {
         let mut app = new_app();
         app.insert_resource(xindeler_input::KeyMap::default());
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
@@ -1158,22 +1350,36 @@ mod tests {
             .expect("labels sync from the live KeyMap");
 
         let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
-        let label_text_of = |app: &mut App, slot_entity: Entity| -> String {
-            app.world()
-                .get::<Children>(slot_entity)
-                .expect("slot has children")
-                .iter()
-                .find_map(|child| {
-                    app.world()
-                        .get::<HotbarKeybindLabel>(child)
-                        .map(|_| app.world().get::<Text>(child).unwrap().0.clone())
-                })
-                .expect("slot has a keybind label child")
-        };
+        let images = app.world().resource::<HudImages>().clone();
 
-        assert_eq!(label_text_of(&mut app, slot_entities[7]), "8");
-        assert_eq!(label_text_of(&mut app, slot_entities[8]), "LMB");
-        assert_eq!(label_text_of(&mut app, slot_entities[9]), "RMB");
+        assert_eq!(
+            find_keybind_label_text(app.world(), slot_entities[7]).as_deref(),
+            Some("8")
+        );
+
+        assert!(
+            find_keybind_label_text(app.world(), slot_entities[8]).is_none(),
+            "slot 8 (the old \"LMB\" holder) must no longer carry a text keybind label"
+        );
+        assert!(
+            find_keybind_label_text(app.world(), slot_entities[9]).is_none(),
+            "slot 9 (the old \"RMB\" holder) must no longer carry a text keybind label"
+        );
+
+        assert_eq!(
+            find_keybind_icon_handle(app.world(), slot_entities[8]),
+            Some(images.get(HudImageKey::MouseClickLeft)),
+            "slot 8 must show the left-mouse-click icon"
+        );
+        assert_eq!(
+            find_keybind_icon_handle(app.world(), slot_entities[9]),
+            Some(images.get(HudImageKey::MouseClickRight)),
+            "slot 9 must show the right-mouse-click icon"
+        );
+        assert!(
+            find_keybind_icon_handle(app.world(), slot_entities[7]).is_none(),
+            "a plain numbered slot must not carry a mouse-click icon"
+        );
     }
 
     /// Regression test for the "two overlapping rectangles" bug (Matías's

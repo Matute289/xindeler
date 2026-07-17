@@ -189,7 +189,14 @@ fn spawn_combat_hud(
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
             node.left = hud_layout::CENTER_LEFT;
-            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            // BL-82 HUD polish round 4 (issue 1): shift the container DOWN
+            // by orb_frame_angel.png's own measured transparent bottom
+            // margin so the real opaque art (not the bounding box) lands
+            // flush with the screen's bottom edge — see
+            // `hud_layout::CLUSTER_BOTTOM_PX`'s own doc comment for why
+            // `CLUSTER_BOTTOM_PX` alone can't fix this.
+            node.bottom =
+                Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::ANGEL_FRAME_BOTTOM_PAD_PX);
             node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.health_orb_left));
         });
 
@@ -217,7 +224,12 @@ fn spawn_combat_hud(
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
             node.left = hud_layout::CENTER_LEFT;
-            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            // BL-82 HUD polish round 4 (issue 1) — see the health orb's own
+            // comment above; stamina uses its OWN measured pad
+            // (`orb_frame_stamina.png` has a different transparent margin
+            // than the angel/cuthulhu frames).
+            node.bottom =
+                Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::STAMINA_FRAME_BOTTOM_PAD_PX);
             node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.stamina_orb_left));
         });
 
@@ -245,7 +257,10 @@ fn spawn_combat_hud(
         .and_modify(|mut node| {
             node.position_type = PositionType::Absolute;
             node.left = hud_layout::CENTER_LEFT;
-            node.bottom = Val::Px(hud_layout::CLUSTER_BOTTOM_PX);
+            // BL-82 HUD polish round 4 (issue 1) — see the health orb's own
+            // comment above; the mana orb uses cuthulhu's own measured pad.
+            node.bottom =
+                Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::CUTHULHU_FRAME_BOTTOM_PAD_PX);
             node.margin = UiRect::left(Val::Px(hud_layout::CLUSTER.mana_orb_left));
         });
 
@@ -821,7 +836,15 @@ mod tests {
         assert_eq!(health.border_radius, non_zero_radius);
         assert_eq!(health.position_type, PositionType::Absolute);
         assert_eq!(health.left, hud_layout::CENTER_LEFT);
-        assert_eq!(health.bottom, Val::Px(hud_layout::CLUSTER_BOTTOM_PX));
+        // BL-82 HUD polish round 4 (issue 1): no longer bare
+        // `CLUSTER_BOTTOM_PX` — each orb is shifted down by its OWN measured
+        // transparent-bottom-margin pad so the real art (not the bounding
+        // box) sits flush with the screen edge. See
+        // `hud_layout::CLUSTER_BOTTOM_PX`'s doc comment for why.
+        assert_eq!(
+            health.bottom,
+            Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::ANGEL_FRAME_BOTTOM_PAD_PX)
+        );
         assert_eq!(
             health.margin.left,
             Val::Px(hud_layout::CLUSTER.health_orb_left)
@@ -833,6 +856,10 @@ mod tests {
         assert_eq!(poise.overflow, orb_clip);
         assert_eq!(poise.border_radius, non_zero_radius);
         assert_eq!(
+            poise.bottom,
+            Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::STAMINA_FRAME_BOTTOM_PAD_PX)
+        );
+        assert_eq!(
             poise.margin.left,
             Val::Px(hud_layout::CLUSTER.stamina_orb_left)
         );
@@ -842,6 +869,10 @@ mod tests {
         assert_eq!(energy.height, Val::Px(hud_layout::ORB_SIZE_PX));
         assert_eq!(energy.overflow, orb_clip);
         assert_eq!(energy.border_radius, non_zero_radius);
+        assert_eq!(
+            energy.bottom,
+            Val::Px(hud_layout::CLUSTER_BOTTOM_PX - hud_layout::CUTHULHU_FRAME_BOTTOM_PAD_PX)
+        );
         assert_eq!(
             energy.margin.left,
             Val::Px(hud_layout::CLUSTER.mana_orb_left)
