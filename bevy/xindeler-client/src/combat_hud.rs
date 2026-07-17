@@ -985,9 +985,23 @@ mod tests {
                     .is_some()
             })
             .expect("a HudOrbBarFillClip child exists");
+        // BL-82 bugfix (Matías's "orb looks empty but I survive 3 more
+        // hits" report): the clip window's height is now expressed as an
+        // absolute `Val::Px` computed from `liquid_inset_px` + the
+        // fraction-of-the-liquid's-own-span (see
+        // `xindeler_ui::bar::HudOrbBarFillClipGeometry::clip_height_px`'s doc
+        // comment), not a flat `Val::Percent(fraction * 100.0)` of the
+        // container — the old formula went fully invisible below
+        // `ANGEL_LIQUID_INSET_PX / ORB_SIZE_PX ≈ 8.75%` HP. At this test's
+        // `fraction == 0.5` the two formulas coincidentally agree numerically
+        // (`14.0 + 0.5 * (160.0 - 28.0) == 0.5 * 160.0 == 80.0`), which is why
+        // this call site alone couldn't have caught the bug — see
+        // `xindeler_ui::bar`'s own
+        // `health_orb_clip_window_stays_visible_at_low_fraction_with_inset`
+        // regression test for the LOW-fraction case where they diverge.
         assert_eq!(
             app.world().get::<Node>(clip_entity).unwrap().height,
-            Val::Percent(50.0)
+            Val::Px(80.0)
         );
 
         let clip_children: Vec<Entity> = app

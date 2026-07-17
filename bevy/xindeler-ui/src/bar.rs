@@ -139,22 +139,82 @@ pub struct HudOrbBarFill;
 
 /// BL-82 EM-5.17 Phase 0 follow-up — the fraction-reveal CLIP WINDOW wrapped
 /// around an orb bar's [`HudOrbBarFill`] image. This is the node
-/// [`update_orb_bars`] resizes (`Node.height = value.fraction() * 100%`),
-/// bottom-anchored with `overflow: Overflow::clip()`: as the fraction
-/// shrinks, this window's TOP edge sinks toward the bottom (never resizing
-/// the liquid image inside it), progressively hiding more of the fixed-size
-/// liquid graphic from the top down — a real "liquid level draining inside a
-/// fixed-size glass" look, the CSS `clip-path`/`overflow:hidden` idiom
-/// applied to `bevy_ui`'s own `Overflow::clip()` primitive. This is a SECOND,
-/// INNER clip layer, nested inside the `container`'s own outer
-/// `overflow: Overflow::clip_y()` (BL-82 orb crop round 3 narrowed this from
-/// both-axis `clip()` to `y`-only, so a wider-than-square frame overlay can
-/// spill past the container horizontally — see `spawn_orb_bar`'s own doc
-/// comment on `frame_width_px`; this inner clip window is unaffected, since
-/// it only ever needs to clip vertically anyway) — the two clips serve
-/// different jobs and neither can substitute for the other.
+/// [`update_orb_bars`] resizes (see
+/// [`HudOrbBarFillClipGeometry::clip_height_px`] for the exact height formula),
+/// bottom-anchored with `overflow: Overflow::clip()`: as the fraction shrinks,
+/// this window's TOP edge sinks toward the bottom (never resizing the liquid
+/// image inside it), progressively hiding more of the fixed-size liquid graphic
+/// from the top down — a real "liquid level draining inside a fixed-size glass"
+/// look, the CSS `clip-path`/`overflow:hidden` idiom applied to `bevy_ui`'s own
+/// `Overflow::clip()` primitive. This is a SECOND, INNER clip layer, nested
+/// inside the `container`'s own outer `overflow: Overflow::clip_y()` (BL-82
+/// orb crop round 3 narrowed this from both-axis `clip()` to `y`-only, so a
+/// wider-than-square frame overlay can spill past the container horizontally
+/// — see `spawn_orb_bar`'s own doc comment on `frame_width_px`; this inner
+/// clip window is unaffected, since it only ever needs to clip vertically
+/// anyway) — the two clips serve different jobs and neither can substitute
+/// for the other.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudOrbBarFillClip;
+
+/// BL-82 bugfix (Matías, live: "the health orb looked completely
+/// empty/invisible, yet I survived roughly 3 more hits") — per-orb-bar
+/// geometry [`update_orb_bars`] needs to compute a clip-window height that
+/// keeps the visible liquid area EXACTLY proportional to the health fraction
+/// across the WHOLE `[0, 1]` range, stored on the clip entity itself (the
+/// same entity [`update_orb_bars`] already queries by
+/// `With<HudOrbBarFillClip>`).
+///
+/// ## Root cause this fixes
+/// [`HudOrbBarFillClip`]'s window used to be sized as a flat
+/// `Val::Percent(fraction * 100.0)` of the container's `height_px` — i.e. its
+/// height in pixels was simply `fraction * height_px`. But [`HudOrbBarFill`]
+/// (the liquid image nested one level inside the clip window) is NOT flush
+/// with the container's bottom edge: `spawn_orb_bar`'s `liquid_inset_px`
+/// bottom-anchors it `liquid_inset_px` ABOVE the container's true bottom (so
+/// it centres inside the frame's circular hole instead of touching the
+/// frame's ring — see `spawn_orb_bar`'s own doc comment). Since the clip
+/// window is ALSO bottom-anchored at the container's true bottom, its own
+/// visible span is `[0, fraction * height_px]` in that same coordinate frame
+/// — and whenever `fraction * height_px < liquid_inset_px`, that visible span
+/// doesn't even reach up to where the liquid image STARTS (`liquid_inset_px`),
+/// so the two ranges have ZERO overlap: the liquid renders **fully
+/// invisible** even though the fraction is genuinely `> 0.0`. For the health
+/// orb specifically (`ORB_SIZE_PX = 160.0`, `ANGEL_LIQUID_INSET_PX = 14.0`,
+/// see `xindeler-client::hud_layout`), that threshold is `14.0 / 160.0 ≈
+/// 8.75%` of max HP — anywhere below that, the orb reads as completely
+/// drained no matter how much real HP remains, which is exactly consistent
+/// with Matías surviving several more hits after the orb "emptied."
+///
+/// ## The fix
+/// The clip window's height must be measured from where the liquid image
+/// ITSELF starts (`liquid_inset_px`), not from the container's true bottom —
+/// see [`Self::clip_height_px`]. This keeps the revealed liquid height
+/// EXACTLY `fraction * (height_px - 2.0 * liquid_inset_px)` (the liquid
+/// image's own real height) for every fraction in `[0.0, 1.0]`, with no dead
+/// zone. `liquid_inset_px == 0.0` (every existing mock/test call site that
+/// doesn't pass a real inset) degenerates back to the OLD `fraction *
+/// height_px` formula exactly — this is a strict generalisation, not a
+/// special case that could regress the zero-inset call sites.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct HudOrbBarFillClipGeometry {
+    /// The orb's full box height in px — the same `height_px`
+    /// `spawn_orb_bar` was given.
+    height_px: f32,
+    /// The liquid image's inset from the box's top/bottom edges — the same
+    /// `liquid_inset_px` `spawn_orb_bar` was given.
+    liquid_inset_px: f32,
+}
+
+impl HudOrbBarFillClipGeometry {
+    /// The clip window's height, in PIXELS (not a `%` of the container),
+    /// that keeps the visible liquid area exactly proportional to `fraction`
+    /// — see this type's own doc comment for the full derivation. Degrades
+    /// to the old `fraction * height_px` when `liquid_inset_px == 0.0`.
+    fn clip_height_px(self, fraction: f32) -> f32 {
+        self.liquid_inset_px + fraction * (self.height_px - 2.0 * self.liquid_inset_px)
+    }
+}
 
 /// Marks an orb bar's container — the vertical, bottom-anchored counterpart
 /// to [`HudBar`]. See [`spawn_orb_bar`]'s doc comment for why this is a
@@ -302,13 +362,17 @@ pub fn spawn_orb_bar(
             // `value.fraction()`, and it clips (`Overflow::clip()`) whatever
             // of the always-full-size liquid image below sticks out above
             // it.
+            let clip_geometry = HudOrbBarFillClipGeometry {
+                height_px,
+                liquid_inset_px,
+            };
             parent
-                .spawn((HudOrbBarFillClip, Node {
+                .spawn((HudOrbBarFillClip, clip_geometry, Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(0.0),
                     bottom: Val::Px(0.0),
                     width: Val::Percent(100.0),
-                    height: Val::Percent(value.fraction() * 100.0),
+                    height: Val::Px(clip_geometry.clip_height_px(value.fraction())),
                     overflow: bevy::ui::Overflow::clip(),
                     ..Default::default()
                 }))
@@ -407,12 +471,12 @@ pub fn spawn_orb_bar(
 /// the regression guard.
 pub(crate) fn update_orb_bars(
     bars: Query<(&BarValue, &Children), (Changed<BarValue>, With<HudOrbBar>)>,
-    mut clips: Query<&mut Node, With<HudOrbBarFillClip>>,
+    mut clips: Query<(&mut Node, &HudOrbBarFillClipGeometry), With<HudOrbBarFillClip>>,
 ) {
     for (value, children) in &bars {
         for &child in children.iter() {
-            if let Ok(mut node) = clips.get_mut(child) {
-                node.height = Val::Percent(value.fraction() * 100.0);
+            if let Ok((mut node, geometry)) = clips.get_mut(child) {
+                node.height = Val::Px(geometry.clip_height_px(value.fraction()));
             }
         }
     }
@@ -657,13 +721,19 @@ mod tests {
     }
 
     /// `spawn_orb_bar` at half value gives the fraction-reveal CLIP WINDOW
-    /// ([`HudOrbBarFillClip`], the container's direct child) a 50% HEIGHT
-    /// (bottom-anchored, unlike the horizontal bar's width fill); a later
-    /// `BarValue` mutation resizes it on the next update — the T57.8
+    /// ([`HudOrbBarFillClip`], the container's direct child) a proportional
+    /// HEIGHT (bottom-anchored, unlike the horizontal bar's width fill); a
+    /// later `BarValue` mutation resizes it on the next update — the T57.8
     /// acceptance bar for the vertical orb-bar primitive, updated for the
     /// BL-82 EM-5.17 Phase 0 follow-up clip-reveal rework: the CLIP WINDOW
     /// is what tracks the fraction now, not the liquid image itself (see
     /// [`orb_bar_fill_image_never_resizes_only_the_clip_wrapper_does`]).
+    /// With `liquid_inset_px == 0.0` (this test's call site) the fixed
+    /// [`HudOrbBarFillClipGeometry::clip_height_px`] formula degrades back to
+    /// the plain `fraction * height_px` value expressed here as `Val::Px`
+    /// (the clip window is now sized in absolute px, not `%`, so the fix in
+    /// [`health_orb_clip_window_stays_visible_at_low_fraction_with_inset`]
+    /// below can express a non-zero-but-sub-container height correctly).
     #[test]
     fn orb_bar_fill_tracks_value_changes_by_height() {
         let mut app = new_orb_app();
@@ -703,7 +773,7 @@ mod tests {
             app.world().get::<Node>(clip_entity).unwrap().height
         };
 
-        assert_eq!(clip_height(&mut app, container), Val::Percent(50.0));
+        assert_eq!(clip_height(&mut app, container), Val::Px(80.0));
 
         app.world_mut()
             .get_mut::<BarValue>(container)
@@ -711,7 +781,93 @@ mod tests {
             .current = 25.0;
         app.update();
 
-        assert_eq!(clip_height(&mut app, container), Val::Percent(25.0));
+        assert_eq!(clip_height(&mut app, container), Val::Px(40.0));
+    }
+
+    /// Regression test for the ROOT CAUSE Matías hit live: "the health orb's
+    /// liquid appeared completely empty/invisible... yet I survived roughly
+    /// 3 more hits before actually dying." With a real `liquid_inset_px > 0`
+    /// (e.g. the health orb's `ANGEL_LIQUID_INSET_PX = 14.0` at
+    /// `ORB_SIZE_PX = 160.0`), the OLD clip-window formula
+    /// (`Val::Percent(fraction * 100.0)`, i.e. `fraction * height_px` in
+    /// pixels) went to ZERO overlap with the liquid image — which starts
+    /// `liquid_inset_px` above the container's true bottom — for any
+    /// `fraction < liquid_inset_px / height_px` (here, `< 8.75%`): the whole
+    /// liquid rendered invisible despite real, nonzero HP remaining. This
+    /// asserts the FIXED clip height at a low-but-nonzero fraction (5%,
+    /// safely below that old 8.75% dead-zone) is non-zero and reaches at
+    /// least up to where the liquid image starts — i.e. some of the liquid
+    /// is genuinely visible, not fully clipped away.
+    #[test]
+    fn health_orb_clip_window_stays_visible_at_low_fraction_with_inset() {
+        let mut app = new_orb_app();
+        let theme = HudTheme::default();
+        const HEIGHT_PX: f32 = 160.0;
+        const LIQUID_INSET_PX: f32 = 14.0;
+        const LOW_FRACTION: f32 = 0.05; // 5% HP — below the old 8.75% dead zone.
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_orb_bar(
+                &mut commands,
+                &theme,
+                Handle::default(),
+                Some(Handle::default()),
+                None,
+                None,
+                HEIGHT_PX,
+                LIQUID_INSET_PX,
+                HEIGHT_PX,
+                HEIGHT_PX,
+                BarValue::new(LOW_FRACTION * 100.0, 100.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let clip_height_px = |app: &mut App, container: Entity| -> f32 {
+            let children: Vec<Entity> = app
+                .world()
+                .get::<Children>(container)
+                .unwrap()
+                .iter()
+                .collect();
+            let clip_entity = children
+                .into_iter()
+                .find(|&e| app.world().get::<HudOrbBarFillClip>(e).is_some())
+                .expect("orb bar has a clip-window child");
+            match app.world().get::<Node>(clip_entity).unwrap().height {
+                Val::Px(px) => px,
+                other => panic!("expected a Val::Px clip height, got {other:?}"),
+            }
+        };
+
+        let height = clip_height_px(&mut app, container);
+
+        // The OLD (buggy) formula would give `LOW_FRACTION * HEIGHT_PX == 8.0`
+        // — strictly less than `LIQUID_INSET_PX == 14.0`, meaning the clip
+        // window never reached up to where the liquid image starts, so NONE
+        // of it would be visible. The FIX must clip window at least up to the
+        // liquid's own start point whenever the fraction is > 0.
+        assert!(
+            height >= LIQUID_INSET_PX,
+            "clip window height ({height}px) must reach at least the liquid image's own start \
+             point ({LIQUID_INSET_PX}px) whenever fraction > 0, or the liquid renders fully \
+             invisible despite nonzero HP — this is the exact bug Matías hit live"
+        );
+
+        // The visible slice of the liquid (the overlap between the clip
+        // window `[0, height]` and the liquid image's own box
+        // `[LIQUID_INSET_PX, HEIGHT_PX - LIQUID_INSET_PX]`) must be
+        // proportional to the fraction, not just "technically nonzero."
+        let visible_liquid_px = (height - LIQUID_INSET_PX).max(0.0);
+        let expected_visible_px = LOW_FRACTION * (HEIGHT_PX - 2.0 * LIQUID_INSET_PX);
+        assert!(
+            (visible_liquid_px - expected_visible_px).abs() < 0.01,
+            "visible liquid height ({visible_liquid_px}px) must be proportional to the health \
+             fraction ({LOW_FRACTION}), expected {expected_visible_px}px"
+        );
     }
 
     /// Regression guard for the exact bug this rework fixes (Matías's
