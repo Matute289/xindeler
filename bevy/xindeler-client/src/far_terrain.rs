@@ -426,6 +426,14 @@ fn retile_far_mesh(
                         bend_start,
                         fog_color: haze.extend(1.0),
                         sky_color: sky_color.extend(1.0),
+                        // BL-82 EM-3.11 round 24: the same `hole_radius` this
+                        // mesh already cuts a CPU hole for — a no-op for the
+                        // sheet (no geometry survives inside the hole anyway),
+                        // set only so both users of this shared material carry
+                        // a consistent near-band value. It's the LOD-object
+                        // meshes (`lod_objects.rs`) this uniform actually
+                        // matters for.
+                        near_band: hole_radius,
                         ..default()
                     },
                 })),

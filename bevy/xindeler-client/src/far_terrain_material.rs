@@ -175,6 +175,20 @@ pub struct FarTerrainExtension {
     /// reads as continuous rather than a hard top edge.
     #[uniform(104)]
     pub sky_color: Vec4,
+    /// BL-82 EM-3.11 round 24: horizontal (XZ) camera-relative radius, in
+    /// world metres, inside which the fragment shader discards — the near
+    /// real-terrain band (the far sheet's own `hole_radius`, set at material
+    /// construction: `far_terrain::retile_far_mesh` for the sheet,
+    /// `lod_objects::receive_lod_zones` for the shared LOD-object material).
+    /// For the far sheet it's a no-op (its geometry is already CPU-culled
+    /// inside the hole); for the LOD-object zone meshes it removes the
+    /// simplified pyramid/box proxies that would otherwise draw ON TOP of the
+    /// real near-terrain trees/houses and z-fight them into the silhouette-
+    /// shaped flicker rounds 20-23 mis-attributed to shadows. `0.0` disables
+    /// it — the [`Default`] value used by bare test apps that build the
+    /// material without a [`CullingConfig`].
+    #[uniform(105)]
+    pub near_band: f32,
 }
 
 impl Default for FarTerrainExtension {
@@ -185,6 +199,11 @@ impl Default for FarTerrainExtension {
             sun_direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
             fog_color: Vec4::new(0.66, 0.73, 0.81, 1.0),
             sky_color: Vec4::new(0.168_627, 0.172_549, 0.184_314, 1.0),
+            // 0.0 = near-band discard disabled by default; the two production
+            // call sites set it to the live `hole_radius` (module docs on the
+            // field). A bare test app that builds this material straight from
+            // `default()` gets the pre-round-24 "draw everything" behaviour.
+            near_band: 0.0,
         }
     }
 }
@@ -357,6 +376,48 @@ mod tests {
         // Matches the doc-comment reasoning on FAR_MESH_BEND_STRENGTH.
         assert!((d200 - 2.0).abs() < 0.1, "got {d200}");
         assert!((d500 - 12.5).abs() < 0.1, "got {d500}");
+    }
+
+    /// BL-82 EM-3.11 round 24: the fragment shader's near-band discard rule,
+    /// kept in Rust so it's unit-testable without a renderer (same discipline
+    /// as [`bend_drop`] above; the WGSL itself is exercised by the
+    /// `XINDELER_SMOKE_FAR_MESH_CAM=1` visual smoke). Mirrors the WGSL
+    /// `near_band > 0.0 && cam_dist_xz < near_band` guard EXACTLY.
+    fn near_band_discards(near_band: f32, cam_dist_xz: f32) -> bool {
+        near_band > 0.0 && cam_dist_xz < near_band
+    }
+
+    #[test]
+    fn near_band_discards_inside_the_band_keeps_at_and_beyond() {
+        let near_band = 288.0; // the default `hole_radius` (7 + 2 chunks · 32 m)
+        assert!(
+            near_band_discards(near_band, 0.0),
+            "a fragment at the camera is inside the near band — discarded"
+        );
+        assert!(
+            near_band_discards(near_band, 287.9),
+            "just inside the band — discarded (this is where an LOD proxy would have z-fought a \
+             real near-terrain tree/house)"
+        );
+        assert!(
+            !near_band_discards(near_band, near_band),
+            "EXACTLY at the boundary is kept (strict <) — no gap against the far sheet, whose \
+             nearest surviving quad sits at exactly hole_radius"
+        );
+        assert!(
+            !near_band_discards(near_band, 1_000.0),
+            "well beyond the band — kept: the horizon silhouette this feature exists for"
+        );
+    }
+
+    #[test]
+    fn near_band_zero_disables_the_discard_at_any_distance() {
+        for d in [0.0, 1.0, 288.0, 5_000.0] {
+            assert!(
+                !near_band_discards(0.0, d),
+                "near_band=0.0 (the Default) must never discard — pre-round-24 behaviour"
+            );
+        }
     }
 
     #[test]

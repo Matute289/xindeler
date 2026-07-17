@@ -31,6 +31,18 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> sun_direction: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<uniform> haze_fog_color: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var<uniform> haze_sky_color: vec4<f32>;
+// BL-82 EM-3.11 round 24: horizontal (XZ) camera-relative radius, in world
+// metres, inside which this material must NOT draw — the SAME near band the
+// far-terrain sheet already cuts a CPU hole for (`far_terrain::retile_far_
+// mesh`'s `hole_radius`). For the far sheet this is a no-op (its geometry is
+// already CPU-culled inside the hole); its real job is the LOD-object zone
+// meshes (`lod_objects.rs`), which — unlike the sheet — had NO near-band
+// exclusion and so drew their simplified pyramid/box proxies ON TOP of the
+// real, detailed near-terrain trees/houses, z-fighting them into the
+// constant silhouette-shaped flicker rounds 20-23 chased through the shadow
+// pipeline. `0.0` disables the discard (the `FarTerrainExtension::default`
+// used by bare test apps).
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var<uniform> near_band: f32;
 
 struct FarTerrainVertex {
     @builtin(instance_index) instance_index: u32,
@@ -135,6 +147,21 @@ fn fragment(
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     std_in.instance_index = in.instance_index;
 #endif
+
+    // ---- BL-82 EM-3.11 round 24: near-band discard ----
+    // Kill any fragment inside the near real-terrain band (the same
+    // `hole_radius` the far sheet cuts a CPU hole for). Camera-relative and
+    // HORIZONTAL (XZ) — matches how the near voxel chunks are streamed/culled
+    // (`lod::cull_chunk_meshes`, also horizontal) and the vertex bend's own
+    // `bend_start` clamp — so an LOD proxy is removed exactly where a real,
+    // block-accurate tree/house already renders, and kept everywhere beyond
+    // it (the horizon silhouette this feature exists for is untouched). Done
+    // BEFORE any PBR work so discarded fragments cost nothing. `near_band ==
+    // 0.0` (the default) disables it.
+    let cam_dist_xz = length(in.world_position.xz - view.world_position.xz);
+    if near_band > 0.0 && cam_dist_xz < near_band {
+        discard;
+    }
 
     var pbr_input = pbr_input_from_standard_material(std_in, is_front);
 
