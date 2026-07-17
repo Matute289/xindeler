@@ -37,8 +37,13 @@ const WAVE_PHASE_B: f32 = 1.9;
 // The exposed "empty vessel" material underneath the liquid — a flat dark
 // grey metal/stone tint (deliberately not a full PBR stone material, see
 // `orb_material.rs`'s module doc comment on why a flat tint is the right v1
-// scope here).
-const STONE_COLOR: vec3<f32> = vec3<f32>(0.16, 0.17, 0.20);
+// scope here). Darkened (Matías live-test follow-up, BL-82 EM-5.17: the
+// original 0.16/0.17/0.20 read as washed-out light grey, not "empty metal
+// vessel") to a near-black gunmetal, sampled against the HUD-D4 orb frame
+// art's own darkest ring pixels (`orb_frame_{angel,cuthulhu,stamina}.png`,
+// which sit in the 0–0x30 charcoal range) with a slight cool tint so it
+// reads as metal rather than flat matte black.
+const STONE_COLOR: vec3<f32> = vec3<f32>(0.012, 0.013, 0.016);
 
 // A thin brighter foam/highlight band right at the wavy surface line so the
 // boundary reads as a moving waterline rather than a flat-tinted seam.
