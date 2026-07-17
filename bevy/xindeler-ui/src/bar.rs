@@ -358,9 +358,22 @@ pub(crate) fn update_orb_bars(
     }
 }
 
-/// BL-82 EM-5.17 Phase 5 — marks a horizontal, image-filled bar's fill child
-/// (the node [`update_horizontal_image_bars`] resizes by WIDTH). Distinct
-/// from [`HudBarFill`] (which paints a flat [`BackgroundColor`]) since the
+/// BL-82 EM-5.17 Phase 5, reworked BL-82 EM-5.17 Phase 0's follow-up fix
+/// applied to this sibling primitive (Matías's "the liquid SHRINKS instead
+/// of DRAINS" report, originally fixed only on [`HudOrbBarFill`]/
+/// [`update_orb_bars`] — this horizontal image bar was added in the same
+/// session and shipped with the identical squash bug, caught by
+/// `bevy-migration-reviewer`) — marks a horizontal, image-filled bar's fill
+/// child. **This node's own `Node.width`/`Node.height` is now FIXED**
+/// (`Val::Px`, matching the bar's full `width_px`/`height_px`) and NEVER
+/// touched by [`update_horizontal_image_bars`] — that was the bug: resizing
+/// an `ImageNode`-carrying `Node` directly makes `ImageNode`'s default
+/// stretch-to-fit rescale/squash the texture into the shrunk box, which
+/// reads as the stagger bar's fill texture visually stretching/squashing
+/// horizontally rather than draining. The fraction is now expressed purely
+/// by [`HudImageBarFillClip`], the wrapper this node lives inside — see that
+/// type's doc comment for the full clip-reveal mechanism. Distinct from
+/// [`HudBarFill`] (which paints a flat [`BackgroundColor`]) since the
 /// boss/target nameplate's health + stagger bars use the HUD-D4 pack's own
 /// dedicated fill textures (a red `ImageNode` fill under `boss_bar_frame.png`;
 /// `boss_stagger_full_bar.png` over `boss_stagger_bar.png`'s track), not a
@@ -371,6 +384,23 @@ pub(crate) fn update_orb_bars(
 /// resize, image instead of color).
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct HudImageBarFill;
+
+/// BL-82 EM-5.17 Phase 5 follow-up — the fraction-reveal CLIP WINDOW wrapped
+/// around a horizontal image bar's [`HudImageBarFill`] image, the horizontal
+/// counterpart to [`HudOrbBarFillClip`]. This is the node
+/// [`update_horizontal_image_bars`] resizes (`Node.width = value.fraction() *
+/// 100%`), left-anchored with `overflow: Overflow::clip()`: as the fraction
+/// shrinks, this window's RIGHT edge sweeps toward the left (never resizing
+/// the fill image inside it), progressively hiding more of the fixed-size
+/// fill graphic from the right side in — a real "meter draining" look, the
+/// CSS `clip-path`/`overflow:hidden` idiom applied to `bevy_ui`'s own
+/// `Overflow::clip()` primitive, same mechanism [`HudOrbBarFillClip`] applies
+/// on the height axis. This is a SECOND, INNER clip layer, nested inside the
+/// container's own outer `overflow: Overflow::clip()` (spawn-time only,
+/// never resized) — the two clips serve different jobs and neither can
+/// substitute for the other.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct HudImageBarFillClip;
 
 /// Marks a horizontal image-filled bar's container.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -409,9 +439,13 @@ pub fn spawn_horizontal_image_bar(
             ImageNode::new(track_image),
         ))
         .with_children(|parent| {
-            parent.spawn((
-                HudImageBarFill,
-                Node {
+            // The fraction-reveal clip window (see [`HudImageBarFillClip`]'s
+            // doc comment) — left-anchored, its OWN width is what tracks
+            // `value.fraction()`, and it clips (`Overflow::clip()`) whatever
+            // of the always-full-size fill image to its right sticks out
+            // past it.
+            parent
+                .spawn((HudImageBarFillClip, Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(0.0),
                     top: Val::Px(0.0),
@@ -419,9 +453,26 @@ pub fn spawn_horizontal_image_bar(
                     height: Val::Percent(100.0),
                     overflow: bevy::ui::Overflow::clip(),
                     ..Default::default()
-                },
-                ImageNode::new(fill_image),
-            ));
+                }))
+                .with_children(|clip_parent| {
+                    // The fill graphic itself: FIXED `Val::Px` size —
+                    // deliberately NOT `Val::Percent(100.0)` of the
+                    // (shrinking) clip window's own box, which would
+                    // re-squash the texture right back into the exact bug
+                    // this rework fixes.
+                    clip_parent.spawn((
+                        HudImageBarFill,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(0.0),
+                            top: Val::Px(0.0),
+                            width: Val::Px(width_px),
+                            height: Val::Px(height_px),
+                            ..Default::default()
+                        },
+                        ImageNode::new(fill_image),
+                    ));
+                });
         })
         .id();
 
@@ -445,16 +496,23 @@ pub fn spawn_horizontal_image_bar(
     container
 }
 
-/// Resizes every horizontal image bar's fill child to its container's
-/// current [`BarValue`] fraction (WIDTH, left-anchored) — the image-fill
-/// counterpart to [`update_bars`], same `Changed<BarValue>` gate.
+/// Resizes every horizontal image bar's fraction-reveal CLIP WINDOW
+/// ([`HudImageBarFillClip`]) to its container's current [`BarValue`]
+/// fraction, left-anchored (grows the window's WIDTH) — the horizontal
+/// counterpart to [`update_orb_bars`], same `Changed<BarValue>` gate.
+/// **Never touches [`HudImageBarFill`]** (the fill image itself, one level
+/// deeper) — that split is the whole fix for the "fill squashes instead of
+/// drains" bug: only the clip window's box may react to the fraction, the
+/// fill graphic's own `Node` must stay a constant `Val::Px` forever. See
+/// `image_bar_fill_image_never_resizes_only_the_clip_wrapper_does` below for
+/// the regression guard.
 pub(crate) fn update_horizontal_image_bars(
     bars: Query<(&BarValue, &Children), (Changed<BarValue>, With<HudImageBar>)>,
-    mut fills: Query<&mut Node, With<HudImageBarFill>>,
+    mut clips: Query<&mut Node, With<HudImageBarFillClip>>,
 ) {
     for (value, children) in &bars {
         for &child in children.iter() {
-            if let Ok(mut node) = fills.get_mut(child) {
+            if let Ok(mut node) = clips.get_mut(child) {
                 node.width = Val::Percent(value.fraction() * 100.0);
             }
         }
@@ -963,10 +1021,14 @@ mod tests {
         app
     }
 
-    /// `spawn_horizontal_image_bar` at half value gives the fill child a 50%
-    /// WIDTH (left-anchored, same axis as [`spawn_bar`]'s flat-color fill,
-    /// but image-backed) — the nameplate health/stagger-bar acceptance case
-    /// (BL-82 EM-5.17 Phase 5).
+    /// `spawn_horizontal_image_bar` at half value gives the fraction-reveal
+    /// CLIP WINDOW ([`HudImageBarFillClip`], the container's direct child) a
+    /// 50% WIDTH (left-anchored, same axis as [`spawn_bar`]'s flat-color
+    /// fill, but image-backed) — the nameplate health/stagger-bar acceptance
+    /// case (BL-82 EM-5.17 Phase 5), updated for the follow-up clip-reveal
+    /// rework: the CLIP WINDOW is what tracks the fraction now, not the fill
+    /// image itself (see
+    /// [`image_bar_fill_image_never_resizes_only_the_clip_wrapper_does`]).
     #[test]
     fn image_bar_fill_tracks_value_changes_by_width() {
         let mut app = new_image_bar_app();
@@ -987,21 +1049,21 @@ mod tests {
         };
         app.update();
 
-        let fill_width = |app: &mut App, container: Entity| -> Val {
+        let clip_width = |app: &mut App, container: Entity| -> Val {
             let children: Vec<Entity> = app
                 .world()
                 .get::<Children>(container)
                 .unwrap()
                 .iter()
                 .collect();
-            let fill_entity = children
+            let clip_entity = children
                 .into_iter()
-                .find(|&e| app.world().get::<HudImageBarFill>(e).is_some())
-                .expect("image bar has a fill child");
-            app.world().get::<Node>(fill_entity).unwrap().width
+                .find(|&e| app.world().get::<HudImageBarFillClip>(e).is_some())
+                .expect("image bar has a clip-window child");
+            app.world().get::<Node>(clip_entity).unwrap().width
         };
 
-        assert_eq!(fill_width(&mut app, container), Val::Percent(50.0));
+        assert_eq!(clip_width(&mut app, container), Val::Percent(50.0));
 
         app.world_mut()
             .get_mut::<BarValue>(container)
@@ -1009,7 +1071,87 @@ mod tests {
             .current = 25.0;
         app.update();
 
-        assert_eq!(fill_width(&mut app, container), Val::Percent(25.0));
+        assert_eq!(clip_width(&mut app, container), Val::Percent(25.0));
+    }
+
+    /// Regression guard for the exact bug this rework fixes (the boss
+    /// stagger bar's `boss_stagger_full_bar.png` fill visually
+    /// stretched/squashed horizontally as the meter depleted instead of
+    /// looking like it drained — the unfixed sibling of the vertical orb-bar
+    /// bug Matías originally reported, caught by `bevy-migration-reviewer`).
+    /// Root cause: the old [`update_horizontal_image_bars`] resized the
+    /// `ImageNode`-carrying fill child's own `Node.width` directly —
+    /// `ImageNode`'s stretch-to-fit then rescales/squashes the fill texture
+    /// into the shrunk box. This asserts the fill image's `Node`
+    /// ([`HudImageBarFill`], now a GRANDCHILD nested inside
+    /// [`HudImageBarFillClip`]) stays a FIXED `Val::Px` matching the bar's
+    /// full size across a `BarValue` mutation — only the clip wrapper
+    /// (covered above) may react to the fraction. A future change that goes
+    /// back to resizing the fill image directly must fail this test.
+    #[test]
+    fn image_bar_fill_image_never_resizes_only_the_clip_wrapper_does() {
+        let mut app = new_image_bar_app();
+
+        let container = {
+            let mut commands = app.world_mut().commands();
+            let id = spawn_horizontal_image_bar(
+                &mut commands,
+                Handle::default(),
+                Handle::default(),
+                Some(Handle::default()),
+                360.0,
+                24.0,
+                BarValue::new(50.0, 100.0),
+            );
+            app.world_mut().flush();
+            id
+        };
+        app.update();
+
+        let fill_image_size = |app: &mut App, container: Entity| -> (Val, Val) {
+            let container_children: Vec<Entity> = app
+                .world()
+                .get::<Children>(container)
+                .unwrap()
+                .iter()
+                .collect();
+            let clip_entity = container_children
+                .into_iter()
+                .find(|&e| app.world().get::<HudImageBarFillClip>(e).is_some())
+                .expect("image bar has a clip-window child");
+            let clip_children: Vec<Entity> = app
+                .world()
+                .get::<Children>(clip_entity)
+                .unwrap()
+                .iter()
+                .collect();
+            let fill_entity = clip_children
+                .into_iter()
+                .find(|&e| app.world().get::<HudImageBarFill>(e).is_some())
+                .expect("clip window has a fill-image grandchild");
+            let node = app.world().get::<Node>(fill_entity).unwrap();
+            (node.width, node.height)
+        };
+
+        let full_size = (Val::Px(360.0), Val::Px(24.0));
+        assert_eq!(
+            fill_image_size(&mut app, container),
+            full_size,
+            "the fill image must spawn at the bar's FULL fixed size"
+        );
+
+        app.world_mut()
+            .get_mut::<BarValue>(container)
+            .unwrap()
+            .current = 5.0;
+        app.update();
+
+        assert_eq!(
+            fill_image_size(&mut app, container),
+            full_size,
+            "changing BarValue must NEVER resize the fill image itself — only the clip wrapper's \
+             width may change"
+        );
     }
 
     /// The optional frame overlay, when given, spawns as a SECOND child
@@ -1041,18 +1183,19 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        assert_eq!(children.len(), 2, "fill child + frame overlay child");
+        assert_eq!(children.len(), 2, "clip-window child + frame overlay child");
         let frame_entity = children
             .into_iter()
-            .find(|&e| app.world().get::<HudImageBarFill>(e).is_none())
-            .expect("a non-fill (frame) child exists");
+            .find(|&e| app.world().get::<HudImageBarFillClip>(e).is_none())
+            .expect("a non-clip-window (frame) child exists");
         assert_eq!(
             *app.world().get::<Pickable>(frame_entity).unwrap(),
             Pickable::IGNORE
         );
     }
 
-    /// Omitting the frame overlay spawns only the fill child.
+    /// Omitting the frame overlay spawns only the fraction-reveal clip
+    /// window — the frame stays a genuinely OPTIONAL parameter.
     #[test]
     fn image_bar_without_frame_spawns_only_fill_child() {
         let mut app = new_image_bar_app();
@@ -1079,6 +1222,10 @@ mod tests {
             .unwrap()
             .iter()
             .collect();
-        assert_eq!(children.len(), 1, "only the fill child, no frame overlay");
+        assert_eq!(
+            children.len(),
+            1,
+            "only the clip-window child, no frame overlay"
+        );
     }
 }
