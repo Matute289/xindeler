@@ -53,6 +53,13 @@ bevy = { version = "=0.19.0", features = ["file_watcher", "system_clipboard"] }
 xindeler-app = { path = "../xindeler-app", features = ["fps-overlay"] }
 # AtmosphereProfile asset + AtmosphereController (EM-2.4, spec §5.4).
 xindeler-oracle-host = { path = "../xindeler-oracle-host" }
+# BL-82 EM-5.10a (T56.34): the Kira-on-`cpal` audio foundation (`AudioManager`
+# + 4 mixer sub-tracks + `.ogg`/`.wav` `AssetLoader`). A normal (non-optional)
+# dependency like `xindeler-oracle-host`/`xindeler-ui` above — a general
+# client capability, not `listen-server`-specific — even though it is only
+# ADDED to the app in `listen_server.rs` today; nothing triggers a sound yet
+# (SFX/music/ambience wiring is 5.10b–e).
+xindeler-audio = { path = "../xindeler-audio" }
 # BL-82 EM-5.1: the widget kit (panel/bar/button/tooltip/notification/theme/
 # i18n) the core combat HUD (EM-5.2, `combat_hud.rs`) builds on.
 xindeler-ui = { path = "../xindeler-ui" }

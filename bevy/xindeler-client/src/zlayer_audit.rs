@@ -196,6 +196,13 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("TheirOfferGridRoot", RootKind::NestedChild {
         parent: "TradeWindowRoot",
     }),
+    // settings_window.rs — pre-existing gap found while verifying T56.34
+    // (BL-82 EM-5.10a): `SettingsWindowRoot` (EM-5.12, PR #169) was never
+    // added here, unrelated to the audio work in this PR. Same
+    // full-screen-modal-backdrop shape as `EscMenuRoot`/`InventoryWindowRoot`
+    // above (`GlobalZIndex(zlayer::MODAL_WINDOWS)` at its spawn site,
+    // `spawn_settings_window`).
+    ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
 ];
 
 /// Scans every `.rs` file under `dir` (recursively) for a top-level `struct

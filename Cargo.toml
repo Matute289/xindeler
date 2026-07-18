@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "bevy/xindeler-app",
+    "bevy/xindeler-audio",
     "bevy/xindeler-client",
     "bevy/xindeler-dimensions",
     "bevy/xindeler-input",
