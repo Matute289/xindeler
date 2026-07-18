@@ -184,7 +184,10 @@ use xindeler_protocol::{
 };
 use xindeler_ui::{
     images::{HudImageKey, HudImages},
-    slot::{ChromelessSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
+    slot::{
+        ChromelessSlot, SLOT_BORDER_PX, SlotAddress, SlotContents, SlotDropped, SlotGroup,
+        slot_bundle,
+    },
     theme::{HudFonts, HudTheme},
     zlayer,
 };
@@ -344,6 +347,30 @@ struct HotbarRightHalf;
 /// what forces this ordering choice.
 #[derive(Component)]
 struct SkillSlotBorderOverlay;
+/// Marks a per-slot opaque dark fill child (BL-82 HUD polish round 7) —
+/// spawned as the VERY FIRST child of a slot (under [`SkillSlotBorderOverlay`]
+/// and everything else in draw order) so it reads as the slot's solid
+/// background plate. This is the flush-look fix for Matías's `captura11.png`
+/// "visible gap between skill slots" report (7th round on that same
+/// complaint): `skill_slot_border.png` is an ornate gothic ring whose opaque
+/// silhouette fills only ~50% of its own bounding box and reaches its box
+/// edge on merely ~2% of each edge (median 31px inset, measured by
+/// alpha-channel scan) — so two adjacent slot frames NEVER touch regardless
+/// of how tight [`hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP`] is (round 5
+/// already cropped to the true opaque bbox) or how small
+/// [`HOTBAR_SLOT_GAP_PX`] is (round 6 already set it to `0.0`); the game
+/// world showed straight through every concave notch AND the transparent
+/// centre, which is the residual "gap" no crop/gap tuning could ever close
+/// because it is intrinsic to the asset's silhouette, not a measurement
+/// error. Filling the whole square slot box with [`HudTheme::palette`]'s
+/// opaque near-black `slot_bg` first makes adjacent slot boxes touch flush
+/// and turns every notch/centre into continuous dark instead of grass —
+/// exactly how `hud-ejemplo-2.png`'s reference slots (solid dark squares
+/// with a thin frame) read flush. The ornate frame then sits ON TOP as pure
+/// decoration; its outward corner-skulls/edge-spikes still overlap slightly
+/// at each seam, reading as ornate dividers rather than gaps.
+#[derive(Component)]
+struct SkillSlotBackground;
 #[derive(Component)]
 struct HotbarPrimaryText;
 #[derive(Component)]
@@ -637,11 +664,47 @@ fn sync_hotbar_slots(
             ChromelessSlot,
         ));
         commands.entity(slot_entity).with_children(|parent| {
+            // BL-82 HUD polish round 7 (Matías's `captura11.png` "visible gap
+            // between skill slots", 7th round on that complaint): an opaque
+            // dark fill spanning the WHOLE slot box, spawned as the VERY FIRST
+            // child so it renders at the very bottom (under the ornate frame,
+            // the keybind badge, the cooldown veil and the icon glyph). This
+            // is the actual flush-look fix — see `SkillSlotBackground`'s own
+            // doc comment for the alpha-scan evidence that the ornate frame
+            // asset can never tile flush by itself (it fills only ~50% of its
+            // bbox and reaches its edge on ~2% of each side), so neither the
+            // round-5 crop nor the round-6 `HOTBAR_SLOT_GAP_PX = 0.0` could
+            // close the gap; a solid dark background behind every slot (the
+            // way `hud-ejemplo-2.png`'s reference achieves flush) makes the
+            // slot boxes touch and stops the game world showing through the
+            // frame's concave notches and transparent centre.
+            // Inset by `-SLOT_BORDER_PX` on every side and sized to the FULL
+            // `SLOT_SIZE_PX` (not `Percent(100.0)`, which resolves to the
+            // slot's PADDING box — inside its 2px border — and would leave a
+            // `2*SLOT_BORDER_PX = 4px` transparent channel between adjacent
+            // slots' fills that still showed the game world through, measured
+            // directly on the round-7 live smoke render). Covering the whole
+            // border box instead makes adjacent slot fills touch flush at
+            // `HOTBAR_SLOT_GAP_PX = 0.0`, with no green sliver between them.
+            parent.spawn((
+                SkillSlotBackground,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-SLOT_BORDER_PX),
+                    left: Val::Px(-SLOT_BORDER_PX),
+                    width: Val::Px(SLOT_SIZE_PX),
+                    height: Val::Px(SLOT_SIZE_PX),
+                    ..Default::default()
+                },
+                BackgroundColor(theme.palette.slot_bg),
+                bevy::picking::Pickable::IGNORE,
+            ));
             // BL-82 EM-5.17 Phase 2: `skill_slot_border.png` overlay — spawned
-            // FIRST (i.e. rendered UNDER the keybind label/cooldown veil/
-            // countdown text below) so those stay legible; see
-            // `SkillSlotBorderOverlay`'s own doc comment for why this pack's
-            // "overlay" art can't safely go on TOP without hiding everything.
+            // right after the background fill above (i.e. rendered UNDER the
+            // keybind label/cooldown veil/countdown text below, but ON TOP of
+            // that fill) so those stay legible; see `SkillSlotBorderOverlay`'s
+            // own doc comment for why this pack's "overlay" art can't safely
+            // go on TOP of everything without hiding it.
             //
             // BL-82 HUD polish round 5: `hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP`
             // crops the source PNG down to its own tight opaque bounding box
@@ -1435,6 +1498,87 @@ mod tests {
             bevy::ui::widget::NodeImageMode::Stretch,
             "the cropped rect must be stretched onto the slot's square box"
         );
+    }
+
+    /// BL-82 HUD polish round 7 — regression guard for Matías's `captura11.png`
+    /// "visible gap between skill slots" report (7th round). The flush-look fix
+    /// is [`SkillSlotBackground`]: an OPAQUE dark
+    /// [`HudTheme::palette`]`.slot_bg` fill spanning the whole slot box,
+    /// spawned as the FIRST (bottom-most in draw order) child so the ornate
+    /// `skill_slot_border.png` frame — which can never tile flush by itself
+    /// (fills only ~50% of its bbox, reaches its edge on ~2% of each side)
+    /// — sits on top of a solid plate instead of the game world. Without
+    /// this fill the concave notches and transparent centre of every frame
+    /// show grass, reading as a gap no crop/`HOTBAR_SLOT_GAP_PX` tuning can
+    /// close. A regression that drops the fill, makes it translucent,
+    /// or spawns it ABOVE the border overlay fails here.
+    #[test]
+    fn each_slot_has_an_opaque_slot_bg_fill_beneath_the_border_frame() {
+        use bevy::color::Alpha;
+
+        let mut app = new_app();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default()],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("sync_hotbar_slots runs");
+        app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        let slot_entity = slot_entities[0];
+
+        let world = app.world();
+        let children = world
+            .get::<Children>(slot_entity)
+            .expect("the slot has children");
+
+        let bg_pos = children
+            .iter()
+            .position(|child| world.get::<SkillSlotBackground>(child).is_some())
+            .expect("the slot has a SkillSlotBackground child");
+        let border_pos = children
+            .iter()
+            .position(|child| world.get::<SkillSlotBorderOverlay>(child).is_some())
+            .expect("the slot has a SkillSlotBorderOverlay child");
+        assert!(
+            bg_pos < border_pos,
+            "SkillSlotBackground must be spawned BEFORE SkillSlotBorderOverlay so the solid fill \
+             renders UNDER the ornate frame, not over it (got bg at {bg_pos}, border at \
+             {border_pos})"
+        );
+
+        let bg_entity = children[bg_pos];
+        let fill = world
+            .get::<BackgroundColor>(bg_entity)
+            .expect("the background child carries a BackgroundColor");
+        assert!(
+            !fill.0.is_fully_transparent(),
+            "SkillSlotBackground must be OPAQUE, else the game world bleeds through the frame's \
+             concave notches/centre and the round-7 flush fix regresses: {:?}",
+            fill.0
+        );
+        assert_eq!(
+            fill.0,
+            app.world().resource::<HudTheme>().palette.slot_bg,
+            "the fill must resolve against the theme's slot_bg role, not a hardcoded literal"
+        );
+
+        // Must cover the FULL border box (SLOT_SIZE_PX, inset by the border on
+        // each side), not the padding box `Percent(100.0)` resolves to — else
+        // a 4px transparent channel between neighbours shows the game world
+        // and the flush fix regresses (round-7 live-render measurement).
+        let node = app
+            .world()
+            .get::<Node>(bg_entity)
+            .expect("the background child carries a Node");
+        assert_eq!(node.width, Val::Px(SLOT_SIZE_PX));
+        assert_eq!(node.height, Val::Px(SLOT_SIZE_PX));
+        assert_eq!(node.top, Val::Px(-SLOT_BORDER_PX));
+        assert_eq!(node.left, Val::Px(-SLOT_BORDER_PX));
     }
 
     /// BL-82 HUD redesign round 6 — replaces the deleted

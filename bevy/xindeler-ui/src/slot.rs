@@ -177,6 +177,14 @@ pub struct SlotDropped {
     pub to_address: SlotAddress,
 }
 
+/// The width (px) of a [`slot_bundle`] slot's flat chrome border, factored out
+/// as a named constant so a caller that draws its own overlay art edge-to-edge
+/// (BL-82 hotbar: `hotbar.rs`'s `SkillSlotBackground` fill) can inset by
+/// exactly this to cover the slot's FULL border box, not just the padding box
+/// the border leaves inside it — keeping the two in lockstep instead of a
+/// second hardcoded `2.0` silently drifting from this one.
+pub const SLOT_BORDER_PX: f32 = 2.0;
+
 /// Spawns a themed, empty, drag-drop-capable slot (square, `size_px` on a
 /// side) at the given `(group, address)`, carrying a DEFAULT (empty)
 /// [`SlotContents`] from the start — so a caller's own `Query<&mut
@@ -204,7 +212,7 @@ pub fn slot_bundle(
         Node {
             width: Val::Px(size_px),
             height: Val::Px(size_px),
-            border: UiRect::all(Val::Px(2.0)),
+            border: UiRect::all(Val::Px(SLOT_BORDER_PX)),
             border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
             // BL-82 EM-5.17/5.18 legacy-inventory rebuild (STEP 4, "the icon
             // never renders" bug): centers both the icon-text glyph and the
