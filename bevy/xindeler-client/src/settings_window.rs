@@ -1,4 +1,4 @@
-//! BL-82 EM-5.12 (T56.39) — the tabbed Settings window.
+//! BL-82 EM-5.12 (T56.39) / EM-5.16 (T56.44) — the tabbed Settings window.
 //!
 //! Ports legacy `voxygen`'s `settings_window/` (Interface/Video/Sound/
 //! Controls/Gameplay/Chat/Language tabs) into the Bevy client as ONE modal
@@ -16,17 +16,25 @@
 //! |               | Controls`, keyboard+gamepad) — not rebuilt here     |       |
 //! | Gameplay      | `CameraSettings` (mouse sensitivity, fly speed)     | ✅    |
 //! | Chat          | `chat.opacity` (→ `chat::sync_chat_scroll_opacity`) | ✅    |
-//! | Language       | `XindelerSettings::language` selector              | ~     |
+//! | Language       | `XindelerSettings::language` selector, LIVE hot-swap| ✅    |
 //! | Networking    | nothing configurable today (connection is automatic)| stub  |
 //! | Sound         | EM-5.10 audio — not built yet                       | stub  |
 //! | Accessibility | EM-5.16 accessibility — not built yet               | stub  |
 //!
-//! Language is `~` (functional-but-simple): the selector persists
-//! `XindelerSettings::language`, but the `xindeler-ui` i18n seam ships the
-//! `en` catalog only until EM-5.16 wires the full reactive Fluent pipeline +
-//! hot-swap, so only `en` resolves for now (the tab says so). Sound/
-//! Accessibility/Networking are HONEST stubs — a visible tab that names the
-//! epic that will fill it, never fake toggles for a system that isn't built.
+//! Sound/Accessibility/Networking are HONEST stubs — a visible tab that names
+//! the epic that will fill it, never fake toggles for a system that isn't
+//! built.
+//!
+//! ## T56.44 — this screen dogfoods the reactive i18n pipeline
+//! Every static label in this window (tab names, row labels, notes, button
+//! text) now resolves through `xindeler_ui::i18n::Localization` instead of a
+//! hardcoded English literal, and is tagged with
+//! [`xindeler_ui::i18n::LocalizedText`]/[`xindeler_ui::i18n::LocalizedLabel`]
+//! so it re-localizes LIVE the moment the Language tab's selector changes —
+//! see `xindeler_ui::i18n`'s own module doc for the full reactive chain. The
+//! dynamic VALUE labels (On/Off, the quality-tier name, the language's own
+//! display name) are recomputed by [`refresh_setting_labels`], which now
+//! reacts to a locale change too, not just a settings change.
 //!
 //! ## Live graphics apply (moved here from the old `esc_menu`)
 //! [`apply_graphics_settings`] reconciles the live camera to
@@ -43,7 +51,10 @@
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     core_pipeline::prepass::DepthPrepass,
-    ecs::schedule::common_conditions::{not, resource_changed},
+    ecs::{
+        change_detection::NonSend,
+        schedule::common_conditions::{not, resource_changed},
+    },
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     render::camera::{MipBias, TemporalJitter},
@@ -53,6 +64,7 @@ use xindeler_input::{ActionState, GameInput};
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -60,10 +72,15 @@ use xindeler_ui::{
 
 use crate::{camera::MainCamera, chat::text_input_focused, combat_hud::Crosshair};
 
-/// The v1 selectable UI locales. Only `en` has a catalog today (the i18n seam
-/// is `en`-only until EM-5.16); extend this list — nothing else changes — as
-/// real `.ftl` locales land.
-const AVAILABLE_LANGUAGES: &[&str] = &["en"];
+/// The v1 selectable UI locales: `(BCP-47 tag, the locale's OWN native
+/// display name)`. A locale's own name is conventionally shown in itself
+/// (e.g. "Español" stays "Español" no matter the active UI locale), so this
+/// is a plain lookup table, not a `.ftl` catalog. Extend this list — nothing
+/// else changes — as more locales get real translations;
+/// `Localization`'s `en`-fallback (see `xindeler_ui::i18n`'s doc) means an
+/// entry here with only PARTIAL `.ftl` coverage still degrades cleanly
+/// rather than looking broken.
+const AVAILABLE_LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("es", "Español")];
 
 // Numeric-control step / clamp bounds (px-free, per setting).
 const UI_SCALE_STEP: f32 = 0.1;
@@ -144,17 +161,20 @@ impl SettingsTab {
         SettingsTab::Accessibility,
     ];
 
-    fn label(self) -> &'static str {
+    /// The `.ftl` key for this tab's button label — every one of these
+    /// already exists in the shared `common.ftl` catalog (used by other
+    /// screens too, e.g. the esc menu's own Settings/Controls buttons).
+    fn label_key(self) -> &'static str {
         match self {
-            SettingsTab::Interface => "Interface",
-            SettingsTab::Video => "Video",
-            SettingsTab::Controls => "Controls",
-            SettingsTab::Gameplay => "Gameplay",
-            SettingsTab::Chat => "Chat",
-            SettingsTab::Language => "Language",
-            SettingsTab::Networking => "Networking",
-            SettingsTab::Sound => "Sound",
-            SettingsTab::Accessibility => "Accessibility",
+            SettingsTab::Interface => "common-interface",
+            SettingsTab::Video => "common-video",
+            SettingsTab::Controls => "common-controls",
+            SettingsTab::Gameplay => "common-gameplay",
+            SettingsTab::Chat => "common-chat",
+            SettingsTab::Language => "common-languages",
+            SettingsTab::Networking => "common-networking",
+            SettingsTab::Sound => "common-sound",
+            SettingsTab::Accessibility => "common-accessibility",
         }
     }
 }
@@ -197,6 +217,30 @@ enum SettingControl {
     // Enum (single cycle button):
     Tier,
     Language,
+}
+
+impl SettingControl {
+    /// The `.ftl` key for this control's ROW LABEL (the static name next to
+    /// the buttons — the dynamic VALUE next to it is [`value_label`], a
+    /// separate concern).
+    fn row_label_key(self) -> &'static str {
+        match self {
+            SettingControl::UiScale => "hud-settings-ui_scale",
+            SettingControl::MouseSensitivity => "hud-settings-mouse_sensitivity",
+            SettingControl::FlySpeed => "hud-settings-fly_speed",
+            SettingControl::ChatOpacity => "hud-settings-background_opacity",
+            SettingControl::ShadowCascades => "hud-settings-shadow_cascades",
+            SettingControl::ShowCrosshair => "hud-settings-crosshair",
+            SettingControl::Ssao => "hud-settings-ssao",
+            SettingControl::Taa => "hud-settings-taa",
+            SettingControl::Bloom => "hud-settings-bloom",
+            SettingControl::VolumetricFog => "hud-settings-volumetric_fog",
+            SettingControl::ContactShadows => "hud-settings-contact_shadows",
+            SettingControl::Vignette => "hud-settings-vignette",
+            SettingControl::Tier => "hud-settings-quality_preset",
+            SettingControl::Language => "hud-settings-language",
+        }
+    }
 }
 
 /// Tags the [`Text`] (or a button whose child is the text) that displays a
@@ -276,20 +320,23 @@ fn sync_crosshair_visibility(
     }
 }
 
-/// Refreshes every value label from the current settings (so a click's effect
-/// is immediately visible). A [`SettingValueLabel`] sits either directly on a
-/// [`Text`] node (numeric rows) or on a button whose child carries the text
-/// (toggle/enum rows) — handle both.
+/// Refreshes every value label from the current settings AND the current
+/// locale (so a click's effect — or a language switch — is immediately
+/// visible). A [`SettingValueLabel`] sits either directly on a [`Text`] node
+/// (numeric rows) or on a button whose child carries the text (toggle/enum
+/// rows) — handle both.
 fn refresh_setting_labels(
     settings: Res<XindelerSettings>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     labels: Query<(Entity, &SettingValueLabel, Option<&Children>)>,
     mut texts: Query<&mut Text>,
 ) {
-    if !settings.is_changed() {
+    if !settings.is_changed() && !current_locale.is_changed() {
         return;
     }
     for (entity, label, children) in &labels {
-        let new = value_label(label.0, &settings);
+        let new = value_label(label.0, &settings, &localization);
         if let Ok(mut text) = texts.get_mut(entity) {
             if text.0 != new {
                 text.0 = new;
@@ -315,6 +362,7 @@ fn spawn_settings_window(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     settings: Res<XindelerSettings>,
+    localization: NonSend<Localization>,
 ) {
     let theme: HudTheme = *theme;
     let selected = SettingsTab::default();
@@ -346,8 +394,15 @@ fn spawn_settings_window(
                 node.align_items = AlignItems::Stretch;
             });
             panel_entity.with_children(|panel| {
-                heading(panel, &fonts, &theme, "Settings", 28.0);
-                spawn_tab_bar(panel, &theme, &fonts, selected);
+                heading(
+                    panel,
+                    &fonts,
+                    &theme,
+                    &localization,
+                    "common-settings",
+                    28.0,
+                );
+                spawn_tab_bar(panel, &theme, &fonts, &localization, selected);
 
                 // Content region: one pane per tab, only the selected one
                 // visible. `overflow: clip_y` keeps a long tab (Video) inside
@@ -362,11 +417,19 @@ fn spawn_settings_window(
                     })
                     .with_children(|content| {
                         for &tab in SettingsTab::ALL {
-                            spawn_tab_pane(content, &theme, &fonts, &settings, tab, selected);
+                            spawn_tab_pane(
+                                content,
+                                &theme,
+                                &fonts,
+                                &settings,
+                                &localization,
+                                tab,
+                                selected,
+                            );
                         }
                     });
 
-                panel.spawn(button_bundle(&theme, &fonts, "Close")).observe(
+                spawn_labeled_button(panel, &theme, &fonts, &localization, "common-close").observe(
                     |_a: On<Activate>, mut actions: MessageWriter<HudAction>| {
                         actions.write(HudAction::CloseWindow);
                     },
@@ -375,12 +438,27 @@ fn spawn_settings_window(
         });
 }
 
+/// Spawns a themed button whose label is a resolved `.ftl` message value,
+/// tagged [`LocalizedLabel`] so it re-resolves live on a locale change.
+fn spawn_labeled_button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) -> EntityCommands<'a> {
+    let mut button = parent.spawn(button_bundle(theme, fonts, &localization.tr(key)));
+    button.insert(LocalizedLabel(key));
+    button
+}
+
 /// The horizontal tab bar (one button per tab; the selected one starts
 /// highlighted).
 fn spawn_tab_bar(
     panel: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    localization: &Localization,
     selected: SettingsTab,
 ) {
     panel
@@ -393,7 +471,8 @@ fn spawn_tab_bar(
         })
         .with_children(|bar| {
             for &tab in SettingsTab::ALL {
-                let mut button = bar.spawn(button_bundle(theme, fonts, tab.label()));
+                let mut button =
+                    spawn_labeled_button(bar, theme, fonts, localization, tab.label_key());
                 button.insert(SettingsTabButton(tab));
                 if tab == selected {
                     button.insert(BackgroundColor(theme.palette.accent));
@@ -414,6 +493,7 @@ fn spawn_tab_pane(
     theme: &HudTheme,
     fonts: &HudFonts,
     settings: &XindelerSettings,
+    localization: &Localization,
     tab: SettingsTab,
     selected: SettingsTab,
 ) {
@@ -435,7 +515,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "UI scale",
+                    localization,
                     SettingControl::UiScale,
                 );
                 toggle_row(
@@ -443,14 +523,15 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Crosshair",
+                    localization,
                     SettingControl::ShowCrosshair,
                 );
                 note(
                     pane,
                     fonts,
                     theme,
-                    "Further HUD-element toggles (bars, buff strip) arrive with their screens.",
+                    localization,
+                    "hud-settings-note_interface",
                 );
             },
             SettingsTab::Video => {
@@ -459,25 +540,39 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Quality preset",
+                    localization,
                     SettingControl::Tier,
                 );
-                toggle_row(pane, theme, fonts, settings, "SSAO", SettingControl::Ssao);
                 toggle_row(
                     pane,
                     theme,
                     fonts,
                     settings,
-                    "Anti-aliasing (TAA)",
+                    localization,
+                    SettingControl::Ssao,
+                );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
                     SettingControl::Taa,
                 );
-                toggle_row(pane, theme, fonts, settings, "Bloom", SettingControl::Bloom);
                 toggle_row(
                     pane,
                     theme,
                     fonts,
                     settings,
-                    "Volumetric fog",
+                    localization,
+                    SettingControl::Bloom,
+                );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
                     SettingControl::VolumetricFog,
                 );
                 toggle_row(
@@ -485,7 +580,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Contact shadows",
+                    localization,
                     SettingControl::ContactShadows,
                 );
                 toggle_row(
@@ -493,7 +588,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Vignette",
+                    localization,
                     SettingControl::Vignette,
                 );
                 numeric_row(
@@ -501,29 +596,31 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Shadow cascades",
+                    localization,
                     SettingControl::ShadowCascades,
                 );
-                note(
-                    pane,
-                    fonts,
-                    theme,
-                    "SSAO and anti-aliasing apply immediately. Other video options (and the \
-                     shadow-cascade count) apply on the next launch. Editing any of these \
-                     switches the preset to Custom.",
-                );
+                note(pane, fonts, theme, localization, "hud-settings-note_video");
             },
             SettingsTab::Controls => {
                 note(
                     pane,
                     fonts,
                     theme,
-                    "Rebind keyboard, mouse and gamepad controls in the dedicated Controls screen.",
+                    localization,
+                    "hud-settings-note_controls",
                 );
-                pane.spawn(button_bundle(theme, fonts, "Open Controls / Rebinding"))
-                    .observe(|_a: On<Activate>, mut actions: MessageWriter<HudAction>| {
+                spawn_labeled_button(
+                    pane,
+                    theme,
+                    fonts,
+                    localization,
+                    "hud-settings-open_controls",
+                )
+                .observe(
+                    |_a: On<Activate>, mut actions: MessageWriter<HudAction>| {
                         actions.write(HudAction::ToggleWindow(HudWindow::Controls));
-                    });
+                    },
+                );
             },
             SettingsTab::Gameplay => {
                 numeric_row(
@@ -531,7 +628,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Mouse sensitivity",
+                    localization,
                     SettingControl::MouseSensitivity,
                 );
                 numeric_row(
@@ -539,15 +636,15 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Fly-cam speed",
+                    localization,
                     SettingControl::FlySpeed,
                 );
                 note(
                     pane,
                     fonts,
                     theme,
-                    "Camera zoom and auto-walk settings arrive with the third-person camera \
-                     polish.",
+                    localization,
+                    "hud-settings-note_gameplay",
                 );
             },
             SettingsTab::Chat => {
@@ -556,15 +653,10 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Background opacity",
+                    localization,
                     SettingControl::ChatOpacity,
                 );
-                note(
-                    pane,
-                    fonts,
-                    theme,
-                    "Chat box opacity applies live to the scrollback panel.",
-                );
+                note(pane, fonts, theme, localization, "hud-settings-note_chat");
             },
             SettingsTab::Language => {
                 enum_row(
@@ -572,15 +664,15 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Language",
+                    localization,
                     SettingControl::Language,
                 );
                 note(
                     pane,
                     fonts,
                     theme,
-                    "Only English ships in v1. Full multi-language coverage and live hot-swap \
-                     arrive with EM-5.16.",
+                    localization,
+                    "hud-settings-note_language",
                 );
             },
             SettingsTab::Networking => {
@@ -588,39 +680,38 @@ fn spawn_tab_pane(
                     pane,
                     fonts,
                     theme,
-                    "No configurable networking settings yet — the client connects automatically. \
-                     Connection tuning arrives with the server browser (EM-5.9).",
+                    localization,
+                    "hud-settings-note_networking",
                 );
             },
             SettingsTab::Sound => {
-                note(
-                    pane,
-                    fonts,
-                    theme,
-                    "Sound settings coming soon (EM-5.10 audio).",
-                );
+                note(pane, fonts, theme, localization, "hud-settings-note_sound");
             },
             SettingsTab::Accessibility => {
                 note(
                     pane,
                     fonts,
                     theme,
-                    "Accessibility settings coming soon (EM-5.16).",
+                    localization,
+                    "hud-settings-note_accessibility",
                 );
             },
         });
 }
 
-/// A section/title heading line inside the panel.
+/// A section/title heading line inside the panel — resolved from `key` and
+/// tagged [`LocalizedText`] so it re-resolves live on a locale change.
 fn heading(
     panel: &mut ChildSpawnerCommands,
     fonts: &HudFonts,
     theme: &HudTheme,
-    text: &str,
+    localization: &Localization,
+    key: &'static str,
     size: f32,
 ) {
     panel.spawn((
-        Text(text.to_owned()),
+        LocalizedText(key),
+        Text(localization.tr(key)),
         TextFont {
             font: bevy::text::FontSource::Handle(fonts.title.clone()),
             font_size: bevy::text::FontSize::Px(size),
@@ -630,10 +721,17 @@ fn heading(
     ));
 }
 
-/// A muted explanatory note line.
-fn note(panel: &mut ChildSpawnerCommands, fonts: &HudFonts, theme: &HudTheme, text: &str) {
+/// A muted explanatory note line — resolved from `key`, live-relocalizing.
+fn note(
+    panel: &mut ChildSpawnerCommands,
+    fonts: &HudFonts,
+    theme: &HudTheme,
+    localization: &Localization,
+    key: &'static str,
+) {
     panel.spawn((
-        Text(text.to_owned()),
+        LocalizedText(key),
+        Text(localization.tr(key)),
         TextFont {
             font: bevy::text::FontSource::Handle(fonts.body.clone()),
             font_size: bevy::text::FontSize::Px(13.0),
@@ -647,10 +745,18 @@ fn note(panel: &mut ChildSpawnerCommands, fonts: &HudFonts, theme: &HudTheme, te
     ));
 }
 
-/// The name label that opens every setting row.
-fn row_label(row: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFonts, name: &str) {
+/// The name label that opens every setting row — resolved from `key`,
+/// live-relocalizing.
+fn row_label(
+    row: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) {
     row.spawn((
-        Text(name.to_owned()),
+        LocalizedText(key),
+        Text(localization.tr(key)),
         TextFont {
             font: bevy::text::FontSource::Handle(fonts.body.clone()),
             font_size: bevy::text::FontSize::Px(16.0),
@@ -680,10 +786,10 @@ fn toggle_row(
     theme: &HudTheme,
     fonts: &HudFonts,
     settings: &XindelerSettings,
-    name: &str,
+    localization: &Localization,
     control: SettingControl,
 ) {
-    cycle_row(pane, theme, fonts, settings, name, control);
+    cycle_row(pane, theme, fonts, settings, localization, control);
 }
 
 /// An enum row: name + a single button whose label is the current variant and
@@ -693,45 +799,54 @@ fn enum_row(
     theme: &HudTheme,
     fonts: &HudFonts,
     settings: &XindelerSettings,
-    name: &str,
+    localization: &Localization,
     control: SettingControl,
 ) {
-    cycle_row(pane, theme, fonts, settings, name, control);
+    cycle_row(pane, theme, fonts, settings, localization, control);
 }
 
 /// Shared spawn for the single-cycle-button rows (bool + enum): clicking the
-/// value button advances the setting (`adjust` with `dir = 1`).
+/// value button advances the setting (`adjust` with `dir = 1`). The value
+/// button's label is NOT tagged [`LocalizedLabel`] — it's driven by
+/// [`refresh_setting_labels`] instead (it depends on live settings data, not
+/// just the locale), matching [`numeric_row`]'s own value cell.
 fn cycle_row(
     pane: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
     settings: &XindelerSettings,
-    name: &str,
+    localization: &Localization,
     control: SettingControl,
 ) {
     pane.spawn(row_node(theme)).with_children(|row| {
-        row_label(row, theme, fonts, name);
-        row.spawn(button_bundle(theme, fonts, &value_label(control, settings)))
-            .insert(SettingValueLabel(control))
-            .observe(
-                move |_a: On<Activate>, mut settings: ResMut<XindelerSettings>| {
-                    apply_and_save(control, 1, &mut settings);
-                },
-            );
+        row_label(row, theme, fonts, localization, control.row_label_key());
+        row.spawn(button_bundle(
+            theme,
+            fonts,
+            &value_label(control, settings, localization),
+        ))
+        .insert(SettingValueLabel(control))
+        .observe(
+            move |_a: On<Activate>, mut settings: ResMut<XindelerSettings>| {
+                apply_and_save(control, 1, &mut settings);
+            },
+        );
     });
 }
 
-/// A numeric row: name + `[−]` + value text + `[+]`.
+/// A numeric row: name + `[−]` + value text + `[+]`. The `-`/`+` glyphs
+/// themselves are deliberately left unlocalized — they're plain mathematical
+/// symbols, not language-dependent text.
 fn numeric_row(
     pane: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
     settings: &XindelerSettings,
-    name: &str,
+    localization: &Localization,
     control: SettingControl,
 ) {
     pane.spawn(row_node(theme)).with_children(|row| {
-        row_label(row, theme, fonts, name);
+        row_label(row, theme, fonts, localization, control.row_label_key());
         row.spawn(button_bundle(theme, fonts, "-")).observe(
             move |_a: On<Activate>, mut settings: ResMut<XindelerSettings>| {
                 apply_and_save(control, -1, &mut settings);
@@ -739,7 +854,7 @@ fn numeric_row(
         );
         row.spawn((
             SettingValueLabel(control),
-            Text(value_label(control, settings)),
+            Text(value_label(control, settings, localization)),
             TextFont {
                 font: bevy::text::FontSource::Handle(fonts.body.clone()),
                 font_size: bevy::text::FontSize::Px(16.0),
@@ -768,11 +883,41 @@ fn apply_and_save(control: SettingControl, dir: i8, settings: &mut XindelerSetti
     }
 }
 
-/// A short `On`/`Off` label for a boolean.
-fn on_off(value: bool) -> String { if value { "On" } else { "Off" }.to_owned() }
+/// A short `On`/`Off` label for a boolean, resolved through the active
+/// locale.
+fn on_off(value: bool, localization: &Localization) -> String {
+    localization.tr(if value { "common-on" } else { "common-off" })
+}
 
-/// The current value of a control, formatted for display.
-fn value_label(control: SettingControl, settings: &XindelerSettings) -> String {
+/// The `.ftl` key for a [`GraphicsTier`]'s display name — reuses the existing
+/// legacy tier-name keys (`hud-settings-*_graphics`) already in the catalog.
+fn tier_label_key(tier: GraphicsTier) -> &'static str {
+    match tier {
+        GraphicsTier::Low => "hud-settings-low_graphics",
+        GraphicsTier::Medium => "hud-settings-medium_graphics",
+        GraphicsTier::High => "hud-settings-high_graphics",
+        GraphicsTier::Ultra => "hud-settings-ultra_graphics",
+        GraphicsTier::Custom => "hud-settings-custom_graphics",
+    }
+}
+
+/// A locale's own native display name (see [`AVAILABLE_LANGUAGES`]'s doc for
+/// why this is a plain lookup, not a `.ftl` message) — an unrecognised tag
+/// falls back to showing the raw tag itself rather than panicking.
+fn language_display_name(tag: &str) -> String {
+    AVAILABLE_LANGUAGES
+        .iter()
+        .find(|(t, _)| *t == tag)
+        .map_or_else(|| tag.to_owned(), |(_, name)| (*name).to_owned())
+}
+
+/// The current value of a control, formatted for display (locale-aware for
+/// the boolean/tier/language rows).
+fn value_label(
+    control: SettingControl,
+    settings: &XindelerSettings,
+    localization: &Localization,
+) -> String {
     let g = &settings.graphics;
     match control {
         SettingControl::UiScale => format!("{:.0}%", settings.ui_scale * 100.0),
@@ -783,15 +928,15 @@ fn value_label(control: SettingControl, settings: &XindelerSettings) -> String {
             .shadow_cascades
             .clamp(MIN_SHADOW_CASCADES, MAX_SHADOW_CASCADES)
             .to_string(),
-        SettingControl::ShowCrosshair => on_off(settings.interface.show_crosshair),
-        SettingControl::Ssao => on_off(g.ssao),
-        SettingControl::Taa => on_off(g.taa),
-        SettingControl::Bloom => on_off(g.bloom),
-        SettingControl::VolumetricFog => on_off(g.volumetric_fog),
-        SettingControl::ContactShadows => on_off(g.contact_shadows),
-        SettingControl::Vignette => on_off(g.vignette),
-        SettingControl::Tier => format!("{:?}", g.tier),
-        SettingControl::Language => settings.language.clone(),
+        SettingControl::ShowCrosshair => on_off(settings.interface.show_crosshair, localization),
+        SettingControl::Ssao => on_off(g.ssao, localization),
+        SettingControl::Taa => on_off(g.taa, localization),
+        SettingControl::Bloom => on_off(g.bloom, localization),
+        SettingControl::VolumetricFog => on_off(g.volumetric_fog, localization),
+        SettingControl::ContactShadows => on_off(g.contact_shadows, localization),
+        SettingControl::Vignette => on_off(g.vignette, localization),
+        SettingControl::Tier => localization.tr(tier_label_key(g.tier)),
+        SettingControl::Language => language_display_name(&settings.language),
     }
 }
 
@@ -888,15 +1033,19 @@ fn next_tier(tier: GraphicsTier) -> GraphicsTier {
     }
 }
 
-/// Cycles to the next available UI locale (wraps). With a single-entry
-/// [`AVAILABLE_LANGUAGES`] this is a no-op — the point is that adding a locale
-/// makes it selectable with no other change.
+/// Cycles to the next available UI locale (wraps). Selecting a new entry here
+/// is ALL it takes to make it live-selectable — `XindelerSettings::save`
+/// persists the tag, and `xindeler-client::localization`'s settings bridge
+/// picks up the change and drives the whole reactive reload/relocalize chain
+/// (`xindeler_ui::i18n::LocaleSyncSet`).
 fn next_language(current: &str) -> String {
     let idx = AVAILABLE_LANGUAGES
         .iter()
-        .position(|&l| l == current)
+        .position(|(tag, _)| *tag == current)
         .unwrap_or(0);
-    AVAILABLE_LANGUAGES[(idx + 1) % AVAILABLE_LANGUAGES.len()].to_owned()
+    AVAILABLE_LANGUAGES[(idx + 1) % AVAILABLE_LANGUAGES.len()]
+        .0
+        .to_owned()
 }
 
 /// Reconciles the live CAMERA render components (SSAO/TAA) to match
@@ -962,6 +1111,15 @@ fn apply_graphics_settings(
     }
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all these structural tests need (they assert entity/component SHAPE, never
+/// specific translated text).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -982,6 +1140,7 @@ mod tests {
             body: Handle::default(),
         });
         app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_settings_window)
@@ -1007,6 +1166,7 @@ mod tests {
             body: Handle::default(),
         });
         app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_settings_window)
@@ -1079,6 +1239,29 @@ mod tests {
             settings.graphics.shadow_cascades, MAX_SHADOW_CASCADES,
             "cascade count clamps at the max (no wrap — numeric, not cyclic)"
         );
+    }
+
+    /// Cycling the language wraps and covers every entry in
+    /// [`AVAILABLE_LANGUAGES`] — a real regression target since T56.44 grew
+    /// the list from a single (no-op) entry to two.
+    #[test]
+    fn next_language_cycles_through_every_available_locale() {
+        assert_eq!(next_language("en"), "es");
+        assert_eq!(next_language("es"), "en", "wraps back to the first entry");
+        assert_eq!(
+            next_language("totally-unknown"),
+            "es",
+            "an unrecognised current tag falls back to cycling from the first entry"
+        );
+    }
+
+    /// `language_display_name` shows a locale's OWN native name, and degrades
+    /// to the raw tag (never panics) for one outside `AVAILABLE_LANGUAGES`.
+    #[test]
+    fn language_display_name_uses_native_names_and_degrades_for_unknown_tags() {
+        assert_eq!(language_display_name("en"), "English");
+        assert_eq!(language_display_name("es"), "Español");
+        assert_eq!(language_display_name("xx"), "xx");
     }
 
     /// The crosshair toggle flips the boolean; the sync system drives its
@@ -1179,6 +1362,79 @@ mod tests {
             after.bounds.len(),
             bounds_before,
             "apply_graphics_settings must not reconfigure the live sun's cascade count"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44) — the real end-to-end proof that switching the
+    /// active locale re-localizes an ALREADY-SPAWNED row label live, using the
+    /// real repo `.ftl` catalogs (not a synthetic fixture) via
+    /// `VELOREN_ASSETS`/`XINDELER_ASSETS`. Spawns the window with `en` active,
+    /// confirms the Interface tab's crosshair row shows the English label,
+    /// then flips `CurrentLocale` to `es` and runs the SAME two systems
+    /// `xindeler_ui::XindelerUiPlugin` chains into `LocaleSyncSet`
+    /// (`reload_localization_on_locale_change` then `relocalize_text`) —
+    /// asserting the row's `Text` now reads the REAL Spanish catalog value,
+    /// not the English fallback, proving the hot-swap works against real
+    /// assets. This is the "i18n test passes" verify criterion from the
+    /// EM-5.16 task board (T56.44).
+    #[test]
+    fn switching_locale_relocalizes_an_already_spawned_row_label_live() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<CurrentLocale>();
+
+        app.world_mut()
+            .run_system_once(spawn_settings_window)
+            .expect("spawn runs");
+
+        let world = app.world_mut();
+        let before_text = world
+            .query::<(&LocalizedText, &Text)>()
+            .iter(world)
+            .find(|(tag, _)| tag.0 == "hud-settings-crosshair")
+            .map(|(_, text)| text.0.clone())
+            .expect("the crosshair row label was spawned and tagged");
+        assert_eq!(
+            before_text, "Crosshair",
+            "the crosshair row must show the real en catalog text at spawn time"
+        );
+
+        // Flip the locale and run the SAME reload+relocalize chain
+        // `XindelerUiPlugin` wires into the real app.
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_text)
+            .expect("relocalize runs");
+
+        let world = app.world_mut();
+        let after_text = world
+            .query::<(&LocalizedText, &Text)>()
+            .iter(world)
+            .find(|(tag, _)| tag.0 == "hud-settings-crosshair")
+            .map(|(_, text)| text.0.clone())
+            .expect("the same row still carries its LocalizedText tag");
+        assert_eq!(
+            after_text, "Punto de mira",
+            "must resolve to the REAL es catalog's own hud-settings-crosshair value, not the en \
+             fallback"
+        );
+        assert_ne!(
+            after_text, before_text,
+            "sanity: this assertion is only meaningful if the resolved text actually changed \
+             between locales"
         );
     }
 }

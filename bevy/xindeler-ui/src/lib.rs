@@ -57,7 +57,7 @@ pub mod zlayer;
 
 use bevy::{
     app::{App, Plugin, Startup, Update},
-    ecs::schedule::IntoScheduleConfigs,
+    ecs::schedule::{IntoScheduleConfigs, common_conditions::resource_changed},
 };
 use bevy_ui_widgets::UiWidgetsPlugins;
 
@@ -83,6 +83,16 @@ impl Plugin for XindelerUiPlugin {
         if !app.is_plugin_added::<bevy_ui_widgets::ButtonPlugin>() {
             app.add_plugins(UiWidgetsPlugins);
         }
+        // BL-82 EM-5.16 (T56.44): the i18n seam's own `en`-default catalog +
+        // locale tracker. `Localization` is `NonSend` (see that type's own
+        // doc comment for why); inserted directly here (not via a Startup
+        // system) since `App::insert_non_send` needs `&mut App`, which this
+        // `build` already has.
+        app.insert_non_send(i18n::Localization::load(
+            &i18n::fallback_locale(),
+            i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<i18n::CurrentLocale>();
         app.init_resource::<hud_state::HudState>()
             .add_message::<hud_state::HudAction>()
             .init_resource::<notification::NotificationQueue>()
@@ -108,7 +118,12 @@ impl Plugin for XindelerUiPlugin {
                     bar::update_bars,
                     bar::update_orb_bars,
                     bar::update_horizontal_image_bars,
-                    button::spawn_button_labels,
+                    // BL-82 EM-5.16 (T56.44): ordered AFTER `LocaleSyncSet` so
+                    // a `HudButtonLabel` a locale hot-swap just rewrote (via
+                    // `i18n::relocalize_button_labels`) propagates onto the
+                    // button's real `Text` child in the SAME frame, not one
+                    // frame late.
+                    button::spawn_button_labels.after(i18n::LocaleSyncSet),
                     button::update_button_visuals,
                     button::update_image_button_visuals,
                     tooltip::update_tooltip,
@@ -119,6 +134,23 @@ impl Plugin for XindelerUiPlugin {
                     // here rather than per-screen).
                     hud_state::apply_hud_actions,
                 ),
+            )
+            // BL-82 EM-5.16 (T56.44): the reactive i18n hot-swap chain —
+            // reload the `Localization` bundle for `CurrentLocale`'s new tag,
+            // then re-resolve every tagged `LocalizedText`/`LocalizedLabel`
+            // entity, all gated on `CurrentLocale` actually changing (see
+            // `i18n`'s own module doc for the full flow + who's responsible
+            // for changing `CurrentLocale` in the first place).
+            .add_systems(
+                Update,
+                (
+                    i18n::reload_localization_on_locale_change,
+                    i18n::relocalize_text,
+                    i18n::relocalize_button_labels,
+                )
+                    .chain()
+                    .in_set(i18n::LocaleSyncSet)
+                    .run_if(resource_changed::<i18n::CurrentLocale>),
             );
         // BL-82 EM-5.3/EM-5.6: the drag-drop slot primitive's global
         // drag/drop observers + its `SlotDropped` message — not per-entity,

@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 
-use bevy::prelude::*;
+use bevy::{ecs::change_detection::NonSend, prelude::*};
 use xindeler_app::XindelerSettings;
 use xindeler_input::{
     ActionState, GameInput, GamepadBinding, KeyMap, KeyOrMouse, RebindOutcome, RebindRequest,
@@ -37,6 +37,7 @@ use xindeler_input::{
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{Localization, LocalizedText},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -193,6 +194,7 @@ fn spawn_controls_screen(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     keymap: Res<KeyMap>,
+    localization: NonSend<Localization>,
 ) {
     // `HudTheme` is `Copy` — an owned value here (rather than the `Res`
     // borrow) is what lets `and_modify`'s closure below capture it `move`
@@ -234,8 +236,17 @@ fn spawn_controls_screen(
                 node.overflow = Overflow::clip_y();
             });
             panel_entity.with_children(|panel| {
+                // BL-82 EM-5.16 (T56.44): resolved through the active locale
+                // and tagged `LocalizedText` so it re-localizes live; reuses
+                // `common-controls` (the same key the settings window's own
+                // Controls tab button and the esc menu's Controls button
+                // resolve), not a new one. The per-action row labels below
+                // (`display_name`) still hardcode English — porting those
+                // needs a real `.ftl` key per `GameInput` variant, a larger
+                // follow-up tracked in the PR description, not done here.
                 panel.spawn((
-                    Text("Controls".to_owned()),
+                    LocalizedText("common-controls"),
+                    Text(localization.tr("common-controls")),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.title.clone()),
                         font_size: bevy::text::FontSize::Px(28.0),
@@ -497,6 +508,10 @@ mod tests {
             body: Handle::default(),
         });
         app.insert_resource(KeyMap::default());
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &[],
+        ));
 
         app.world_mut()
             .run_system_once(spawn_controls_screen)

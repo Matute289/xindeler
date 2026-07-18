@@ -144,6 +144,13 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     }),
     // esc_menu.rs
     ("EscMenuRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
+    // settings_window.rs — pre-existing gap found by this audit while
+    // working on BL-82 EM-5.16 (T56.44); `SettingsWindowRoot` (EM-5.12,
+    // `spawn_settings_window`) was never registered here at all, unrelated to
+    // the i18n work itself. Fixed as a drive-by, same class of miss
+    // `zlayer_audit.rs`'s own history (16 missing entries, PR #171) already
+    // documents.
+    ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // inventory_ui.rs
     ("InventoryWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     ("BagGridRoot", RootKind::NestedChild {

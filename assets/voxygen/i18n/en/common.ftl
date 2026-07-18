@@ -29,6 +29,11 @@ common-characters = Characters
 common-close = Close
 common-yes = Yes
 common-no = No
+## BL-82 EM-5.16 (T56.44): a generic boolean-toggle label pair (settings
+## window toggles use this, not common-yes/common-no — "On/Off" reads better
+## for a switch than "Yes/No").
+common-on = On
+common-off = Off
 common-back = Back
 common-create = Create
 common-okay = OK
