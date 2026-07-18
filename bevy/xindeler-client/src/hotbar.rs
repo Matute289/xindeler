@@ -13,17 +13,33 @@
 //! full rationale; [`spawn_slot_row_half`] is now a bare transparent flex
 //! container instead of an `ImageNode`-backed piece.
 //!
-//! ## Slot count — 10 HOLDERS always rendered, 5+5 split (BL-82 EM-5.17
-//! ## Phase 3: "5+5 slot-holders" follow-up)
+//! ## BL-82 HUD overhaul (this pass) — 2×3 grid per side, 12 slots, shrunk
+//! Three coupled changes on Matías's ask (he explicitly wanted an Opus-level
+//! plan given the scope), superseding the "5+5 flat row" scheme documented
+//! below (kept for the still-relevant machinery it explains):
+//! 1. **Empty-slot stone cue, not a black box.** Round 7's opaque near-black
+//!    full-box [`SkillSlotBackground`] plate is gone (Matías found it too
+//!    heavy); slots are transparent again (terrain through the ring notches is
+//!    now acceptable), and only the EMPTY state carries a grey-stone centre cue
+//!    — see [`SkillSlotBackground`]/[`sync_empty_slot_backgrounds`].
+//! 2. **Substantially smaller cluster.** [`SLOT_SIZE_PX`] `58 -> 42` and
+//!    `hud_layout::ORB_SIZE_PX` `160 -> 112`, bringing the whole bottom-centre
+//!    cluster closer to Veloren's thin bottom strip (the minimap is untouched).
+//! 3. **2×3 grid per side, 12 slots.** Each half is a
+//!    [`SLOT_COLS_PER_HALF`]×[`SLOT_ROWS_PER_HALF`] grid (6 slots), 12 total,
+//!    keyed per Matías's exact map — see [`SLOT_INPUTS`].
+//!
+//! ## Slot count — HOLDERS always rendered, split evenly (BL-82 EM-5.17
+//! ## Phase 3: "5+5 slot-holders" follow-up; now 6+6 per the overhaul above)
 //! Matías's original ask (under-scoped by the Phase 0/2 bugfixes above, which
-//! only fixed rendering bugs without changing the *count*): the hotbar
-//! must show 5 skill-holder slots on the LEFT half and 5 on the
-//! RIGHT (10 total), one per drag-drop ability-slot address — 10
-//! independently rebindable slots regardless of which `GameInput` labels
-//! each one shows (see the "Keybind LABELS" section below for the round-3
-//! numbering scheme; `Primary`/`Secondary` i.e. M1/M2 as a SEPARATE pair of
-//! fixed, non-draggable indicators are unrelated — see below — not part of
-//! this 10).
+//! only fixed rendering bugs without changing the *count*): the hotbar must
+//! show a full grid of skill-holder slots on each half — now
+//! [`SLOTS_PER_HALF`] on the LEFT and [`SLOTS_PER_HALF`] on the RIGHT
+//! ([`HOTBAR_SLOT_COUNT`] total), one per drag-drop ability-slot address, each
+//! independently rebindable regardless of which `GameInput` labels it shows
+//! (see the "Keybind LABELS" section below; `Primary`/`Secondary` i.e. M1/M2
+//! as a SEPARATE pair of fixed, non-draggable indicators are unrelated — see
+//! below).
 //!
 //! [`HOTBAR_SLOT_COUNT`] slot HOLDERS are now spawned UNCONDITIONALLY,
 //! independent of `xindeler_protocol::NetAbilities::slots.len()` — which is
@@ -40,50 +56,44 @@
 //! `ChangeAbilityEvent` handler (`common::comp::ability::ActiveAbilities::
 //! change_ability`, via `Vec::get_mut`) silently no-ops for any slot index
 //! `>= limit`, so a drop onto a placeholder simply does nothing server-side,
-//! not a crash or a mis-bind. This reserves the full 10-slot visual budget
+//! not a crash or a mis-bind. This reserves the full 12-slot visual budget
 //! today and needs no further client change the day a game-design lever
 //! (skill tree, class perk, etc.) raises `ActiveAbilities::limit` past 5 —
 //! the newly-real slots just start showing content, the layout already fits
 //! them.
 //!
 //! [`sync_slot_half_parenting`] splits the FIXED [`HOTBAR_SLOT_COUNT`] (not
-//! the sim-reported count) via `div_ceil(2)`, so it is always an exact 5/5 —
-//! previously, with only `abilities.slots.len()` (5) entities existing, the
-//! same `div_ceil` math gave an uneven 3/2 split (`ceil(5/2) == 3`), which is
-//! the literal bug this phase fixes.
+//! the sim-reported count) via `div_ceil(2)`, so it is always an exact even
+//! split ([`SLOTS_PER_HALF`] each side) — previously, with only
+//! `abilities.slots.len()` entities existing, the same `div_ceil` math gave an
+//! uneven split, which is the literal bug the "5+5 slot-holders" phase fixed.
 //!
 //! M1/M2 (primary/secondary) remain separate, non-draggable indicators — the
 //! sim's `PrimaryAbility`/`SecondaryAbility` are fixed to "whatever's
 //! wielded", not user-rebindable, so there is no slot address for them; this
 //! phase does not touch [`sync_primary_secondary_indicators`].
 //!
-//! ## Keybind LABELS — 1-8 across both halves + mouse for the last two (BL-82
-//! ## HUD polish round 3, issue 4)
-//! [`SLOT_INPUTS`] used to be a straight `Slot1..Slot10` run (one numbered
-//! keybind label per holder). Matías's `captura2.png` review asked for 1-8
-//! spanning BOTH halves combined, with the rightmost 2 holders (the last 2 of
-//! the RIGHT half) showing the LEFT/RIGHT mouse buttons instead of 9/10 —
-//! reusing `xindeler_input::GameInput::Primary`/`Secondary` (already bound to
-//! `MouseButton::Left`/`Right` by default, `keybind.rs::default_binding`) for
-//! the LABEL only, same as every other slot. This is a pure relabelling: no
-//! new input plumbing, since nothing today actually triggers a hotbar slot
-//! FROM a `GameInput` press (that wiring is a documented future step —
-//! [`SLOT_INPUTS`] only ever feeds [`sync_keybind_labels`]'s keymap lookup,
-//! never an activation path), so reusing `Primary`/`Secondary` here can't
-//! double-fire against the separate M1/M2 indicators above (those read the
-//! WIELDED weapon's ability id, not this array).
+//! ## Keybind LABELS — Matías's exact 2×3 map (BL-82 HUD overhaul)
+//! [`SLOT_INPUTS`] maps each slot index (row-major within each half) to the
+//! `GameInput` whose live binding its badge shows. The overhaul (this pass)
+//! fixes the map to Matías's exact spec — left block `1,2,3 / 4,5,6`, right
+//! block `7,8,LMB / 9,0,RMB` — so the two mouse buttons
+//! (`GameInput::Primary`/`Secondary`) now sit at indices `8`/`11` (rightmost
+//! column of each right-block row), not the trailing two. The numbers come
+//! from the live [`KeyMap`] (`Slot1..Slot9` -> `1..9`, `Slot10` -> `0`, which
+//! this pass rebinds onto `Digit0` in `keybind.rs` so the badge is truthful).
+//! This stays a pure LABEL map: nothing today triggers a hotbar slot FROM a
+//! `GameInput` press (documented future step — [`SLOT_INPUTS`] only feeds
+//! [`sync_keybind_labels`]'s keymap lookup), so reusing `Primary`/`Secondary`
+//! here can't double-fire against the separate M1/M2 indicators (those read
+//! the WIELDED weapon's ability id, not this array).
 //!
-//! BL-82 HUD polish round 4 (issue 4): round 3's `"LMB"`/`"RMB"` TEXT (via
-//! `key_label`) for those same last two holders is now a real
-//! [`HotbarKeybindIcon`] `ImageNode` instead — Matías's own dedicated
-//! `mouse_click_left.png`/`mouse_click_right.png` art (a dark mouse
-//! silhouette with the relevant button highlighted gold, matching the
-//! HUD-D4 pack's style). This is STILL a pure display swap: indices 8/9 keep
-//! reusing [`GameInput::Primary`]/[`GameInput::Secondary`] purely to select
-//! WHICH icon to show ([`sync_hotbar_slots`]'s spawn-time `match`), not to
-//! resync a live binding — see [`HotbarKeybindIcon`]'s own doc comment for
-//! why this icon (unlike the numbered text labels) never needs
-//! [`sync_keybind_labels`] to touch it again after spawn.
+//! The two mouse-button holders render Matías's dedicated
+//! `mouse_click_left.png`/`mouse_click_right.png` art (a real
+//! [`HotbarKeybindIcon`] `ImageNode`, not `"LMB"`/`"RMB"` text) — the
+//! `Primary`/`Secondary` entries select WHICH icon to show
+//! ([`sync_hotbar_slots`]'s spawn-time `match`), never resynced from a live
+//! rebind (see [`HotbarKeybindIcon`]'s own doc comment).
 //!
 //! ## Real drag-to-assign, todays scope
 //! The `xindeler-ui::slot` drag-drop primitive is wired end-to-end: dragging
@@ -214,12 +224,17 @@ const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 /// BL-82 HUD redesign round 6: that background image
 /// (`action_bar_bg_left.png`/`_right.png`) is gone — see `hud_layout.rs`'s own
 /// top-of-file doc comment — so there is no longer any fit-inside-the-frame
-/// constraint driving this value; kept at `58.0` unchanged, since Matías's
-/// `hud-ejemplo-2.png` reference shows icons roughly this size relative to
-/// the orbs. [`hud_layout::SLOT_ROW_WIDTH_PX`] now derives the row
-/// container's own width straight from this constant instead of the row
-/// needing to fit inside a separately-sized box.
-pub(crate) const SLOT_SIZE_PX: f32 = 58.0;
+/// constraint driving this value.
+///
+/// BL-82 HUD overhaul (this pass): shrunk `58.0 -> 42.0` as part of Matías's
+/// "make the whole bottom-centre cluster substantially smaller, closer to
+/// Veloren's thin bottom strip" ask (goal #2) — the orbs shrink in lockstep
+/// (`hud_layout::ORB_SIZE_PX` `160 -> 112`). Going from a 1×5 row per side to a
+/// 2×3 grid per side (goal #3) already narrows each side's footprint on its
+/// own; the smaller per-slot size compounds that. [`hud_layout::
+/// SLOT_ROW_WIDTH_PX`] derives the grid's own width straight from this
+/// constant and [`SLOT_COLS_PER_HALF`].
+pub(crate) const SLOT_SIZE_PX: f32 = 42.0;
 
 /// BL-82 HUD redesign round 6: the gap (px) between adjacent hotbar slots
 /// within one slot row. History: `4.0` (theme's generic `HudSpacing::xs`) ->
@@ -238,11 +253,19 @@ pub(crate) const SLOT_SIZE_PX: f32 = 58.0;
 /// is the natural tightest packing, matching the reference exactly.
 pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 0.0;
 
-/// Number of ability-slot HOLDERS rendered per action-bar half (BL-82
-/// EM-5.17 "5+5 slot-holders" follow-up) — Matías's explicit ask: 5 on the
-/// left piece, 5 on the right, 10 total, regardless of how many of them the
-/// sim currently populates with real content (see the module doc comment).
-pub(crate) const SLOTS_PER_HALF: usize = 5;
+/// BL-82 HUD overhaul (this pass): the ability-slot grid is now a 2-ROW × 3-
+/// COLUMN block per side (Matías's goal #3), up from the previous flat 1×5 row.
+/// [`SLOT_COLS_PER_HALF`] columns wide, [`SLOT_ROWS_PER_HALF`] rows tall.
+pub(crate) const SLOT_COLS_PER_HALF: usize = 3;
+/// See [`SLOT_COLS_PER_HALF`].
+pub(crate) const SLOT_ROWS_PER_HALF: usize = 2;
+
+/// Number of ability-slot HOLDERS rendered per action-bar half — now a
+/// [`SLOT_COLS_PER_HALF`]×[`SLOT_ROWS_PER_HALF`] grid (`3*2 == 6`), up from the
+/// old flat `5`. 6 on the left block, 6 on the right, 12 total, regardless of
+/// how many of them the sim currently populates with real content (see the
+/// module doc comment).
+pub(crate) const SLOTS_PER_HALF: usize = SLOT_COLS_PER_HALF * SLOT_ROWS_PER_HALF;
 
 /// Total slot holders always rendered — matches [`SLOT_INPUTS`]'s length and
 /// is asserted equal to it in
@@ -254,24 +277,43 @@ const HOTBAR_SLOT_COUNT: usize = SLOTS_PER_HALF * 2;
 /// holder shows a keybind glyph, not just the ones the sim currently
 /// populates with content.
 ///
-/// BL-82 HUD polish round 3 (issue 4): the first 8 (indices `0..8`, spanning
-/// BOTH halves — `Slot1..Slot5` in the left half, `Slot6..Slot8` in the first
-/// 3 of the right half) show plain numbers `1..8`; the LAST TWO holders
-/// (indices `8`/`9`, the trailing 2 slots of the right half) show
-/// `Primary`/`Secondary` instead of `Slot9`/`Slot10` — [`key_label`] already
-/// renders those as `"LMB"`/`"RMB"` (their default bindings, `keybind.rs`'s
-/// `default_binding`), so no display-layer change was needed beyond swapping
-/// which `GameInput` this array names for those two indices.
-const SLOT_INPUTS: [GameInput; 10] = [
+/// BL-82 HUD overhaul (this pass): with the grid now 2×3 per side and 12 slots
+/// total, Matías specified this EXACT keybind-to-position map. Slot indices run
+/// row-major within each half (the same order the grid auto-flows its
+/// children), so index -> grid cell is:
+///
+/// ```text
+///   LEFT half (indices 0..6)      RIGHT half (indices 6..12)
+///   row 1:  [1] [2] [3]           row 1:  [7] [8] [LMB]
+///   row 2:  [4] [5] [6]           row 2:  [9] [0] [RMB]
+/// ```
+///
+/// So the two mouse buttons ([`GameInput::Primary`]/[`GameInput::Secondary`],
+/// rendered as the `mouse_click_left`/`_right` icons — see the match in
+/// [`sync_hotbar_slots`]) sit at indices `8` and `11` (right block, rightmost
+/// column of each row), NOT the trailing two indices as in the old flat-row
+/// scheme. The number labels come straight from the live [`KeyMap`]: `Slot1..
+/// Slot9` -> `1..9` and `Slot10` -> `0` (this pass rebound `Slot10` from `KeyQ`
+/// onto `Digit0`, `keybind.rs`, so the `0` badge is truthful). This stays a
+/// pure LABEL/position map — nothing today triggers a slot FROM a `GameInput`
+/// press (documented future step), so reusing `Primary`/`Secondary` here can't
+/// double-fire against the separate M1/M2 indicators.
+const SLOT_INPUTS: [GameInput; 12] = [
+    // Left block, row 1: keys 1, 2, 3.
     GameInput::Slot1,
     GameInput::Slot2,
     GameInput::Slot3,
+    // Left block, row 2: keys 4, 5, 6.
     GameInput::Slot4,
     GameInput::Slot5,
     GameInput::Slot6,
+    // Right block, row 1: keys 7, 8, LMB.
     GameInput::Slot7,
     GameInput::Slot8,
     GameInput::Primary,
+    // Right block, row 2: keys 9, 0, RMB.
+    GameInput::Slot9,
+    GameInput::Slot10,
     GameInput::Secondary,
 ];
 
@@ -311,6 +353,7 @@ impl Plugin for HotbarViewPlugin {
                 (
                     sync_hotbar_slots,
                     sync_slot_half_parenting.after(sync_hotbar_slots),
+                    sync_empty_slot_backgrounds.after(sync_hotbar_slots),
                     sync_primary_secondary_indicators,
                     sync_keybind_labels,
                     sync_cooldown_overlays.after(sync_hotbar_slots),
@@ -347,28 +390,29 @@ struct HotbarRightHalf;
 /// what forces this ordering choice.
 #[derive(Component)]
 struct SkillSlotBorderOverlay;
-/// Marks a per-slot opaque dark fill child (BL-82 HUD polish round 7) —
-/// spawned as the VERY FIRST child of a slot (under [`SkillSlotBorderOverlay`]
-/// and everything else in draw order) so it reads as the slot's solid
-/// background plate. This is the flush-look fix for Matías's `captura11.png`
-/// "visible gap between skill slots" report (7th round on that same
-/// complaint): `skill_slot_border.png` is an ornate gothic ring whose opaque
-/// silhouette fills only ~50% of its own bounding box and reaches its box
-/// edge on merely ~2% of each edge (median 31px inset, measured by
-/// alpha-channel scan) — so two adjacent slot frames NEVER touch regardless
-/// of how tight [`hud_layout::SKILL_SLOT_BORDER_SOURCE_CROP`] is (round 5
-/// already cropped to the true opaque bbox) or how small
-/// [`HOTBAR_SLOT_GAP_PX`] is (round 6 already set it to `0.0`); the game
-/// world showed straight through every concave notch AND the transparent
-/// centre, which is the residual "gap" no crop/gap tuning could ever close
-/// because it is intrinsic to the asset's silhouette, not a measurement
-/// error. Filling the whole square slot box with [`HudTheme::palette`]'s
-/// opaque near-black `slot_bg` first makes adjacent slot boxes touch flush
-/// and turns every notch/centre into continuous dark instead of grass —
-/// exactly how `hud-ejemplo-2.png`'s reference slots (solid dark squares
-/// with a thin frame) read flush. The ornate frame then sits ON TOP as pure
-/// decoration; its outward corner-skulls/edge-spikes still overlap slightly
-/// at each seam, reading as ornate dividers rather than gaps.
+/// Marks a per-slot "empty socket" stone cue child (BL-82 HUD overhaul, goal
+/// #1) — spawned as the VERY FIRST child of a slot (under
+/// [`SkillSlotBorderOverlay`] and everything else in draw order) so it reads
+/// UNDER the ornate frame ring.
+///
+/// This REPLACES round 7's opaque near-black full-box `slot_bg` plate. Round 7
+/// filled the whole slot box opaque so adjacent frames read flush against the
+/// terrain — but Matías found the resulting solid black boxes too heavy and
+/// asked (goal #1) for transparent slots back (terrain showing through the
+/// ring's concave notches is now acceptable), keeping only a grey STONE
+/// treatment on the specifically-EMPTY slot state so "is this slot empty?"
+/// still reads at a glance. So this child now:
+/// - fills only the ring's CENTRE hole ([`EMPTY_SLOT_STONE_INSET_PX`] inset on
+///   every side), NOT the full box — the outer band stays clear so the frame's
+///   own notches remain see-through;
+/// - uses [`HudTheme::palette`]'s partially-translucent mid-grey
+///   `slot_empty_stone` (not near-black), with rounded corners echoing the
+///   ring's inner circle;
+/// - is TOGGLED by [`sync_empty_slot_backgrounds`] — shown (`Display::Flex`)
+///   only while the slot holds no ability, hidden (`Display::None`) once it is
+///   filled (the icon then occupies the centre instead). It spawns hidden and
+///   the toggle system reveals it for empty slots, so a filled slot never
+///   flashes a stone cue on the first frame.
 #[derive(Component)]
 struct SkillSlotBackground;
 #[derive(Component)]
@@ -381,7 +425,7 @@ struct HotbarSecondaryText;
 #[derive(Component)]
 struct HotbarKeybindLabel(GameInput);
 /// BL-82 HUD polish round 4 (issue 4) — marks the small `ImageNode` child a
-/// mouse-click-icon holder (index 8/9, `GameInput::Primary`/`Secondary`)
+/// mouse-click-icon holder (indices 8/11, `GameInput::Primary`/`Secondary`)
 /// carries INSTEAD OF a [`HotbarKeybindLabel`]. Unlike the numbered text
 /// labels, this icon is a STATIC replacement for the old `"LMB"`/`"RMB"`
 /// glyph (`key_label`'s own rendering of those two bindings) — it never
@@ -402,7 +446,21 @@ struct HotbarCooldownText;
 /// keybind badge sitting in each slot's bottom-left corner — Matías's
 /// `skill-slots-1.png` reference shows each slot's keybind indicator as a
 /// distinct chip rather than bare unadorned text floating over the slot art.
-pub(crate) const KEYBIND_BADGE_SIZE_PX: f32 = 20.0;
+///
+/// BL-82 HUD overhaul: shrunk `20.0 -> 16.0` in step with the smaller
+/// [`SLOT_SIZE_PX`] (`58 -> 42`), so the badge keeps roughly the same share of
+/// the slot it labels.
+pub(crate) const KEYBIND_BADGE_SIZE_PX: f32 = 16.0;
+
+/// BL-82 HUD overhaul (goal #1): inset (px) from each edge of a slot's box to
+/// the [`SkillSlotBackground`] "empty" stone cue, so the cue sits only in the
+/// ring's CENTRE hole rather than filling the whole box. Keeping the box's
+/// outer band clear leaves the ornate `skill_slot_border.png` frame's own
+/// concave notches see-through (terrain shows through — Matías now accepts
+/// this), reverting round 7's heavy full-box black plate while still giving
+/// empty slots a clear grey-stone "socket" read. `~29%` of [`SLOT_SIZE_PX`] on
+/// each side leaves a centred square roughly matching the ring's inner opening.
+pub(crate) const EMPTY_SLOT_STONE_INSET_PX: f32 = 12.0;
 
 /// Distance (px) from the slot's own bottom/left edges to the badge's
 /// bottom/left edges (BL-82 HUD polish round 4, issue 3).
@@ -438,7 +496,7 @@ fn keybind_badge_bundle(theme: &HudTheme) -> impl Bundle {
 }
 
 /// BL-82 HUD polish round 4 (issue 4): the mouse-click-icon bundle a keybind
-/// badge's child carries for index 8/9 (`GameInput::Primary`/`Secondary`)
+/// badge's child carries for indices 8/11 (`GameInput::Primary`/`Secondary`)
 /// instead of a [`HotbarKeybindLabel`] text node — a small square `ImageNode`
 /// (a few px smaller than the badge itself, so the badge's own circular
 /// border/background still reads as a rim around it) showing the real
@@ -494,19 +552,26 @@ fn short_glyph(ability_id: &str) -> String {
 /// Rounds 3-5 (preserved in git history/this module's changelog-style doc
 /// comments elsewhere) spent significant effort getting the ornate
 /// `action_bar_bg_left.png`/`action_bar_bg_right.png` background pieces to
-/// size/crop/align well around the slots — this round removes that art from
+/// size/crop/align well around the slots — that round removed that art from
 /// the render path entirely (Matías's `hud-ejemplo-2.png` reference has no
-/// frame art around its ability icons at all), so this function no longer
-/// takes an image handle, `bottom_pad_px`, or a leading-inset padding: it's
-/// just a plain transparent absolutely-positioned flex-row container, sized
-/// to EXACTLY [`hud_layout::SLOT_ROW_WIDTH_PX`]×[`hud_layout::
-/// SLOT_ROW_HEIGHT_PX`] (derived straight from the slot geometry — see that
-/// constant's own doc comment), with its slots vertically centred via
-/// `align_items: AlignItems::Center` and horizontally packed at
-/// [`HOTBAR_SLOT_GAP_PX`] apart. `justify_content` no longer matters (kept as
-/// `FlexStart` for parity with the old left-anchored behaviour) since the
-/// container's own width now equals its content's width exactly — there is
-/// no leftover slack for `Center` vs `FlexStart` to disagree about.
+/// frame art around its ability icons at all), so this function takes no image
+/// handle/`bottom_pad_px`/leading inset: it's a plain transparent
+/// absolutely-positioned container, sized to EXACTLY [`hud_layout::
+/// SLOT_ROW_WIDTH_PX`]×[`hud_layout::SLOT_ROW_HEIGHT_PX`] (derived straight
+/// from the slot geometry — see that constant's own doc comment).
+///
+/// ## BL-82 HUD overhaul — 2×3 grid, not a flat 1×5 row (goal #3)
+/// Each half is now a [`Display::Grid`] of [`SLOT_COLS_PER_HALF`] columns ×
+/// [`SLOT_ROWS_PER_HALF`] rows of [`SLOT_SIZE_PX`] cells,
+/// [`HOTBAR_SLOT_GAP_PX`] apart. The [`SLOTS_PER_HALF`] slot entities this
+/// half receives (via [`sync_slot_half_parenting`]) auto-flow into those cells
+/// row-major in child order — which is exactly the index order [`SLOT_INPUTS`]
+/// assigns keybinds in, so index `0,1,2` land in the top row and `3,4,5` in the
+/// bottom row (left block: keys `1,2,3 / 4,5,6`; right block: `7,8,LMB /
+/// 9,0,RMB`). The container's own box is `SLOT_ROW_HEIGHT_PX` (`==
+/// ORB_SIZE_PX`) tall — taller than the 2 slot rows — so `align_content:
+/// Center` centres the grid vertically within the orbs' own band, the same way
+/// the old `align_items: Center` centred the single row.
 fn spawn_slot_row_half(commands: &mut Commands, left_offset_px: f32) -> Entity {
     commands
         .spawn((GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP), Node {
@@ -516,10 +581,19 @@ fn spawn_slot_row_half(commands: &mut Commands, left_offset_px: f32) -> Entity {
             margin: UiRect::left(Val::Px(left_offset_px)),
             width: Val::Px(hud_layout::SLOT_ROW_WIDTH_PX),
             height: Val::Px(hud_layout::SLOT_ROW_HEIGHT_PX),
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::FlexStart,
-            align_items: AlignItems::Center,
+            display: Display::Grid,
+            grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(
+                SLOT_COLS_PER_HALF,
+                SLOT_SIZE_PX,
+            )],
+            grid_template_rows: vec![bevy::ui::RepeatedGridTrack::px(
+                SLOT_ROWS_PER_HALF,
+                SLOT_SIZE_PX,
+            )],
+            align_content: AlignContent::Center,
+            justify_content: JustifyContent::Center,
             column_gap: Val::Px(HOTBAR_SLOT_GAP_PX),
+            row_gap: Val::Px(HOTBAR_SLOT_GAP_PX),
             ..Default::default()
         }))
         .id()
@@ -664,39 +738,35 @@ fn sync_hotbar_slots(
             ChromelessSlot,
         ));
         commands.entity(slot_entity).with_children(|parent| {
-            // BL-82 HUD polish round 7 (Matías's `captura11.png` "visible gap
-            // between skill slots", 7th round on that complaint): an opaque
-            // dark fill spanning the WHOLE slot box, spawned as the VERY FIRST
-            // child so it renders at the very bottom (under the ornate frame,
-            // the keybind badge, the cooldown veil and the icon glyph). This
-            // is the actual flush-look fix — see `SkillSlotBackground`'s own
-            // doc comment for the alpha-scan evidence that the ornate frame
-            // asset can never tile flush by itself (it fills only ~50% of its
-            // bbox and reaches its edge on ~2% of each side), so neither the
-            // round-5 crop nor the round-6 `HOTBAR_SLOT_GAP_PX = 0.0` could
-            // close the gap; a solid dark background behind every slot (the
-            // way `hud-ejemplo-2.png`'s reference achieves flush) makes the
-            // slot boxes touch and stops the game world showing through the
-            // frame's concave notches and transparent centre.
-            // Inset by `-SLOT_BORDER_PX` on every side and sized to the FULL
-            // `SLOT_SIZE_PX` (not `Percent(100.0)`, which resolves to the
-            // slot's PADDING box — inside its 2px border — and would leave a
-            // `2*SLOT_BORDER_PX = 4px` transparent channel between adjacent
-            // slots' fills that still showed the game world through, measured
-            // directly on the round-7 live smoke render). Covering the whole
-            // border box instead makes adjacent slot fills touch flush at
-            // `HOTBAR_SLOT_GAP_PX = 0.0`, with no green sliver between them.
+            // BL-82 HUD overhaul (goal #1): the "empty socket" stone cue — a
+            // grey, partially-translucent, rounded fill inset to the ring's
+            // CENTRE hole ([`EMPTY_SLOT_STONE_INSET_PX`] on every side), spawned
+            // as the VERY FIRST child so it renders under the ornate frame, the
+            // keybind badge, the cooldown veil and the icon glyph. This
+            // REPLACES round 7's opaque near-black full-box fill (Matías found
+            // those solid black boxes too heavy; he now accepts terrain showing
+            // through the frame's own notches). Spawned `Display::None` and
+            // revealed only for EMPTY slots by `sync_empty_slot_backgrounds`
+            // (so a filled slot never flashes a stone cue) — see
+            // `SkillSlotBackground`'s own doc comment. Rounded corners echo the
+            // ring's inner circle; the outer band stays clear so the frame's
+            // concave notches remain see-through.
             parent.spawn((
                 SkillSlotBackground,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(-SLOT_BORDER_PX),
-                    left: Val::Px(-SLOT_BORDER_PX),
-                    width: Val::Px(SLOT_SIZE_PX),
-                    height: Val::Px(SLOT_SIZE_PX),
+                    display: Display::None,
+                    top: Val::Px(EMPTY_SLOT_STONE_INSET_PX - SLOT_BORDER_PX),
+                    left: Val::Px(EMPTY_SLOT_STONE_INSET_PX - SLOT_BORDER_PX),
+                    width: Val::Px(SLOT_SIZE_PX - 2.0 * EMPTY_SLOT_STONE_INSET_PX),
+                    height: Val::Px(SLOT_SIZE_PX - 2.0 * EMPTY_SLOT_STONE_INSET_PX),
+                    // Rounded corners echo the ring's inner circle.
+                    border_radius: BorderRadius::all(Val::Px(
+                        (SLOT_SIZE_PX - 2.0 * EMPTY_SLOT_STONE_INSET_PX) / 4.0,
+                    )),
                     ..Default::default()
                 },
-                BackgroundColor(theme.palette.slot_bg),
+                BackgroundColor(theme.palette.slot_empty_stone),
                 bevy::picking::Pickable::IGNORE,
             ));
             // BL-82 EM-5.17 Phase 2: `skill_slot_border.png` overlay — spawned
@@ -737,11 +807,11 @@ fn sync_hotbar_slots(
             // (previously a bare top-left text label with no background
             // chip) — see `keybind_badge_bundle`'s own doc comment.
             //
-            // BL-82 HUD polish round 4 (issue 4): the last two holders
-            // (`GameInput::Primary`/`Secondary`) show a dedicated mouse-click
-            // ICON inside that same badge instead of the `"LMB"`/`"RMB"` text
-            // `key_label` used to render — see `HotbarKeybindIcon`'s own doc
-            // comment.
+            // BL-82 HUD polish round 4 (issue 4): the two mouse-button holders
+            // (`GameInput::Primary`/`Secondary`, indices 8/11 in the 2×3 map)
+            // show a dedicated mouse-click ICON inside that same badge instead
+            // of the `"LMB"`/`"RMB"` text `key_label` used to render — see
+            // `HotbarKeybindIcon`'s own doc comment.
             match SLOT_INPUTS.get(index).copied() {
                 Some(GameInput::Primary) => {
                     parent
@@ -943,6 +1013,49 @@ fn sync_slot_half_parenting(
     for (index, &slot_entity) in slot_entities.0.iter().enumerate() {
         let target = if index < mid { left_half } else { right_half };
         commands.entity(target).add_child(slot_entity);
+    }
+}
+
+/// BL-82 HUD overhaul (goal #1): shows each slot's [`SkillSlotBackground`]
+/// grey-stone "empty socket" cue (`Display::Flex`) only while the slot holds no
+/// ability, and hides it (`Display::None`) once the slot is filled — the icon
+/// glyph then occupies the centre instead. "Empty" is read straight off the
+/// slot's own [`SlotContents::icon_text`] (blank for both an out-of-range
+/// placeholder holder AND an in-range-but-unassigned slot — see
+/// [`sync_hotbar_slots`]), the same signal every other empty-slot behaviour in
+/// this module keys off. Runs AFTER [`sync_hotbar_slots`] so it sees the
+/// current frame's content; diffs before writing so a settled slot doesn't
+/// churn its `Node` every frame. A freshly-spawned slot isn't visible to the
+/// `contents`/`children_of` queries until the next frame (the same command-
+/// queue lag [`sync_hotbar_slots`]'s own `old_len` split documents) — it stays
+/// at the spawned `Display::None` default for that one frame, which is correct:
+/// a filled slot must never flash a stone cue, and an empty slot appearing one
+/// frame late at startup is imperceptible.
+fn sync_empty_slot_backgrounds(
+    slot_entities: Res<HotbarSlotEntities>,
+    contents: Query<&SlotContents>,
+    children_of: Query<&Children>,
+    mut backgrounds: Query<&mut Node, With<SkillSlotBackground>>,
+) {
+    for &entity in &slot_entities.0 {
+        let Ok(slot_contents) = contents.get(entity) else {
+            continue;
+        };
+        let target = if slot_contents.icon_text.is_empty() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        let Ok(children) = children_of.get(entity) else {
+            continue;
+        };
+        for child in children.iter() {
+            if let Ok(mut node) = backgrounds.get_mut(child)
+                && node.display != target
+            {
+                node.display = target;
+            }
+        }
     }
 }
 
@@ -1229,7 +1342,7 @@ mod tests {
         assert_eq!(
             slot_entities.0.len(),
             HOTBAR_SLOT_COUNT,
-            "must always spawn the fixed 10-holder budget, not just the mirror's 3 real slots"
+            "must always spawn the fixed 12-holder budget, not just the mirror's 3 real slots"
         );
 
         let world = app.world();
@@ -1266,25 +1379,31 @@ mod tests {
         assert_eq!(HOTBAR_SLOT_COUNT, SLOTS_PER_HALF * 2);
     }
 
-    /// BL-82 HUD polish round 3 (issue 4): the first 8 slot holders are
-    /// labelled `Slot1..Slot8` (numbers `1..8`, spanning both halves) and the
-    /// LAST TWO (the trailing 2 of the right half) are `Primary`/`Secondary`
-    /// (mouse LMB/RMB) — not `Slot9`/`Slot10`. Regression guard against a
-    /// future edit silently reverting to the old all-numeric scheme.
+    /// BL-82 HUD overhaul: [`SLOT_INPUTS`] pins Matías's exact 2×3 keybind map
+    /// — left block `1,2,3 / 4,5,6`, right block `7,8,LMB / 9,0,RMB`. So the
+    /// two mouse buttons sit at indices `8` (right block row 1, col 3) and `11`
+    /// (right block row 2, col 3), NOT the trailing two indices, and `Slot9`/
+    /// `Slot10` occupy indices `9`/`10`. Regression guard against a future edit
+    /// silently drifting the map (especially back to the old flat-row scheme).
     #[test]
-    fn last_two_slot_inputs_are_mouse_buttons_not_slot9_and_slot10() {
-        assert_eq!(&SLOT_INPUTS[..8], &[
+    fn slot_inputs_pin_the_exact_two_by_three_keybind_map() {
+        assert_eq!(SLOT_INPUTS, [
+            // Left block, row 1 / row 2.
             GameInput::Slot1,
             GameInput::Slot2,
             GameInput::Slot3,
             GameInput::Slot4,
             GameInput::Slot5,
             GameInput::Slot6,
+            // Right block, row 1: 7, 8, LMB.
             GameInput::Slot7,
             GameInput::Slot8,
+            GameInput::Primary,
+            // Right block, row 2: 9, 0, RMB.
+            GameInput::Slot9,
+            GameInput::Slot10,
+            GameInput::Secondary,
         ]);
-        assert_eq!(SLOT_INPUTS[8], GameInput::Primary);
-        assert_eq!(SLOT_INPUTS[9], GameInput::Secondary);
     }
 
     /// BL-82 HUD polish round 4 (issue 3): every keybind label/icon now
@@ -1323,15 +1442,15 @@ mod tests {
         None
     }
 
-    /// The round-3 numbering scheme still holds through
-    /// [`sync_keybind_labels`]: holder 7 (the last plain number) shows
-    /// `"8"`. BL-82 HUD polish round 4 (issue 4) changed what the LAST TWO
-    /// holders (8/9, `Primary`/`Secondary`) show: no more `"LMB"`/`"RMB"`
-    /// text (they no longer carry a [`HotbarKeybindLabel`] at all) — instead
-    /// each shows a real [`HotbarKeybindIcon`] pointing at
-    /// `mouse_click_left.png`/`mouse_click_right.png`.
+    /// BL-82 HUD overhaul: the 2×3 keybind map renders through
+    /// [`sync_keybind_labels`] as Matías specified — the number holders show
+    /// their live binding (`Slot8` -> `"8"`, `Slot9` -> `"9"`, `Slot10` ->
+    /// `"0"` after this pass's `keybind.rs` rebind onto `Digit0`), and the two
+    /// mouse-button holders (indices `8`/`11`, `Primary`/`Secondary`) carry a
+    /// real [`HotbarKeybindIcon`] pointing at `mouse_click_left.png`/
+    /// `mouse_click_right.png` rather than a text label.
     #[test]
-    fn last_two_hotbar_slots_show_mouse_click_icons_not_text_labels() {
+    fn hotbar_slots_show_the_two_by_three_keybind_labels_and_mouse_icons() {
         let mut app = new_app();
         app.insert_resource(xindeler_input::KeyMap::default());
         app.world_mut().spawn((NetLocalPlayer, NetAbilities {
@@ -1342,7 +1461,7 @@ mod tests {
 
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("spawn all 10 holders");
+            .expect("spawn all 12 holders");
         app.update();
         app.world_mut()
             .run_system_once(sync_keybind_labels)
@@ -1351,29 +1470,39 @@ mod tests {
         let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
         let images = app.world().resource::<HudImages>().clone();
 
+        // Number holders show their live binding.
         assert_eq!(
             find_keybind_label_text(app.world(), slot_entities[7]).as_deref(),
-            Some("8")
+            Some("8"),
+            "index 7 is Slot8 -> \"8\""
+        );
+        assert_eq!(
+            find_keybind_label_text(app.world(), slot_entities[9]).as_deref(),
+            Some("9"),
+            "index 9 is Slot9 -> \"9\""
+        );
+        assert_eq!(
+            find_keybind_label_text(app.world(), slot_entities[10]).as_deref(),
+            Some("0"),
+            "index 10 is Slot10 -> \"0\" (rebound onto Digit0 this pass)"
         );
 
-        assert!(
-            find_keybind_label_text(app.world(), slot_entities[8]).is_none(),
-            "slot 8 (the old \"LMB\" holder) must no longer carry a text keybind label"
-        );
-        assert!(
-            find_keybind_label_text(app.world(), slot_entities[9]).is_none(),
-            "slot 9 (the old \"RMB\" holder) must no longer carry a text keybind label"
-        );
-
+        // Mouse-button holders (indices 8, 11) carry an icon, not a text label.
+        for mouse_index in [8usize, 11] {
+            assert!(
+                find_keybind_label_text(app.world(), slot_entities[mouse_index]).is_none(),
+                "slot {mouse_index} is a mouse-button holder and must carry no text keybind label"
+            );
+        }
         assert_eq!(
             find_keybind_icon_handle(app.world(), slot_entities[8]),
             Some(images.get(HudImageKey::MouseClickLeft)),
-            "slot 8 must show the left-mouse-click icon"
+            "index 8 (right block row 1, col 3) must show the left-mouse-click icon"
         );
         assert_eq!(
-            find_keybind_icon_handle(app.world(), slot_entities[9]),
+            find_keybind_icon_handle(app.world(), slot_entities[11]),
             Some(images.get(HudImageKey::MouseClickRight)),
-            "slot 9 must show the right-mouse-click icon"
+            "index 11 (right block row 2, col 3) must show the right-mouse-click icon"
         );
         assert!(
             find_keybind_icon_handle(app.world(), slot_entities[7]).is_none(),
@@ -1500,20 +1629,17 @@ mod tests {
         );
     }
 
-    /// BL-82 HUD polish round 7 — regression guard for Matías's `captura11.png`
-    /// "visible gap between skill slots" report (7th round). The flush-look fix
-    /// is [`SkillSlotBackground`]: an OPAQUE dark
-    /// [`HudTheme::palette`]`.slot_bg` fill spanning the whole slot box,
-    /// spawned as the FIRST (bottom-most in draw order) child so the ornate
-    /// `skill_slot_border.png` frame — which can never tile flush by itself
-    /// (fills only ~50% of its bbox, reaches its edge on ~2% of each side)
-    /// — sits on top of a solid plate instead of the game world. Without
-    /// this fill the concave notches and transparent centre of every frame
-    /// show grass, reading as a gap no crop/`HOTBAR_SLOT_GAP_PX` tuning can
-    /// close. A regression that drops the fill, makes it translucent,
-    /// or spawns it ABOVE the border overlay fails here.
+    /// BL-82 HUD overhaul (goal #1) — [`SkillSlotBackground`] is now the EMPTY
+    /// slot's grey-stone centre cue, not round 7's opaque black full-box plate
+    /// (which Matías rejected as too heavy). Pins: it spawns UNDER the border
+    /// frame (drawn beneath the ring), spawns hidden (`Display::None` — a
+    /// filled slot must never flash it), fills only the ring's centre hole
+    /// ([`EMPTY_SLOT_STONE_INSET_PX`] inset, NOT the full box, so the frame's
+    /// notches stay see-through), and its colour is the theme's translucent
+    /// mid-grey `slot_empty_stone` role, not a hardcoded literal and not opaque
+    /// near-black.
     #[test]
-    fn each_slot_has_an_opaque_slot_bg_fill_beneath_the_border_frame() {
+    fn empty_slot_stone_cue_is_an_inset_translucent_grey_beneath_the_frame() {
         use bevy::color::Alpha;
 
         let mut app = new_app();
@@ -1546,7 +1672,7 @@ mod tests {
             .expect("the slot has a SkillSlotBorderOverlay child");
         assert!(
             bg_pos < border_pos,
-            "SkillSlotBackground must be spawned BEFORE SkillSlotBorderOverlay so the solid fill \
+            "SkillSlotBackground must be spawned BEFORE SkillSlotBorderOverlay so the stone cue \
              renders UNDER the ornate frame, not over it (got bg at {bg_pos}, border at \
              {border_pos})"
         );
@@ -1557,28 +1683,99 @@ mod tests {
             .expect("the background child carries a BackgroundColor");
         assert!(
             !fill.0.is_fully_transparent(),
-            "SkillSlotBackground must be OPAQUE, else the game world bleeds through the frame's \
-             concave notches/centre and the round-7 flush fix regresses: {:?}",
+            "the stone cue must be visible (not fully transparent): {:?}",
             fill.0
         );
         assert_eq!(
             fill.0,
-            app.world().resource::<HudTheme>().palette.slot_bg,
-            "the fill must resolve against the theme's slot_bg role, not a hardcoded literal"
+            app.world().resource::<HudTheme>().palette.slot_empty_stone,
+            "the stone cue must resolve against the theme's slot_empty_stone role, not a literal"
         );
 
-        // Must cover the FULL border box (SLOT_SIZE_PX, inset by the border on
-        // each side), not the padding box `Percent(100.0)` resolves to — else
-        // a 4px transparent channel between neighbours shows the game world
-        // and the flush fix regresses (round-7 live-render measurement).
         let node = app
             .world()
             .get::<Node>(bg_entity)
             .expect("the background child carries a Node");
-        assert_eq!(node.width, Val::Px(SLOT_SIZE_PX));
-        assert_eq!(node.height, Val::Px(SLOT_SIZE_PX));
-        assert_eq!(node.top, Val::Px(-SLOT_BORDER_PX));
-        assert_eq!(node.left, Val::Px(-SLOT_BORDER_PX));
+        assert_eq!(
+            node.display,
+            Display::None,
+            "SkillSlotBackground must spawn hidden — sync_empty_slot_backgrounds reveals it only \
+             for empty slots, so a filled slot never flashes a stone cue on the first frame"
+        );
+        // Inset to the ring's centre hole, NOT the full box — leaving the outer
+        // band clear keeps the frame's own concave notches see-through (goal
+        // #1's revert of the round-7 full-box plate).
+        let inset_size = SLOT_SIZE_PX - 2.0 * EMPTY_SLOT_STONE_INSET_PX;
+        assert_eq!(node.width, Val::Px(inset_size));
+        assert_eq!(node.height, Val::Px(inset_size));
+        assert_eq!(
+            node.top,
+            Val::Px(EMPTY_SLOT_STONE_INSET_PX - SLOT_BORDER_PX)
+        );
+        assert_eq!(
+            node.left,
+            Val::Px(EMPTY_SLOT_STONE_INSET_PX - SLOT_BORDER_PX)
+        );
+    }
+
+    /// BL-82 HUD overhaul (goal #1) — [`sync_empty_slot_backgrounds`] toggles
+    /// each slot's stone cue by its content: shown (`Display::Flex`) while the
+    /// slot is empty, hidden (`Display::None`) once it holds an ability (the
+    /// icon then occupies the centre). Regression guard so a filled slot never
+    /// shows the "empty socket" cue behind its icon and an empty one always
+    /// does.
+    #[test]
+    fn sync_empty_slot_backgrounds_toggles_the_stone_cue_by_content() {
+        let mut app = new_app();
+        // Slot 0 filled with a real ability, slot 1 an in-range empty.
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![
+                NetHotbarSlot {
+                    aux: NetAuxiliaryAbility::Innate(0),
+                    ability_id: Some("class.warrior.rally".to_owned()),
+                },
+                NetHotbarSlot::default(),
+            ],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("spawn holders + write content");
+        app.update();
+        app.world_mut()
+            .run_system_once(sync_empty_slot_backgrounds)
+            .expect("toggle the stone cues");
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        let stone_display = |world: &World, slot: Entity| -> Display {
+            let children = world.get::<Children>(slot).expect("slot has children");
+            for child in children.iter() {
+                if world.get::<SkillSlotBackground>(child).is_some() {
+                    return world.get::<Node>(child).unwrap().display;
+                }
+            }
+            panic!("slot has no SkillSlotBackground child");
+        };
+
+        assert_eq!(
+            stone_display(app.world(), slot_entities[0]),
+            Display::None,
+            "a FILLED slot must hide its stone cue (the icon occupies the centre)"
+        );
+        assert_eq!(
+            stone_display(app.world(), slot_entities[1]),
+            Display::Flex,
+            "an EMPTY slot must show its stone cue"
+        );
+        // A placeholder holder beyond the mirror's real slots is also empty ->
+        // shows the cue.
+        assert_eq!(
+            stone_display(app.world(), slot_entities[HOTBAR_SLOT_COUNT - 1]),
+            Display::Flex,
+            "an out-of-range placeholder holder is empty and must show the stone cue"
+        );
     }
 
     /// BL-82 HUD redesign round 6 — replaces the deleted
@@ -1999,17 +2196,16 @@ mod tests {
         assert_eq!(background.0, Color::srgba(0.1, 0.9, 0.1, 0.5));
     }
 
-    /// BL-82 EM-5.17 "5+5 slot-holders" follow-up (Matías's ask: 5 holders on
-    /// each background piece, 10 total): [`HOTBAR_SLOT_COUNT`] is now FIXED
-    /// at 10, so `div_ceil(2)` always gives an exact 5/5 split — even when
-    /// the mirror currently reports FEWER real slots than that (here: 3),
-    /// the first 5 HOLDER entities (3 real + 2 placeholder) go to the LEFT
-    /// half and the last 5 (all placeholder) go to the RIGHT half. This is
-    /// also the literal regression guard for the bug this phase fixes: with
-    /// the OLD "entity count == mirror length" behaviour, `ceil(3/2) == 2`
-    /// would have put only 2 entities in the left half and 1 in the right.
+    /// [`HOTBAR_SLOT_COUNT`] is FIXED at [`SLOTS_PER_HALF`]`*2`, so
+    /// `div_ceil(2)` always gives an exact even split
+    /// ([`SLOTS_PER_HALF`] each side) — even when the mirror currently reports
+    /// FEWER real slots than that (here: 3), the first [`SLOTS_PER_HALF`]
+    /// HOLDER entities go to the LEFT half and the rest to the RIGHT. Also the
+    /// literal regression guard for the "5+5 slot-holders" bug: with the OLD
+    /// "entity count == mirror length" behaviour, `div_ceil` on the shorter
+    /// mirror length would have split the halves unevenly.
     #[test]
-    fn slot_half_parenting_splits_five_and_five_regardless_of_mirror_length() {
+    fn slot_half_parenting_splits_evenly_regardless_of_mirror_length() {
         let mut app = new_app();
         let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
         let right_half = app.world_mut().spawn(HotbarRightHalf).id();
@@ -2025,7 +2221,7 @@ mod tests {
 
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("spawn 10 holders (3 real + 7 placeholder)");
+            .expect("spawn all holders (3 real + placeholders)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
@@ -2056,13 +2252,13 @@ mod tests {
     }
 
     /// A LATER change to the mirror's real slot COUNT (e.g. a weapon swap)
-    /// must NOT change the 5/5 split — unlike the pre-fix behaviour (where
+    /// must NOT change the even split — unlike the pre-fix behaviour (where
     /// the entity count itself tracked the mirror and a count change could
-    /// shift the `div_ceil` boundary), the holder count is fixed today, so
-    /// the same 5 entities stay in each half no matter how `NetAbilities`
-    /// changes.
+    /// shift the `div_ceil` boundary), the holder count is fixed today, so the
+    /// same [`SLOTS_PER_HALF`] entities stay in each half no matter how
+    /// `NetAbilities` changes.
     #[test]
-    fn slot_half_parenting_stays_five_and_five_when_mirror_length_changes() {
+    fn slot_half_parenting_stays_even_when_mirror_length_changes() {
         let mut app = new_app();
         let left_half = app.world_mut().spawn(HotbarLeftHalf).id();
         let right_half = app.world_mut().spawn(HotbarRightHalf).id();
@@ -2077,7 +2273,7 @@ mod tests {
 
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("spawn 10 holders (2 real + 8 placeholder)");
+            .expect("spawn all holders (2 real + placeholders)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
@@ -2110,7 +2306,7 @@ mod tests {
         ];
         app.world_mut()
             .run_system_once(sync_hotbar_slots)
-            .expect("still 10 holders (3 real + 7 placeholder)");
+            .expect("still all holders (3 real + placeholders)");
         app.update();
         app.world_mut()
             .run_system_once(sync_slot_half_parenting)
@@ -2124,7 +2320,7 @@ mod tests {
                 .iter()
                 .count(),
             SLOTS_PER_HALF,
-            "the split must stay 5/5 even after the mirror's real slot count changes"
+            "the split must stay even after the mirror's real slot count changes"
         );
         assert_eq!(
             app.world()
