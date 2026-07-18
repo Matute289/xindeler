@@ -2638,6 +2638,18 @@ mod tests {
     /// orb off-screen-left) and a very wide one (the orb slid clear to the
     /// right) both get the true corner margin; a common desktop width lands
     /// in the danger band and gets lifted above the whole cluster instead.
+    ///
+    /// **BL-82 HUD redesign round 6 note**: this test was originally written
+    /// (this PR) against round-5's cluster geometry, where 1920px (1080p) sat
+    /// inside the danger band. Round 6 (merged afterward) pulled the whole
+    /// bottom-centre cluster inward toward screen centre (removed the
+    /// action-bar frame art, tightened every gap) — re-measured directly via
+    /// [`hud_layout::health_orb_screen_x`] post-merge: at 1920px the health
+    /// orb's left edge now sits at `x≈426`, past [`PANEL_LEFT_PX`] +
+    /// [`PANEL_WIDTH`] (`336`), so it no longer overlaps the panel's box.
+    /// 1080p is genuinely SAFE now — a real, welcome side effect of round 6's
+    /// tightening, not a bug in either round. Only 1280px (still squarely
+    /// inside the narrower band) remains a danger-band example here.
     #[test]
     fn chat_panel_bottom_sits_flush_in_the_corner_except_in_the_orb_danger_band() {
         assert!(!chat_panel_needs_lift(480.0), "narrow: orb is off-screen");
@@ -2650,10 +2662,11 @@ mod tests {
         assert_eq!(chat_panel_bottom(1280.0), PANEL_BOTTOM_LIFTED_PX);
 
         assert!(
-            chat_panel_needs_lift(1920.0),
-            "1920px (1080p) is ALSO in the danger band — the common case this fix must not break"
+            !chat_panel_needs_lift(1920.0),
+            "1920px (1080p): round 6's tighter cluster geometry pulled the orb clear of the \
+             panel's box — safe for the true corner margin now (see this test's own doc comment)"
         );
-        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_LIFTED_PX);
+        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_CORNER_PX);
 
         assert!(
             !chat_panel_needs_lift(2560.0),
