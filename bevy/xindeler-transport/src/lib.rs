@@ -76,7 +76,10 @@ pub mod quinnet;
 
 pub use quinnet::QuinnetTransport;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use bevy::app::PluginGroup;
 
@@ -105,26 +108,42 @@ pub struct TransportConfig {
     /// [`Self::server`] purely so the field is never a meaningless default).
     pub server_addr: SocketAddr,
     /// Subject name for the server's self-signed TLS certificate (server
-    /// role) / the (currently UNVERIFIED, v1 — see [`quinnet`]'s module doc
-    /// comment) hostname claim the client connection is constructed with
-    /// (client role).
+    /// role) / the hostname claim the client connection is constructed with,
+    /// and the key a [`Self::known_hosts_path`] entry is stored/looked up
+    /// under (client role — see [`quinnet`]'s module doc comment for the
+    /// trust-on-first-use scheme this now drives).
     pub server_hostname: String,
+    /// **Client role only** (ignored server-side, same convention
+    /// [`Self::server_addr`] documents for itself): path of the persistent
+    /// "known hosts" fingerprint store [`quinnet`]'s trust-on-first-use
+    /// verifier reads/writes (EM-8.5). Defaults to `<userdata>/known_hosts`
+    /// (`xindeler_app::settings::userdata_dir()` — the same per-user data
+    /// directory `XindelerSettings::path()` uses for `settings.ron`), so it
+    /// survives restarts and honors `XINDELER_USERDATA` the same way every
+    /// other piece of client-local persistent state in this codebase does.
+    pub known_hosts_path: PathBuf,
 }
 
 impl TransportConfig {
-    /// A server-role config listening on `bind_addr`.
+    /// A server-role config listening on `bind_addr`. `known_hosts_path` is
+    /// set for structural consistency (never a meaningless default, same
+    /// reasoning as `server_addr` above) but never read server-side: a
+    /// server presents its own self-signed certificate, it never verifies a
+    /// peer's.
     #[must_use]
     pub fn server(bind_addr: SocketAddr) -> Self {
         Self {
             bind_addr,
             server_addr: bind_addr,
             server_hostname: bind_addr.ip().to_string(),
+            known_hosts_path: default_known_hosts_path(),
         }
     }
 
     /// A client-role config dialing `server_addr`, bound to an OS-assigned
     /// ephemeral port (`0`) on the wildcard interface matching `server_addr`'s
-    /// IP family.
+    /// IP family, with [`Self::known_hosts_path`] defaulted to
+    /// `<userdata>/known_hosts`.
     #[must_use]
     pub fn client(server_addr: SocketAddr) -> Self {
         let unspecified = match server_addr {
@@ -135,8 +154,14 @@ impl TransportConfig {
             bind_addr: SocketAddr::new(unspecified, 0),
             server_addr,
             server_hostname: server_addr.ip().to_string(),
+            known_hosts_path: default_known_hosts_path(),
         }
     }
+}
+
+/// `<userdata>/known_hosts` — see [`TransportConfig::known_hosts_path`].
+fn default_known_hosts_path() -> PathBuf {
+    xindeler_app::settings::userdata_dir().join("known_hosts")
 }
 
 /// The transport seam. `server_plugins`/`client_plugins` each bundle
@@ -166,6 +191,7 @@ mod tests {
         assert_eq!(cfg.bind_addr, addr);
         assert_eq!(cfg.server_addr, addr);
         assert_eq!(cfg.server_hostname, "127.0.0.1");
+        assert_eq!(cfg.known_hosts_path, default_known_hosts_path());
     }
 
     #[test]
@@ -176,6 +202,7 @@ mod tests {
         assert_eq!(cfg.bind_addr.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         assert_eq!(cfg.bind_addr.port(), 0);
         assert_eq!(cfg.server_hostname, "127.0.0.1");
+        assert_eq!(cfg.known_hosts_path, default_known_hosts_path());
 
         let v6: SocketAddr = "[::1]:14006".parse().expect("valid literal");
         let cfg = TransportConfig::client(v6);

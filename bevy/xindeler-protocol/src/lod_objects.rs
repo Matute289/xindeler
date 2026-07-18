@@ -122,7 +122,12 @@ impl NetLodZone {
         // clamped to the same real cap so a huge/corrupt `objects.len()`
         // can't itself force an oversized upfront allocation before
         // `decompress_raw`'s own `output_limit` check even runs.
-        let mut raw = Vec::with_capacity((self.objects.len() * 2).min(MAX_DECOMPRESSED_ZONE_BYTES));
+        let mut raw = Vec::with_capacity(
+            self.objects
+                .len()
+                .saturating_mul(2)
+                .min(MAX_DECOMPRESSED_ZONE_BYTES),
+        );
         lz_fear::raw::decompress_raw(
             &self.objects,
             &[0; 0],
