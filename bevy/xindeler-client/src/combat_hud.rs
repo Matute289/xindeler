@@ -69,8 +69,13 @@ struct DeathScreenRoot;
 struct DamageVignette;
 
 /// The crosshair marker (a small always-on centred reticle).
+///
+/// `pub(crate)` (BL-82 EM-5.12): the settings window's Interface tab drives
+/// its live [`Visibility`] from `XindelerSettings::interface.show_crosshair`
+/// (`settings_window::sync_crosshair_visibility`) — the reticle's spawn/layout
+/// stays owned here; only the toggle reads this marker.
 #[derive(Component)]
-struct Crosshair;
+pub(crate) struct Crosshair;
 
 /// One spawned buff-strip icon slot, tagged with which [`common::comp::buff::
 /// BuffKind`] index (`kinds` array position, EM-5.2's `NetBuffs` ordering) it
