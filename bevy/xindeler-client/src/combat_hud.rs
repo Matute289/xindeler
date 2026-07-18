@@ -265,7 +265,7 @@ fn spawn_combat_hud(
         });
 
     // XP bar + the SINGLE canonical level readout, centred directly above the
-    // action bar's "core" span (both halves + the Stamina orb — spec §3.1;
+    // "core" row span (both ability-slot rows + the Stamina orb — spec §3.1;
     // Bug B's fix removes the old top-right `LevelText` entirely, this is
     // the only level readout left on screen outside the diary). A column
     // flex container (not two independently-positioned nodes) so the level
@@ -280,8 +280,8 @@ fn spawn_combat_hud(
                     + hud_layout::ORB_SIZE_PX
                     + hud_layout::XP_CLUSTER_GAP_PX,
             ),
-            margin: UiRect::left(Val::Px(-hud_layout::ACTION_BAR_TOTAL_WIDTH_PX / 2.0)),
-            width: Val::Px(hud_layout::ACTION_BAR_TOTAL_WIDTH_PX),
+            margin: UiRect::left(Val::Px(-hud_layout::CORE_ROW_WIDTH_PX / 2.0)),
+            width: Val::Px(hud_layout::CORE_ROW_WIDTH_PX),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
             row_gap: Val::Px(theme.spacing.xs),
@@ -306,7 +306,7 @@ fn spawn_combat_hud(
         &theme,
         theme.palette.xp,
         theme.palette.xp_bg,
-        hud_layout::ACTION_BAR_TOTAL_WIDTH_PX,
+        hud_layout::CORE_ROW_WIDTH_PX,
         6.0,
         BarValue::new(0.0, 1.0),
     );
@@ -882,7 +882,7 @@ mod tests {
         // The XP bar now spans the action bar's "core" width (both halves +
         // the Stamina orb), not the old full-screen `Percent(100.0)` — but
         // height/overflow/radius must still survive from `spawn_bar`.
-        assert_eq!(xp.width, Val::Px(hud_layout::ACTION_BAR_TOTAL_WIDTH_PX));
+        assert_eq!(xp.width, Val::Px(hud_layout::CORE_ROW_WIDTH_PX));
         assert_eq!(xp.height, Val::Px(6.0));
         assert_eq!(xp.overflow, clip);
         assert_eq!(xp.border_radius, non_zero_radius);

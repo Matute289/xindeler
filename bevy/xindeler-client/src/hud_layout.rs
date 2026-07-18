@@ -1,11 +1,10 @@
 //! BL-82 EM-5.17 Phase 2 — shared bottom-center HUD cluster geometry.
 //!
-//! `combat_hud.rs` (the 3 resource orbs) and `hotbar.rs` (the 2-piece action
-//! bar background + ability slots) are two INDEPENDENT `Startup`-spawn
-//! plugins, but per the design spec (§3.1) they must render as ONE visually
-//! contiguous bottom-center row:
-//! `[ Health orb ] [ action_bar_bg_left ] [ Stamina orb ] [ action_bar_bg_right
-//! ] [ Mana orb ]`. Rather than have each file invent its own magic-number
+//! `combat_hud.rs` (the 3 resource orbs) and `hotbar.rs` (the ability-slot
+//! row) are two INDEPENDENT `Startup`-spawn plugins, but per the design spec
+//! (§3.1) they must render as ONE visually contiguous bottom-center row:
+//! `[ Health orb ] [ left slot row ] [ Stamina orb ] [ right slot row ]
+//! [ Mana orb ]`. Rather than have each file invent its own magic-number
 //! offsets (guaranteed to drift out of alignment the first time either file's
 //! constants change), every element's horizontal placement is computed ONCE
 //! here, from the same arithmetic, and both files position their own pieces
@@ -13,6 +12,35 @@
 //! same percent-plus-negative-margin centring idiom `combat_hud.rs`'s own
 //! `Crosshair` node already uses) — no shared parent entity is needed across
 //! the two plugins, so spawn-order between them never matters.
+//!
+//! ## BL-82 HUD redesign round 6 — the action-bar FRAME pieces are gone
+//! Matías's reference (`hud-ejemplo-2.png`, a Diablo-4-fan-art HUD) has NO
+//! ornate frame art around the ability slots at all — just individual square
+//! icons sitting directly between the two large circular orbs, tightly
+//! packed and pulled in close to the centre. Rounds 3-5 below (preserved for
+//! the still-relevant orb-frame-margin math they established) spent their
+//! effort getting `action_bar_bg_left.png`/`action_bar_bg_right.png` (the
+//! ornate bronze/spiked frame pieces) to fit/align well — round 6 removes
+//! those two assets from the render path ENTIRELY instead. The former
+//! `ACTION_BAR_*` constants that existed purely to size/crop/trim that frame
+//! art (`ACTION_BAR_WIDTH_TRIM`, `ACTION_BAR_HALF_WIDTH_PX`, the
+//! `ACTION_BAR_LEFT/RIGHT_*_MARGIN_PX`/`*_BOTTOM_PAD_PX`/
+//! `*_FLAT_SAFE_*_RAW_PX` family) are deleted outright, not renamed — none of
+//! that math has any referent left once the art is gone. What replaces it:
+//! [`SLOT_ROW_WIDTH_PX`]/[`SLOT_ROW_HEIGHT_PX`] derive the ability-slot row's
+//! box DIRECTLY from the slot geometry itself
+//! (`crate::hotbar::SLOT_SIZE_PX`/`SLOTS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`) — no
+//! trim factor, no leading inset, no "flat opaque backing" safe-zone, because
+//! there is no background art left whose own transparent padding or
+//! decorative corner curl needs working around. The row's own box edges ARE
+//! its visible content's edges. The four per-seam gap constants
+//! ([`HEALTH_TO_LEFT_ROW_GAP_PX`] etc.) keep the SAME "real, opaque-to-opaque
+//! visible gap" contract round 5 established — they just drop the
+//! now-nonexistent action-bar-art margin term from the `box_gap` formula (the
+//! orb frames' own margins are unaffected: those orbs are untouched by this
+//! round, only the action-bar frame pieces are removed). See
+//! [`CLUSTER_GAP_PX`]'s own doc comment for the up-to-date version of that
+//! formula.
 //!
 //! ## A real asset gap found while wiring this phase — RESOLVED, see below
 //! *(Historical note, BL-82 EM-5.17 Phase 2)* This doc comment originally
@@ -314,8 +342,9 @@ pub const STAMINA_FRAME_WIDTH_PX: f32 = (1089.0 - 330.0) * ORB_SIZE_PX / 768.0;
 /// ([`CLUSTER_GAP_PX`]), with a single lump-sum correction bolted onto the
 /// one seam (mana orb) that visibly needed it most. That was never going to
 /// be exactly right: [`CLUSTER_GAP_PX`] positions BOUNDING BOXES
-/// ([`ORB_SIZE_PX`] squares for the orbs, [`ACTION_BAR_HALF_WIDTH_PX`] for
-/// the action-bar halves) — it has zero awareness that EVERY piece in this
+/// ([`ORB_SIZE_PX`] squares for the orbs, the (since-deleted)
+/// `ACTION_BAR_HALF_WIDTH_PX` for the action-bar halves) — it has zero
+/// awareness that EVERY piece in this
 /// row bakes its own transparent margin into its own render box, and that
 /// margin is DIFFERENT on every side of every piece (verified directly via
 /// an alpha-channel scan of the real on-disk PNGs, `alpha > 10` threshold,
@@ -407,67 +436,44 @@ pub const STAMINA_FRAME_RIGHT_MARGIN_PX: f32 =
 pub const CUTHULHU_FRAME_LEFT_MARGIN_PX: f32 =
     83.0 * ORB_SIZE_PX / 768.0 - (CUTHULHU_FRAME_WIDTH_PX - ORB_SIZE_PX) / 2.0;
 
-/// `action_bar_bg_left.png`'s own measured transparent LEFT margin (`27` raw
-/// px out of its `1380px`-wide canvas — see [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s
-/// doc comment for the full round-5 measurement methodology), scaled by this
-/// piece's own `render_width / native_width` factor. Faces the health orb's
-/// own right edge.
-pub const ACTION_BAR_LEFT_LEFT_MARGIN_PX: f32 = 27.0 * ACTION_BAR_HALF_WIDTH_PX / 1380.0;
-
-/// `action_bar_bg_left.png`'s own measured transparent RIGHT margin — `0` raw
-/// px (the opaque art already runs flush to this piece's own native canvas
-/// edge on this side) out of the same `1380px`-wide canvas. Faces the
-/// stamina orb's own left edge. Kept as an explicit `0.0 * ... / 1380.0`
-/// expression (not a bare `0.0` literal) purely so this constant stays
-/// symbolically parallel to every other margin here — if a future asset
-/// re-cut changes this side's margin, the multiplication already has the
-/// right shape to just plug in the new raw px.
-pub const ACTION_BAR_LEFT_RIGHT_MARGIN_PX: f32 = 0.0 * ACTION_BAR_HALF_WIDTH_PX / 1380.0;
-
-/// `action_bar_bg_right.png`'s own measured transparent LEFT margin (`19` raw
-/// px out of its `1380px`-wide canvas). Faces the stamina orb's own right
-/// edge.
-pub const ACTION_BAR_RIGHT_LEFT_MARGIN_PX: f32 = 19.0 * ACTION_BAR_HALF_WIDTH_PX / 1380.0;
-
-/// `action_bar_bg_right.png`'s own measured transparent RIGHT margin (`11`
-/// raw px out of the same `1380px`-wide canvas). Faces the mana orb's own
-/// left edge.
-pub const ACTION_BAR_RIGHT_RIGHT_MARGIN_PX: f32 = 11.0 * ACTION_BAR_HALF_WIDTH_PX / 1380.0;
-
+/// BL-82 HUD redesign round 6 — the ability-slot row itself has NO baked-in
+/// transparent margin of its own to account for: it's a plain transparent
+/// flex container sized to EXACTLY `crate::hotbar::SLOTS_PER_HALF` slots +
+/// gaps ([`SLOT_ROW_WIDTH_PX`]), not an ornate background PNG with its own
+/// asset-specific padding the way `action_bar_bg_left.png`/`_right.png` used
+/// to have (round 5's now-deleted `ACTION_BAR_LEFT/RIGHT_*_MARGIN_PX`). So
+/// the `box_gap = target_real_gap - margin_A - margin_B` formula round 5
+/// established (see [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s doc comment) drops to a
+/// single term per seam: only the ORB's own margin, since the row's margin on
+/// that side is exactly `0.0`.
+///
 /// The box-to-box distance (px) between the health orb's own [`ORB_SIZE_PX`]
-/// hit-box and the LEFT action-bar half's own [`ACTION_BAR_HALF_WIDTH_PX`]
-/// box that makes their REAL, opaque art land exactly [`CLUSTER_GAP_PX`]
-/// apart — see [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s doc comment for the
-/// `box_gap = CLUSTER_GAP_PX - margin_A - margin_B` derivation. Negative here
-/// (the angel frame's own overhang alone already exceeds the target real
-/// gap plus the action bar's own left margin) — the two nominal boxes
-/// overlap slightly, which is fine (see that same doc comment for why).
-pub const HEALTH_TO_LEFT_BAR_GAP_PX: f32 =
-    CLUSTER_GAP_PX - ANGEL_FRAME_RIGHT_MARGIN_PX - ACTION_BAR_LEFT_LEFT_MARGIN_PX;
+/// hit-box and the LEFT slot row's own [`SLOT_ROW_WIDTH_PX`] box that makes
+/// their REAL, opaque content land exactly [`CLUSTER_GAP_PX`] apart. Negative
+/// here (the angel frame's own overhang alone already exceeds the target real
+/// gap) — the two nominal boxes overlap slightly, which is fine (see
+/// [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s doc comment for why an overlapping
+/// nominal box is not a bug).
+pub const HEALTH_TO_LEFT_ROW_GAP_PX: f32 = CLUSTER_GAP_PX - ANGEL_FRAME_RIGHT_MARGIN_PX;
 
-/// The box-to-box distance (px) between the LEFT action-bar half's own right
-/// edge and the stamina orb's own left edge that makes their REAL art land
+/// The box-to-box distance (px) between the LEFT slot row's own right edge
+/// and the stamina orb's own left edge that makes their REAL content land
 /// exactly [`CLUSTER_GAP_PX`] apart.
-pub const LEFT_BAR_TO_STAMINA_GAP_PX: f32 =
-    CLUSTER_GAP_PX - ACTION_BAR_LEFT_RIGHT_MARGIN_PX - STAMINA_FRAME_LEFT_MARGIN_PX;
+pub const LEFT_ROW_TO_STAMINA_GAP_PX: f32 = CLUSTER_GAP_PX - STAMINA_FRAME_LEFT_MARGIN_PX;
 
 /// The box-to-box distance (px) between the stamina orb's own right edge and
-/// the RIGHT action-bar half's own left edge that makes their REAL art land
+/// the RIGHT slot row's own left edge that makes their REAL content land
 /// exactly [`CLUSTER_GAP_PX`] apart.
-pub const STAMINA_TO_RIGHT_BAR_GAP_PX: f32 =
-    CLUSTER_GAP_PX - STAMINA_FRAME_RIGHT_MARGIN_PX - ACTION_BAR_RIGHT_LEFT_MARGIN_PX;
+pub const STAMINA_TO_RIGHT_ROW_GAP_PX: f32 = CLUSTER_GAP_PX - STAMINA_FRAME_RIGHT_MARGIN_PX;
 
-/// The box-to-box distance (px) between the RIGHT action-bar half's own
-/// right edge and the mana orb's own left edge that makes their REAL art
-/// land exactly [`CLUSTER_GAP_PX`] apart — the direct replacement for the old
-/// `CLUSTER_GAP_PX + CUTHULHU_EXTRA_GAP_PX` combination. Large and positive
-/// (unlike the other three seams) because the cuthulhu frame's own real art
-/// recedes so far inside its nominal hit-box ([`CUTHULHU_FRAME_LEFT_MARGIN_PX`]
-/// `≈ -33px`, an overhang) that a wide box-to-box distance is needed before
-/// the REAL art gets anywhere near the action bar's own (much smaller)
-/// right-side margin.
-pub const RIGHT_BAR_TO_MANA_GAP_PX: f32 =
-    CLUSTER_GAP_PX - ACTION_BAR_RIGHT_RIGHT_MARGIN_PX - CUTHULHU_FRAME_LEFT_MARGIN_PX;
+/// The box-to-box distance (px) between the RIGHT slot row's own right edge
+/// and the mana orb's own left edge that makes their REAL content land
+/// exactly [`CLUSTER_GAP_PX`] apart. Large and positive (unlike the other
+/// three seams) because the cuthulhu frame's own real art recedes so far
+/// inside its nominal hit-box ([`CUTHULHU_FRAME_LEFT_MARGIN_PX`] `≈ -33px`, an
+/// overhang) that a wide box-to-box distance is needed before the REAL art
+/// gets anywhere near the row's own (zero) right-side margin.
+pub const RIGHT_ROW_TO_MANA_GAP_PX: f32 = CLUSTER_GAP_PX - CUTHULHU_FRAME_LEFT_MARGIN_PX;
 
 /// BL-82 EM-5.17 Phase 0 second follow-up — companion to
 /// [`ANGEL_FRAME_SOURCE_CROP`]: [`xindeler_ui::bar::spawn_orb_bar`]'s
@@ -516,146 +522,35 @@ pub const CUTHULHU_LIQUID_INSET_PX: f32 = 20.0;
 /// liquid circle is still visibly larger than its frame").
 pub const STAMINA_LIQUID_INSET_PX: f32 = 20.0;
 
-/// Height (px) of each action-bar-half background. Matches [`ORB_SIZE_PX`]
-/// so the whole cluster's bottom edge lines up in one row.
-pub const ACTION_BAR_HALF_HEIGHT_PX: f32 = ORB_SIZE_PX;
+/// BL-82 HUD redesign round 6 — replaces the deleted
+/// `ACTION_BAR_HALF_HEIGHT_PX`. Height (px) of each ability-slot row's own
+/// container — kept equal to [`ORB_SIZE_PX`] (not just
+/// [`crate::hotbar::SLOT_SIZE_PX`]) so the row's container still spans the SAME
+/// vertical band as the orbs either side of it; `hotbar.rs`'s `align_items:
+/// AlignItems::Center` then centres the (shorter) slots within that band,
+/// matching the orbs' own vertical centre exactly the way the old
+/// action-bar-half background did.
+pub const SLOT_ROW_HEIGHT_PX: f32 = ORB_SIZE_PX;
 
-/// Width (px) of each action-bar-half background, derived from
-/// `action_bar_bg_left.png`/`action_bar_bg_right.png`'s REAL on-disk aspect
-/// ratio (`1380×752`/`1379×752`, i.e. ≈1.835:1) at
-/// [`ACTION_BAR_HALF_HEIGHT_PX`] tall — keeps the ornate frame art undistorted
-/// instead of an arbitrary guessed width.
-///
-/// BL-82 EM-5.17 Phase 0 review follow-up (Matías: the bronze-framed action-
-/// bar pieces themselves should shrink a bit, distinct from the orb/gap
-/// tuning PR #126 already did — "more breathing room in the overall HUD
-/// row"). [`ACTION_BAR_WIDTH_TRIM`] scales the pure aspect-derived width down
-/// a modest 12% — a "small trim, not a redesign" per Matías's own framing,
-/// tuned by eye against `--smoke-screenshot` output. A pure width-only scale
-/// (height untouched, since [`ACTION_BAR_HALF_HEIGHT_PX`] still has to match
-/// [`ORB_SIZE_PX`] for the row's shared bottom edge) does very slightly
-/// squash the art off its native aspect ratio — imperceptible at this modest
-/// a trim, and the far smaller evil compared to either shrinking the row's
-/// height (breaking the orb alignment) or leaving no breathing room at all.
-///
-/// BL-82 EM-5.17 "5+5 slot-holders" follow-up: each piece now ALWAYS renders
-/// [`crate::hotbar::SLOTS_PER_HALF`] (5) ability-slot holders (previously the
-/// entity count tracked the sim's real, usually-shorter slot count — see
-/// `hotbar.rs`'s own module doc comment) — `hotbar::SLOT_SIZE_PX` was bumped
-/// from `44.0` to `46.0` to match, the largest size 5 slots + 4 gaps still
-/// fit inside this trimmed width (see that constant's own doc comment for the
-/// exact arithmetic);
-/// [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`]
-/// pins this so a future change to either constant can't silently overflow.
-///
-/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issues 2/3):
-/// nudged `0.88 -> 0.95` — a modest re-widening, NOT a reversion of the
-/// original "more breathing room" trim (still noticeably below `1.0`, the
-/// pure aspect-derived width) — to make room for flush/adjacent slots at a
-/// legibly bigger [`crate::hotbar::SLOT_SIZE_PX`] (`46.0 -> 52.0`) without
-/// spreading them across the piece.
-///
-/// Same round, POST-REVIEW follow-up: bumped again, `0.95 -> 1.14` —
-/// this one genuinely does cross `1.0` (the pure aspect-derived width),
-/// stretching the art slightly wider than its native aspect ratio rather
-/// than squashing it, the first time this constant has gone that direction.
-/// Necessary to make room for `crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX`
-/// (a fix for a SEPARATE bug that same live `--smoke-screenshot` check
-/// caught: the row's first slot rendering under the background art's own
-/// corner curl — see that constant's own doc comment for the pixel-measured
-/// proof, and for why the inset itself is a full slot pitch rather than a
-/// smaller value) without shrinking `SLOT_SIZE_PX` back down and undoing
-/// issue 3's fix. At this still-modest a stretch (14% over native aspect,
-/// similar order of magnitude to the original 12% squash) the distortion
-/// reads the same as the original trim's own squash did: imperceptible
-/// against the ornate, already-irregular frame art. See
-/// [`crate::hotbar::SLOT_SIZE_PX`]'s doc comment for the exact fit
-/// arithmetic this trim now supports and
-/// [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`] for
-/// the pinned regression.
-///
-/// BL-82 HUD polish round 4 (issue 3, Matías's `skill-slots-1.png`
-/// reference): bumped again, `1.14 -> 1.40` — makes room for
-/// `crate::hotbar::SLOT_SIZE_PX`'s further bump (`52.0 -> 58.0`) at the
-/// reference's noticeably larger, more flush/adjacent slot squares.
-///
-/// ## A first attempt at `1.30` looked right on paper, was WRONG on screen
-/// The [`tests::five_slots_per_half_fit_inside_the_action_bar_half_width`]
-/// arithmetic only proves the 5-slot row fits inside
-/// [`ACTION_BAR_HALF_WIDTH_PX`]'s own BOUNDING BOX — it says nothing about
-/// whether that box's ART is actually OPAQUE all the way out to that width.
-/// A first pass at `1.30` (paired with `SLOT_SIZE_PX = 60.0`) passed that
-/// test but, verified via a real `--smoke-screenshot`, visibly showed the
-/// RIGHT half's last 1-2 holders (the mouse-click-icon slots) floating over
-/// bare green terrain — `action_bar_bg_right.png` has a prominent decorative
-/// ROUNDED END-CAP on its right side (the side away from the stamina orb,
-/// mirroring the ornate spiked caps the orb frames also have) whose opaque
-/// "flat plate" backing runs out well before the box's own right edge.
-/// Measured directly (Python + Pillow/NumPy, alpha-channel scan, `alpha >
-/// 10` threshold — same methodology as this module's other crop
-/// measurements — restricted to the ROW's own vertical band, i.e. the
-/// `crate::hotbar::SLOT_SIZE_PX`-tall strip a slot square actually occupies,
-/// not the whole `752px` canvas height, since a spike tip far above/below
-/// that band is irrelevant to whether a SLOT SQUARE has real backing): the
-/// right half's flat, ≥98%-opaque backing (within that band) holds from
-/// native `x=98` to `x≈1249` of its `1380px`-wide canvas, then collapses
-/// fast (`97.9%` at `x=1250` down to `21%` by `x=1290`). The row's content
-/// must end at or before that `x≈1249` boundary (scaled to whatever
-/// `ACTION_BAR_HALF_WIDTH_PX` renders at), which is a MUCH tighter
-/// constraint than "fits inside the box" — see
-/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]/
-/// [`ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX`] and
-/// [`tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
-/// for the constants/regression test this discovery adds. `1.40` (rather
-/// than `1.30`) is the smallest re-trim (given `SLOT_SIZE_PX = 58.0`,
-/// slightly pulled back from the first `60.0` attempt) that clears this
-/// tighter constraint with a real margin on BOTH halves, re-verified against
-/// a fresh `--smoke-screenshot` showing every one of the 10 holders — 1-8
-/// numbered plus the 2 mouse-click icons — sitting fully on the dark plate
-/// art, no green terrain visible through any of them.
-pub const ACTION_BAR_WIDTH_TRIM: f32 = 1.40;
-pub const ACTION_BAR_HALF_WIDTH_PX: f32 =
-    ACTION_BAR_HALF_HEIGHT_PX * (1380.0 / 752.0) * ACTION_BAR_WIDTH_TRIM;
-
-/// BL-82 HUD polish round 4 (issue 3) — the native-canvas x-coordinate (out
-/// of `action_bar_bg_right.png`'s `1380px` width) past which the RIGHT
-/// action-bar half's own flat plate art stops being reliably opaque within
-/// the hotbar row's own vertical band — see [`ACTION_BAR_WIDTH_TRIM`]'s doc
-/// comment for the full measurement methodology. A conservative reading of
-/// the measured data (opacity is still a genuine `100%` through `x=1240`,
-/// only starting its fast collapse at `x=1250`), not the absolute measured
-/// edge (`x≈1249`) — a few native px of margin here costs nothing and
-/// absorbs any small re-measurement error.
-///
-/// `#[cfg(test)]`: this constant is only ever read by
-/// [`tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
-/// — the real fix is [`ACTION_BAR_WIDTH_TRIM`]'s tuned value itself, this is
-/// the measured boundary that value must stay under. Ungated, it trips
-/// `-D dead-code` in the non-test build (this crate is a binary, so a `pub`
-/// item with no caller outside `#[cfg(test)]` is exactly as dead as a
-/// private one) — [`health_orb_screen_x`] above used to follow this same
-/// pattern, until a real runtime caller (`chat.rs`'s bottom-left corner
-/// placement) promoted it out of `#[cfg(test)]`; this constant has no such
-/// runtime caller, so it stays gated.
-#[cfg(test)]
-pub const ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX: f32 = 1240.0;
-
-/// BL-82 HUD polish round 4 (issue 3) — the native-canvas x-coordinate (out
-/// of `action_bar_bg_left.png`'s `1380px` width) before which the LEFT
-/// action-bar half's own flat plate art is NOT yet reliably opaque within the
-/// hotbar row's own vertical band (the mirrored decorative corner curl this
-/// piece's own `HOTBAR_ROW_LEADING_INSET_PX` fix already targets — that fix
-/// predates this round's measurement but this pins the SAME real constraint
-/// numerically instead of by eye). Measured: opacity reaches a genuine
-/// `100%` at `x=150`, ramping up from `0%` at `x=20` — same conservative
-/// "round to where it's unambiguously flat" reading as
-/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`].
-///
-/// `#[cfg(test)]`: same reasoning as
-/// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]'s own doc comment — test-only
-/// regression value, not read at runtime.
-#[cfg(test)]
-pub const ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX: f32 = 150.0;
+/// BL-82 HUD redesign round 6 — replaces the deleted
+/// `ACTION_BAR_HALF_WIDTH_PX`/ `ACTION_BAR_WIDTH_TRIM`. Width (px) of each
+/// ability-slot row's own container, derived DIRECTLY from the slot geometry
+/// itself — `crate::hotbar::SLOTS_PER_HALF` slots of
+/// `crate::hotbar::SLOT_SIZE_PX` each, separated by
+/// `crate::hotbar::SLOTS_PER_HALF - 1` gaps of
+/// `crate::hotbar::HOTBAR_SLOT_GAP_PX`. Unlike the deleted constants this
+/// replaces, there is no trim factor, no leading inset, and no "flat opaque
+/// backing" safe-zone to fit inside: with the ornate `action_bar_bg_left.png`/
+/// `_right.png` frame art gone, the row's box has no background art of its
+/// own at all (a plain transparent flex container) — its bounding box IS
+/// exactly its visible content's bounding box, so this is a straight sum, not
+/// a tuned-by-eye multiplier the way the old (now-deleted)
+/// `ACTION_BAR_WIDTH_TRIM` used to be. See
+/// [`tests::slot_row_width_matches_the_slot_geometry_exactly`] for the pinned
+/// regression.
+pub const SLOT_ROW_WIDTH_PX: f32 = crate::hotbar::SLOTS_PER_HALF as f32
+    * crate::hotbar::SLOT_SIZE_PX
+    + (crate::hotbar::SLOTS_PER_HALF as f32 - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
 
 /// Horizontal gap (px) between adjacent cluster pieces — health orb / left
 /// action-bar half / stamina orb / right action-bar half / mana orb. Was a
@@ -695,18 +590,25 @@ pub const ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX: f32 = 150.0;
 /// which two pieces' own margins happened to fall on that seam. This
 /// constant is now the target this module actually enforces: the REAL,
 /// opaque-art-to-opaque-art visible gap every seam should render at — every
-/// seam's own [`HEALTH_TO_LEFT_BAR_GAP_PX`]/[`LEFT_BAR_TO_STAMINA_GAP_PX`]/
-/// [`STAMINA_TO_RIGHT_BAR_GAP_PX`]/[`RIGHT_BAR_TO_MANA_GAP_PX`] computes
+/// seam's own [`HEALTH_TO_LEFT_ROW_GAP_PX`]/[`LEFT_ROW_TO_STAMINA_GAP_PX`]/
+/// [`STAMINA_TO_RIGHT_ROW_GAP_PX`]/[`RIGHT_ROW_TO_MANA_GAP_PX`] computes
 /// whatever box-to-box distance (possibly negative — see those constants'
-/// own doc comment) achieves it. `2.0` itself is unchanged from round 4 —
-/// this round fixes HOW it's honoured, not what value looks right; revisit
-/// this value first (not the per-seam formulas) if a future
-/// `--smoke-screenshot` still shows too much/little breathing room evenly
-/// across every seam.
-pub const CLUSTER_GAP_PX: f32 = 2.0;
+/// own doc comment) achieves it.
+///
+/// ## BL-82 HUD redesign round 6 — pulled tighter now that there's no frame art
+/// Rounds 3-5 tuned this against the ornate `action_bar_bg_left.png`/
+/// `_right.png` frame pieces, which no longer render at all (see this
+/// module's own top-of-file doc comment). With the frame gone, Matías's
+/// reference (`hud-ejemplo-2.png`) shows the ability icons sitting almost
+/// flush against the stamina orb's own ring, tighter than round 4/5's
+/// already-small `2.0px` target — shrunk `2.0 -> 1.0`. Still a real, if
+/// tiny, positive value (not `0.0`/negative) — the same round-4 precedent
+/// applies: a fully-flush gap reads as a mismatched art seam where an orb's
+/// circular edge meets a slot's square corner, not a clean line.
+pub const CLUSTER_GAP_PX: f32 = 1.0;
 
 /// Distance (px) from the viewport's bottom edge to the bottom of the whole
-/// orb/action-bar row.
+/// orb/slot-row row.
 ///
 /// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 5): was
 /// `20.0`, leaving a visible gap down to the floor texture in live gameplay
@@ -728,55 +630,40 @@ pub const CLUSTER_GAP_PX: f32 = 2.0;
 /// Matías's round-4 report (`captura4.png` + `record23.mov`, independently
 /// re-confirmed by extracting frames rather than trusting a single still):
 /// green ground/road is still visibly rendering BELOW the orb/action-bar row
-/// even with this constant at `0.0`. Round 3's own reasoning above was only
-/// half right: it correctly ruled out a SEPARATE vertical inset/overhang
-/// mechanism (there isn't one — `ORB_SOURCE_CROP`/`*_FRAME_SOURCE_CROP` really
-/// do span the full `y[0,768]` canvas height), but it never checked whether
-/// that FULL canvas height is itself free of transparent padding at its own
-/// bottom edge. Re-measured directly (Python + Pillow, alpha-channel
-/// column/row scan, `alpha > 10` threshold — same methodology as this
-/// module's own crop-measurement comments above) against the real on-disk
-/// PNGs: every one of the 5 cluster pieces has a real, contiguous band of
-/// fully-transparent pixels at the very bottom of its own canvas, BELOW the
-/// last row of genuinely opaque art:
-/// - `orb_frame_angel.png` (`768px` tall): last opaque row `y=756` → `11px`
-///   transparent below it.
-/// - `orb_frame_cuthulhu.png` (`768px` tall): last opaque row `y=754` → `13px`.
-/// - `orb_frame_stamina.png` (`768px` tall): last opaque row `y=753` → `14px`.
-/// - `action_bar_bg_left.png` (`752px` tall): last opaque row `y=728` → `23px`.
-/// - `action_bar_bg_right.png` (`752px` tall): last opaque row `y=725` →
-///   `26px`.
-///
-/// This is exactly the failure mode the round-4 brief predicted: a
-/// `bottom_px` constant positions the CONTAINER's bounding box, not the
-/// visible art's own lowest opaque pixel — no value of this one shared
-/// constant can compensate for a PER-ASSET amount of baked-in transparent
-/// margin, since the 5 pieces don't agree on how much they have (`11`-`26`
-/// raw px, not even close to uniform). At `CLUSTER_BOTTOM_PX == 0.0` every
-/// container's bottom edge sits exactly at the screen's bottom edge, but each
-/// container's real art ends `padding_px` ABOVE that line — precisely the gap
-/// Matías keeps reporting, and (composing with [`HudScalePlugin`]'s
-/// `UiScale`) one that GROWS at a larger window/UI scale rather than staying
-/// a fixed few px, matching why a still screenshot at a good size already
-/// shows it clearly.
+/// even with this constant at `0.0`. Root cause: every orb frame PNG has a
+/// real, contiguous band of fully-transparent pixels at the very bottom of
+/// its own canvas, BELOW the last row of genuinely opaque art:
+/// `orb_frame_angel.png` (`768px` tall) `11px`, `orb_frame_cuthulhu.png`
+/// `13px`, `orb_frame_stamina.png` `14px` — this is exactly the failure mode
+/// the round-4 brief predicted: a `bottom_px` constant positions the
+/// CONTAINER's bounding box, not the visible art's own lowest opaque pixel —
+/// no value of this one shared constant can compensate for a PER-ASSET
+/// amount of baked-in transparent margin, since the 3 orb pieces don't agree
+/// on how much they have.
 ///
 /// The fix: [`ANGEL_FRAME_BOTTOM_PAD_PX`]/[`CUTHULHU_FRAME_BOTTOM_PAD_PX`]/
-/// [`STAMINA_FRAME_BOTTOM_PAD_PX`]/[`ACTION_BAR_LEFT_BOTTOM_PAD_PX`]/
-/// [`ACTION_BAR_RIGHT_BOTTOM_PAD_PX`] below — each piece's OWN measured
-/// padding, scaled from raw canvas px to real rendered px by the exact same
-/// factor its own height already uses (`render_height / native_height`, the
-/// same "scale the measurement, don't re-measure at render size" approach
+/// [`STAMINA_FRAME_BOTTOM_PAD_PX`] below — each orb's OWN measured padding,
+/// scaled from raw canvas px to real rendered px by the exact same factor its
+/// own height already uses (`render_height / native_height`, the same "scale
+/// the measurement, don't re-measure at render size" approach
 /// [`ANGEL_FRAME_WIDTH_PX`] already established). Every real spawn call site
-/// (`combat_hud.rs`'s 3 orbs, `hotbar.rs`'s 2 action-bar halves) now sets
-/// `bottom: Val::Px(CLUSTER_BOTTOM_PX - <that piece's own pad constant>)` —
+/// (`combat_hud.rs`'s 3 orbs) sets
+/// `bottom: Val::Px(CLUSTER_BOTTOM_PX - <that orb's own pad constant>)` —
 /// pushing each container down by exactly its own transparent margin so the
 /// REAL opaque pixel (not the bounding box) lands flush with the screen's
 /// bottom edge, verified directly via `--smoke-screenshot` (not just the
 /// arithmetic) against both `captura4.png` (the bug) and live gameplay.
 /// `CLUSTER_BOTTOM_PX` itself stays the shared "nominal" anchor every other
 /// derived offset (`CLUSTER_TOTAL_HEIGHT_PX`, the XP cluster's own bottom)
-/// already builds from — only the 5 real spawn sites apply the extra
-/// per-piece correction, so nothing downstream needs to change.
+/// already builds from.
+///
+/// BL-82 HUD redesign round 6: the ability-slot row (`hotbar.rs`) no longer
+/// has its OWN bottom-pad correction — it's a transparent flex container with
+/// zero baked-in margin (unlike the deleted `action_bar_bg_left.png`/
+/// `_right.png`, whose own `23px`/`26px` bottom padding used to need the same
+/// per-piece treatment), so it now just sits at a bare `CLUSTER_BOTTOM_PX`
+/// like any ordinary node, vertically centred within [`SLOT_ROW_HEIGHT_PX`]
+/// via `align_items: AlignItems::Center`.
 pub const CLUSTER_BOTTOM_PX: f32 = 0.0;
 
 /// BL-82 HUD polish round 4 (issue 1) — [`orb_frame_angel.png`]'s own
@@ -794,19 +681,6 @@ pub const CUTHULHU_FRAME_BOTTOM_PAD_PX: f32 = 13.0 * ORB_SIZE_PX / 768.0;
 /// Stamina (centre orb) variant of [`ANGEL_FRAME_BOTTOM_PAD_PX`] — `14` raw
 /// px out of the same `768px`-tall canvas.
 pub const STAMINA_FRAME_BOTTOM_PAD_PX: f32 = 14.0 * ORB_SIZE_PX / 768.0;
-
-/// `action_bar_bg_left.png`'s own measured transparent bottom margin (`23`
-/// raw px out of its `752px`-tall canvas), scaled to real rendered px by the
-/// `ACTION_BAR_HALF_HEIGHT_PX / 752.0` factor (the action-bar halves' own
-/// native-height scale factor, distinct from the orbs' `768.0` canvas). See
-/// [`CLUSTER_BOTTOM_PX`]'s own doc comment for the measurement methodology.
-pub const ACTION_BAR_LEFT_BOTTOM_PAD_PX: f32 = 23.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0;
-
-/// `action_bar_bg_right.png` variant of [`ACTION_BAR_LEFT_BOTTOM_PAD_PX`] —
-/// `26` raw px out of the same `752px`-tall canvas (the two halves are
-/// mirrored art, not byte-identical, hence the slightly different measured
-/// value).
-pub const ACTION_BAR_RIGHT_BOTTOM_PAD_PX: f32 = 26.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0;
 
 /// Gap (px) between the top of the orb/action-bar row and the XP-bar+level
 /// cluster sitting just above it (spec §3.1's "between/above the orbs and
@@ -837,21 +711,22 @@ pub const XP_CLUSTER_CONTENT_HEIGHT_PX: f32 = 40.0;
 pub const CLUSTER_TOTAL_HEIGHT_PX: f32 =
     CLUSTER_BOTTOM_PX + ORB_SIZE_PX + XP_CLUSTER_GAP_PX + XP_CLUSTER_CONTENT_HEIGHT_PX;
 
-/// Total width (px) of the "core" action-bar span — the two background
-/// halves plus the centre Stamina orb, EXCLUDING the two outer (Health/Mana)
-/// orbs. The XP bar + level readout are centred on this span, matching the
-/// HUD-D4 reference's own narrower XP strip (it sits above the action bar,
-/// not edge-to-edge across the full orb-to-orb cluster).
+/// Total width (px) of the "core" row span — the two ability-slot rows plus
+/// the centre Stamina orb, EXCLUDING the two outer (Health/Mana) orbs. The XP
+/// bar + level readout are centred on this span, matching the HUD-D4
+/// reference's own narrower XP strip (it sits above the slot row, not
+/// edge-to-edge across the full orb-to-orb cluster).
 ///
-/// BL-82 HUD polish round 5: the two gaps THIS span actually contains are
-/// [`LEFT_BAR_TO_STAMINA_GAP_PX`]/[`STAMINA_TO_RIGHT_BAR_GAP_PX`] — no longer
-/// `2.0 * CLUSTER_GAP_PX`, now that every seam gets its own per-margin box
-/// gap instead of sharing one flat value (see [`CLUSTER_GAP_PX`]'s own doc
-/// comment).
-pub const ACTION_BAR_TOTAL_WIDTH_PX: f32 = 2.0 * ACTION_BAR_HALF_WIDTH_PX
+/// BL-82 HUD redesign round 6: renamed from `ACTION_BAR_TOTAL_WIDTH_PX` (no
+/// "action bar" left to name) and now built from [`SLOT_ROW_WIDTH_PX`]
+/// instead of the deleted `ACTION_BAR_HALF_WIDTH_PX`. The two gaps this span
+/// contains are [`LEFT_ROW_TO_STAMINA_GAP_PX`]/[`STAMINA_TO_RIGHT_ROW_GAP_PX`]
+/// — every seam still gets its own per-margin box gap rather than sharing one
+/// flat value (see [`CLUSTER_GAP_PX`]'s own doc comment).
+pub const CORE_ROW_WIDTH_PX: f32 = 2.0 * SLOT_ROW_WIDTH_PX
     + ORB_SIZE_PX
-    + LEFT_BAR_TO_STAMINA_GAP_PX
-    + STAMINA_TO_RIGHT_BAR_GAP_PX;
+    + LEFT_ROW_TO_STAMINA_GAP_PX
+    + STAMINA_TO_RIGHT_ROW_GAP_PX;
 
 /// Every cluster piece's horizontal offset (px), relative to the viewport's
 /// own horizontal centre, of that piece's OWN LEFT edge — i.e. exactly the
@@ -861,18 +736,16 @@ pub const ACTION_BAR_TOTAL_WIDTH_PX: f32 = 2.0 * ACTION_BAR_HALF_WIDTH_PX
 /// both `combat_hud.rs` and `hotbar.rs` derive their own pieces' placement
 /// from the exact same arithmetic.
 ///
-/// BL-82 HUD polish round 5: every adjacent pair now uses its OWN per-seam
-/// box gap ([`HEALTH_TO_LEFT_BAR_GAP_PX`]/[`LEFT_BAR_TO_STAMINA_GAP_PX`]/
-/// [`STAMINA_TO_RIGHT_BAR_GAP_PX`]/[`RIGHT_BAR_TO_MANA_GAP_PX`]) rather than
-/// a shared [`CLUSTER_GAP_PX`] with one lump-sum exception bolted onto the
-/// mana-orb seam (round 3's `CUTHULHU_EXTRA_GAP_PX`, now removed) — see
-/// [`CLUSTER_GAP_PX`]'s own doc comment for why a single shared box distance
-/// could never produce a uniform REAL gap across every seam.
+/// BL-82 HUD redesign round 6: fields renamed `action_bar_*_half_left` ->
+/// `slot_row_*_half_left` (no "action bar" left to name — see the module's
+/// own top-of-file doc comment) and now built from [`SLOT_ROW_WIDTH_PX`] and
+/// the [`HEALTH_TO_LEFT_ROW_GAP_PX`]/[`LEFT_ROW_TO_STAMINA_GAP_PX`]/
+/// [`STAMINA_TO_RIGHT_ROW_GAP_PX`]/[`RIGHT_ROW_TO_MANA_GAP_PX`] per-seam gaps.
 pub struct ClusterOffsets {
     pub health_orb_left: f32,
-    pub action_bar_left_half_left: f32,
+    pub slot_row_left_half_left: f32,
     pub stamina_orb_left: f32,
-    pub action_bar_right_half_left: f32,
+    pub slot_row_right_half_left: f32,
     pub mana_orb_left: f32,
 }
 
@@ -881,24 +754,18 @@ pub struct ClusterOffsets {
 pub const CLUSTER: ClusterOffsets = {
     let stamina_orb_left = -ORB_SIZE_PX / 2.0;
     let stamina_orb_right = ORB_SIZE_PX / 2.0;
-    let action_bar_right_half_left = stamina_orb_right + STAMINA_TO_RIGHT_BAR_GAP_PX;
-    let action_bar_right_half_right = action_bar_right_half_left + ACTION_BAR_HALF_WIDTH_PX;
-    // BL-82 HUD polish round 5: this seam's own per-margin box gap (see
-    // RIGHT_BAR_TO_MANA_GAP_PX's own doc comment) replaces round 3's
-    // `CLUSTER_GAP_PX + CUTHULHU_EXTRA_GAP_PX` combination — it already
-    // folds in the equivalent of that round's extra clearance, computed
-    // exactly from the cuthulhu frame's own measured margin instead of a
-    // hand-tuned delta.
-    let mana_orb_left = action_bar_right_half_right + RIGHT_BAR_TO_MANA_GAP_PX;
-    let action_bar_left_half_right = stamina_orb_left - LEFT_BAR_TO_STAMINA_GAP_PX;
-    let action_bar_left_half_left = action_bar_left_half_right - ACTION_BAR_HALF_WIDTH_PX;
-    let health_orb_left = action_bar_left_half_left - HEALTH_TO_LEFT_BAR_GAP_PX - ORB_SIZE_PX;
+    let slot_row_right_half_left = stamina_orb_right + STAMINA_TO_RIGHT_ROW_GAP_PX;
+    let slot_row_right_half_right = slot_row_right_half_left + SLOT_ROW_WIDTH_PX;
+    let mana_orb_left = slot_row_right_half_right + RIGHT_ROW_TO_MANA_GAP_PX;
+    let slot_row_left_half_right = stamina_orb_left - LEFT_ROW_TO_STAMINA_GAP_PX;
+    let slot_row_left_half_left = slot_row_left_half_right - SLOT_ROW_WIDTH_PX;
+    let health_orb_left = slot_row_left_half_left - HEALTH_TO_LEFT_ROW_GAP_PX - ORB_SIZE_PX;
 
     ClusterOffsets {
         health_orb_left,
-        action_bar_left_half_left,
+        slot_row_left_half_left,
         stamina_orb_left,
-        action_bar_right_half_left,
+        slot_row_right_half_left,
         mana_orb_left,
     }
 };
@@ -946,29 +813,22 @@ mod tests {
 
     /// The cluster is laid out symmetrically around screen centre: the
     /// Stamina orb (the centrepiece) straddles `x = 0` exactly, and the two
-    /// action-bar halves mirror each other in width — a regression guard
+    /// ability-slot rows mirror each other in width — a regression guard
     /// against a future constant tweak silently breaking the "one
     /// contiguous row" contract this module exists to enforce.
     ///
-    /// BL-82 HUD polish round 5: every adjacent pair now uses its OWN
-    /// per-seam box gap ([`HEALTH_TO_LEFT_BAR_GAP_PX`]/
-    /// [`LEFT_BAR_TO_STAMINA_GAP_PX`]/[`STAMINA_TO_RIGHT_BAR_GAP_PX`]/
-    /// [`RIGHT_BAR_TO_MANA_GAP_PX`]) instead of one shared [`CLUSTER_GAP_PX`]
-    /// with a single lump-sum exception (round 3's now-removed
-    /// `CUTHULHU_EXTRA_GAP_PX`) — this test updates its assertions to those
-    /// per-seam constants. The two action-bar halves' WIDTH still comes from
-    /// the SAME [`ACTION_BAR_HALF_WIDTH_PX`] constant regardless (only the
-    /// gaps AROUND them differ per seam now), so the "both halves are the
-    /// same width" invariant this test guards still holds unchanged.
+    /// BL-82 HUD redesign round 6: renamed BAR->ROW throughout (no "action
+    /// bar" left — see the module's own top-of-file doc comment) and now
+    /// checks [`SLOT_ROW_WIDTH_PX`] (derived directly from the slot geometry)
+    /// instead of the deleted `ACTION_BAR_HALF_WIDTH_PX`.
     #[test]
     fn cluster_is_symmetric_around_centre() {
         assert_eq!(CLUSTER.stamina_orb_left, -ORB_SIZE_PX / 2.0);
 
-        let left_bar_width = CLUSTER.stamina_orb_left
-            - LEFT_BAR_TO_STAMINA_GAP_PX
-            - CLUSTER.action_bar_left_half_left;
-        let right_bar_width =
-            CLUSTER.mana_orb_left - RIGHT_BAR_TO_MANA_GAP_PX - CLUSTER.action_bar_right_half_left;
+        let left_row_width =
+            CLUSTER.stamina_orb_left - LEFT_ROW_TO_STAMINA_GAP_PX - CLUSTER.slot_row_left_half_left;
+        let right_row_width =
+            CLUSTER.mana_orb_left - RIGHT_ROW_TO_MANA_GAP_PX - CLUSTER.slot_row_right_half_left;
         // BL-82 HUD polish round 5: `0.01`, not `f32::EPSILON` — the two
         // sides no longer share an IDENTICAL expression tree (each seam now
         // subtracts its OWN differently-valued `*_TO_*_GAP_PX` constant), so
@@ -976,69 +836,71 @@ mod tests {
         // though they're algebraically equal in real-number math. `0.01px`
         // matches the tolerance every other assertion in this test already
         // uses.
-        assert!((left_bar_width - right_bar_width).abs() < 0.01);
-        assert!((left_bar_width - ACTION_BAR_HALF_WIDTH_PX).abs() < 0.01);
+        assert!((left_row_width - right_row_width).abs() < 0.01);
+        assert!((left_row_width - SLOT_ROW_WIDTH_PX).abs() < 0.01);
 
-        // Health orb's right edge must sit exactly `HEALTH_TO_LEFT_BAR_GAP_PX`
-        // before the left bar half's left edge.
+        // Health orb's right edge must sit exactly `HEALTH_TO_LEFT_ROW_GAP_PX`
+        // before the left row's left edge.
         let health_orb_right = CLUSTER.health_orb_left + ORB_SIZE_PX;
         assert!(
-            (health_orb_right + HEALTH_TO_LEFT_BAR_GAP_PX - CLUSTER.action_bar_left_half_left)
-                .abs()
+            (health_orb_right + HEALTH_TO_LEFT_ROW_GAP_PX - CLUSTER.slot_row_left_half_left).abs()
                 < 0.01
         );
 
-        // Mana orb's left edge must sit exactly `RIGHT_BAR_TO_MANA_GAP_PX`
-        // past the right bar half's right edge.
-        let action_bar_right_half_right =
-            CLUSTER.action_bar_right_half_left + ACTION_BAR_HALF_WIDTH_PX;
+        // Mana orb's left edge must sit exactly `RIGHT_ROW_TO_MANA_GAP_PX`
+        // past the right row's right edge.
+        let slot_row_right_half_right = CLUSTER.slot_row_right_half_left + SLOT_ROW_WIDTH_PX;
         assert!(
-            (CLUSTER.mana_orb_left - RIGHT_BAR_TO_MANA_GAP_PX - action_bar_right_half_right).abs()
+            (CLUSTER.mana_orb_left - RIGHT_ROW_TO_MANA_GAP_PX - slot_row_right_half_right).abs()
                 < 0.01
         );
     }
 
-    /// BL-82 HUD polish round 5 — the actual REGRESSION GUARD this whole
-    /// round exists to add: every seam's REAL, opaque-art-to-opaque-art
-    /// visible gap must equal [`CLUSTER_GAP_PX`] exactly, computed the same
-    /// way [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s doc comment derives it
-    /// (`real_gap = box_gap + margin_A + margin_B`). This is what the old
-    /// `cluster_is_symmetric_around_centre` test could NOT catch — it only
-    /// ever asserted relationships between BOUNDING BOXES, which is exactly
-    /// how this bug shipped three rounds in a row despite every earlier
-    /// version of that test passing throughout. A future edit to any
-    /// `*_MARGIN_PX`/`*_TO_*_GAP_PX` constant that breaks this identity — not
-    /// just a box-position regression — fails here.
+    /// BL-82 HUD polish round 5 — the actual REGRESSION GUARD that round
+    /// exists to add: every seam's REAL, opaque-art-to-opaque-art visible gap
+    /// must equal [`CLUSTER_GAP_PX`] exactly, computed the same way
+    /// [`ANGEL_FRAME_RIGHT_MARGIN_PX`]'s doc comment derives it (`real_gap =
+    /// box_gap + orb_margin + row_margin`). This is what a simple
+    /// box-position check (like `cluster_is_symmetric_around_centre` above)
+    /// can NOT catch by itself — it only asserts relationships between
+    /// BOUNDING BOXES, which is exactly how the round-5 bug shipped three
+    /// rounds in a row despite that box-position test passing throughout.
+    ///
+    /// BL-82 HUD redesign round 6: `row_margin` is now always `0.0` — the
+    /// ability-slot row (round 6) is a bare transparent flex container with
+    /// no baked-in art padding of its own, unlike the deleted
+    /// `action_bar_bg_left.png`/`_right.png` this replaced (which used to
+    /// contribute the second, now-removed `ACTION_BAR_LEFT/RIGHT_*_MARGIN_PX`
+    /// term). Kept as an explicit `+ 0.0` in the loop below (not just dropped)
+    /// so the formula stays visibly parallel to the doc comment's own
+    /// `box_gap + orb_margin + row_margin` identity.
     #[test]
     fn every_seam_real_opaque_gap_equals_cluster_gap_px() {
         let seams = [
             (
-                "health->left_bar",
-                HEALTH_TO_LEFT_BAR_GAP_PX,
+                "health->left_row",
+                HEALTH_TO_LEFT_ROW_GAP_PX,
                 ANGEL_FRAME_RIGHT_MARGIN_PX,
-                ACTION_BAR_LEFT_LEFT_MARGIN_PX,
             ),
             (
-                "left_bar->stamina",
-                LEFT_BAR_TO_STAMINA_GAP_PX,
-                ACTION_BAR_LEFT_RIGHT_MARGIN_PX,
+                "left_row->stamina",
+                LEFT_ROW_TO_STAMINA_GAP_PX,
                 STAMINA_FRAME_LEFT_MARGIN_PX,
             ),
             (
-                "stamina->right_bar",
-                STAMINA_TO_RIGHT_BAR_GAP_PX,
+                "stamina->right_row",
+                STAMINA_TO_RIGHT_ROW_GAP_PX,
                 STAMINA_FRAME_RIGHT_MARGIN_PX,
-                ACTION_BAR_RIGHT_LEFT_MARGIN_PX,
             ),
             (
-                "right_bar->mana",
-                RIGHT_BAR_TO_MANA_GAP_PX,
-                ACTION_BAR_RIGHT_RIGHT_MARGIN_PX,
+                "right_row->mana",
+                RIGHT_ROW_TO_MANA_GAP_PX,
                 CUTHULHU_FRAME_LEFT_MARGIN_PX,
             ),
         ];
-        for (name, box_gap, margin_a, margin_b) in seams {
-            let real_gap = box_gap + margin_a + margin_b;
+        for (name, box_gap, orb_margin) in seams {
+            let row_margin = 0.0;
+            let real_gap = box_gap + orb_margin + row_margin;
             assert!(
                 (real_gap - CLUSTER_GAP_PX).abs() < 0.01,
                 "{name} seam's real opaque-art gap is {real_gap}, expected {CLUSTER_GAP_PX}"
@@ -1046,21 +908,21 @@ mod tests {
         }
     }
 
-    /// The XP/level cluster's width matches the "core" action-bar span
-    /// (both halves + the centre orb, not the two outer orbs) — pins the
+    /// The XP/level cluster's width matches the "core" row span (both
+    /// ability-slot rows + the centre orb, not the two outer orbs) — pins the
     /// value both `combat_hud.rs`'s XP-cluster container and any future
     /// caller rely on.
     ///
-    /// BL-82 HUD polish round 5: the two gaps this span sums are
-    /// [`LEFT_BAR_TO_STAMINA_GAP_PX`]/[`STAMINA_TO_RIGHT_BAR_GAP_PX`], no
-    /// longer `2.0 * CLUSTER_GAP_PX`.
+    /// BL-82 HUD redesign round 6: renamed from
+    /// `action_bar_total_width_spans_both_halves_and_stamina_orb`, now checks
+    /// [`CORE_ROW_WIDTH_PX`]/[`SLOT_ROW_WIDTH_PX`].
     #[test]
-    fn action_bar_total_width_spans_both_halves_and_stamina_orb() {
-        let expected = 2.0 * ACTION_BAR_HALF_WIDTH_PX
+    fn core_row_width_spans_both_slot_rows_and_stamina_orb() {
+        let expected = 2.0 * SLOT_ROW_WIDTH_PX
             + ORB_SIZE_PX
-            + LEFT_BAR_TO_STAMINA_GAP_PX
-            + STAMINA_TO_RIGHT_BAR_GAP_PX;
-        assert!((ACTION_BAR_TOTAL_WIDTH_PX - expected).abs() < f32::EPSILON);
+            + LEFT_ROW_TO_STAMINA_GAP_PX
+            + STAMINA_TO_RIGHT_ROW_GAP_PX;
+        assert!((CORE_ROW_WIDTH_PX - expected).abs() < f32::EPSILON);
     }
 
     /// [`CLUSTER_TOTAL_HEIGHT_PX`] is exactly the sum of its own named parts
@@ -1115,13 +977,18 @@ mod tests {
     /// BL-82 HUD polish round 4 (issue 1): every `*_BOTTOM_PAD_PX` constant
     /// must be strictly positive (a real piece of the source art's own
     /// transparent margin, not a zero/negative no-op) and small relative to
-    /// [`ORB_SIZE_PX`]/[`ACTION_BAR_HALF_HEIGHT_PX`] (a few px, not a large
-    /// fraction of the whole orb/action-bar height — a wildly larger value
-    /// here would signal a measurement bug, not a real transparent margin).
-    /// Also pins each constant's exact scaled value against the raw
-    /// measured px this module's own doc comments cite, so a future asset
-    /// re-cut that changes the padding is caught here rather than silently
-    /// reintroducing the flush-bottom gap.
+    /// [`ORB_SIZE_PX`] (a few px, not a large fraction of the whole orb
+    /// height — a wildly larger value here would signal a measurement bug,
+    /// not a real transparent margin). Also pins each constant's exact scaled
+    /// value against the raw measured px this module's own doc comments
+    /// cite, so a future asset re-cut that changes the padding is caught
+    /// here rather than silently reintroducing the flush-bottom gap.
+    ///
+    /// BL-82 HUD redesign round 6: only the 3 orb pads remain —
+    /// `ACTION_BAR_LEFT/RIGHT_BOTTOM_PAD_PX` are deleted along with the
+    /// action-bar frame art they measured; the ability-slot row has no
+    /// bottom pad of its own any more (see [`CLUSTER_BOTTOM_PX`]'s doc
+    /// comment).
     #[test]
     fn bottom_pad_constants_are_small_positive_fractions_of_their_own_render_height() {
         // Computed with the EXACT SAME expression shape/order as each real
@@ -1134,21 +1001,11 @@ mod tests {
         assert_eq!(ANGEL_FRAME_BOTTOM_PAD_PX, 11.0 * ORB_SIZE_PX / 768.0);
         assert_eq!(CUTHULHU_FRAME_BOTTOM_PAD_PX, 13.0 * ORB_SIZE_PX / 768.0);
         assert_eq!(STAMINA_FRAME_BOTTOM_PAD_PX, 14.0 * ORB_SIZE_PX / 768.0);
-        assert_eq!(
-            ACTION_BAR_LEFT_BOTTOM_PAD_PX,
-            23.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0
-        );
-        assert_eq!(
-            ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
-            26.0 * ACTION_BAR_HALF_HEIGHT_PX / 752.0
-        );
 
         for pad in [
             ANGEL_FRAME_BOTTOM_PAD_PX,
             CUTHULHU_FRAME_BOTTOM_PAD_PX,
             STAMINA_FRAME_BOTTOM_PAD_PX,
-            ACTION_BAR_LEFT_BOTTOM_PAD_PX,
-            ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
         ] {
             assert!(pad > 0.0, "a bottom pad must be a real positive margin");
             assert!(
@@ -1178,86 +1035,31 @@ mod tests {
         );
     }
 
-    /// Regression guard for [`ACTION_BAR_WIDTH_TRIM`] (BL-82 EM-5.17 "5+5
-    /// slot-holders" follow-up, superseding the old "worst case 3 slots"
-    /// version of this test; updated BL-82 HUD polish round 3 for the
-    /// flush/adjacent slot layout — issues 2/3 of Matías's `captura2.png`
-    /// report): each action-bar half ALWAYS renders
-    /// [`crate::hotbar::SLOTS_PER_HALF`] (5) holders now (not a sim-driven,
-    /// usually-shorter count) — this pins that the re-trimmed
-    /// [`ACTION_BAR_HALF_WIDTH_PX`] still fits [`crate::hotbar::
-    /// HOTBAR_ROW_LEADING_INSET_PX`] (round-3 post-review follow-up — the
-    /// corner-clearing left inset, see that constant's own doc comment) plus
-    /// exactly 5 `hotbar::SLOT_SIZE_PX` slots + 4 of `hotbar::
-    /// HOTBAR_SLOT_GAP_PX` gaps (no longer the theme's generic
-    /// `HudSpacing::xs` — round 3 gave the hotbar its own dedicated, tighter
-    /// gap constant, matching `xindeler-old`'s own `slot_offset = 3.0`
-    /// reference layout), so a future change to any of
-    /// `ACTION_BAR_WIDTH_TRIM`/`HOTBAR_ROW_LEADING_INSET_PX`/`SLOT_SIZE_PX`/
-    /// `HOTBAR_SLOT_GAP_PX` can't silently make the row overflow the
-    /// background art's own width.
+    /// BL-82 HUD redesign round 6 — replaces the deleted
+    /// `five_slots_per_half_fit_inside_the_action_bar_half_width` and
+    /// `hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`.
+    /// Those two tests existed purely because the ability-slot row used to
+    /// sit INSIDE a wider, independently-sized background image
+    /// (`action_bar_bg_left.png`/`_right.png`) that could, in principle, be
+    /// too narrow to fit the slots, or wide enough to fit them but still
+    /// clip past that image's own flat opaque backing — both failure modes
+    /// are structurally impossible now that [`SLOT_ROW_WIDTH_PX`] IS the
+    /// slots' own width (no separate background box to under/overflow). What
+    /// remains worth pinning: the formula itself, computed the exact same way
+    /// `crate::hotbar`'s own row-spawning code does, so a future edit to
+    /// [`SLOT_ROW_WIDTH_PX`]'s definition or to
+    /// `crate::hotbar::SLOT_SIZE_PX`/`SLOTS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`
+    /// can't silently desync the two.
     #[test]
-    fn five_slots_per_half_fit_inside_the_action_bar_half_width() {
-        let leading_inset = crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX;
-        let slot_gap = crate::hotbar::HOTBAR_SLOT_GAP_PX;
+    fn slot_row_width_matches_the_slot_geometry_exactly() {
         let slots_per_half = crate::hotbar::SLOTS_PER_HALF as f32;
-        let row_width = leading_inset
-            + slots_per_half * crate::hotbar::SLOT_SIZE_PX
-            + (slots_per_half - 1.0) * slot_gap;
+        let expected = slots_per_half * crate::hotbar::SLOT_SIZE_PX
+            + (slots_per_half - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
         assert!(
-            ACTION_BAR_HALF_WIDTH_PX >= row_width,
-            "ACTION_BAR_HALF_WIDTH_PX ({ACTION_BAR_HALF_WIDTH_PX}) must fit the \
-             HOTBAR_ROW_LEADING_INSET_PX-shifted {slots_per_half} hotbar slots + gaps \
-             ({row_width}) — a future change to ACTION_BAR_WIDTH_TRIM, \
-             HOTBAR_ROW_LEADING_INSET_PX, SLOT_SIZE_PX, or HOTBAR_SLOT_GAP_PX shrank this below \
-             that floor"
-        );
-    }
-
-    /// BL-82 HUD polish round 4 (issue 3) — the REAL regression guard the
-    /// bounding-box-only check above can't provide: the row's content must
-    /// land within each action-bar half's own FLAT, OPAQUE plate art (see
-    /// [`ACTION_BAR_WIDTH_TRIM`]'s doc comment for the full story of how a
-    /// trim that passed the box-fit test above still visibly overflowed onto
-    /// green terrain on the right half). Converts the row's rendered-px
-    /// start/end back to the SAME `1380px`-native-width coordinate space
-    /// [`ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX`]/
-    /// [`ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX`] were measured against
-    /// (both source PNGs share that native width) and checks both real
-    /// constraints: the row must END at or before the RIGHT half's flat
-    /// backing runs out, and must START at or after the LEFT half's own
-    /// corner-curl clears.
-    #[test]
-    fn hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing() {
-        let leading_inset = crate::hotbar::HOTBAR_ROW_LEADING_INSET_PX;
-        let slot_gap = crate::hotbar::HOTBAR_SLOT_GAP_PX;
-        let slot_size = crate::hotbar::SLOT_SIZE_PX;
-        let slots_per_half = crate::hotbar::SLOTS_PER_HALF as f32;
-        let row_end_rendered =
-            leading_inset + slots_per_half * slot_size + (slots_per_half - 1.0) * slot_gap;
-
-        // Both `action_bar_bg_left.png`/`_right.png` are `1380px` wide
-        // natively — this is the SAME scale factor `ACTION_BAR_HALF_WIDTH_PX`
-        // itself is derived from (`ACTION_BAR_HALF_HEIGHT_PX * (1380/752) *
-        // ACTION_BAR_WIDTH_TRIM`), just inverted back to native px.
-        let native_scale = ACTION_BAR_HALF_WIDTH_PX / 1380.0;
-        let row_end_native = row_end_rendered / native_scale;
-        let leading_inset_native = leading_inset / native_scale;
-
-        assert!(
-            row_end_native <= ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX,
-            "the hotbar row's content ends at native x={row_end_native:.1} on the RIGHT half, \
-             past the flat plate's own safe opaque boundary \
-             ({ACTION_BAR_RIGHT_FLAT_SAFE_END_RAW_PX}) — the last holder(s) will render over bare \
-             terrain instead of the plate art; increase ACTION_BAR_WIDTH_TRIM or shrink \
-             SLOT_SIZE_PX/HOTBAR_SLOT_GAP_PX"
-        );
-        assert!(
-            leading_inset_native >= ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX,
-            "the hotbar row's content starts at native x={leading_inset_native:.1} on the LEFT \
-             half, before the flat plate's own corner-curl clears \
-             ({ACTION_BAR_LEFT_FLAT_SAFE_START_RAW_PX}) — the first holder will render under the \
-             piece's decorative corner"
+            (SLOT_ROW_WIDTH_PX - expected).abs() < f32::EPSILON,
+            "SLOT_ROW_WIDTH_PX ({SLOT_ROW_WIDTH_PX}) must equal exactly SLOTS_PER_HALF * \
+             SLOT_SIZE_PX + (SLOTS_PER_HALF - 1) * HOTBAR_SLOT_GAP_PX ({expected}) — with no \
+             background frame art left, the row's box has nothing else in it"
         );
     }
 }

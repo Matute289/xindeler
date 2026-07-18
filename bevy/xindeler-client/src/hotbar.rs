@@ -3,11 +3,21 @@
 //! EM-5.11's `xindeler-input` keymap, and cooldown greying/wipe reading the
 //! `xindeler-sim-bridge::hotbar` mirror.
 //!
+//! ## BL-82 HUD redesign round 6 — no more ornate action-bar frame art
+//! `action_bar_bg_left.png`/`action_bar_bg_right.png` (the ornate
+//! bronze/spiked frame pieces this screen used to render behind each slot
+//! row) are gone entirely, per Matías's `hud-ejemplo-2.png` reference (a
+//! Diablo-4-fan-art HUD with no frame art around the ability icons at all —
+//! just individual square icons sitting directly between the two large
+//! circular orbs). See `hud_layout.rs`'s own top-of-file doc comment for the
+//! full rationale; [`spawn_slot_row_half`] is now a bare transparent flex
+//! container instead of an `ImageNode`-backed piece.
+//!
 //! ## Slot count — 10 HOLDERS always rendered, 5+5 split (BL-82 EM-5.17
 //! ## Phase 3: "5+5 slot-holders" follow-up)
 //! Matías's original ask (under-scoped by the Phase 0/2 bugfixes above, which
-//! only fixed rendering bugs without changing the *count*): the action bar
-//! must show 5 skill-holder slots on the LEFT background piece and 5 on the
+//! only fixed rendering bugs without changing the *count*): the hotbar
+//! must show 5 skill-holder slots on the LEFT half and 5 on the
 //! RIGHT (10 total), one per drag-drop ability-slot address — 10
 //! independently rebindable slots regardless of which `GameInput` labels
 //! each one shows (see the "Keybind LABELS" section below for the round-3
@@ -186,91 +196,44 @@ use crate::{controls_screen::key_label, hud_layout};
 /// what a group number means).
 const HOTBAR_GROUP: SlotGroup = SlotGroup(0);
 
-/// `pub(crate)` (not private) so `hud_layout.rs`'s own regression test can
-/// pin `ACTION_BAR_HALF_WIDTH_PX` against the real slot size, instead of a
-/// second hardcoded literal silently drifting out of sync with this one.
+/// `pub(crate)` (not private) so `hud_layout.rs`'s own [`hud_layout::
+/// SLOT_ROW_WIDTH_PX`] can derive its row-container width DIRECTLY from this
+/// (and [`SLOTS_PER_HALF`]/[`HOTBAR_SLOT_GAP_PX`]), instead of a second
+/// hardcoded literal silently drifting out of sync with this one.
 ///
-/// BL-82 EM-5.17 "5+5 slot-holders" follow-up: bumped `44.0` -> `46.0`, the
-/// largest size that still fit [`SLOTS_PER_HALF`] (5) slots + 4 of the
-/// theme's `HudSpacing::xs` (4px) gaps inside the THEN-current
-/// `hud_layout::ACTION_BAR_HALF_WIDTH_PX`.
+/// History: `44.0` (Phase 2) -> `46.0` (EM-5.17 "5+5 slot-holders") ->
+/// `52.0` (HUD polish round 3, legibility) -> `58.0` (HUD polish round 4,
+/// Matías's `skill-slots-1.png` reference) — every one of those rounds also
+/// re-trimmed the (now-deleted) `hud_layout::ACTION_BAR_WIDTH_TRIM` in
+/// lockstep, since the slots used to have to fit inside an independently-sized
+/// ornate background image.
 ///
-/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 3 — the
-/// slot numbers/outlines were "quite small and hard to make out"): bumped
-/// again, `46.0 -> 52.0`. This phase also (issue 2) moved the row off the
-/// generic theme spacing onto its own dedicated [`HOTBAR_SLOT_GAP_PX`] (3px,
-/// matching `xindeler-old`'s own `skillbar.rs` reference layout's
-/// `slot_offset = 3.0`) and re-trimmed `hud_layout::ACTION_BAR_WIDTH_TRIM`
-/// (originally `0.88 -> 0.95`, then `-> 1.14` in the same round's post-review
-/// follow-up — see [`HOTBAR_ROW_LEADING_INSET_PX`]'s own doc comment) for
-/// room — together these raise the fit ceiling from `246px` (`5*46 + 4*4`)
-/// to [`HOTBAR_ROW_LEADING_INSET_PX`] `+ 5*52 + 4*3 == 327px`, comfortably
-/// inside the re-trimmed `ACTION_BAR_HALF_WIDTH_PX` (≈334.7px, see
-/// `hud_layout::tests::five_slots_per_half_fit_inside_the_action_bar_half_width`
-/// for the pinned regression) with a few px of margin to spare on the
-/// trailing edge (the row is left-anchored, not centred — see
-/// `spawn_action_bar_half`'s own doc comment).
-/// BL-82 HUD polish round 4 (Matías's `skill-slots-1.png` reference, issue
-/// 3 — round 3's `52.0` still read noticeably smaller/further apart than the
-/// reference's big, flush/adjacent slot squares): bumped `52.0 -> 58.0`,
-/// paired with a tighter [`HOTBAR_SLOT_GAP_PX`] (`3.0 -> 2.0`, closer to true
-/// "flush/adjacent" without the squares literally sharing a border) and a
-/// re-trimmed `hud_layout::ACTION_BAR_WIDTH_TRIM` (`1.14 -> 1.40`) so all 5
-/// slots + [`HOTBAR_ROW_LEADING_INSET_PX`] fit inside NOT JUST
-/// `hud_layout::ACTION_BAR_HALF_WIDTH_PX`'s bounding box but each half's own
-/// FLAT, OPAQUE plate art — see `hud_layout::ACTION_BAR_WIDTH_TRIM`'s own doc
-/// comment for why the box-fit test alone wasn't enough (a first attempt at
-/// `60.0`/`1.30` passed that test but still visibly overflowed onto green
-/// terrain on the right half; `58.0` is the pulled-back size that fits with a
-/// real margin at `1.40`) and
-/// [`hud_layout::tests::hotbar_row_fits_within_each_action_bar_halfs_own_flat_opaque_backing`]
-/// for the pinned regression.
+/// BL-82 HUD redesign round 6: that background image
+/// (`action_bar_bg_left.png`/`_right.png`) is gone — see `hud_layout.rs`'s own
+/// top-of-file doc comment — so there is no longer any fit-inside-the-frame
+/// constraint driving this value; kept at `58.0` unchanged, since Matías's
+/// `hud-ejemplo-2.png` reference shows icons roughly this size relative to
+/// the orbs. [`hud_layout::SLOT_ROW_WIDTH_PX`] now derives the row
+/// container's own width straight from this constant instead of the row
+/// needing to fit inside a separately-sized box.
 pub(crate) const SLOT_SIZE_PX: f32 = 58.0;
 
-/// BL-82 HUD polish round 3 (issue 2): the gap (px) between adjacent hotbar
-/// slots within one action-bar half — a dedicated, MUCH tighter constant
-/// than the theme's generic `HudSpacing::xs` (4px) this row used to share
-/// with every other HUD widget, chosen to match `xindeler-old`'s own
-/// `voxygen/src/hud/skillbar.rs` reference layout (`let slot_offset = 3.0;`,
-/// slots placed `RightFrom(prev_slot, slot_offset)` — i.e. flush/adjacent,
-/// not spread out) that Matías explicitly pointed to ("fijate como es esa
-/// parte en xindeler-old"). Paired with `JustifyContent::FlexStart` in
-/// [`spawn_action_bar_half`] (not `Center`) so the row hugs one edge of the
-/// piece instead of being centred with generous space on both sides.
+/// BL-82 HUD redesign round 6: the gap (px) between adjacent hotbar slots
+/// within one slot row. History: `4.0` (theme's generic `HudSpacing::xs`) ->
+/// `3.0` (HUD polish round 3, a dedicated tighter constant matching
+/// `xindeler-old`'s own `skillbar.rs` reference `slot_offset = 3.0`) -> `2.0`
+/// (HUD polish round 4, Matías's `skill-slots-1.png` reference).
 ///
-/// BL-82 HUD polish round 4 (issue 3): shrunk again, `3.0 -> 2.0`, alongside
-/// [`SLOT_SIZE_PX`]'s bump — Matías's `skill-slots-1.png` reference shows the
-/// slot squares sitting essentially flush/adjacent to one another, tighter
-/// than round 3's `3.0` already was.
-pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 2.0;
-
-/// BL-82 HUD polish round 3 FOLLOW-UP (post-review live `--smoke-screenshot`
-/// check): `FlexStart` with zero leading margin put the FIRST slot of each
-/// half (index 0/`Slot1` and index 5/`Slot6`) directly under
-/// `action_bar_bg_left.png`/`_right.png`'s own decorative corner curl on that
-/// side — chunkier than the corner on the opposite (trailing) side, so slot 0
-/// rendered as a barely-legible partial square while slots 1-4 (already clear
-/// of it — confirmed the SAME way, by rendering `--smoke-screenshot` and
-/// inspecting the actual pixels, not just eyeballing the source art) looked
-/// fine.
-///
-/// Deliberately defined AS exactly one slot pitch (`SLOT_SIZE_PX +
-/// HOTBAR_SLOT_GAP_PX`, `== 52 + 3 == 55.0` at the time this was written) —
-/// not a bare literal that could silently drift out of sync with either of
-/// those if one changes later (BL-82 HUD polish round 4 bumped both
-/// `SLOT_SIZE_PX`/`HOTBAR_SLOT_GAP_PX` again, to `58.0`/`2.0` — this constant
-/// tracks that automatically, `== 60.0` today) — NOT a smaller hand-tuned
-/// guess: an earlier, smaller value (`40.0`) was tried first and
-/// re-verified against a fresh `--smoke-screenshot` — still not enough
-/// clearance, slot 0 was STILL partially under the corner. One full slot
-/// pitch instead moves slot 0 to EXACTLY where slot 1 used to sit pre-fix
-/// (empirically already confirmed clean in that same screenshot), rather
-/// than trying to guess the corner's exact pixel extent a second time.
-/// Paired with `ACTION_BAR_WIDTH_TRIM`'s matching bump (see that constant's
-/// own doc comment) so the trailing slack the right-anchored edge already
-/// enjoyed (see [`SLOT_SIZE_PX`]'s doc comment) isn't eaten by this — only
-/// the row's start moves, not the inter-slot gaps.
-pub(crate) const HOTBAR_ROW_LEADING_INSET_PX: f32 = SLOT_SIZE_PX + HOTBAR_SLOT_GAP_PX;
+/// Round 6 shrinks this further, `2.0 -> 0.0` — Matías's `hud-ejemplo-2.png`
+/// reference shows the ability icons sitting essentially flush/adjacent, no
+/// visible gap between them (each icon's own border art supplies the visual
+/// separation, the way `skill_slot_border.png`'s per-slot border already
+/// does). Previous rounds kept a small positive gap specifically to avoid a
+/// mismatched-art seam where two ORNATE frame pieces touched — that concern
+/// doesn't apply here: there is no frame art dictating a minimum spacing any
+/// more (see `hud_layout.rs`'s own top-of-file doc comment), so a flush `0.0`
+/// is the natural tightest packing, matching the reference exactly.
+pub(crate) const HOTBAR_SLOT_GAP_PX: f32 = 0.0;
 
 /// Number of ability-slot HOLDERS rendered per action-bar half (BL-82
 /// EM-5.17 "5+5 slot-holders" follow-up) — Matías's explicit ask: 5 on the
@@ -361,13 +324,16 @@ impl Plugin for HotbarViewPlugin {
 #[derive(Resource, Default)]
 struct HotbarSlotEntities(Vec<Entity>);
 
-/// BL-82 EM-5.17 Phase 2: the LEFT half of the 2-piece action-bar background
-/// (`action_bar_bg_left.png`), the parent for the first half of the ability
-/// slots (spec §3.1). Replaces the old single full-width `HotbarSlotRow`.
+/// The LEFT half of the ability-slot row, the parent for the first half of
+/// the ability slots (spec §3.1). Originally the parent of the
+/// `action_bar_bg_left.png` background piece (BL-82 EM-5.17 Phase 2); BL-82
+/// HUD redesign round 6 removed that background image — this is now a bare
+/// transparent flex container (see [`spawn_slot_row_half`]'s own doc
+/// comment).
 #[derive(Component)]
 struct HotbarLeftHalf;
-/// The RIGHT half (`action_bar_bg_right.png`) — the parent for the
-/// remaining ability slots.
+/// The RIGHT half — the parent for the remaining ability slots. See
+/// [`HotbarLeftHalf`]'s own doc comment.
 #[derive(Component)]
 struct HotbarRightHalf;
 /// Marks a per-slot `skill_slot_border.png` overlay child (BL-82 EM-5.17
@@ -489,149 +455,55 @@ fn short_glyph(ability_id: &str) -> String {
     glyph
 }
 
-/// Spawns the two `action_bar_bg_left.png`/`action_bar_bg_right.png`-backed
-/// halves flanking the centre Stamina orb (spec §3.1, BL-82 EM-5.17 Phase 2 —
-/// replaces the old single full-width `HotbarSlotRow` flat band). Each half
-/// is itself the flex-row PARENT its own share of ability slots get
-/// `add_child`ed into (by [`sync_hotbar_slots`]/[`sync_slot_half_parenting`]),
-/// positioned per `crate::hud_layout::CLUSTER` — the SAME arithmetic
-/// `combat_hud.rs`'s orbs use, so the two independently-`Startup`-spawned
-/// plugins line up into one contiguous row.
+/// Spawns one of the two ability-slot row halves flanking the centre Stamina
+/// orb (spec §3.1). Each half is itself the flex-row PARENT its own share of
+/// ability slots get `add_child`ed into (by
+/// [`sync_hotbar_slots`]/[`sync_slot_half_parenting`]), positioned per
+/// `crate::hud_layout::CLUSTER` — the SAME arithmetic `combat_hud.rs`'s orbs
+/// use, so the two independently-`Startup`-spawned plugins line up into one
+/// contiguous row.
 ///
-/// BL-82 HUD polish round 3 (Matías's `captura2.png` report, issue 2 — the
-/// numbered slots read as spread out across almost the full width of the
-/// ornate frame, instead of sitting snug against one another):
-/// `justify_content` changed `Center -> FlexStart` and `column_gap` changed
-/// from the theme's generic `HudSpacing::xs` to the dedicated, tighter
-/// [`HOTBAR_SLOT_GAP_PX`]. `FlexStart` anchors BOTH halves' slot rows to their
-/// own piece's LEFT edge (not centred with generous space on both sides) — this
-/// reads as one continuous "1 2 3 4 5 [orb] 6 7 8 9 10" sequence (each half
-/// starts its own run of numbers flush against its own left edge) rather than
-/// two independently-centred islands, matching the "flush and adjacent,
-/// anchored to one edge" reference layout Matías pointed to in `xindeler-old`'s
-/// `voxygen/src/hud/skillbar.rs` (`BottomLeftWithMarginsOn(frame, 0.0, 0.0)`
-/// then `RightFrom(prev, slot_offset)`). A useful side effect for the right
-/// half specifically: its own leftover slack now sits on its TRAILING
-/// (right, mana-orb-facing) edge as plain ornate frame art rather than being
-/// split as extra inter-slot gaps — reinforcing issue 1's fix (the mana orb
-/// getting more visual breathing room from the busy numbered content).
-///
-/// POST-REVIEW FOLLOW-UP (same round, caught by a live `--smoke-screenshot`
-/// check after the above landed): plain `FlexStart` with no leading padding
-/// put the row's very first slot directly under the background art's own
-/// chunky corner curl on that side — see [`HOTBAR_ROW_LEADING_INSET_PX`]'s
-/// doc comment for the pixel-measured proof and reasoning. `padding.left`
-/// (not a bigger `column_gap`, which would also space out every OTHER pair)
-/// shifts only the row's start, keeping every inter-slot gap exactly
-/// [`HOTBAR_SLOT_GAP_PX`].
-///
-/// A first attempt at this padding-only fix rendered as a complete no-op —
-/// re-verified with bevy's own resolved `ComputedNode`/`UiGlobalTransform`
-/// (not just eyeballing screenshots) that the row's geometry WAS shifting
-/// correctly. Root cause: [`ImageNode`]'s `visual_box` defaults to
-/// `VisualBox::ContentBox`, so the background art ITSELF was being confined
-/// to (and stretched into) the padded content box right along with the
-/// slots — the corner curl shifted right by the exact same amount the slots
-/// did, so their relative overlap never changed no matter how big the
-/// padding got. Explicitly setting `visual_box: VisualBox::PaddingBox` pins
-/// the artwork to the padding-independent box while `padding.left` still only
-/// affects where the flex-row CHILDREN start — the two finally move relative
-/// to each other, which is what actually clears the corner. `PaddingBox`
-/// specifically (not `BorderBox`) — this `Node` sets no `border` width, so
-/// both variants render byte-identically today (`ComputedNode::border` is
-/// zero either way), but `PaddingBox` is the more semantically precise pick
-/// ("ignore only my own padding") and stays correct if a `border` is ever
-/// added to this node later.
-///
-/// BL-82 HUD polish round 4 (issue 1): `bottom_pad_px` is the ONE new
-/// parameter this round adds — `action_bar_bg_left.png`/`_right.png`'s own
-/// measured transparent bottom margin (see
-/// `hud_layout::CLUSTER_BOTTOM_PX`'s doc comment for the full root-cause
-/// writeup), applied as `bottom: Val::Px(CLUSTER_BOTTOM_PX - bottom_pad_px)`
-/// so the real opaque art (not the bounding box) lands flush with the
-/// screen's bottom edge instead of leaving a visible gap above it.
-///
-/// BL-82 HUD polish round 5 FOLLOW-UP — the actual root cause of "orb ↔
-/// action-bar gap is huge no matter what `hud_layout::CLUSTER_GAP_PX`/
-/// `*_MARGIN_PX` says": this `ImageNode` never set `image_mode`, so it
-/// defaulted to `NodeImageMode::Auto`. Per `bevy_ui_render`'s own extraction
-/// code (`extract_uinode_images`), `Auto` does NOT stretch the source image
-/// to the node's box — it scales the image to CONTAIN within the box
-/// (`source * (visual_box.size() / source).min_element()`) and centres the
-/// result, i.e. exactly a CSS `object-fit: contain` + `object-position:
-/// center`. `action_bar_bg_left.png`/`_right.png` are `1380×752` (aspect
-/// `≈1.835`) stretched into a `≈411×160` box (aspect `≈2.569`); `Auto`
-/// therefore renders them at `160 * 1.835 ≈ 293.6px` wide — `≈117px`
-/// NARROWER than the box — centred, leaving a real `≈59px` margin on BOTH
-/// sides no amount of `hud_layout` gap/margin tuning could ever close,
-/// because every one of round 5's `*_MARGIN_PX` constants assumes the art
-/// already fills its box edge-to-edge (true for the orb frames —
-/// `xindeler_ui::bar::spawn_orb_bar` already sets `Stretch` — and now true
-/// for `SkillSlotBorderOverlay` — but this piece was the one place in the
-/// whole cluster that still silently relied on the `Auto` default).
-/// Verified directly: a `--smoke-screenshot` before this line showed a
-/// `≈70-90px` real gap on every orb↔action-bar seam despite the per-seam
-/// `*_GAP_PX` constants computing to within `2px` of
-/// [`hud_layout::CLUSTER_GAP_PX`]; after adding `Stretch`, the same capture
-/// shows the real gaps collapsing to the low single-digit pixels those
-/// constants actually target. Explicit `Stretch` (not just relying on some
-/// future default change) — the SAME fix `spawn_orb_bar`'s frame overlay and
-/// `SkillSlotBorderOverlay` already apply, for the same reason: an
-/// `ImageNode` inside a `Node` with BOTH `width`/`height` already fixed via
-/// `Val::Px` must be told to fill that box, `Auto` never infers "fill" from
-/// fixed dimensions alone.
-fn spawn_action_bar_half(
-    commands: &mut Commands,
-    background: Handle<Image>,
-    left_offset_px: f32,
-    bottom_pad_px: f32,
-) -> Entity {
+/// ## BL-82 HUD redesign round 6 — no more background art
+/// Rounds 3-5 (preserved in git history/this module's changelog-style doc
+/// comments elsewhere) spent significant effort getting the ornate
+/// `action_bar_bg_left.png`/`action_bar_bg_right.png` background pieces to
+/// size/crop/align well around the slots — this round removes that art from
+/// the render path entirely (Matías's `hud-ejemplo-2.png` reference has no
+/// frame art around its ability icons at all), so this function no longer
+/// takes an image handle, `bottom_pad_px`, or a leading-inset padding: it's
+/// just a plain transparent absolutely-positioned flex-row container, sized
+/// to EXACTLY [`hud_layout::SLOT_ROW_WIDTH_PX`]×[`hud_layout::
+/// SLOT_ROW_HEIGHT_PX`] (derived straight from the slot geometry — see that
+/// constant's own doc comment), with its slots vertically centred via
+/// `align_items: AlignItems::Center` and horizontally packed at
+/// [`HOTBAR_SLOT_GAP_PX`] apart. `justify_content` no longer matters (kept as
+/// `FlexStart` for parity with the old left-anchored behaviour) since the
+/// container's own width now equals its content's width exactly — there is
+/// no leftover slack for `Center` vs `FlexStart` to disagree about.
+fn spawn_slot_row_half(commands: &mut Commands, left_offset_px: f32) -> Entity {
     commands
-        .spawn((
-            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
-            ImageNode {
-                visual_box: bevy::ui::VisualBox::PaddingBox,
-                image_mode: bevy::ui::widget::NodeImageMode::Stretch,
-                ..ImageNode::new(background)
-            },
-            Node {
-                position_type: PositionType::Absolute,
-                left: hud_layout::CENTER_LEFT,
-                bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX - bottom_pad_px),
-                margin: UiRect::left(Val::Px(left_offset_px)),
-                width: Val::Px(hud_layout::ACTION_BAR_HALF_WIDTH_PX),
-                height: Val::Px(hud_layout::ACTION_BAR_HALF_HEIGHT_PX),
-                padding: UiRect::left(Val::Px(HOTBAR_ROW_LEADING_INSET_PX)),
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(HOTBAR_SLOT_GAP_PX),
-                ..Default::default()
-            },
-        ))
+        .spawn((GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP), Node {
+            position_type: PositionType::Absolute,
+            left: hud_layout::CENTER_LEFT,
+            bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX),
+            margin: UiRect::left(Val::Px(left_offset_px)),
+            width: Val::Px(hud_layout::SLOT_ROW_WIDTH_PX),
+            height: Val::Px(hud_layout::SLOT_ROW_HEIGHT_PX),
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(HOTBAR_SLOT_GAP_PX),
+            ..Default::default()
+        }))
         .id()
 }
 
-fn spawn_hotbar(
-    mut commands: Commands,
-    theme: Res<HudTheme>,
-    fonts: Res<HudFonts>,
-    images: Res<HudImages>,
-) {
-    let left_half = spawn_action_bar_half(
-        &mut commands,
-        images.get(HudImageKey::ActionBarBgLeft),
-        hud_layout::CLUSTER.action_bar_left_half_left,
-        hud_layout::ACTION_BAR_LEFT_BOTTOM_PAD_PX,
-    );
+fn spawn_hotbar(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+    let left_half = spawn_slot_row_half(&mut commands, hud_layout::CLUSTER.slot_row_left_half_left);
     commands.entity(left_half).insert(HotbarLeftHalf);
 
-    let right_half = spawn_action_bar_half(
-        &mut commands,
-        images.get(HudImageKey::ActionBarBgRight),
-        hud_layout::CLUSTER.action_bar_right_half_left,
-        hud_layout::ACTION_BAR_RIGHT_BOTTOM_PAD_PX,
-    );
+    let right_half =
+        spawn_slot_row_half(&mut commands, hud_layout::CLUSTER.slot_row_right_half_left);
     commands.entity(right_half).insert(HotbarRightHalf);
 
     let text_font = |font: Handle<bevy::text::Font>| TextFont {
@@ -960,9 +832,9 @@ fn sync_hotbar_slots(
 }
 
 /// BL-82 EM-5.17 Phase 2: (re-)parents every current hotbar slot entity into
-/// whichever action-bar HALF it belongs to — the first `ceil(n/2)` slots go
-/// into the LEFT half (`action_bar_bg_left.png`), the rest into the RIGHT
-/// half (spec §3.1's "first half of slots in left, rest in right"). Runs
+/// whichever slot-row HALF it belongs to — the first `ceil(n/2)` slots go
+/// into the LEFT half ([`HotbarLeftHalf`]), the rest into the RIGHT half
+/// (spec §3.1's "first half of slots in left, rest in right"). Runs
 /// AFTER [`sync_hotbar_slots`] so it always sees that system's up-to-date
 /// [`HotbarSlotEntities`] for the current frame.
 ///
@@ -1565,20 +1437,22 @@ mod tests {
         );
     }
 
-    /// BL-82 HUD polish round 5 FOLLOW-UP — regression guard for the REAL
-    /// root cause of "orb ↔ action-bar gap stays huge no matter what
-    /// `hud_layout::CLUSTER_GAP_PX`/`*_MARGIN_PX` says" (see
-    /// `spawn_action_bar_half`'s own doc comment for the full
-    /// `NodeImageMode::Auto` vs `Stretch` root-cause writeup, discovered via
-    /// a live `--smoke-screenshot` pixel measurement AFTER the per-seam
-    /// margin constants were already in place and still showing a `≈70-90px`
-    /// real gap). Both action-bar-half `ImageNode`s must carry
-    /// `NodeImageMode::Stretch` — a future regression back to the `Auto`
-    /// default would silently reintroduce a real, uncloseable `≈117px`
-    /// contain-fit margin on both action-bar halves regardless of anything
-    /// `hud_layout`'s gap math computes.
+    /// BL-82 HUD redesign round 6 — replaces the deleted
+    /// `action_bar_halves_stretch_their_background_to_fill_the_box` (that
+    /// test guarded round 5's `NodeImageMode::Stretch` fix for the
+    /// `action_bar_bg_left.png`/`_right.png` `ImageNode`s; round 6 deletes
+    /// those `ImageNode`s entirely — see `spawn_slot_row_half`'s own doc
+    /// comment). The real invariant round 6 needs pinned instead: neither
+    /// slot-row half carries an `ImageNode` at all (no frame art rendering,
+    /// per Matías's `hud-ejemplo-2.png` reference), and each half's box is
+    /// sized to EXACTLY [`hud_layout::SLOT_ROW_WIDTH_PX`]×[`hud_layout::
+    /// SLOT_ROW_HEIGHT_PX`] positioned per `hud_layout::CLUSTER`'s own
+    /// `slot_row_left_half_left`/`slot_row_right_half_left` offsets — a
+    /// future regression that re-adds a background image, or drifts the
+    /// row's own size/position away from `hud_layout`'s arithmetic, fails
+    /// here.
     #[test]
-    fn action_bar_halves_stretch_their_background_to_fill_the_box() {
+    fn slot_row_halves_have_no_background_art_and_match_hud_layout_geometry() {
         let mut app = new_app();
         app.world_mut()
             .run_system_once(spawn_hotbar)
@@ -1597,18 +1471,32 @@ mod tests {
             .expect("spawn_hotbar spawns a HotbarRightHalf entity")
             .id();
 
-        for (name, half) in [("left", left_half), ("right", right_half)] {
-            let image_node = world
-                .get::<ImageNode>(half)
-                .unwrap_or_else(|| panic!("the {name} action-bar half carries an ImageNode"));
-            assert_eq!(
-                image_node.image_mode,
-                bevy::ui::widget::NodeImageMode::Stretch,
-                "the {name} action-bar half's background must be NodeImageMode::Stretch — \
-                 NodeImageMode::Auto (the ImageNode default) contain-fits + centres the image \
-                 instead of filling the Node's explicit width/height box, reopening the exact \
-                 real-gap bug this round exists to close"
+        let expectations = [
+            (
+                "left",
+                left_half,
+                hud_layout::CLUSTER.slot_row_left_half_left,
+            ),
+            (
+                "right",
+                right_half,
+                hud_layout::CLUSTER.slot_row_right_half_left,
+            ),
+        ];
+        for (name, half, expected_left_offset) in expectations {
+            assert!(
+                world.get::<ImageNode>(half).is_none(),
+                "the {name} slot-row half must NOT carry an ImageNode — the ornate action-bar \
+                 frame art is removed entirely per the HUD redesign, the row is a bare \
+                 transparent container"
             );
+            let node = world
+                .get::<Node>(half)
+                .unwrap_or_else(|| panic!("the {name} slot-row half carries a Node"));
+            assert_eq!(node.width, Val::Px(hud_layout::SLOT_ROW_WIDTH_PX));
+            assert_eq!(node.height, Val::Px(hud_layout::SLOT_ROW_HEIGHT_PX));
+            assert_eq!(node.bottom, Val::Px(hud_layout::CLUSTER_BOTTOM_PX));
+            assert_eq!(node.margin.left, Val::Px(expected_left_offset));
         }
     }
 
