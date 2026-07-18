@@ -346,14 +346,26 @@ fn main() -> AppExit {
         {
             let smoke_menu = matches!(smoke_mode, Some(smoke::SmokeMode::Screenshot(_)))
                 && std::env::var("XINDELER_SMOKE_MENU").is_ok();
+            // BL-82 EM-5.9 (T56.30) verification hook: `XINDELER_SMOKE_CONNECTING=1`
+            // starts DIRECTLY in `AppState::Connecting` so a `--smoke-screenshot`
+            // run captures the transient loading screen. It uses the SHORT
+            // (menu-length) warmup — NOT the long `world_boots` gameplay warmup —
+            // so the single capture lands while the background world boot is
+            // still in flight and the loading screen is up. Test-only.
+            let smoke_connecting = matches!(smoke_mode, Some(smoke::SmokeMode::Screenshot(_)))
+                && std::env::var("XINDELER_SMOKE_CONNECTING").is_ok();
             // `world_boots` here is true only for the `XINDELER_SMOKE_AUTOCONNECT`
             // hook (a screenshot run that should reach gameplay through the menu).
-            if smoke_mode.is_none() || smoke_menu || world_boots {
+            if smoke_mode.is_none() || smoke_menu || smoke_connecting || world_boots {
                 app.add_plugins(listen_server::ListenServerPlugin {
                     boot_eagerly: false,
                 });
                 app.add_plugins(menu::MainMenuPlugin);
-                initial_state = AppState::MainMenu;
+                initial_state = if smoke_connecting {
+                    AppState::Connecting
+                } else {
+                    AppState::MainMenu
+                };
             } else {
                 app.add_plugins(voxel_demo::VoxelDemoPlugin);
                 initial_state = AppState::Demo;

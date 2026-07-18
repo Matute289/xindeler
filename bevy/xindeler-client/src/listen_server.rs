@@ -37,10 +37,10 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
-    LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    SocialMirrorPlugin, boot_embedded_player, boot_test_server,
+    ChatBridgePlugin, CombatHudMirrorPlugin, ConnectStage, EmbeddedPlayer, HotbarMirrorPlugin,
+    LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimServer,
+    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting, boot_test_server,
 };
 
 use crate::{
@@ -386,42 +386,20 @@ impl Plugin for ListenServerPlugin {
 /// so callers run it from an exclusive `&mut World` system on the connecting
 /// screen, having already rendered a "Connecting…" frame first.
 pub fn boot_offline_world(world: &mut World) -> bool {
-    let data_dir = userdata_dir().join("listen-server");
-    if let Err(err) = std::fs::create_dir_all(&data_dir) {
-        error!(
-            "listen-server: cannot create data dir {} ({err}); running without a world",
-            data_dir.display()
-        );
-        return false;
-    }
-    info!(
-        "listen-server: booting embedded world at {} (this takes several seconds)…",
-        data_dir.display()
-    );
-    match boot_test_server(&data_dir) {
-        Ok(mut sim) => {
-            // EM-3.7b: boot the embedded local-player Client over TCP
-            // loopback to the sim we just booted (its listener is already
-            // live). This blocks on the handshake (~hundreds of ms) but runs
-            // once, right after the multi-second world boot. On failure we
-            // still insert the sim and run — the terrain-anchor persister
-            // fallback covers streaming, just without a controllable player.
-            match boot_embedded_player(&mut sim) {
-                Ok(player) => {
-                    world.insert_non_send(sim);
-                    world.insert_non_send(player);
-                    info!(
-                        "listen-server: embedded world + local player booted; player is \
-                         controllable once spawned"
-                    );
-                },
-                Err(err) => {
-                    world.insert_non_send(sim);
-                    warn!(
-                        "listen-server: embedded player failed to connect ({err}); running as \
-                         spectator (terrain persister fallback, no controllable player)"
-                    );
-                },
+    match boot_offline_world_parts(&|_| {}) {
+        Ok((sim, player)) => {
+            world.insert_non_send(sim);
+            if let Some(player) = player {
+                world.insert_non_send(player);
+                info!(
+                    "listen-server: embedded world + local player booted; player is controllable \
+                     once spawned"
+                );
+            } else {
+                warn!(
+                    "listen-server: running as spectator (terrain persister fallback, no \
+                     controllable player)"
+                );
             }
             true
         },
@@ -431,6 +409,54 @@ pub fn boot_offline_world(world: &mut World) -> bool {
                  (missing XINDELER_ASSETS / LFS map blobs?)"
             );
             false
+        },
+    }
+}
+
+/// The pure (World-free) half of [`boot_offline_world`]: boots the embedded
+/// world + local player and RETURNS them instead of inserting them, reporting
+/// each real boot stage through `progress` (BL-82 EM-5.9 T56.30).
+///
+/// This is what makes a genuine staged loading screen possible: the connecting
+/// screen runs this on a background thread (both objects are `Send`), passing a
+/// `progress` closure that writes into a cell the Bevy main thread polls, so
+/// the window keeps rendering live progress instead of freezing through the
+/// multi-second boot. The eager `--listen-server` path calls the thin
+/// [`boot_offline_world`] wrapper above with a no-op `progress`, so its
+/// behaviour is byte-for-byte unchanged.
+///
+/// Returns:
+/// - `Err` — the world itself could not boot (missing assets / LFS blobs); the
+///   caller surfaces a connect error.
+/// - `Ok((sim, Some(player)))` — full boot with a controllable local player.
+/// - `Ok((sim, None))` — the sim booted but the embedded player failed to
+///   connect; the caller runs as a spectator (terrain-anchor persister
+///   fallback), exactly as [`boot_offline_world`] always has.
+pub fn boot_offline_world_parts(
+    progress: &(dyn Fn(ConnectStage) + Send + Sync),
+) -> Result<(SimServer, Option<EmbeddedPlayer>), String> {
+    let data_dir = userdata_dir().join("listen-server");
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|err| format!("cannot create data dir {}: {err}", data_dir.display()))?;
+    info!(
+        "listen-server: booting embedded world at {} (this takes several seconds)…",
+        data_dir.display()
+    );
+    progress(ConnectStage::GeneratingWorld);
+    let mut sim = boot_test_server(&data_dir).map_err(|err| format!("{err:?}"))?;
+
+    // EM-3.7b: boot the embedded local-player Client over TCP loopback to the
+    // sim we just booted (its listener is already live). This blocks on the
+    // real handshake (~hundreds of ms, staged through `progress`) but runs
+    // once, right after the multi-second world boot. On failure we still return
+    // the sim so the terrain-anchor persister fallback can cover streaming, just
+    // without a controllable player.
+    progress(ConnectStage::EstablishingConnection);
+    match boot_embedded_player_reporting(&mut sim, progress) {
+        Ok(player) => Ok((sim, Some(player))),
+        Err(err) => {
+            warn!("listen-server: embedded player failed to connect ({err}); spectator fallback");
+            Ok((sim, None))
         },
     }
 }

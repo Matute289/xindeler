@@ -195,6 +195,18 @@ impl Plugin for SmokeScreenshotPlugin {
         } else {
             (WARMUP_FRAMES, TIMEOUT_FRAMES)
         };
+        // Test-only override so a harness can capture a TRANSIENT screen (e.g.
+        // BL-82 EM-5.9 T56.30's connecting/loading screen, which is gone by the
+        // default 90-frame warmup) at a deliberately early frame. No effect
+        // unless `XINDELER_SMOKE_WARMUP_FRAMES` is set. Reviewer minor
+        // (bevy-migration-reviewer): clamped strictly below `timeout` so a
+        // careless override value can never make the run time out before the
+        // capture fires.
+        let warmup = std::env::var("XINDELER_SMOKE_WARMUP_FRAMES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|w| w.min(timeout.saturating_sub(1)))
+            .unwrap_or(warmup);
         app.insert_resource(SmokeScreenshot {
             path: self.path.clone(),
             target: Handle::default(),
