@@ -389,6 +389,15 @@ impl Plugin for ListenServerPlugin {
         // module doc comment for the precedence between this system and the
         // smoke override.
         app.add_plugins(crate::targeting::TargetSelectionPlugin);
+        // BL-82 EM-5.10a (T56.34): the Kira-on-`cpal` audio foundation
+        // (`AudioManager` + 4 mixer sub-tracks + master, `.ogg`/`.wav`
+        // `AssetLoader`, volume application, diagnostics). Just added here —
+        // nothing triggers a sound yet (no SFX/music/ambience wiring; that's
+        // 5.10b–e). Order-independent (reads/writes no mirrored state), so
+        // it doesn't matter that it's registered after the mirrors/HUD
+        // plugins above. Split into its own call — the tuple near the top of
+        // this function is already at the 15-plugin ceiling.
+        app.add_plugins(xindeler_audio::XindelerAudioPlugin);
 
         // BL-82 EM-5.14: the character-select screen + its char-list mirror,
         // added ONLY when launched with `--char-select` so the default boot
