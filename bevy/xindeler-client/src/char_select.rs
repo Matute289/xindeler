@@ -567,14 +567,35 @@ impl Plugin for CharSelectViewPlugin {
             .init_resource::<WizardState>()
             .init_resource::<CharSelectScreen>()
             .add_message::<CharAction>()
-            .add_systems(
-                OnEnter(AppState::CharSelect),
-                (reset_state, spawn_screen).chain(),
-            )
+            .add_systems(OnEnter(AppState::CharSelect), reset_state)
             .add_systems(OnExit(AppState::CharSelect), despawn_screen)
             .add_systems(
                 Update,
                 (
+                    // BL-82 EM-5.14 startup-panic fix (Matías, live-testing
+                    // 2026-07-18): `spawn_screen` used to run chained after
+                    // `reset_state` on `OnEnter(AppState::CharSelect)`. That
+                    // panicked whenever `CharSelect` is the process's INITIAL
+                    // `AppState` (exactly the `--char-select` launch path) —
+                    // Bevy's `Main` schedule runs the initial state's
+                    // `OnEnter` in a special `StateTransition` pass that
+                    // fires BEFORE `PreStartup`/`Startup`/`PostStartup` (see
+                    // `bevy_app::main_schedule`'s own doc comment: "This
+                    // means that `OnEnter(MyState::Foo)` will be called
+                    // *before* `PreStartup` ... if `MyState` was added to the
+                    // app with `MyState::Foo` as the initial state"), so
+                    // `HudTheme`/`HudFonts` (seeded by `XindelerUiPlugin`'s
+                    // `theme::init_theme`, a `Startup` system) did not exist
+                    // yet. `spawn_screen` now runs as an `Update` system,
+                    // guarded the same way `menu.rs`'s `build_menu`/
+                    // `enter_connecting` already dodge this exact scenario
+                    // (`Option<Res<HudTheme>>`/`Option<Res<HudFonts>>`, no-op
+                    // until ready) plus a `CharSelectRoot`-exists check so it
+                    // spawns exactly once. `Update` still runs AFTER
+                    // `Startup` even on the very first frame, so the screen
+                    // is up within that same first frame once the resources
+                    // land — no visible delay, just no more panic.
+                    spawn_screen,
                     ingest_char_list,
                     read_name_input,
                     apply_char_actions,
@@ -628,7 +649,25 @@ fn reset_state(mut state: ResMut<WizardState>, mut screen: ResMut<CharSelectScre
     *screen = CharSelectScreen::Roster;
 }
 
-fn spawn_screen(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+/// Spawns the char-select screen scaffold exactly once (see the module doc
+/// comment / `CharSelectViewPlugin::build`'s registration comment for why
+/// this is an `Update` system, not `OnEnter`): tolerates `HudTheme`/
+/// `HudFonts` not existing yet (retries next frame, same posture as
+/// `menu.rs`'s `build_menu`/`enter_connecting`) and no-ops once
+/// [`CharSelectRoot`] already exists (`despawn_screen` on `OnExit` clears it,
+/// so re-entering the state naturally re-spawns).
+fn spawn_screen(
+    mut commands: Commands,
+    theme: Option<Res<HudTheme>>,
+    fonts: Option<Res<HudFonts>>,
+    roots: Query<Entity, With<CharSelectRoot>>,
+) {
+    if !roots.is_empty() {
+        return;
+    }
+    let (Some(theme), Some(fonts)) = (theme, fonts) else {
+        return;
+    };
     commands
         .spawn((
             CharSelectRoot,
@@ -1514,5 +1553,148 @@ mod tests {
             .expect("CharSelectRoot exists")
             .0;
         assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
+
+    /// Regression test for the real startup panic (Matías, live-testing
+    /// 2026-07-18): `spawn_screen` used to take hard `Res<HudTheme>`/
+    /// `Res<HudFonts>`, which panicked ("Resource does not exist") the first
+    /// time `CharSelect` was the process's INITIAL `AppState` (the
+    /// `--char-select` launch path) — see `CharSelectViewPlugin::build`'s
+    /// registration comment for the root cause (Bevy's initial-state
+    /// `OnEnter` fires before `Startup`, which is what seeds those
+    /// resources). `spawn_screen` must run cleanly with neither resource
+    /// present and must NOT spawn a half-built [`CharSelectRoot`].
+    #[test]
+    fn spawn_screen_does_not_panic_before_hud_theme_exists() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // Deliberately NO `HudTheme`/`HudFonts` inserted — reproduces the
+        // pre-`Startup` window `OnEnter(initial_state)` actually runs in.
+
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen must not panic when HudTheme/HudFonts are missing");
+
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<CharSelectRoot>>()
+                .iter(world)
+                .count(),
+            0,
+            "no screen should be spawned until HudTheme/HudFonts exist"
+        );
+    }
+
+    /// Companion to the test above: once `HudTheme`/`HudFonts` become
+    /// available (mirroring `theme::init_theme` finally running at
+    /// `Startup`, one frame after the pre-`Startup` `OnEnter` that used to
+    /// panic), a later run of the SAME `Update`-scheduled `spawn_screen`
+    /// picks them up and builds the screen exactly once — proving the
+    /// "retry next frame" fix actually converges, not just that it avoids
+    /// panicking forever.
+    #[test]
+    fn spawn_screen_spawns_once_hud_theme_becomes_available() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+
+        // First frame: resources not ready yet — no-op (see the test above).
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs with no resources");
+
+        // "Startup" finally ran: seed HudTheme/HudFonts.
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        // Second frame: now it builds the screen...
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs once resources exist");
+        {
+            let world = app.world_mut();
+            assert_eq!(
+                world
+                    .query_filtered::<Entity, With<CharSelectRoot>>()
+                    .iter(world)
+                    .count(),
+                1,
+                "the screen spawns exactly once resources are ready"
+            );
+        }
+
+        // ...and a THIRD frame must not spawn a second root on top of it.
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs again");
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<CharSelectRoot>>()
+                .iter(world)
+                .count(),
+            1,
+            "spawn_screen must not double-spawn the root on a later frame"
+        );
+    }
+
+    /// End-to-end regression test exercising the REAL Bevy scheduling quirk
+    /// that caused the live panic, not just a hand-simulated approximation:
+    /// `CharSelect` set as the process's INITIAL `AppState` via
+    /// `App::insert_state` (exactly what `main.rs` does for
+    /// `--listen-server --char-select`), with `HudTheme`/`HudFonts` seeded by
+    /// a REAL `Startup` system (standing in for `XindelerUiPlugin`'s
+    /// `theme::init_theme`, minus the real `AssetServer` round-trip this
+    /// test doesn't need). Before the fix, `OnEnter(AppState::CharSelect)`
+    /// ran `spawn_screen` directly and this panicked on the very first
+    /// `app.update()` — see `bevy_app::main_schedule`'s own doc comment: the
+    /// initial state's `OnEnter` fires in a `StateTransition` pass that
+    /// precedes `PreStartup`/`Startup`/`PostStartup`. After the fix,
+    /// `spawn_screen` is `Update`-scheduled (which still runs AFTER
+    /// `Startup`, even on this same first frame), so the screen is up with
+    /// no panic by the time `update()` returns.
+    #[test]
+    fn char_select_survives_being_the_initial_app_state() {
+        use bevy::state::app::StatesPlugin;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(StatesPlugin);
+        // Stand-in for `XindelerUiPlugin`'s `theme::init_theme`.
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.insert_resource(HudTheme::default());
+            commands.insert_resource(HudFonts {
+                title: Handle::default(),
+                body: Handle::default(),
+            });
+        });
+        app.init_resource::<WizardState>()
+            .init_resource::<CharSelectScreen>()
+            .add_systems(OnEnter(AppState::CharSelect), reset_state)
+            .add_systems(OnExit(AppState::CharSelect), despawn_screen)
+            .add_systems(Update, spawn_screen.run_if(in_state(AppState::CharSelect)));
+        // Exactly like `main.rs`'s `--char-select` bypass: `CharSelect` is
+        // the INITIAL state, not entered via a later transition.
+        app.insert_state(AppState::CharSelect);
+
+        // Must not panic — this is the actual bug.
+        app.update();
+
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<CharSelectRoot>>()
+                .iter(world)
+                .count(),
+            1,
+            "the char-select screen must be up by the end of the very first frame, even though \
+             its OnEnter ran before Startup"
+        );
     }
 }
