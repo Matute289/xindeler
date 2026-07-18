@@ -165,6 +165,7 @@ impl Plugin for SocialHudViewPlugin {
                     sync_player_list,
                     sync_group_state,
                     sync_group_panel,
+                    sync_group_bars,
                     sync_invite_banner,
                     sync_active_dialogue,
                     sync_dialogue_panel,
@@ -334,6 +335,22 @@ struct PartyVoiceIconImage;
 #[derive(Component)]
 struct PartyNameLabel;
 
+/// Marks a party row's health-bar entity (the one [`spawn_bar`] returns for
+/// [`NetHealth`]) so [`sync_group_bars`] can refresh its [`BarValue`] every
+/// frame without re-querying by row position — see that system's own doc
+/// comment for the bug this exists to fix (bars frozen at spawn-time value).
+#[derive(Component)]
+struct PartyHealthBar;
+/// The energy-bar equivalent of [`PartyHealthBar`].
+#[derive(Component)]
+struct PartyEnergyBar;
+/// Tags a party row's health/energy bar entity with the group member's uid
+/// it belongs to, so [`sync_group_bars`] can correlate it back against the
+/// live mirrored [`NetHealth`]/[`NetEnergy`] the same way [`sync_group_panel`]
+/// does when first spawning the bar.
+#[derive(Component, Clone, Copy)]
+struct PartyMemberUid(u64);
+
 #[derive(Component)]
 struct InviteBannerRoot;
 #[derive(Component)]
@@ -427,15 +444,55 @@ fn sync_group_panel(
             .and_then(|(_, _, _, xp)| xp)
             .map(|xp| xp.level);
 
+        // `row_entity` is the outer per-member CONTAINER (a Column, not the
+        // visual row itself) — see `top_row_entity`'s doc comment just below
+        // for why the portrait/info content and the Kick/Make-Leader actions
+        // are split into two stacked inner rows rather than one long Row.
         let row_entity = commands
             .spawn((GroupMemberRow, Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: theme.spacing.sm_px(),
-                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Column,
+                row_gap: theme.spacing.xs_px(),
                 ..Default::default()
             }))
             .id();
         commands.entity(root_entity).add_child(row_entity);
+
+        // Portrait + info column on their own inner Row. BL-82 EM-5.17 Phase
+        // 4 follow-up (party-frame overlap bug): the OLD single-Row layout
+        // put portrait+info+Kick+Make-Leader all on one Row inside a panel
+        // declared only 280px wide (`spawn_social_hud`'s `GroupPanelRoot`).
+        // Bevy UI (taffy) flexbox never shrinks a Row's children below their
+        // intrinsic content size just because the declared parent width is
+        // smaller — it silently overflows the panel's box instead. Measured
+        // intrinsic width of the old one-line row: portrait 64px + gap 8px +
+        // info column (2×120px dual bars + 4px gap = 244px) + gap 8px + Kick
+        // button (~80px) + gap 8px + Make Leader button (~130px) ≈ 542px,
+        // nearly double the panel's declared 280px — the overflowing
+        // Kick/Make-Leader buttons (and, for longer names, the name label
+        // too) spilled far enough right to land under the centered ESC menu
+        // / the bottom-left chat panel's fixed footprint. Those OTHER panels
+        // correctly carry a HIGHER `GlobalZIndex` tier than party frames
+        // (`zlayer::CHAT`=30, `zlayer::MODAL_WINDOWS`=100 vs this panel's
+        // `ORBS_ACTION_BAR_PARTY_MINIMAP`=20 — see `zlayer.rs`'s own module
+        // doc for why that ordering is intentional), so once the overflowing
+        // content reached their screen region it was legitimately painted
+        // UNDER them — correct z-order behaviour given content that had
+        // already escaped its own panel's bounds. Splitting the actions onto
+        // their OWN indented row below brings the top row's intrinsic width
+        // down to ≈316px (portrait 64 + gap 8 + info column 244) and the
+        // actions row's down to ≈290px (72px left margin + Kick + gap +
+        // Make Leader) — both now close to `GroupPanelRoot`'s widened 340px
+        // (see that spawn site), so party-frame content stays inside its own
+        // panel instead of bleeding into neighbouring UI's screen space.
+        let top_row_entity = commands
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: theme.spacing.sm_px(),
+                align_items: AlignItems::Center,
+                ..Default::default()
+            })
+            .id();
+        commands.entity(row_entity).add_child(top_row_entity);
 
         // --- Portrait stack (spec §3.4: 64×64 circular portrait + level
         // badge at its bottom edge) ---
@@ -448,7 +505,7 @@ fn sync_group_panel(
                 ..Default::default()
             })
             .id();
-        commands.entity(row_entity).add_child(portrait_entity);
+        commands.entity(top_row_entity).add_child(portrait_entity);
 
         let placeholder_fill = commands
             .spawn((
@@ -524,14 +581,29 @@ fn sync_group_panel(
         }
 
         // --- Info column: name + voice icon, then dual bars ---
+        //
+        // `max_width` + `overflow: clip_x()` cap this column at the dual-bar
+        // row's own width (`PARTY_BAR_WIDTH_PX * 2 + xs` gap): bevy-migration-
+        // reviewer follow-up on the party-frame overlap fix above (see
+        // `top_row_entity`'s doc comment) — that fix's width arithmetic
+        // assumed the 244px-wide bars row always dominates this column's
+        // intrinsic width, but an unbounded `PartyNameLabel` can be wider
+        // than that (long alias, `★ ` leader prefix, wide glyphs), which
+        // would silently re-widen the column — and with it `top_row_entity`
+        // and the whole panel content — back past `GroupPanelRoot`'s 340px,
+        // reproducing the same overflow-bleeds-into-neighbouring-panels bug
+        // for long names. Clipping the name instead of letting it dictate
+        // the column's width keeps the panel's box the hard bound.
         let info_entity = commands
             .spawn(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: theme.spacing.xs_px(),
+                max_width: Val::Px(PARTY_BAR_WIDTH_PX * 2.0 + theme.spacing.xs),
+                overflow: bevy::ui::Overflow::clip_x(),
                 ..Default::default()
             })
             .id();
-        commands.entity(row_entity).add_child(info_entity);
+        commands.entity(top_row_entity).add_child(info_entity);
 
         let name_row_entity = commands
             .spawn(Node {
@@ -605,6 +677,12 @@ fn sync_group_panel(
                         PARTY_BAR_HEIGHT_PX,
                         BarValue::new(health.current, health.max),
                     );
+                    // Tagged so `sync_group_bars` can find and refresh this
+                    // exact bar's `BarValue` every frame without needing a
+                    // full row rebuild — see that system's doc comment.
+                    commands
+                        .entity(bar_entity)
+                        .insert((PartyHealthBar, PartyMemberUid(member.uid)));
                     commands.entity(bars_row_entity).add_child(bar_entity);
                 }
                 if let Some(energy) = energy {
@@ -617,6 +695,9 @@ fn sync_group_panel(
                         PARTY_BAR_HEIGHT_PX,
                         BarValue::new(energy.current, energy.max),
                     );
+                    commands
+                        .entity(bar_entity)
+                        .insert((PartyEnergyBar, PartyMemberUid(member.uid)));
                     commands.entity(bars_row_entity).add_child(bar_entity);
                 }
             },
@@ -640,7 +721,23 @@ fn sync_group_panel(
         // server enforces leader-only permission regardless, but a
         // self-target button is confusing UX, not just a no-op
         // (bevy-migration-reviewer follow-up).
+        //
+        // Spawned on their OWN row (`actions_row_entity`), indented to align
+        // under the info column, rather than appended to `top_row_entity` —
+        // see `top_row_entity`'s own doc comment above for why (the old
+        // single-Row layout's intrinsic width badly overflowed the panel's
+        // declared width, spilling into neighbouring panels' screen space).
         if Some(member.uid) != my_uid {
+            let actions_row_entity = commands
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: theme.spacing.sm_px(),
+                    margin: UiRect::left(Val::Px(PARTY_PORTRAIT_SIZE_PX + theme.spacing.sm)),
+                    ..Default::default()
+                })
+                .id();
+            commands.entity(row_entity).add_child(actions_row_entity);
+
             let kick_uid = member.uid;
             let kick_entity = commands
                 .spawn(button_bundle(&theme, &fonts, "Kick"))
@@ -655,7 +752,7 @@ fn sync_group_panel(
                     },
                 )
                 .id();
-            commands.entity(row_entity).add_child(kick_entity);
+            commands.entity(actions_row_entity).add_child(kick_entity);
 
             let leader_uid = member.uid;
             let assign_entity = commands
@@ -671,7 +768,88 @@ fn sync_group_panel(
                     },
                 )
                 .id();
-            commands.entity(row_entity).add_child(assign_entity);
+            commands.entity(actions_row_entity).add_child(assign_entity);
+        }
+    }
+}
+
+/// Refreshes every already-spawned party member bar's [`BarValue`] from the
+/// live mirrored [`NetHealth`]/[`NetEnergy`] every frame — the fix for the
+/// "party frame bars never update after spawn" bug (live-tested, PR
+/// description has the repro).
+///
+/// **Root cause**: [`sync_group_panel`] is the only place that ever read
+/// health/energy into a bar, and it's gated on `!state.is_changed()` where
+/// `state` is [`CurrentGroupState`] — which itself only changes when
+/// `xindeler_sim_bridge::social`'s (private-module, not directly linkable
+/// here) `mirror_group_state` system broadcasts a fresh [`NetGroupState`].
+/// That broadcast is ALSO gated (on
+/// `cache.last_sent != state`), and [`NetGroupState`]'s member list carries
+/// only `uid`+`name` — no health/energy field at all — so a member taking
+/// damage never changes the broadcast STATE, never re-triggers
+/// `sync_group_panel`'s gate, and the bar [`spawn_bar`] created at
+/// join-time keeps its spawn-time value forever. This is the same bug CLASS
+/// already fixed twice this session (`boss_nameplate.rs`'s
+/// `sync_nameplate_content`, `combat_hud.rs`'s `sync_local_player_bars`) —
+/// here the gate isn't just redundant, it actively blocks the one signal
+/// (live mirrored health/energy) the bar actually needs to track, because
+/// that signal was never part of what the gate watches in the first place.
+///
+/// Follows `sync_local_player_bars`'s own established fix pattern: a plain
+/// `Update` system (no gate — `CurrentGroupState`'s change detection is the
+/// wrong signal to gate ON, not just a redundant one), diffing before
+/// writing each [`BarValue`] so an unchanged value never marks the
+/// component `Changed` (would otherwise defeat `bar.rs`'s downstream
+/// `Changed<BarValue>`-gated fill-width update every single frame).
+///
+/// Correlates each tagged bar's [`PartyMemberUid`] against the mirrored
+/// [`NetUid`] query — the exact same uid-correlation [`sync_group_panel`]
+/// already does at spawn time — rather than rebuilding rows, since a full
+/// row rebuild (despawn + respawn every child) every frame purely to update
+/// a fill fraction would be wasteful and would also stomp any per-row UI
+/// state (e.g. button hover) that isn't this system's concern.
+///
+/// Doesn't touch the "(out of range)" text path: a member gaining/losing
+/// mirror coverage still only re-renders on the next `NetGroupState`
+/// broadcast (a member joining/leaving/changing leader) — a narrower,
+/// separate, pre-existing gap this fix doesn't attempt to close (Matías's
+/// live test reported bars frozen while mirrored, not members flickering
+/// in/out of range).
+fn sync_group_bars(
+    mirrored: Query<(&NetUid, Option<&NetHealth>, Option<&NetEnergy>)>,
+    mut health_bars: Query<
+        (&PartyMemberUid, &mut BarValue),
+        (With<PartyHealthBar>, Without<PartyEnergyBar>),
+    >,
+    mut energy_bars: Query<
+        (&PartyMemberUid, &mut BarValue),
+        (With<PartyEnergyBar>, Without<PartyHealthBar>),
+    >,
+) {
+    for (member_uid, mut value) in &mut health_bars {
+        let Some(health) = mirrored
+            .iter()
+            .find(|(uid, ..)| uid.0 == member_uid.0)
+            .and_then(|(_, health, _)| health)
+        else {
+            continue;
+        };
+        let new_value = BarValue::new(health.current, health.max);
+        if *value != new_value {
+            *value = new_value;
+        }
+    }
+    for (member_uid, mut value) in &mut energy_bars {
+        let Some(energy) = mirrored
+            .iter()
+            .find(|(uid, ..)| uid.0 == member_uid.0)
+            .and_then(|(_, _, energy)| energy)
+        else {
+            continue;
+        };
+        let new_value = BarValue::new(energy.current, energy.max);
+        if *value != new_value {
+            *value = new_value;
         }
     }
 }
@@ -946,6 +1124,16 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
     // Social window (now at top-right still, so the two remain disjoint).
     // `GlobalZIndex` per spec §4.4: party frames share the ambient always-on
     // HUD chrome layer with the orbs/action-bar/minimap.
+    //
+    // Width widened 280px -> 340px (party-frame overlap bug fix, see
+    // `top_row_entity`'s doc comment in `sync_group_panel`): 280px never
+    // actually matched a member row's real intrinsic content width, so rows
+    // silently overflowed the panel's declared box and bled into
+    // neighbouring panels' screen space (chat's fixed bottom-left footprint,
+    // the centered ESC menu). 340px comfortably fits both the reworked
+    // top row (portrait 64 + gap 8 + dual-bar info column 244 ≈ 316px) and
+    // the indented Kick/Make-Leader actions row (≈290px) with a small
+    // margin, so party-frame content now stays inside its own panel.
     commands
         .spawn((
             GroupPanelRoot,
@@ -955,7 +1143,7 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 position_type: PositionType::Absolute,
                 top: Val::Px(100.0),
                 left: Val::Px(20.0),
-                width: Val::Px(280.0),
+                width: Val::Px(340.0),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(20.0),
                 ..Default::default()
@@ -1322,6 +1510,89 @@ mod tests {
         assert_eq!(
             out_of_range_rows, 1,
             "the non-mirrored member gets the out-of-range label"
+        );
+    }
+
+    /// Regression test for the "party frame bars never update after spawn"
+    /// bug (see [`sync_group_bars`]'s own doc comment for the root cause):
+    /// a mirrored member's health CHANGES after the row was first spawned
+    /// (e.g. real combat damage) WITHOUT [`CurrentGroupState`] changing
+    /// again (a health tick alone never re-broadcasts `NetGroupState`, which
+    /// carries no health field at all) — [`sync_group_bars`] must still
+    /// refresh the existing bar's [`BarValue`], never leaving it stuck at
+    /// its spawn-time value.
+    #[test]
+    fn sync_group_bars_refreshes_stale_bars_after_health_changes_without_a_new_group_state() {
+        let mut app = new_app();
+        insert_hud_images(&mut app);
+        app.world_mut().insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.world_mut().spawn((GroupPanelRoot, Visibility::Hidden));
+        let root = app.world_mut().spawn(GroupMembersRoot).id();
+
+        let mirrored_entity = app
+            .world_mut()
+            .spawn((
+                NetUid(1),
+                NetHealth {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                NetEnergy {
+                    current: 50.0,
+                    max: 50.0,
+                },
+            ))
+            .id();
+
+        app.world_mut().resource_mut::<CurrentGroupState>().0 = NetGroupState {
+            group_name: Some("Party".to_owned()),
+            leader: Some(1),
+            members: vec![NetGroupMember {
+                uid: 1,
+                name: "Ally".to_owned(),
+            }],
+            pending_invite: None,
+        };
+
+        // Spawn the row (`sync_group_panel`'s ONE run) — the bar captures
+        // the spawn-time value (100/100 health).
+        app.world_mut()
+            .run_system_once(sync_group_panel)
+            .expect("system runs");
+        app.update();
+
+        let health_bar = *all_descendants(&app, root)
+            .iter()
+            .find(|&&e| app.world().get::<PartyHealthBar>(e).is_some())
+            .expect("health bar was spawned");
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar).unwrap(),
+            BarValue::new(100.0, 100.0),
+            "the bar starts at the spawn-time mirrored value"
+        );
+
+        // Real damage — the mirrored NetHealth changes, but `CurrentGroupState`
+        // does NOT (no new NetGroupState arrives; a health tick alone never
+        // broadcasts one). `sync_group_panel` would NOT re-run here (its own
+        // gate correctly skips a no-op state), which is exactly why the bug
+        // existed: nothing else used to read the live health into the bar.
+        app.world_mut()
+            .get_mut::<NetHealth>(mirrored_entity)
+            .unwrap()
+            .current = 35.0;
+
+        app.world_mut()
+            .run_system_once(sync_group_bars)
+            .expect("sync_group_bars runs");
+
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar).unwrap(),
+            BarValue::new(35.0, 100.0),
+            "sync_group_bars must refresh the bar from the LIVE mirrored NetHealth, not leave it \
+             stuck at the spawn-time value"
         );
     }
 
