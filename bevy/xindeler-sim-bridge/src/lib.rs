@@ -103,6 +103,9 @@ pub use chat::{ChatBridgePlugin, apply_chat_send_requests, broadcast_embedded_ch
 mod combat_hud;
 pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 
+pub mod crafting;
+pub use crafting::{CraftingMirrorPlugin, mirror_crafting_state};
+
 mod hotbar;
 pub use hotbar::{HotbarMirrorPlugin, apply_hotbar_assignment_requests, mirror_hotbar_state};
 
