@@ -494,6 +494,50 @@ pub struct LocalPlayerInput {
     pub look: Vec3,
 }
 
+/// Hard cap on the DECOMPRESSED size (bytes) [`CompressedChunk::decode`] will
+/// accept, passed as `lz_fear::raw::decompress_raw`'s `output_limit` (BL-82
+/// EM-8.5 — see [`crate::lod_objects::MAX_DECOMPRESSED_ZONE_BYTES`]'s doc
+/// comment for the general "why this matters" background on LZ4's
+/// back-reference decompression-bomb amplification).
+///
+/// ## Derivation (real structure, not a guess — but with one honest gap)
+/// `TerrainChunk` (`common::terrain::TerrainChunk = chonk::Chonk<Block,
+/// TerrainChunkSize, TerrainChunkMeta>`) is FIXED 32×32 blocks horizontally
+/// (`TERRAIN_CHUNK_BLOCKS_LG = 5`), split vertically into 16-block-tall
+/// sub-chunks (`common::terrain::chonk::SubChunkSize`). Each sub-chunk is a
+/// sparse-by-4×4×4-group `Chunk<Block, _, TerrainChunkMeta>`
+/// (`common::volumes::chunk::Chunk`) — worst case (every one of its 256
+/// groups populated, the maximally adversarial-but-still-legitimately-
+/// encodable case a pathological/checkerboard column could produce) stores
+/// `32*32*16 = 16384` `Block`s (bincode-legacy-encodes a `Block` as its
+/// `BlockKind` variant tag (4 bytes, serde's default enum-discriminant
+/// encoding, independent of `BlockKind`'s in-memory `#[repr(u8)]`) + 3 bytes
+/// of colour/sprite data = 7 bytes/block) plus a 256-byte group-index array
+/// plus its own small `TerrainChunkMeta` clone — comfortably under 128 KiB
+/// per sub-chunk even with generous padding for that per-sub-chunk `meta`
+/// clone.
+///
+/// **The one real gap**: unlike [`NetFarTerrain`]'s `LOD_ALT_MAX_DIM` or
+/// [`crate::lod_objects::NetLodZone`]'s `LOD_ZONE_MAX_OBJECTS`, nothing in
+/// this codebase type-level-bounds how many sub-chunks (i.e. how TALL) a
+/// `Chonk` may grow — `sub_chunks: Vec<SubChunk<..>>` is an unbounded `Vec`,
+/// and no `MAX_ALT`/world-height constant exists anywhere in `common`/
+/// `world`. In practice, the shipped world generator's own tuning
+/// (`world::config::CONFIG`: `mountain_scale = 2048.0`, `sea_level = 140.0`)
+/// keeps real column altitude spreads far smaller than that — a representative
+/// real chunk is only ~80 blocks tall (5 sub-chunks; see
+/// `common/benches/chonk_benchmark.rs`'s own `MIN_Z = 140`/`MAX_Z = 220`
+/// reference fixture) — but nothing GUARANTEES a legitimate chunk can never
+/// exceed that. This bound therefore assumes a generously oversized 4096-block
+/// (256 sub-chunk) vertical ceiling — double `mountain_scale` plus margin,
+/// vastly more than any world this project's shipped generator produces —
+/// rather than a tightly-provable exact maximum: `256 sub-chunks * 128 KiB` ≈
+/// 32 MiB. This is a POLICY bound with real headroom over observed usage
+/// (see [`compressed_chunk_decode_still_works_for_a_realistic_dense_chunk`]'s
+/// regression test below), not a tight, provably-exact cap — flagged here
+/// honestly rather than presented as more precise than it is.
+const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+
 /// Server → client terrain stream: one sim chunk, bincode(legacy)-serialized
 /// and lz4-compressed (EM-3.6; same scheme Veloren's COMPRESSED net streams
 /// use — `network/src/message.rs`). Travels on the [`XindelerChannel::Terrain`]
@@ -525,17 +569,26 @@ impl CompressedChunk {
         Self { key, bytes }
     }
 
-    /// Decompresses + deserializes the payload. `None` = corrupt payload
-    /// (callers log and drop; the local loopback can't corrupt, so this only
-    /// matters once a real transport lands in EM-4.2b).
-    ///
-    /// The decompressed-size cap mirrors `network/src/message.rs`
-    /// (`usize::MAX`); a hostile-input budget is an EM-4.2d (hardening)
-    /// concern, not a loopback one.
+    /// Decompresses + deserializes the payload. `None` = corrupt payload, OR
+    /// one that claims to decompress past [`MAX_DECOMPRESSED_CHUNK_BYTES`]
+    /// (decompression-bomb hardening, BL-82 EM-8.5 — see that constant's doc
+    /// comment; callers log and drop either way, same "reject, don't
+    /// half-apply" contract every other decode in this crate follows).
     #[must_use]
     pub fn decode(&self) -> Option<TerrainChunk> {
-        let mut raw = Vec::with_capacity(self.bytes.len() * 2);
-        lz_fear::raw::decompress_raw(&self.bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+        // The initial capacity hint is just a hint (never a trust boundary):
+        // clamped to the same real cap so a huge/corrupt `bytes.len()` can't
+        // itself force an oversized upfront allocation before
+        // `decompress_raw`'s own `output_limit` check even runs (same defense
+        // `NetLodZone::decode`/`map::decompress` apply).
+        let mut raw = Vec::with_capacity(
+            self.bytes
+                .len()
+                .saturating_mul(2)
+                .min(MAX_DECOMPRESSED_CHUNK_BYTES),
+        );
+        lz_fear::raw::decompress_raw(&self.bytes, &[0; 0], &mut raw, MAX_DECOMPRESSED_CHUNK_BYTES)
+            .ok()?;
         bincode::serde::decode_from_slice(&raw, bincode::config::legacy())
             .ok()
             .map(|(chunk, _)| chunk)
@@ -563,6 +616,35 @@ pub struct TerrainAnchor {
     /// Sim/world position (Veloren axes: x-east, y-north, z-up).
     pub wpos: [f32; 3],
 }
+
+/// Hard cap on the DECOMPRESSED size (bytes) any single [`NetFarTerrain`]
+/// layer ([`NetFarTerrain::decode_heights`]/`decode_colors`/`decode_horizon`)
+/// will accept, passed as [`NetFarTerrain::decompress`]'s `output_limit`
+/// (BL-82 EM-8.5 — see [`crate::lod_objects::MAX_DECOMPRESSED_ZONE_BYTES`]'s
+/// doc comment for the general "why this matters" background).
+///
+/// ## Derivation (a real, server-enforced bound — unlike [`CompressedChunk`]'s)
+/// Unlike a terrain chunk's unbounded vertical extent,
+/// [`NetFarTerrain::grid_size`] IS server-enforced: the only producer
+/// (`xindeler_sim_bridge::send_far_terrain_once`, via its `lod_alt_grid_dims`
+/// helper) caps both grid axes at `LOD_ALT_MAX_DIM = 128` regardless of world
+/// size, so a real message never carries more than `128 * 128 = 16384`
+/// samples per layer. Bincode-legacy-encoded, the largest layer is
+/// [`Self::heights`] (`Vec<f32>`, 4 bytes/sample) or
+/// [`Self::horizon`] (`Vec<[u8; 4]>`, 4 bytes/sample): `16384 * 4 = 65536`
+/// bytes plus an 8-byte `Vec`-length prefix ≈ 64 KiB — [`Self::colors`]
+/// (`Vec<[u8; 3]>`) is smaller still. This cap is set at 4 MiB, ~64x that
+/// real per-layer maximum: comfortably clearing framing overhead and any
+/// future increase to `LOD_ALT_MAX_DIM` while remaining a small, meaningful
+/// bound rather than [`CompressedChunk`]'s necessarily coarser one (that
+/// message has no equivalent server-enforced input cap — see its own
+/// constant's doc comment).
+///
+/// Note that [`Self::decompress`]'s caller (`decode_heights` et al.) only
+/// checks the decoded length against [`Self::grid_size`] AFTER
+/// decompression — this cap must therefore (and does) stand on its own,
+/// independent of whatever `grid_size` a hostile message claims.
+const MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Server → client: the coarse far-terrain grid (EM-3.10b height, BL-82
 /// EM-3.11 real colour), one downsampled sample per [`Self::chunk_stride`]²
@@ -665,15 +747,30 @@ impl NetFarTerrain {
     }
 
     /// Decompresses + deserializes a layer blob. `None` for an empty blob
-    /// (the "layer absent" contract, e.g. an unshipped [`Self::horizon`]) or a
-    /// corrupt payload; callers additionally length-check against
-    /// [`Self::grid_size`].
+    /// (the "layer absent" contract, e.g. an unshipped [`Self::horizon`]), a
+    /// corrupt payload, OR one that claims to decompress past
+    /// [`MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES`] (decompression-bomb
+    /// hardening, BL-82 EM-8.5 — see that constant's doc comment); callers
+    /// additionally length-check against [`Self::grid_size`].
     fn decompress<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Option<Vec<T>> {
         if bytes.is_empty() {
             return None;
         }
-        let mut raw = Vec::with_capacity(bytes.len() * 2);
-        lz_fear::raw::decompress_raw(bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+        // Capacity hint clamped to the real cap — same "never trust the hint"
+        // defense every other decode in this crate applies.
+        let mut raw = Vec::with_capacity(
+            bytes
+                .len()
+                .saturating_mul(2)
+                .min(MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES),
+        );
+        lz_fear::raw::decompress_raw(
+            bytes,
+            &[0; 0],
+            &mut raw,
+            MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES,
+        )
+        .ok()?;
         bincode::serde::decode_from_slice(&raw, bincode::config::legacy())
             .ok()
             .map(|(items, _)| items)
@@ -1372,6 +1469,92 @@ mod tests {
         assert_eq!(decoded.get(VVec3::new(3, 4, 5)).ok(), Some(&block));
     }
 
+    /// Regression proof (BL-82 EM-8.5) for [`MAX_DECOMPRESSED_CHUNK_BYTES`]:
+    /// a large, densely-varied chunk (8 sub-chunks / 128 blocks tall — well
+    /// beyond the ~80-block-tall reference fixture
+    /// `common/benches/chonk_benchmark.rs` uses, and with every voxel given a
+    /// distinct colour so no 4×4×4 group can fall back to the chunk's
+    /// `default` value and get elided — the realistic-worst-case shape that
+    /// constant's own doc comment reasons about) still decodes fine under the
+    /// new bound. Guards against picking the cap too tight for real,
+    /// legitimately large terrain.
+    #[test]
+    fn compressed_chunk_decode_still_works_for_a_realistic_dense_chunk() {
+        use common::{
+            terrain::{Block, BlockKind, TerrainChunk, TerrainChunkMeta},
+            vol::{ReadVol, WriteVol},
+        };
+        use vek::{Rgb, Vec3 as VVec3};
+
+        let mut chunk =
+            TerrainChunk::new(0, Block::empty(), Block::empty(), TerrainChunkMeta::void());
+        const HEIGHT: i32 = 128; // 8 sub-chunks worth (16 blocks/sub-chunk)
+        for x in 0..32i32 {
+            for y in 0..32i32 {
+                for z in 0..HEIGHT {
+                    // Every voxel distinct-ish (position-derived colour) so no
+                    // group can elide to the chunk's default value.
+                    let color = Rgb::new((x * 7 + z) as u8, (y * 5 + z) as u8, (x + y + z) as u8);
+                    chunk
+                        .set(VVec3::new(x, y, z), Block::new(BlockKind::Rock, color))
+                        .expect("in-bounds write");
+                }
+            }
+        }
+
+        let encoded = CompressedChunk::encode([0, 0], &chunk);
+        assert!(
+            encoded.bytes.len() < MAX_DECOMPRESSED_CHUNK_BYTES,
+            "even the COMPRESSED wire size of this stress chunk ({} bytes) should stay well under \
+             the decompressed cap ({} bytes) — sanity check on the test's own setup",
+            encoded.bytes.len(),
+            MAX_DECOMPRESSED_CHUNK_BYTES
+        );
+        let decoded = encoded.decode().expect(
+            "a real, densely-varied, larger-than-typical chunk must still decode under \
+             MAX_DECOMPRESSED_CHUNK_BYTES",
+        );
+        assert_eq!(
+            decoded.get(VVec3::new(5, 5, 100)).ok(),
+            chunk.get(VVec3::new(5, 5, 100)).ok()
+        );
+    }
+
+    /// Decompression-bomb hardening (BL-82 EM-8.5): a small compressed blob
+    /// that CLAIMS (via LZ4 back-references) to decompress to far more than
+    /// [`MAX_DECOMPRESSED_CHUNK_BYTES`] must be rejected (`None`), not
+    /// allocated — same construction as
+    /// `lod_objects::tests::net_lod_zone_rejects_a_payload_that_decompresses_
+    /// past_the_size_cap`, exercising the REAL `decompress_raw` call
+    /// `CompressedChunk::decode` makes.
+    #[test]
+    fn compressed_chunk_decode_rejects_a_payload_that_decompresses_past_the_size_cap() {
+        const BOMB_DECOMPRESSED_LEN: usize = 4 * MAX_DECOMPRESSED_CHUNK_BYTES;
+        let huge_repetitive = vec![0x37_u8; BOMB_DECOMPRESSED_LEN];
+
+        let mut compressed = Vec::new();
+        let mut table = lz_fear::raw::U32Table::default();
+        lz_fear::raw::compress2(&huge_repetitive, 0, &mut table, &mut compressed)
+            .expect("lz4 compression into a Vec<u8> is infallible");
+        assert!(
+            compressed.len() * 16 < huge_repetitive.len(),
+            "test setup should compress the repetitive buffer to well under 1/16th its size, got \
+             {} bytes for a {} byte input",
+            compressed.len(),
+            huge_repetitive.len()
+        );
+
+        let bomb = CompressedChunk {
+            key: [0, 0],
+            bytes: compressed,
+        };
+        assert!(
+            bomb.decode().is_none(),
+            "a payload claiming to decompress past MAX_DECOMPRESSED_CHUNK_BYTES must be rejected, \
+             not allocated"
+        );
+    }
+
     /// EM-3.10b (+ BL-82 EM-3.11 Phase A colour, Phase B horizon): a
     /// downsampled altitude+colour+horizon grid survives `encode` →
     /// `decode_heights`/`decode_colors`/`decode_horizon` byte-for-byte
@@ -1432,6 +1615,100 @@ mod tests {
         assert_eq!(encoded.decode_heights(), None);
         assert_eq!(encoded.decode_colors(), None);
         assert_eq!(encoded.decode_horizon(), None);
+    }
+
+    /// Regression proof (BL-82 EM-8.5) for
+    /// [`MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES`]: a grid at the REAL
+    /// server-enforced max (`LOD_ALT_MAX_DIM = 128`, 128×128 = 16384 samples —
+    /// the largest [`NetFarTerrain::encode`]'s only real producer,
+    /// `xindeler_sim_bridge::send_far_terrain_once`, ever sends) still decodes
+    /// fine for all three layers under the new bound.
+    #[test]
+    fn net_far_terrain_decode_still_works_at_the_real_max_grid_size() {
+        const DIM: usize = 128;
+        const LEN: usize = DIM * DIM;
+        let heights: Vec<f32> = (0..LEN).map(|i| i as f32 * 0.1).collect();
+        let colors: Vec<[u8; 3]> = (0..LEN)
+            .map(|i| {
+                [
+                    (i % 256) as u8,
+                    ((i / 3) % 256) as u8,
+                    ((i / 7) % 256) as u8,
+                ]
+            })
+            .collect();
+        let horizon: Vec<[u8; 4]> = (0..LEN)
+            .map(|i| {
+                [
+                    (i % 256) as u8,
+                    ((i / 2) % 256) as u8,
+                    ((i / 3) % 256) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        let encoded =
+            NetFarTerrain::encode([DIM as u32, DIM as u32], 8, &heights, &colors, &horizon);
+
+        assert_eq!(
+            encoded
+                .decode_heights()
+                .expect("must decode at the real max grid size")
+                .len(),
+            LEN
+        );
+        assert_eq!(
+            encoded
+                .decode_colors()
+                .expect("must decode at the real max grid size")
+                .len(),
+            LEN
+        );
+        assert_eq!(
+            encoded
+                .decode_horizon()
+                .expect("must decode at the real max grid size")
+                .len(),
+            LEN
+        );
+    }
+
+    /// Decompression-bomb hardening (BL-82 EM-8.5): a small compressed blob
+    /// claiming (via LZ4 back-references) to decompress past
+    /// [`MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES`] is rejected (`None`), not
+    /// allocated — exercises the REAL `decompress_raw` call
+    /// `decode_heights` makes (same construction as
+    /// `lod_objects::tests::net_lod_zone_rejects_a_payload_that_decompresses_
+    /// past_the_size_cap`).
+    #[test]
+    fn net_far_terrain_rejects_a_payload_that_decompresses_past_the_size_cap() {
+        const BOMB_DECOMPRESSED_LEN: usize = 4 * MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES;
+        let huge_repetitive = vec![0x21_u8; BOMB_DECOMPRESSED_LEN];
+
+        let mut compressed = Vec::new();
+        let mut table = lz_fear::raw::U32Table::default();
+        lz_fear::raw::compress2(&huge_repetitive, 0, &mut table, &mut compressed)
+            .expect("lz4 compression into a Vec<u8> is infallible");
+        assert!(
+            compressed.len() * 16 < huge_repetitive.len(),
+            "test setup should compress the repetitive buffer to well under 1/16th its size, got \
+             {} bytes for a {} byte input",
+            compressed.len(),
+            huge_repetitive.len()
+        );
+
+        let bomb = NetFarTerrain {
+            grid_size: [1, 1],
+            chunk_stride: 8,
+            heights: compressed,
+            colors: Vec::new(),
+            horizon: Vec::new(),
+        };
+        assert!(
+            bomb.decode_heights().is_none(),
+            "a payload claiming to decompress past MAX_DECOMPRESSED_FAR_TERRAIN_LAYER_BYTES must \
+             be rejected, not allocated"
+        );
     }
 
     /// `NetFarTerrain` replicates server → client over the loopback exactly

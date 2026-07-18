@@ -61,3 +61,20 @@ bevy_replicon_quinnet = { version = "=0.20.0", default-features = false, feature
     "shared-client-id",
 ] }
 tracing = { workspace = true }
+# EM-8.5: `TransportConfig::known_hosts_path` defaults to
+# `<userdata>/known_hosts` via this crate's `settings::userdata_dir()` — the
+# established per-user data directory convention (`XindelerSettings::path()`
+# uses the SAME function for `settings.ron`). `xindeler-app` is explicitly
+# documented as "usable from the headless server shell" (no render/window
+# deps, `bevy_log`+`bevy_state` only), so this dependency edge is legal from
+# `xindeler-server-app`'s side too (even though only the CLIENT role actually
+# reads `known_hosts_path` — see that field's own doc comment).
+xindeler-app = { path = "../xindeler-app" }
+
+[dev-dependencies]
+# EM-8.5's real TOFU connect-twice test (`tests/tofu_certificate.rs`): a real
+# loopback QUIC endpoint on an OS-picked free port, and a scratch dir for the
+# known_hosts fingerprint store — same crates/pins `xindeler-server-app`'s own
+# integration tests already use for the identical purpose.
+tempfile = { workspace = true }
+portpicker = { git = "https://github.com/xMAC94x/portpicker-rs", rev = "e04e3a61d6c1645c865b36c57877f1f8e48e0cb7" }

@@ -32,6 +32,30 @@
 use bevy::{ecs::message::Message, math::Vec2 as BevyVec2};
 use serde::{Deserialize, Serialize};
 
+/// Hard cap on the DECOMPRESSED size (bytes) [`NetMapData::decode_image`] will
+/// accept, passed as `lz_fear::raw::decompress_raw`'s `output_limit` (BL-82
+/// EM-8.5 — closes the decompression-bomb gap this module's `decompress`
+/// previously left open with `usize::MAX`, same hardening
+/// [`crate::lod_objects::MAX_DECOMPRESSED_ZONE_BYTES`] already applied to its
+/// own sibling call site; see that constant's doc comment for the full
+/// "why this matters" background on LZ4's back-reference amplification).
+///
+/// ## Derivation (a real bound, not a guess)
+/// The ONLY thing this module ever passes through [`decompress`] is
+/// [`NetMapData::image_rgb`] — `markers`/`pois` are plain (uncompressed)
+/// message fields. The server-side producer
+/// (`xindeler_sim_bridge::map::send_map_data_once`) downsamples the
+/// background image to at most [`MAP_IMAGE_MAX_DIM`] samples per axis (see
+/// that constant's own doc comment — `1024`, chosen and bandwidth-measured
+/// for exactly this reason), so the real maximum pre-compression payload is
+/// `MAP_IMAGE_MAX_DIM * MAP_IMAGE_MAX_DIM * 3` bytes (one `[u8; 3]` RGB pixel
+/// per sample) = `1024 * 1024 * 3` = 3,145,728 bytes (~3 MiB), plus a few
+/// bytes of bincode `Vec` length-prefix overhead. This cap is set to 16 MiB —
+/// a little over 5x that real maximum, comfortably clearing bincode/framing
+/// overhead and any future small bump to [`MAP_IMAGE_MAX_DIM`] without ever
+/// approaching "unbounded."
+const MAX_DECOMPRESSED_MAP_IMAGE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
 /// Downsample cap for [`NetMapData::image_size`]: at most this many samples
 /// per axis, regardless of world size. Lives HERE (shared between
 /// `xindeler-sim-bridge::map::send_map_data_once`, which downsamples to it,
@@ -200,14 +224,29 @@ fn compress<T: Serialize>(items: &[T]) -> Vec<u8> {
     bytes
 }
 
-/// Decompresses + deserializes a compressed blob. `None` for an empty blob or
-/// a corrupt payload.
+/// Decompresses + deserializes a compressed blob. `None` for an empty blob, a
+/// corrupt payload, OR one that claims to decompress past
+/// [`MAX_DECOMPRESSED_MAP_IMAGE_BYTES`] (decompression-bomb hardening,
+/// BL-82 EM-8.5 — see that constant's doc comment) — callers treat all three
+/// the same "drop, don't crash" way [`crate::NetFarTerrain::decode_heights`]/
+/// [`crate::lod_objects::NetLodZone::decode`] already do.
 fn decompress<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Option<Vec<T>> {
     if bytes.is_empty() {
         return None;
     }
-    let mut raw = Vec::with_capacity(bytes.len() * 2);
-    lz_fear::raw::decompress_raw(bytes, &[0; 0], &mut raw, usize::MAX).ok()?;
+    // The initial capacity hint is just a hint (never a trust boundary): same
+    // "clamp the hint, don't just clamp the real limit" defense
+    // `NetLodZone::decode` applies, so a huge/corrupt `bytes.len()` can't
+    // itself force an oversized upfront allocation before `decompress_raw`'s
+    // own `output_limit` check even runs.
+    let mut raw = Vec::with_capacity(
+        bytes
+            .len()
+            .saturating_mul(2)
+            .min(MAX_DECOMPRESSED_MAP_IMAGE_BYTES),
+    );
+    lz_fear::raw::decompress_raw(bytes, &[0; 0], &mut raw, MAX_DECOMPRESSED_MAP_IMAGE_BYTES)
+        .ok()?;
     bincode::serde::decode_from_slice(&raw, bincode::config::legacy())
         .ok()
         .map(|(items, _)| items)
@@ -298,6 +337,82 @@ mod tests {
         // Corrupt the declared size so the decoded length no longer matches.
         data.image_size = [3, 3];
         assert!(data.decode_image().is_none());
+    }
+
+    /// Regression proof (BL-82 EM-8.5): a REAL, legitimately-sized background
+    /// image — at the actual shipped [`MAP_IMAGE_MAX_DIM`] cap, the largest a
+    /// real server ever produces — still decodes fine under the new bound.
+    /// Guards against picking [`MAX_DECOMPRESSED_MAP_IMAGE_BYTES`] too tight.
+    #[test]
+    fn decode_image_still_works_at_the_real_max_image_dimension() {
+        // A real background image at the actual dimension a server would
+        // send is not uniform (worldgen has real colour variety) — a small
+        // repeating pattern is enough to prove the round trip at full size
+        // without needing worldgen data in a unit test.
+        let dim = MAP_IMAGE_MAX_DIM as usize;
+        let pixels: Vec<[u8; 3]> = (0..dim * dim)
+            .map(|i| {
+                [
+                    (i % 256) as u8,
+                    ((i / 3) % 256) as u8,
+                    ((i / 7) % 256) as u8,
+                ]
+            })
+            .collect();
+        let data = NetMapData::encode(
+            [1024, 1024],
+            32,
+            [MAP_IMAGE_MAX_DIM, MAP_IMAGE_MAX_DIM],
+            &pixels,
+            Vec::new(),
+            Vec::new(),
+        );
+        let decoded = data
+            .decode_image()
+            .expect("a real, max-sized background image must still decode under the new bound");
+        assert_eq!(decoded.len(), pixels.len());
+    }
+
+    /// Decompression-bomb hardening (BL-82 EM-8.5): a small compressed blob
+    /// that CLAIMS (via LZ4 back-references — the classic zip-bomb
+    /// amplification mechanism, see [`MAX_DECOMPRESSED_MAP_IMAGE_BYTES`]'s doc
+    /// comment) to decompress to far more than that cap must be rejected
+    /// (`None`), not allocated. Same construction
+    /// `lod_objects::tests::net_lod_zone_rejects_a_payload_that_decompresses_
+    /// past_the_size_cap` uses: a large, highly-repetitive buffer compresses
+    /// to a small fraction of its decompressed size, so this exercises the
+    /// REAL `decompress_raw` call `decode_image` makes, not a mocked
+    /// stand-in.
+    #[test]
+    fn decode_image_rejects_a_payload_that_decompresses_past_the_size_cap() {
+        const BOMB_DECOMPRESSED_LEN: usize = 64 * 1024 * 1024; // 64 MiB
+        let huge_repetitive = vec![0x42_u8; BOMB_DECOMPRESSED_LEN];
+
+        let mut compressed = Vec::new();
+        let mut table = lz_fear::raw::U32Table::default();
+        lz_fear::raw::compress2(&huge_repetitive, 0, &mut table, &mut compressed)
+            .expect("lz4 compression into a Vec<u8> is infallible");
+        assert!(
+            compressed.len() * 16 < huge_repetitive.len(),
+            "test setup should compress the repetitive buffer to well under 1/16th its size, got \
+             {} bytes for a {} byte input",
+            compressed.len(),
+            huge_repetitive.len()
+        );
+
+        let bomb = NetMapData {
+            world_size_chunks: [1024, 1024],
+            chunk_size_blocks: 32,
+            image_size: [8192, 8192],
+            image_rgb: compressed,
+            markers: Vec::new(),
+            pois: Vec::new(),
+        };
+        assert!(
+            bomb.decode_image().is_none(),
+            "a payload claiming to decompress past MAX_DECOMPRESSED_MAP_IMAGE_BYTES must be \
+             rejected, not allocated"
+        );
     }
 
     /// North (larger `wpos.y`) maps to a SMALLER `v` (top of screen); east
