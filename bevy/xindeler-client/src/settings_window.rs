@@ -120,6 +120,10 @@ impl Plugin for SettingsWindowPlugin {
                 spawn_settings_window.after(xindeler_ui::theme::init_theme),
             )
             .add_systems(
+                Startup,
+                force_open_settings_tab_from_env.after(spawn_settings_window),
+            )
+            .add_systems(
                 Update,
                 (
                     // Reads `ActionState` — order after the frame's real input
@@ -201,6 +205,24 @@ impl SettingsTab {
             SettingsTab::Accessibility => "common-accessibility",
         }
     }
+
+    /// Parses a lowercase debug tab name (see
+    /// [`force_open_settings_tab_from_env`]) — `None` for anything that
+    /// doesn't match one of the nine variants.
+    fn from_debug_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "interface" => SettingsTab::Interface,
+            "video" => SettingsTab::Video,
+            "controls" => SettingsTab::Controls,
+            "gameplay" => SettingsTab::Gameplay,
+            "chat" => SettingsTab::Chat,
+            "language" => SettingsTab::Language,
+            "networking" => SettingsTab::Networking,
+            "sound" => SettingsTab::Sound,
+            "accessibility" => SettingsTab::Accessibility,
+            _ => return None,
+        })
+    }
 }
 
 /// The currently-shown settings tab (client-local UI state, not persisted).
@@ -276,6 +298,38 @@ impl SettingControl {
 #[derive(Component, Clone, Copy)]
 struct SettingValueLabel(SettingControl);
 
+/// Dev-only hook: forces the Settings window open on a specific tab at boot
+/// when `XINDELER_SETTINGS_DEBUG_TAB` is set to one of the nine tab names
+/// (case-insensitive, e.g. `video`). No effect when the var is unset — this
+/// system is registered unconditionally by [`SettingsWindowPlugin`] (unlike
+/// `smoke.rs`'s `XINDELER_SMOKE_WARMUP_FRAMES`, which only exists inside
+/// `SmokeScreenshotPlugin` and is therefore never even compiled-in outside
+/// `--smoke-screenshot`), but the one `env::var` read it costs on every real
+/// launch is negligible and it is a genuine no-op unless a player's shell
+/// happens to export this exact variable (bevy-migration-reviewer note on an
+/// earlier revision of this doc comment: don't overstate the parity with
+/// that convention). Exists because `--smoke-screenshot` has no way to
+/// simulate the mouse clicks (tab-bar button, then Esc→Settings) needed to
+/// reach any pane but the default-selected one; this is what let a headless
+/// capture actually SEE each tab's content pane and catch the
+/// Display-vs-Visibility layout bug this file's `sync_tab_panes`/
+/// `spawn_tab_pane` used to have (see their doc comments), the same class of
+/// bug `diary.rs`'s `sync_tab_content_visibility` already documents fixing.
+fn force_open_settings_tab_from_env(
+    mut hud_state: ResMut<HudState>,
+    mut selected: ResMut<SelectedSettingsTab>,
+) {
+    let Ok(tab_name) = std::env::var("XINDELER_SETTINGS_DEBUG_TAB") else {
+        return;
+    };
+    let Some(tab) = SettingsTab::from_debug_name(&tab_name) else {
+        warn!("XINDELER_SETTINGS_DEBUG_TAB={tab_name:?} did not match any SettingsTab");
+        return;
+    };
+    hud_state.toggle(HudWindow::Settings);
+    selected.0 = tab;
+}
+
 /// F10 (or whatever [`GameInput::Settings`] is bound to) toggles the window —
 /// same convention every other HUD window uses.
 fn toggle_settings_window(action_state: Res<ActionState>, mut actions: MessageWriter<HudAction>) {
@@ -303,20 +357,37 @@ fn sync_settings_window_visibility(
 /// Shows the selected tab's pane (and hides the rest) + highlights the active
 /// tab button. Gated on `is_changed` so it only walks the panes when the
 /// selection actually changes.
+///
+/// ## Why `Node::display`, not `Visibility` (the 7-empty-tabs bug this fixed)
+/// All nine panes are siblings inside ONE `FlexDirection::Column` content
+/// container (see [`spawn_settings_window`]), and `Visibility::Hidden` only
+/// skips RENDERING an entity — it does NOT remove it from `taffy`'s layout
+/// computation (a `bevy_ui` gotcha this crate has hit, and fixed, at least
+/// twice before: `diary.rs`'s `sync_tab_content_visibility` and
+/// `crafting_ui.rs`'s tab roots both use `Node::display` for exactly this
+/// reason). So every hidden pane still occupied its full column height, and
+/// since [`SettingsTab::ALL`]'s spawn order puts `Interface` FIRST, only it
+/// ever landed inside the container's `overflow: Overflow::clip_y()` visible
+/// region — every OTHER tab's real content was spawned correctly but pushed
+/// below the clip and never painted, reading as "completely empty" (matching
+/// the bug report exactly: Interface — first in spawn order — worked, all
+/// eight tabs after it looked blank). `Display::None` removes a pane from
+/// layout entirely (zero size, as if it weren't there), so only the ONE
+/// selected pane ever contributes height to the column.
 fn sync_tab_panes(
     selected: Res<SelectedSettingsTab>,
     theme: Res<HudTheme>,
-    mut panes: Query<(&SettingsTabPane, &mut Visibility)>,
+    mut panes: Query<(&SettingsTabPane, &mut Node)>,
     mut tabs: Query<(&SettingsTabButton, &mut BackgroundColor)>,
 ) {
     if !selected.is_changed() {
         return;
     }
-    for (pane, mut visibility) in &mut panes {
-        *visibility = if pane.0 == selected.0 {
-            Visibility::Inherited
+    for (pane, mut node) in &mut panes {
+        node.display = if pane.0 == selected.0 {
+            Display::Flex
         } else {
-            Visibility::Hidden
+            Display::None
         };
     }
     for (tab, mut bg) in &mut tabs {
@@ -514,8 +585,13 @@ fn spawn_tab_bar(
         });
 }
 
-/// Spawns one tab's content pane (hidden unless it's the initially-selected
-/// tab).
+/// Spawns one tab's content pane (removed from layout via `Node::display`
+/// unless it's the initially-selected tab — see [`sync_tab_panes`]'s doc for
+/// why `display`, not `Visibility`, is what actually keeps a non-selected
+/// pane's content out of the shared column). `Visibility::Inherited` is used
+/// for every pane regardless of selection: it only needs to follow the
+/// ancestor [`SettingsWindowRoot`]'s open/closed state, never toggle on its
+/// own.
 fn spawn_tab_pane(
     content: &mut ChildSpawnerCommands,
     theme: &HudTheme,
@@ -525,13 +601,14 @@ fn spawn_tab_pane(
     tab: SettingsTab,
     selected: SettingsTab,
 ) {
-    let visibility = if tab == selected {
-        Visibility::Inherited
+    let display = if tab == selected {
+        Display::Flex
     } else {
-        Visibility::Hidden
+        Display::None
     };
     content
-        .spawn((SettingsTabPane(tab), visibility, Node {
+        .spawn((SettingsTabPane(tab), Visibility::Inherited, Node {
+            display,
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(theme.spacing.sm),
             ..Default::default()
@@ -1263,6 +1340,171 @@ mod tests {
         let world = app.world_mut();
         let pane_count = world.query::<&SettingsTabPane>().iter(world).count();
         assert_eq!(pane_count, SettingsTab::ALL.len());
+    }
+
+    /// Regression for the "7 of 9 settings tabs render empty" bug: every
+    /// single tab pane — not just the default-selected `Interface` one —
+    /// must actually spawn REAL content (row labels, buttons, notes), not
+    /// merely exist as an empty [`SettingsTabPane`]-tagged entity. Before the
+    /// fix this test would have passed too (the content WAS spawned) —
+    /// see the next test for the assertion that actually caught the bug.
+    #[test]
+    fn every_tab_pane_spawns_real_content() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(test_localization());
+
+        app.world_mut()
+            .run_system_once(spawn_settings_window)
+            .expect("spawn runs");
+
+        let world = app.world_mut();
+        let mut panes = world.query::<(&SettingsTabPane, Option<&Children>)>();
+        let mut checked = 0;
+        for (pane, children) in panes.iter(world) {
+            let child_count = children.map_or(0, |c| c.len());
+            assert!(
+                child_count > 0,
+                "{:?} tab's pane spawned with zero children — it has no real content",
+                pane.0
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            SettingsTab::ALL.len(),
+            "sanity: every tab's pane was actually visited"
+        );
+    }
+
+    /// THE regression test for the actual reported bug: at spawn time, only
+    /// the initially-selected tab (`Interface`, the default) may have
+    /// `Node::display == Display::Flex` — every other pane must be
+    /// `Display::None`. Before the fix, every pane spawned at the `Node`
+    /// default (`Display::Flex`) regardless of selection and relied solely
+    /// on `Visibility::Hidden` (which does not remove a node from `taffy`
+    /// layout) to hide non-selected tabs — so all nine panes stacked their
+    /// full height inside the shared `Column`-direction content container,
+    /// and only the FIRST one (`Interface`) ever fell inside the container's
+    /// `overflow: Overflow::clip_y()` visible region. This assertion fails
+    /// against that old code (every pane reports `Display::Flex`) and passes
+    /// against the `Node::display`-driven fix.
+    #[test]
+    fn only_the_initially_selected_pane_has_display_flex() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(test_localization());
+
+        app.world_mut()
+            .run_system_once(spawn_settings_window)
+            .expect("spawn runs");
+
+        let world = app.world_mut();
+        let mut panes = world.query::<(&SettingsTabPane, &Node)>();
+        for (pane, node) in panes.iter(world) {
+            if pane.0 == SettingsTab::default() {
+                assert_eq!(
+                    node.display,
+                    Display::Flex,
+                    "the initially-selected tab ({:?}) must be laid out",
+                    pane.0
+                );
+            } else {
+                assert_eq!(
+                    node.display,
+                    Display::None,
+                    "{:?} is not the selected tab and must be removed from layout \
+                     (Display::None), not merely Visibility::Hidden — otherwise it still occupies \
+                     column height and pushes every later tab's content out of the clipped \
+                     visible region",
+                    pane.0
+                );
+            }
+        }
+    }
+
+    /// Switching the selected tab flips `Node::display` (not just
+    /// `Visibility`) on both the newly-selected and newly-deselected panes,
+    /// and never touches the panes' actual content (child count survives the
+    /// switch — panes are never despawned/rebuilt, only shown/hidden).
+    #[test]
+    fn switching_tabs_flips_display_on_both_panes_without_losing_content() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(test_localization());
+        app.init_resource::<SelectedSettingsTab>();
+
+        app.world_mut()
+            .run_system_once(spawn_settings_window)
+            .expect("spawn runs");
+
+        fn pane_state(app: &mut App, tab: SettingsTab) -> (Display, usize) {
+            let world = app.world_mut();
+            let mut panes = world.query::<(&SettingsTabPane, &Node, Option<&Children>)>();
+            let (_, node, children) = panes
+                .iter(world)
+                .find(|(pane, _, _)| pane.0 == tab)
+                .expect("pane exists");
+            (node.display, children.map_or(0, |c| c.len()))
+        }
+
+        let (interface_display_before, interface_children) =
+            pane_state(&mut app, SettingsTab::Interface);
+        assert_eq!(interface_display_before, Display::Flex);
+        assert!(interface_children > 0);
+        let (video_display_before, video_children_before) =
+            pane_state(&mut app, SettingsTab::Video);
+        assert_eq!(video_display_before, Display::None);
+        assert!(
+            video_children_before > 0,
+            "Video's content already exists while hidden"
+        );
+
+        app.world_mut().resource_mut::<SelectedSettingsTab>().0 = SettingsTab::Video;
+        app.world_mut()
+            .run_system_once(sync_tab_panes)
+            .expect("sync runs");
+
+        let (interface_display_after, interface_children_after) =
+            pane_state(&mut app, SettingsTab::Interface);
+        assert_eq!(
+            interface_display_after,
+            Display::None,
+            "Interface must be removed from layout once it's no longer selected"
+        );
+        assert_eq!(
+            interface_children_after, interface_children,
+            "switching tabs must not despawn/rebuild a pane's content"
+        );
+
+        let (video_display_after, video_children_after) = pane_state(&mut app, SettingsTab::Video);
+        assert_eq!(
+            video_display_after,
+            Display::Flex,
+            "Video must now be laid out — this is what makes it visible"
+        );
+        assert_eq!(
+            video_children_after, video_children_before,
+            "Video's content survives the switch unchanged"
+        );
     }
 
     /// Editing a preset-owned graphics toggle flips the tier to `Custom` so a

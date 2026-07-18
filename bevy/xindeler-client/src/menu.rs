@@ -2029,9 +2029,8 @@ fn back_to_main(
 }
 
 fn options_notice(_activate: On<Activate>, mut form: ResMut<LoginForm>) {
-    form.error = Some(
-        "Settings live in the in-game Esc menu (a full settings screen is EM-5.12).".to_owned(),
-    );
+    form.error =
+        Some("Settings are available from the in-game Esc menu once you're playing.".to_owned());
 }
 
 fn toggle_mode(_activate: On<Activate>, mut form: ResMut<LoginForm>) {
