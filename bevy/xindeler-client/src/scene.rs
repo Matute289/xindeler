@@ -18,14 +18,36 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use xindeler_app::AppState;
 
-// TODO(EM-5.9): scope to `OnEnter(AppState::Demo)` + despawn on exit once
-// MainMenu becomes the default state — today Demo is the only path so Startup
-// is equivalent (reviewer m6).
+/// BL-82 EM-5.9 (T56.29): now that `MainMenu` is the default interactive state
+/// (not `Demo`), the demo scene is scoped to `AppState::Demo` and despawned on
+/// exit — closing the `TODO(EM-5.9)` that named this task as the fix point. It
+/// used to spawn unconditionally at `Startup`, which — once the menu →
+/// Connecting → in-game path lands in a REAL world — would have left the demo
+/// ground plane / PBR grid / columns / fog volume coexisting with gameplay in
+/// the same Bevy world. Only the `--smoke-atmosphere`/`--smoke-screenshot`/
+/// no-feature paths keep `AppState::Demo` as their initial state, so only they
+/// spawn it.
 pub struct DemoScenePlugin;
 
 impl Plugin for DemoScenePlugin {
-    fn build(&self, app: &mut App) { app.add_systems(Startup, spawn_demo_scene); }
+    fn build(&self, app: &mut App) {
+        app.add_systems(OnEnter(AppState::Demo), spawn_demo_scene)
+            .add_systems(OnExit(AppState::Demo), despawn_demo_scene);
+    }
+}
+
+/// Tags every entity [`spawn_demo_scene`] creates so [`despawn_demo_scene`] can
+/// tear the whole demo scene down when leaving [`AppState::Demo`].
+#[derive(Component)]
+struct DemoSceneEntity;
+
+/// Removes the demo scene on `OnExit(AppState::Demo)`.
+fn despawn_demo_scene(mut commands: Commands, entities: Query<Entity, With<DemoSceneEntity>>) {
+    for entity in &entities {
+        commands.entity(entity).despawn();
+    }
 }
 
 /// Procedural checkerboard: 64x64 px, 8 px cells, nearest-filtered and
@@ -81,6 +103,7 @@ fn spawn_demo_scene(
     // frequency in the distance, where TAA-vs-shimmer is most visible).
     let checker = images.add(checkerboard_image());
     commands.spawn((
+        DemoSceneEntity,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(400.0, 400.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color_texture: Some(checker),
@@ -110,6 +133,7 @@ fn spawn_demo_scene(
                 cube.clone()
             };
             commands.spawn((
+                DemoSceneEntity,
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 Transform::from_xyz(
@@ -131,6 +155,7 @@ fn spawn_demo_scene(
     // Kept clear of the voxel chunk footprint (EM-3.3).
     for (x, z) in [(24.0, -14.0), (36.0, 12.0), (-24.0, -20.0), (-24.0, 14.0)] {
         commands.spawn((
+            DemoSceneEntity,
             Mesh3d(column.clone()),
             MeshMaterial3d(column_material.clone()),
             Transform::from_xyz(x, 7.0, z),
@@ -139,6 +164,7 @@ fn spawn_demo_scene(
 
     // Emissive sphere: bloom check (south of the voxel chunk since EM-3.3).
     commands.spawn((
+        DemoSceneEntity,
         Mesh3d(meshes.add(Sphere::new(0.8))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::BLACK,
@@ -152,6 +178,7 @@ fn spawn_demo_scene(
     // Density comes from the default atmosphere profile (single source of
     // truth); the AtmosphereController re-drives it at runtime (EM-2.4).
     commands.spawn((
+        DemoSceneEntity,
         FogVolume {
             density_factor: xindeler_oracle_host::AtmosphereProfile::default().fog_volume_density,
             ..Default::default()

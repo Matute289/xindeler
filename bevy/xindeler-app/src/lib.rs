@@ -18,7 +18,9 @@ use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*, state::app::State
 
 pub use crate::{
     sets::{GameplaySet, MirrorSet, NetSet, PresentationSet, SimSet},
-    settings::{ExperimentalGraphics, GraphicsSettings, GraphicsTier, XindelerSettings},
+    settings::{
+        ExperimentalGraphics, GraphicsSettings, GraphicsTier, MenuSettings, XindelerSettings,
+    },
     state::AppState,
 };
 
