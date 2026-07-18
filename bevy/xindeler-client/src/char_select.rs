@@ -1483,4 +1483,36 @@ mod tests {
             "Adventurer is not playable"
         );
     }
+
+    /// BL-82 EM-5.14 follow-up (zlayer audit): [`CharSelectRoot`] is a
+    /// full-screen, independently-positioned window (spec/EM-5.17 §4.4
+    /// `MODAL_WINDOWS` tier — it must draw over always-on ambient HUD chrome
+    /// exactly like `DiaryWindowRoot`/`InventoryWindowRoot`/`FullMapRoot`).
+    /// Mirrors `trade_ui.rs`'s `invite_and_trade_window_roots_carry_the_
+    /// modal_windows_z_index` pattern: pins that `spawn_screen` actually
+    /// attaches the `GlobalZIndex`, not just that the doc comment claims it.
+    #[test]
+    fn char_select_root_carries_the_modal_windows_z_index() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<CharSelectRoot>>()
+            .single(world)
+            .expect("CharSelectRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
 }
