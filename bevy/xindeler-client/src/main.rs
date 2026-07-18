@@ -69,6 +69,8 @@ mod perf_log;
 mod player_input;
 mod post;
 mod scene;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod settings_window;
 mod smoke;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod social_hud;

@@ -84,6 +84,7 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
+use xindeler_app::XindelerSettings;
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
 use xindeler_ui::{
@@ -100,12 +101,39 @@ use crate::hud_layout;
 /// the earlier port read as a heavy "window"); legacy chat is a light
 /// see-through overlay.
 ///
-/// TODO (post look-parity): legacy `chat_opacity`/`chat_size_x` are
-/// user-configurable `ChatSettings` fields; this pass bakes their defaults as
-/// consts for LOOK parity. True parity (an opacity slider / a resizable box)
-/// will need [`CHAT_BG`]/[`PANEL_WIDTH`] to read from a settings resource/RON
-/// rather than a `const`.
+/// BL-82 EM-5.12 partially closes the TODO below: the scrollback box's opacity
+/// now reads from `XindelerSettings::chat.opacity` (see
+/// [`sync_chat_scroll_opacity`]); this `const` is the SPAWN-time default (its
+/// `0.4` alpha equals the settings default) and the input-box focus tint still
+/// uses it. `PANEL_WIDTH`/`chat_size_x` remain baked.
+///
+/// TODO (post look-parity): legacy `chat_size_x` is a user-configurable
+/// `ChatSettings` field; this pass still bakes [`PANEL_WIDTH`] as a const for
+/// LOOK parity. True parity (a resizable box) will need it to read from a
+/// settings resource/RON rather than a `const`.
 const CHAT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.4);
+
+/// BL-82 EM-5.12: applies the Chat settings tab's opacity
+/// (`XindelerSettings::chat.opacity`) to the scrollback box's translucent-black
+/// background. Gated on `settings.is_changed()` so it only writes when the
+/// setting actually changes (the F5-collapse path toggles the box's
+/// `Display`/`Visibility`, never its `BackgroundColor`, so the two don't
+/// fight). The chat input line's focus tint keeps using [`CHAT_BG`] directly.
+fn sync_chat_scroll_opacity(
+    settings: Res<XindelerSettings>,
+    mut areas: Query<&mut BackgroundColor, With<ChatScrollArea>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    let alpha = settings.chat.opacity.clamp(0.0, 1.0);
+    let desired = Color::srgba(0.0, 0.0, 0.0, alpha);
+    for mut bg in &mut areas {
+        if bg.0 != desired {
+            bg.0 = desired;
+        }
+    }
+}
 
 /// The per-channel message text colors, copied verbatim from legacy
 /// `voxygen/src/hud/mod.rs`'s `WORLD_COLOR`/`SAY_COLOR`/… `const`s (the source
@@ -618,6 +646,9 @@ impl Plugin for ChatViewPlugin {
                 chat_smoke_verify,
                 sync_chat_scroll_height_to_window,
                 sync_chat_panel_bottom_to_window,
+                // BL-82 EM-5.12: drive the scrollback box opacity from the
+                // Chat settings tab (`XindelerSettings::chat.opacity`).
+                sync_chat_scroll_opacity,
                 // Reads `ActionState` — after the frame's real input resolution.
                 toggle_chat_via_hotkey.after(xindeler_input::InputResolveSet),
                 blur_chat_input_on_escape,

@@ -54,6 +54,25 @@ pub struct XindelerSettings {
     /// speed/fast-multiplier/mouse-sensitivity move out of a hardcoded
     /// `FlyCam::default()` and into user-facing, persisted settings.
     pub camera: CameraSettings,
+    /// BL-82 EM-5.12 (T56.39) — the Interface settings tab: HUD-facing
+    /// toggles (crosshair, …). `ui_scale` stays a top-level field (T56.6
+    /// established it there and `hud_scale.rs` reads it there); this holds the
+    /// remaining interface toggles the settings window exposes. Same
+    /// `#[serde(default)]` backward-compat guarantee as every field above.
+    pub interface: InterfaceSettings,
+    /// BL-82 EM-5.12 (T56.39) — the Chat settings tab. Closes `chat.rs`'s own
+    /// documented TODO (its `CHAT_BG` const doc: "legacy `chat_opacity` is a
+    /// user-configurable field; this pass bakes the default as a const … true
+    /// parity will need it to read from a settings resource"): the chat
+    /// scrollback box's translucent-black opacity is now a persisted setting.
+    pub chat: ChatSettings,
+    /// BL-82 EM-5.12 (T56.39) — the Language settings tab: the selected UI
+    /// locale (BCP-47-ish tag, e.g. `"en"`). v1 ships the `en` catalog only
+    /// (the `xindeler-ui` i18n seam is `en`-only until EM-5.16 wires the full
+    /// reactive Fluent pipeline + hot-swap), so this is persisted and
+    /// selectable but currently only `"en"` resolves — see the settings
+    /// window's Language tab note.
+    pub language: String,
 }
 
 impl Default for XindelerSettings {
@@ -63,8 +82,47 @@ impl Default for XindelerSettings {
             ui_scale: 1.0,
             controls: xindeler_input::KeyMap::default(),
             camera: CameraSettings::default(),
+            interface: InterfaceSettings::default(),
+            chat: ChatSettings::default(),
+            language: default_language(),
         }
     }
+}
+
+/// The default (and, in v1, only fully-wired) UI locale.
+fn default_language() -> String { "en".to_owned() }
+
+/// BL-82 EM-5.12 — HUD-facing interface toggles (the settings window's
+/// Interface tab). Kept as its own sub-struct (not loose fields on
+/// [`XindelerSettings`]) so the tab maps to one cohesive section, mirroring
+/// [`GraphicsSettings`]/[`CameraSettings`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterfaceSettings {
+    /// Whether the centred combat-HUD crosshair reticle is shown
+    /// (`combat_hud::Crosshair`'s live `Visibility` follows this).
+    pub show_crosshair: bool,
+}
+
+impl Default for InterfaceSettings {
+    fn default() -> Self {
+        Self {
+            show_crosshair: true,
+        }
+    }
+}
+
+/// BL-82 EM-5.12 — chat-panel appearance (the settings window's Chat tab).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatSettings {
+    /// Chat scrollback background opacity, `0.0` (fully transparent) … `1.0`
+    /// (opaque). Legacy default `0.4` (`voxygen` `ChatSettings::chat_opacity`).
+    pub opacity: f32,
+}
+
+impl Default for ChatSettings {
+    fn default() -> Self { Self { opacity: 0.4 } }
 }
 
 /// Camera-rig tunables a player expects to control (mouse sensitivity, debug
@@ -466,5 +524,37 @@ mod tests {
         let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
         assert_eq!(settings.camera, CameraSettings::default());
         assert_eq!(settings.camera.mouse_sensitivity, 0.002);
+    }
+
+    /// BL-82 EM-5.12: a settings.ron predating the `interface`/`chat`/
+    /// `language` sections (every file written before this epic) still loads
+    /// and gets their defaults — same backward-compat guarantee every field
+    /// above already established for itself.
+    #[test]
+    fn old_settings_files_default_the_em512_sections() {
+        let text = "(graphics: (taa: false, shadow_cascades: 2))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.interface, InterfaceSettings::default());
+        assert!(settings.interface.show_crosshair, "crosshair on by default");
+        assert_eq!(settings.chat, ChatSettings::default());
+        assert_eq!(settings.chat.opacity, 0.4, "legacy chat_opacity default");
+        assert_eq!(settings.language, "en");
+    }
+
+    /// The new EM-5.12 sub-structs round-trip through save/load intact (the
+    /// persistence path the settings window relies on: change → restart →
+    /// survives).
+    #[test]
+    fn em512_settings_round_trip_through_ron() {
+        let mut settings = XindelerSettings::default();
+        settings.interface.show_crosshair = false;
+        settings.chat.opacity = 0.75;
+        settings.language = "es".to_owned();
+        let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
+            .expect("settings serialize");
+        let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
+        assert!(!round_tripped.interface.show_crosshair);
+        assert_eq!(round_tripped.chat.opacity, 0.75);
+        assert_eq!(round_tripped.language, "es");
     }
 }

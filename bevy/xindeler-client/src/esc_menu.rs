@@ -1,76 +1,27 @@
-//! BL-82 EM-5.12 — the Escape/pause menu + a Video/Graphics settings tab.
+//! BL-82 EM-5.12 (T56.38) — the Escape/pause menu.
 //!
-//! Ports legacy `voxygen`'s esc menu (`voxygen/src/hud/esc_menu.rs`) + the
-//! Video pane of its settings window (`voxygen/src/hud/settings_window/
-//! video.rs`) into the Bevy client, SCOPED to what this epic needs: a centred
-//! pause panel with a **Resume** button and a **Video** section exposing the
-//! three graphics toggles that already exist as real, startup-read fields on
-//! [`xindeler_app::GraphicsSettings`] — `ssao`, `taa`, and the
-//! `shadow_cascades` count (see `crate::light::spawn_light_rig` /
-//! `crate::camera::spawn_camera`).
+//! Ports legacy `voxygen`'s esc menu (`voxygen/src/hud/esc_menu.rs`) into the
+//! Bevy client as a proper pause panel: **Resume**, **Settings** (opens the
+//! tabbed settings window — `crate::settings_window`, `HudWindow::Settings`),
+//! **Controls** (opens the EM-5.11 rebinding screen — `crate::controls_screen`,
+//! `HudWindow::Controls`), **Servers** (a stub until the EM-5.9 server browser
+//! lands — see [`handle_servers_click`]), **Logout** (stub — no character-
+//! select/main-menu flow on this embedded-server path yet), and **Quit**
+//! (a real `AppExit`).
 //!
-//! ## Deliberately out of scope (documented, not silently skipped)
-//! Legacy's esc menu also had Character Selection / Report Bug / Logout / Quit
-//! buttons, and its settings window had Interface/Gameplay/Controls/Sound/
-//! Video/Language tabs. This module ships ONLY Resume + the Video graphics
-//! trio — the slice this epic (and Matías's live shadow-flicker investigation,
-//! which needs an in-game way to toggle exactly these three) requires. The
-//! standalone Controls rebinding screen already exists separately
-//! (`crate::controls_screen`, `HudWindow::Controls`); folding it in as a tab
-//! here is future scope.
+//! Escape itself is the universal back-out key: [`toggle_esc_menu`] closes
+//! whatever window is open, and summons this menu only when nothing is open.
 //!
-//! ## Live application (the whole point for the flicker investigation)
-//! [`apply_graphics_settings`] reconciles the live camera to match
-//! [`xindeler_app::GraphicsSettings`] whenever it changes: it inserts/removes
-//! [`ScreenSpaceAmbientOcclusion`]/[`TemporalAntiAliasing`] on the camera — so
-//! flipping SSAO or TAA changes the RUNNING render config immediately, no
-//! restart, no renderer-plugin rebuild. Every change is persisted to
-//! `settings.ron` (and the graphics `tier` is forced to
-//! [`GraphicsTier::Custom`] so a hand-edited toggle isn't clobbered by a preset
-//! on next load — see [`GraphicsSettings::sanitize`]).
-//!
-//! ## Shadow cascades apply on RESTART, not live (BL-82 crash fix)
-//! The **cascade COUNT** is the one exception to live-apply, and deliberately
-//! so. Changing `num_cascades` on an ALREADY-RUNNING directional light — by any
-//! means, whether re-`insert`ing a new `CascadeShadowConfig` on the existing
-//! sun OR despawning and respawning the sun entity — reliably aborts the client
-//! from a `bevy_light` internal:
-//!
-//! ```text
-//! thread 'Compute Task Pool' panicked at bevy_light-0.19.0/src/lib.rs:477:
-//! index out of bounds: the len is 1 but the index is 1
-//! ```
-//!
-//! Root cause (traced through the actual panicking system, not just the line):
-//! `bevy_light::check_dir_light_mesh_visibility` keeps a **persistent**
-//! `Local<Parallel<Vec<Vec<Entity>>>>` of per-cascade visibility scratch
-//! queues. Each frame its `for_each_init` only `resize`s that scratch to the
-//! current cascade count *on the worker threads rayon actually schedules work
-//! onto*; threads left idle this pass keep the PREVIOUS frame's (shorter) Vec.
-//! The collect loop then iterates ALL ever-touched thread-locals and indexes
-//! each at the new cascade index — so the first frame the count *increases*
-//! (e.g. 1 -> 2), any thread carrying a stale length-1 queue is indexed at [1]
-//! and panics. Because that stale state lives in a per-SYSTEM `Local` (not on
-//! the light entity), respawning the sun does not reset it — only a fresh app
-//! start begins with an empty `Local`, which is why a cascade count picked at
-//! `crate::light::spawn_light_rig` time is always safe while a live change is
-//! not. Bevy is pinned at `=0.19.0` from crates.io (not a fork), so we fix this
-//! from our side by NOT reconfiguring cascades on the live light: the setting
-//! still cycles + persists, and takes effect on the next launch. SSAO and TAA
-//! stay fully live.
+//! The graphics toggles this module used to host inline (SSAO/TAA/shadow
+//! cascades — the pre-EM-5.12 "Video slice") moved into the settings window's
+//! **Video** tab, alongside the full `GraphicsSettings` set; the live camera
+//! reconcile (`apply_graphics_settings`) moved there with them. This module is
+//! now pure menu — it owns no settings state.
 //!
 //! Compiled only under `listen-server`/`net-client`, matching every other
 //! `xindeler_ui`-consuming screen module in this crate.
 
-use bevy::{
-    anti_alias::taa::TemporalAntiAliasing,
-    core_pipeline::prepass::DepthPrepass,
-    ecs::schedule::common_conditions::{not, resource_changed},
-    pbr::ScreenSpaceAmbientOcclusion,
-    prelude::*,
-    render::camera::{MipBias, TemporalJitter},
-};
-use xindeler_app::{GraphicsTier, XindelerSettings};
+use bevy::{ecs::schedule::common_conditions::not, prelude::*};
 use xindeler_input::{ActionState, GameInput};
 use xindeler_ui::{
     button::{Activate, button_bundle},
@@ -80,16 +31,10 @@ use xindeler_ui::{
     zlayer,
 };
 
-use crate::{camera::MainCamera, chat::text_input_focused, targeting::hard_lock_active};
-
-/// Effective shadow-cascade range (matches `crate::light::spawn_light_rig`'s
-/// own `clamp(1, 4)`): cycling the toggle wraps within this.
-const MIN_SHADOW_CASCADES: u8 = 1;
-const MAX_SHADOW_CASCADES: u8 = 4;
+use crate::{chat::text_input_focused, targeting::hard_lock_active};
 
 /// Installs the esc/pause menu: spawns the (hidden) panel at `Startup`, opens/
-/// closes it on Escape, keeps its visibility + toggle labels synced, and
-/// applies graphics changes live.
+/// closes it on Escape, and keeps its visibility synced.
 pub struct EscMenuPlugin;
 
 impl Plugin for EscMenuPlugin {
@@ -134,9 +79,6 @@ impl Plugin for EscMenuPlugin {
                 // After `apply_hud_actions` so the panel's `Visibility` matches
                 // the window state THIS frame (no one-frame open lag).
                 sync_esc_menu_visibility.after(xindeler_ui::hud_state::apply_hud_actions),
-                sync_graphics_labels,
-                // Reconcile the live render config whenever settings change.
-                apply_graphics_settings.run_if(resource_changed::<XindelerSettings>),
             ),
         );
     }
@@ -146,19 +88,6 @@ impl Plugin for EscMenuPlugin {
 /// `HudState::is_open(HudWindow::EscMenu)`).
 #[derive(Component)]
 struct EscMenuRoot;
-
-/// The three live-tunable graphics controls this menu exposes.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum GraphicsControl {
-    Ssao,
-    Taa,
-    ShadowCascades,
-}
-
-/// Tags a graphics toggle button so [`sync_graphics_labels`] can relabel it
-/// from the current [`XindelerSettings`].
-#[derive(Component, Clone, Copy)]
-struct GraphicsControlButton(GraphicsControl);
 
 /// Escape is the universal "back out" key: it closes whatever window is open
 /// (the pause menu, Diary, Inventory, Map, …), and only summons the pause menu
@@ -211,27 +140,15 @@ fn sync_esc_menu_visibility(
     };
 }
 
-/// Spawns the centred pause panel: a "Game Menu" title, a Resume button, a
-/// "Video" section header, and one labelled toggle button per
-/// [`GraphicsControl`].
+/// Spawns the centred pause panel: a "Game Menu" title and the menu buttons
+/// (Resume / Settings / Controls / Servers / Logout / Quit).
 ///
 /// BL-82 EM-5.17/5.18 click-routing fix: `EscMenuRoot` is a full-screen modal
 /// backdrop exactly like `DiaryWindowRoot`/`InventoryWindowRoot`/`FullMapRoot`,
-/// but — unlike the diary — it was spawned without `GlobalZIndex(
-/// zlayer::MODAL_WINDOWS)`. Left at the default z-partition (0), it sat
-/// BELOW the always-on ambient HUD chrome once that chrome gained its own
-/// higher z-index this phase (hotbar/orbs = `ORBS_ACTION_BAR_PARTY_MINIMAP`
-/// =20): wherever the pause panel visually overlapped the hotbar,
-/// `bevy_ui` picking (which resolves the highest z-partition first)
-/// routed clicks to that ambient chrome instead of the pause menu underneath
-/// — i.e. opening ESC did not actually block hotbar interaction where they
-/// overlapped.
-fn spawn_esc_menu(
-    mut commands: Commands,
-    theme: Res<HudTheme>,
-    fonts: Res<HudFonts>,
-    settings: Res<XindelerSettings>,
-) {
+/// and carries `GlobalZIndex(zlayer::MODAL_WINDOWS)` so `bevy_ui` picking
+/// (highest z-partition first) routes clicks to the pause panel rather than the
+/// always-on ambient HUD chrome (hotbar/orbs) it overlaps.
+fn spawn_esc_menu(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     let theme: HudTheme = *theme;
     commands
         .spawn((
@@ -265,35 +182,29 @@ fn spawn_esc_menu(
                 panel
                     .spawn(button_bundle(&theme, &fonts, "Resume"))
                     .observe(handle_resume_click);
-
-                heading(panel, &fonts, &theme, "Video", 20.0);
-
-                for control in [
-                    GraphicsControl::Ssao,
-                    GraphicsControl::Taa,
-                    GraphicsControl::ShadowCascades,
-                ] {
-                    spawn_graphics_row(panel, &theme, &fonts, &settings, control);
-                }
-
-                // Restart-vs-live honesty: SSAO/TAA apply immediately; the
-                // shadow-cascade COUNT is read once at startup by
-                // `crate::light::spawn_light_rig` (changing it on the live sun
-                // aborts the client — see the module doc), so it is flagged
-                // "(restart)" and applies on the next launch.
-                panel.spawn((
-                    Text(
-                        "SSAO and anti-aliasing apply immediately. Shadow cascades apply on \
-                         restart."
-                            .to_owned(),
-                    ),
-                    TextFont {
-                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(13.0),
-                        ..Default::default()
-                    },
-                    TextColor(theme.palette.text_muted),
-                ));
+                panel
+                    .spawn(button_bundle(&theme, &fonts, "Settings"))
+                    .observe(handle_settings_click);
+                panel
+                    .spawn(button_bundle(&theme, &fonts, "Controls"))
+                    .observe(handle_controls_click);
+                // Stub until the EM-5.9 server browser (T56.31) lands — it is
+                // in a separate, not-yet-merged PR chain (#166→#168), and
+                // wiring it here would create exactly the cross-PR dependency
+                // this task deliberately avoids. TODO(EM-5.9 merge): open the
+                // real server browser here.
+                panel
+                    .spawn(button_bundle(&theme, &fonts, "Servers (soon)"))
+                    .observe(handle_servers_click);
+                // Stub: there is no character-select / main-menu flow to return
+                // to on this embedded-server path yet (EM-5.9/5.14). TODO: route
+                // to the main menu once that state machine merges.
+                panel
+                    .spawn(button_bundle(&theme, &fonts, "Logout (soon)"))
+                    .observe(handle_logout_click);
+                panel
+                    .spawn(button_bundle(&theme, &fonts, "Quit"))
+                    .observe(handle_quit_click);
             });
         });
 }
@@ -317,211 +228,40 @@ fn heading(
     ));
 }
 
-/// One graphics row: a name label + a value button that cycles the setting
-/// (`On`/`Off`, or the cascade count) on click.
-fn spawn_graphics_row(
-    panel: &mut ChildSpawnerCommands,
-    theme: &HudTheme,
-    fonts: &HudFonts,
-    settings: &XindelerSettings,
-    control: GraphicsControl,
-) {
-    panel
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(theme.spacing.sm),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::SpaceBetween,
-            ..Default::default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text(control_name(control).to_owned()),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(16.0),
-                    ..Default::default()
-                },
-                TextColor(theme.palette.text),
-                Node {
-                    width: Val::Px(180.0),
-                    ..Default::default()
-                },
-            ));
-            row.spawn(button_bundle(
-                theme,
-                fonts,
-                &control_value_label(control, &settings.graphics),
-            ))
-            .insert(GraphicsControlButton(control))
-            .observe(
-                move |_activate: On<Activate>, mut settings: ResMut<XindelerSettings>| {
-                    cycle_control(control, &mut settings);
-                    // A hand-edited toggle must survive a reload — a non-Custom
-                    // tier's preset would clobber it on next `sanitize()`.
-                    settings.graphics.tier = GraphicsTier::Custom;
-                    if let Err(err) = settings.save() {
-                        error!(
-                            "esc menu: failed to persist settings.ron after a graphics change: \
-                             {err}"
-                        );
-                    }
-                },
-            );
-        });
-}
-
 /// Resume closes the pause menu (routes through the generic `HudAction` bus,
 /// exactly like every other window's close control).
 fn handle_resume_click(_activate: On<Activate>, mut actions: MessageWriter<HudAction>) {
     actions.write(HudAction::CloseWindow);
 }
 
-/// Advances a control's value in [`XindelerSettings`] (booleans flip; the
-/// cascade count cycles `1→2→3→4→1`).
-fn cycle_control(control: GraphicsControl, settings: &mut XindelerSettings) {
-    let g = &mut settings.graphics;
-    match control {
-        GraphicsControl::Ssao => g.ssao = !g.ssao,
-        GraphicsControl::Taa => g.taa = !g.taa,
-        GraphicsControl::ShadowCascades => {
-            g.shadow_cascades = if g.shadow_cascades >= MAX_SHADOW_CASCADES {
-                MIN_SHADOW_CASCADES
-            } else {
-                g.shadow_cascades + 1
-            };
-        },
-    }
+/// Settings opens the tabbed settings window. Opening it closes THIS menu (the
+/// single mutually-exclusive `HudWindow` slot), so the pause panel gives way to
+/// the settings window.
+fn handle_settings_click(_activate: On<Activate>, mut actions: MessageWriter<HudAction>) {
+    actions.write(HudAction::ToggleWindow(HudWindow::Settings));
 }
 
-fn control_name(control: GraphicsControl) -> &'static str {
-    match control {
-        GraphicsControl::Ssao => "SSAO",
-        GraphicsControl::Taa => "Anti-aliasing (TAA)",
-        // "(restart)": unlike SSAO/TAA this does NOT apply live — see the
-        // module-level "Shadow cascades apply on RESTART" doc for the
-        // `bevy_light` crash it avoids. The new count is read at startup by
-        // `crate::light::spawn_light_rig`.
-        GraphicsControl::ShadowCascades => "Shadow cascades (restart)",
-    }
+/// Controls opens the EM-5.11 rebinding screen (keyboard/mouse + gamepad).
+fn handle_controls_click(_activate: On<Activate>, mut actions: MessageWriter<HudAction>) {
+    actions.write(HudAction::ToggleWindow(HudWindow::Controls));
 }
 
-fn control_value_label(
-    control: GraphicsControl,
-    graphics: &xindeler_app::GraphicsSettings,
-) -> String {
-    match control {
-        GraphicsControl::Ssao => on_off(graphics.ssao).to_owned(),
-        GraphicsControl::Taa => on_off(graphics.taa).to_owned(),
-        GraphicsControl::ShadowCascades => graphics
-            .shadow_cascades
-            .clamp(MIN_SHADOW_CASCADES, MAX_SHADOW_CASCADES)
-            .to_string(),
-    }
+/// Servers is a stub until the EM-5.9 server browser (T56.31) merges — see
+/// [`spawn_esc_menu`]. It logs an honest TODO rather than opening a fake
+/// browser.
+fn handle_servers_click(_activate: On<Activate>) {
+    info!("esc menu: Servers is stubbed until the EM-5.9 server browser lands (T56.31)");
 }
 
-fn on_off(value: bool) -> &'static str { if value { "On" } else { "Off" } }
-
-/// Refreshes every graphics toggle button's label from the current settings
-/// (so a click's effect is immediately visible). Gated on `is_changed` so it
-/// only walks the buttons when settings actually change.
-fn sync_graphics_labels(
-    settings: Res<XindelerSettings>,
-    buttons: Query<(&GraphicsControlButton, &Children)>,
-    mut texts: Query<&mut Text>,
-) {
-    if !settings.is_changed() {
-        return;
-    }
-    for (button, children) in &buttons {
-        let label = control_value_label(button.0, &settings.graphics);
-        for &child in children {
-            if let Ok(mut text) = texts.get_mut(child)
-                && text.0 != label
-            {
-                text.0 = label.clone();
-            }
-        }
-    }
+/// Logout is a stub: there is no character-select / main-menu flow to return to
+/// on this embedded-server path yet (EM-5.9/5.14).
+fn handle_logout_click(_activate: On<Activate>) {
+    info!("esc menu: Logout is stubbed until the EM-5.9 main-menu state machine lands");
 }
 
-/// Reconciles the live CAMERA render components (SSAO/TAA) to match
-/// [`XindelerSettings`] — this is what makes those two toggles apply WITHOUT a
-/// restart. Idempotent: it only inserts/removes a component when the live state
-/// doesn't already match, so re-running it on any settings change (e.g. a
-/// controls rebind that also saves settings) is harmless.
-///
-/// It deliberately does NOT touch the sun's `CascadeShadowConfig`: changing
-/// the cascade COUNT on the live directional light aborts the client from a
-/// `bevy_light` internal (stale per-thread visibility scratch — see this
-/// module's "Shadow cascades apply on RESTART" doc). The cascade count is read
-/// once at startup by `crate::light::spawn_light_rig`, so a changed value is
-/// simply persisted here and takes effect on the next launch.
-fn apply_graphics_settings(
-    settings: Res<XindelerSettings>,
-    mut commands: Commands,
-    cameras: Query<
-        (
-            Entity,
-            Has<ScreenSpaceAmbientOcclusion>,
-            Has<TemporalAntiAliasing>,
-        ),
-        With<MainCamera>,
-    >,
-) {
-    let g = &settings.graphics;
-    for (camera, has_ssao, has_taa) in &cameras {
-        match (g.ssao, has_ssao) {
-            (true, false) => {
-                commands
-                    .entity(camera)
-                    .insert(ScreenSpaceAmbientOcclusion::default());
-            },
-            (false, true) => {
-                commands
-                    .entity(camera)
-                    .remove::<ScreenSpaceAmbientOcclusion>();
-            },
-            _ => {},
-        }
-        match (g.taa, has_taa) {
-            (true, false) => {
-                // `TemporalAntiAliasing` `#[require]`s `TemporalJitter`,
-                // `MipBias`, `DepthPrepass` and `MotionVectorPrepass`, all of
-                // which Bevy adds automatically on this runtime insert (the
-                // explicit `DepthPrepass` here is belt-and-suspenders, and
-                // idempotent — Bevy no-ops a duplicate).
-                commands
-                    .entity(camera)
-                    .insert((DepthPrepass, TemporalAntiAliasing::default()));
-            },
-            (false, true) => {
-                // Removing ONLY `TemporalAntiAliasing` is NOT a clean "TAA off"
-                // state: `TemporalJitter`'s sub-pixel projection offset (which
-                // `bevy_render` keeps applying while the component is present)
-                // freezes at its last value, and `MipBias`'s texture-sharpening
-                // bias stays applied — so the picture would keep a permanent
-                // jitter offset + sharpen (bevy-migration-reviewer finding).
-                // For Matías's shadow-flicker A/B this matters: "TAA off" must
-                // reach a real no-TAA baseline. Drop the jitter + mip bias too.
-                // `DepthPrepass`/`MotionVectorPrepass` are left resident (no
-                // visual residue, and other passes may want the depth prepass);
-                // they cost a little GPU until restart — an accepted trade for
-                // a live toggle.
-                commands
-                    .entity(camera)
-                    .remove::<TemporalAntiAliasing>()
-                    .remove::<TemporalJitter>()
-                    .remove::<MipBias>();
-            },
-            _ => {},
-        }
-    }
-    // NOTE: the shadow-cascade COUNT is intentionally NOT reconciled here.
-    // Re-inserting a `CascadeShadowConfig` with a different `num_cascades` on
-    // the live sun (or respawning the sun) crashes `bevy_light` — see the
-    // module doc. It is applied at startup by `crate::light::spawn_light_rig`
-    // instead; here it is only persisted (by the caller) for the next launch.
+/// Quit exits the client cleanly (`AppExit::Success`).
+fn handle_quit_click(_activate: On<Activate>, mut exit: MessageWriter<AppExit>) {
+    exit.write(AppExit::Success);
 }
 
 #[cfg(test)]
@@ -552,7 +292,6 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
-        app.insert_resource(XindelerSettings::default());
 
         app.world_mut()
             .run_system_once(spawn_esc_menu)
@@ -693,165 +432,6 @@ mod tests {
             actions.is_empty(),
             "Escape while a hard lock is active must not emit any HudAction — no pause-menu \
              open/close on the same press"
-        );
-    }
-
-    /// Cycling each control walks the expected values: booleans flip, the
-    /// cascade count wraps 4→1.
-    #[test]
-    fn cycling_controls_advances_the_values() {
-        let mut settings = XindelerSettings::default();
-        settings.graphics.ssao = true;
-        cycle_control(GraphicsControl::Ssao, &mut settings);
-        assert!(!settings.graphics.ssao, "SSAO toggles off");
-
-        settings.graphics.taa = false;
-        cycle_control(GraphicsControl::Taa, &mut settings);
-        assert!(settings.graphics.taa, "TAA toggles on");
-
-        settings.graphics.shadow_cascades = 3;
-        cycle_control(GraphicsControl::ShadowCascades, &mut settings);
-        assert_eq!(settings.graphics.shadow_cascades, 4);
-        cycle_control(GraphicsControl::ShadowCascades, &mut settings);
-        assert_eq!(
-            settings.graphics.shadow_cascades, MIN_SHADOW_CASCADES,
-            "the cascade count wraps 4 -> 1"
-        );
-    }
-
-    /// [`apply_graphics_settings`] reconciles the live camera: enabling SSAO/
-    /// TAA in settings inserts the components; disabling removes them — the
-    /// "applies live, no restart" acceptance bar (headless: asserts the ECS
-    /// reconciliation, which is exactly the state the render graph reads).
-    #[test]
-    fn apply_reconciles_camera_components_to_settings() {
-        let mut app = App::new();
-        app.insert_resource(XindelerSettings::default());
-        let camera = app.world_mut().spawn(MainCamera).id();
-        app.add_systems(Update, apply_graphics_settings);
-
-        // Default settings (Ultra: ssao + taa on) -> both components inserted.
-        app.update();
-        assert!(
-            app.world()
-                .get::<ScreenSpaceAmbientOcclusion>(camera)
-                .is_some(),
-            "SSAO-on settings must insert the SSAO component live"
-        );
-        assert!(
-            app.world().get::<TemporalAntiAliasing>(camera).is_some(),
-            "TAA-on settings must insert the TAA component live"
-        );
-
-        // Turn both off -> both removed.
-        {
-            let mut settings = app.world_mut().resource_mut::<XindelerSettings>();
-            settings.graphics.ssao = false;
-            settings.graphics.taa = false;
-        }
-        app.update();
-        assert!(
-            app.world()
-                .get::<ScreenSpaceAmbientOcclusion>(camera)
-                .is_none(),
-            "SSAO-off settings must remove the SSAO component live"
-        );
-        assert!(
-            app.world().get::<TemporalAntiAliasing>(camera).is_none(),
-            "TAA-off settings must remove the TAA component live"
-        );
-    }
-
-    /// Disabling TAA must reach a CLEAN no-TAA baseline: the residual
-    /// `TemporalJitter` (a frozen sub-pixel projection offset) and `MipBias`
-    /// (texture sharpening) `TemporalAntiAliasing` pulls in must be removed
-    /// too, not just the TAA node (bevy-migration-reviewer finding — this is
-    /// the baseline Matías's shadow-flicker A/B relies on). Inserts the trio
-    /// explicitly (deterministic, no reliance on `#[require]` auto-add in a
-    /// headless app) and asserts all three are gone after a TAA-off reconcile.
-    #[test]
-    fn disabling_taa_clears_the_jitter_and_mip_bias_residue() {
-        let mut app = App::new();
-        let mut settings = XindelerSettings::default();
-        settings.graphics.taa = false;
-        app.insert_resource(settings);
-        let camera = app
-            .world_mut()
-            .spawn((
-                MainCamera,
-                TemporalAntiAliasing::default(),
-                TemporalJitter::default(),
-                MipBias(-1.0),
-            ))
-            .id();
-        app.add_systems(Update, apply_graphics_settings);
-
-        app.update();
-
-        assert!(
-            app.world().get::<TemporalAntiAliasing>(camera).is_none(),
-            "TAA node removed"
-        );
-        assert!(
-            app.world().get::<TemporalJitter>(camera).is_none(),
-            "the frozen jitter offset must be cleared for a clean no-TAA baseline"
-        );
-        assert!(
-            app.world().get::<MipBias>(camera).is_none(),
-            "the TAA mip-bias sharpening must be cleared for a clean no-TAA baseline"
-        );
-    }
-
-    /// BL-82 crash regression: changing `shadow_cascades` must NOT touch the
-    /// live sun's `CascadeShadowConfig`. Re-inserting a config with a
-    /// different `num_cascades` on the running light (or respawning it) aborts
-    /// the client from a `bevy_light` internal — the stale per-thread
-    /// visibility scratch in `check_dir_light_mesh_visibility` (see the module
-    /// doc). The count is applied at startup by `crate::light::spawn_light_rig`
-    /// instead; here we assert the live-reconcile system leaves an existing
-    /// cascade config byte-for-byte untouched even across a settings change,
-    /// so the crash-triggering live mutation can never be reintroduced without
-    /// this test failing.
-    #[test]
-    fn changing_shadow_cascades_does_not_mutate_the_live_sun() {
-        use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
-
-        let mut app = App::new();
-        // Start at the Ultra default (4 cascades).
-        app.insert_resource(XindelerSettings::default());
-        // A stand-in for the live sun, carrying a 1-cascade config. If the
-        // system ever live-reconciled cascades, a settings bump to a higher
-        // count would grow `bounds` here — exactly the cross-frame count
-        // INCREASE that crashes `bevy_light`.
-        let sun_config = CascadeShadowConfigBuilder {
-            num_cascades: 1,
-            maximum_distance: 500.0,
-            ..Default::default()
-        }
-        .build();
-        let bounds_before = sun_config.bounds.len();
-        assert_eq!(bounds_before, 1, "sanity: 1 cascade -> 1 bound");
-        let sun = app.world_mut().spawn(sun_config).id();
-        app.add_systems(Update, apply_graphics_settings);
-
-        // First reconcile with the default settings.
-        app.update();
-        // Now change the cascade count (1 -> 3, the crash-prone INCREASE).
-        {
-            let mut settings = app.world_mut().resource_mut::<XindelerSettings>();
-            settings.graphics.shadow_cascades = 3;
-        }
-        app.update();
-
-        let after = app
-            .world()
-            .get::<CascadeShadowConfig>(sun)
-            .expect("sun still carries its cascade config");
-        assert_eq!(
-            after.bounds.len(),
-            bounds_before,
-            "apply_graphics_settings must NOT reconfigure the live sun's cascade count — that \
-             crashes bevy_light; the count is applied at startup instead"
         );
     }
 }
