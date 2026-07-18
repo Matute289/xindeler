@@ -109,7 +109,16 @@ const PARTY_FRAME_SRC_W: f32 = 1408.0;
 const PARTY_FRAME_SRC_H: f32 = 768.0;
 /// Rendered width of one party frame; height derives from the native aspect
 /// ratio so the circle stays circular and the grooves stay aligned.
-const PARTY_FRAME_WIDTH_PX: f32 = 320.0;
+///
+/// BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — was `320.0`: at
+/// that size barely 2 rows fit in a normal ~1280×744 window (live-tested,
+/// Matías's report), nowhere near enough for a real 6-12-member party.
+/// `160.0` halves both axes (height derives to ~87px, down from ~174px),
+/// taking a normal window from ~2 comfortable rows to ~6-7 (see the PR
+/// body's "N rows fit" arithmetic), while every measured region below
+/// still lines up exactly, because they're all re-derived from
+/// `PARTY_FRAME_SCALE`.
+const PARTY_FRAME_WIDTH_PX: f32 = 160.0;
 const PARTY_FRAME_HEIGHT_PX: f32 = PARTY_FRAME_WIDTH_PX * PARTY_FRAME_SRC_H / PARTY_FRAME_SRC_W;
 /// Asset-pixel → rendered-pixel scale (uniform on both axes).
 const PARTY_FRAME_SCALE: f32 = PARTY_FRAME_WIDTH_PX / PARTY_FRAME_SRC_W;
@@ -126,7 +135,23 @@ const PARTY_MP_GROOVE: [f32; 4] = [691.0, 413.0, 534.0, 57.0];
 /// fraction of the (scaled) hole diameter so it tracks `PARTY_FRAME_WIDTH_PX`.
 const PARTY_LEVEL_BADGE_FRAC: f32 = 0.36;
 /// The voice-chat icon size — small, sitting inline next to the name label.
-const PARTY_VOICE_ICON_SIZE_PX: f32 = 16.0;
+///
+/// Unlike the `PARTY_*` regions above, this (and the two font sizes below)
+/// is NOT one of the asset's measured source-pixel regions, so it never
+/// scaled with `PARTY_FRAME_SCALE` in the first place — it was a plain
+/// absolute px sized to look right against the OLD 320px-wide frame. Shrunk
+/// by hand alongside the frame (roughly proportional, with a legibility
+/// floor) so it still fits inside the now-smaller name row instead of
+/// overflowing it. Was `16.0`.
+const PARTY_VOICE_ICON_SIZE_PX: f32 = 11.0;
+/// The party-member name label's (and the "out of range" label's) font
+/// size — another absolute px never covered by `PARTY_FRAME_SCALE` (see
+/// [`PARTY_VOICE_ICON_SIZE_PX`]'s doc comment). Was `12.0`; shrunk so it
+/// still fits inside the smaller name row without clipping.
+const PARTY_NAME_FONT_PX: f32 = 10.0;
+/// The level badge's number font size — same absolute-px caveat as
+/// [`PARTY_NAME_FONT_PX`]. Was `11.0`.
+const PARTY_LEVEL_BADGE_FONT_PX: f32 = 9.0;
 
 /// Builds an absolutely-positioned [`Node`] covering a measured SOURCE-pixel
 /// region `[x, y, w, h]` of `party_portrait_frame.png`, scaled to rendered
@@ -582,13 +607,27 @@ fn sync_group_panel(
             .and_then(|(_, _, _, xp)| xp)
             .map(|xp| xp.level);
 
-        // `row_entity` is the outer per-member CONTAINER (a Column): the
-        // decorative frame block on top, then the Kick/Make-Leader actions on
-        // their own row below it.
+        // `row_entity` is the outer per-member CONTAINER: the decorative
+        // frame block on the left, the Kick/Make-Leader actions beside it on
+        // the right, vertically centred against the (taller) frame.
+        //
+        // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — was a
+        // Column (frame ON TOP of a separate actions row BELOW it). At the
+        // frame's old 320px width that vertical stack was already the
+        // majority of a ~235px-tall row; simply shrinking the frame's own
+        // size couldn't get anywhere near fitting 6+ rows in a normal
+        // window, because `button_bundle`'s ~40px-tall Kick/Make-Leader
+        // buttons (an unrelated shared widget, deliberately NOT resized
+        // here — shrinking it would also shrink every OTHER button in the
+        // client) were being added on top of the frame's height every row.
+        // Laying them out beside the frame instead means the row's total
+        // height is `max(frame_height, actions_row_height)`, not their sum
+        // — see the PR body for the row-count arithmetic this unlocks.
         let row_entity = commands
             .spawn((GroupMemberRow, Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: theme.spacing.xs_px(),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: theme.spacing.sm_px(),
                 ..Default::default()
             }))
             .id();
@@ -661,9 +700,19 @@ fn sync_group_panel(
                 Text(label),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(12.0),
+                    font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
                     ..Default::default()
                 },
+                // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) —
+                // the now-much-shorter `name_row_node` (a fraction of the
+                // shrunk `PARTY_HOLE`) is narrow enough that Bevy's default
+                // soft-wrap broke a longer name across 2-3 lines, spilling
+                // down over the HP/MP bars instead of being clipped to one
+                // line (live-tested, visually confirmed via
+                // `--smoke-screenshot`). `clip_x()` below only clips
+                // horizontal overflow — it does nothing about vertical
+                // wrapping — so wrapping must be disabled explicitly too.
+                TextLayout::no_wrap(),
                 TextColor(if is_leader {
                     theme.palette.accent
                 } else {
@@ -749,6 +798,13 @@ fn sync_group_panel(
                 ]);
                 oor_node.align_items = AlignItems::Center;
                 oor_node.justify_content = JustifyContent::Center;
+                // Same clip_x() + `TextLayout::no_wrap()` pairing as the
+                // name label below — this container is narrower now too
+                // (BL-82 EM-5.17 Phase 4 follow-up, party-frame shrink), so
+                // without it "(out of range)" would wrap across several
+                // lines and spill past the plaque instead of truncating to
+                // one line.
+                oor_node.overflow = bevy::ui::Overflow::clip_x();
                 let oor_container = commands.spawn(oor_node).id();
                 commands.entity(frame_container).add_child(oor_container);
                 let out_of_range = commands
@@ -756,9 +812,10 @@ fn sync_group_panel(
                         Text("(out of range)".to_owned()),
                         TextFont {
                             font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                            font_size: bevy::text::FontSize::Px(12.0),
+                            font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
                             ..Default::default()
                         },
+                        TextLayout::no_wrap(),
                         TextColor(theme.palette.text_muted),
                     ))
                     .id();
@@ -816,7 +873,7 @@ fn sync_group_panel(
                     Text(format!("{level}")),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(11.0),
+                        font_size: bevy::text::FontSize::Px(PARTY_LEVEL_BADGE_FONT_PX),
                         ..Default::default()
                     },
                     TextColor(theme.palette.text),
@@ -830,17 +887,17 @@ fn sync_group_panel(
         // self-target button is confusing UX, not just a no-op
         // (bevy-migration-reviewer follow-up).
         //
-        // Spawned on their OWN row (`actions_row_entity`) BELOW the decorative
-        // frame, lightly indented, rather than inside the frame — the frame is
-        // pure decorative chrome with no room for buttons, and keeping the
-        // actions out of it means the frame's fixed aspect ratio is never
-        // stretched by button content.
+        // Spawned as `row_entity`'s second child, BESIDE the decorative
+        // frame (not inside it — the frame is pure decorative chrome with
+        // no room for buttons, and keeping the actions out of it means the
+        // frame's fixed aspect ratio is never stretched by button content).
+        // No manual left margin here: `row_entity`'s own `column_gap`
+        // already spaces this from `frame_container`.
         if Some(member.uid) != my_uid {
             let actions_row_entity = commands
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
                     column_gap: theme.spacing.sm_px(),
-                    margin: UiRect::left(theme.spacing.sm_px()),
                     ..Default::default()
                 })
                 .id();
@@ -1226,19 +1283,38 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         });
 
     // Group/party panel: always visible while in a group. BL-82 EM-5.17
-    // Phase 4: repositioned to spec §3.4's confirmed anchor (top-left column,
-    // `top:100,left:20`, `row_gap:20` between member rows) — was top-right,
-    // which the pre-reskin flat layout used purely to avoid overlapping the
-    // Social window (now at top-right still, so the two remain disjoint).
-    // `GlobalZIndex` per spec §4.4: party frames share the ambient always-on
-    // HUD chrome layer with the orbs/action-bar/minimap.
+    // Phase 4: repositioned to spec §3.4's confirmed anchor (top-left
+    // column, `top:100,left:20`) — was top-right, which the pre-reskin flat
+    // layout used purely to avoid overlapping the Social window (now at
+    // top-right still, so the two remain disjoint). `GlobalZIndex` per spec
+    // §4.4: party frames share the ambient always-on HUD chrome layer with
+    // the orbs/action-bar/minimap.
     //
-    // Width 340px comfortably contains each member row's decorative frame
-    // (`PARTY_FRAME_WIDTH_PX` = 320px, see `sync_group_panel`) plus the
-    // indented Kick/Make-Leader actions row below it, so party-frame content
-    // stays inside its own panel and never bleeds into neighbouring panels'
-    // screen space (chat's fixed bottom-left footprint, the centered ESC
-    // menu). Keep this >= `PARTY_FRAME_WIDTH_PX` if the frame is ever resized.
+    // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — `row_gap`
+    // between member rows was `20.0`; combined with the OLD frame's ~235px
+    // per-row footprint (a 320px-wide frame stacked ABOVE a separate
+    // actions row) that meant barely 2 rows fit in a normal ~744px-tall
+    // window. Now that a member row's actions sit BESIDE the (much
+    // smaller) frame instead of below it — see `row_entity`'s own doc
+    // comment above, in this same function — the row-to-row gap is
+    // tightened to `theme.spacing.xs_px()` too, so the saved frame height
+    // isn't immediately eaten back up by generous spacing.
+    //
+    // Width grew from 340px to 420px even though the frame itself shrank:
+    // the frame is no longer the widest thing in a row — with the actions
+    // row now BESIDE it instead of below, `frame(160px) + gap + Kick/Make
+    // Leader buttons` is wider than the old vertical stack ever was. Keep
+    // this >= that combined width if either the frame or the buttons are
+    // ever resized again (live-verified with real "Kick"/"Make Leader"
+    // button text via `--smoke-screenshot`, ~20-40px of slack left).
+    //
+    // Known follow-up (bevy-migration-reviewer, this PR): this panel still
+    // has no scroll container — a ~744px-tall window fits roughly 6-7 rows
+    // at this size (see the PR body's arithmetic), not a full 12-member
+    // party without scrolling. Good enough to unblock a typical 4-6-member
+    // party; a genuinely oversized roster still needs `overflow_y`/a
+    // scrollable list, tracked as a separate follow-up rather than folded
+    // into this size-only fix.
     commands
         .spawn((
             GroupPanelRoot,
@@ -1248,9 +1324,9 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 position_type: PositionType::Absolute,
                 top: Val::Px(100.0),
                 left: Val::Px(20.0),
-                width: Val::Px(340.0),
+                width: Val::Px(420.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(20.0),
+                row_gap: theme.spacing.sm_px(),
                 ..Default::default()
             },
         ))
@@ -1265,7 +1341,7 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 );
             parent.spawn((GroupMembersRoot, Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(20.0),
+                row_gap: theme.spacing.xs_px(),
                 ..Default::default()
             }));
         });
