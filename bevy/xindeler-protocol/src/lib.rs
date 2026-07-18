@@ -28,6 +28,10 @@ pub mod login;
 pub mod map;
 pub mod narrative;
 pub mod owner_visibility;
+// BL-82 EM-8.4: static source-scanner test guarding against the recurring
+// NetOwnerOnly/Scope bug class (EM-5.7/EM-5.15) — see its own module doc
+// comment. Test-only, like `xindeler-client::zlayer_audit`'s sibling guard.
+#[cfg(test)] mod owner_scope_audit;
 pub mod sfx;
 pub mod skillset;
 pub mod social;
