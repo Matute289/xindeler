@@ -44,19 +44,26 @@
 //! host the menu drives); a no-feature build keeps booting straight into the
 //! demo scene.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    io::Read,
+    net::{TcpStream, ToSocketAddrs},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use bevy::{
     input::keyboard::{Key, KeyboardInput},
     prelude::*,
+    tasks::{IoTaskPool, Task, block_on},
 };
 use serde::Deserialize;
-use xindeler_app::{AppState, XindelerSettings};
+use xindeler_app::{AppState, SavedServer, XindelerSettings};
 use xindeler_sim_bridge::{ConnectStage, EmbeddedPlayer, SimServer};
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::HudState,
     panel::panel_bundle,
+    scroll::scroll_view_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
 };
@@ -75,6 +82,7 @@ impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuScreen>()
             .init_resource::<LoginForm>()
+            .init_resource::<ServerBrowser>()
             .init_resource::<LoadingTips>()
             .init_resource::<Credits>()
             // Load the data-driven tips + credits once at startup (RON under
@@ -90,8 +98,19 @@ impl Plugin for MainMenuPlugin {
                 (
                     build_menu,
                     read_login_input,
+                    read_browser_input,
                     render_login_fields.after(build_menu),
                     render_status_line.after(build_menu),
+                    render_browser_fields.after(build_menu),
+                    // The server-browser concurrency + live list (BL-82 EM-5.9
+                    // T56.31): kick off / drain the async ping/version queries,
+                    // (re)build the row list when it structurally changes, and
+                    // repaint each row's live status text every frame.
+                    service_server_queries,
+                    rebuild_server_list.after(build_menu),
+                    render_server_rows
+                        .after(rebuild_server_list)
+                        .after(service_server_queries),
                 )
                     .run_if(in_state(AppState::MainMenu)),
             )
@@ -161,6 +180,11 @@ enum MenuScreen {
     Main,
     /// Username / password / server + Offline/Online toggle + Connect/Back.
     Login,
+    /// BL-82 EM-5.9 (T56.31) — the multiplayer server browser: the saved-server
+    /// list with live-queried ping/version/player-count, an add/delete flow, a
+    /// refresh action, and a Connect that drives the chosen server through the
+    /// login connect path.
+    ServerBrowser,
 }
 
 /// Which login field currently has keyboard focus.
@@ -238,6 +262,344 @@ impl LoginForm {
             },
         };
         self.focused = Some(next);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server browser (BL-82 EM-5.9 T56.31) — concurrent ping/version querying
+// ---------------------------------------------------------------------------
+//
+// This is the multiplayer half of the login flow. The old `voxygen` "server
+// browser" was only a persisted `Vec<String>` of addresses with NO live query
+// (you learned a server's version solely by fully connecting); this rebuilds it
+// properly: a saved list whose ping/version/player-count/MOTD are queried
+// CONCURRENTLY off the main thread and painted into each row AS its own probe
+// completes (never blocking on the slowest server).
+//
+// ## What a probe can honestly learn (see `probe_server`)
+// The new game transport is QUIC/`bevy_replicon` and exposes NO lightweight
+// status query — a server's version/player-count is knowable only by completing
+// the full login handshake, which the menu-mode process cannot do (it is
+// build-time-committed to the embedded SERVER-role transport; see #166/#167 and
+// this module's doc comment). So the v1 probe measures what IS universally
+// available — reachability + ping, via a real TCP connect — and additionally
+// parses an OPTIONAL one-line status banner (version/players/MOTD) if the peer
+// sends one. Real Xindeler servers don't answer that banner yet (a tiny
+// side-channel status responder is the natural follow-up), so today they'd show
+// ping only; a local listener that DOES answer it shows the full row — which is
+// exactly how the concurrency + parse path is exercised by the tests.
+
+/// The default game port appended to a saved address that omits one (legacy
+/// `voxygen`'s default game port; kept identical so a bare hostname resolves
+/// the same way it did in the old client).
+const DEFAULT_GAME_PORT: u16 = 14004;
+
+/// How long a single probe waits for the TCP connection to establish before
+/// reporting the server unreachable.
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// After connecting, how long the probe waits for the OPTIONAL one-line status
+/// banner. Short: real game servers don't send one, so on timeout the probe
+/// still returns a good ping — just without the extra fields.
+const PROBE_STATUS_READ_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// The live, queried status of one server (populated asynchronously as its
+/// probe completes). Everything past `ping_ms` is optional because the only
+/// thing the v1 probe learns from ANY reachable endpoint is the ping;
+/// version/players/MOTD arrive only if the server answers the status banner.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ServerStatus {
+    /// Round-trip time of the TCP connect, in milliseconds.
+    ping_ms: Option<u32>,
+    /// The server's reported version string, if it answered the status banner.
+    version: Option<String>,
+    /// `(online, cap)` player counts, if reported.
+    players: Option<(u32, u32)>,
+    /// The server's message-of-the-day, if reported.
+    motd: Option<String>,
+}
+
+/// The probe outcome for one server: `Ok` = reachable (with whatever it told
+/// us), `Err` = unreachable / resolve failure (a human-readable reason).
+type ProbeResult = Result<ServerStatus, String>;
+
+/// The optional one-line status banner a server MAY send right after accepting
+/// the probe's TCP connection, as a single line of RON:
+/// `(version:"0.1.0",players:Some((3,20)),motd:"Welcome!")`. Every field is
+/// `#[serde(default)]` so a partial/empty banner still parses.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ServerStatusBanner {
+    version: String,
+    players: Option<(u32, u32)>,
+    motd: String,
+}
+
+/// The per-row query lifecycle.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum QueryState {
+    /// Not yet queried this session.
+    #[default]
+    Idle,
+    /// A probe task is in flight.
+    Querying,
+    /// The probe finished with this result.
+    Done(ProbeResult),
+}
+
+/// One row of the browser: the saved identity + its live query state.
+#[derive(Clone, Debug)]
+struct ServerRow {
+    address: String,
+    nickname: String,
+    state: QueryState,
+}
+
+/// Which add-server field currently has keyboard focus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AddField {
+    Address,
+    Nickname,
+}
+
+impl AddField {
+    const ORDER: [AddField; 2] = [AddField::Address, AddField::Nickname];
+}
+
+/// The whole in-memory server-browser state: the working row list (a live copy
+/// of `settings.menu.servers` plus each row's query state), the in-flight probe
+/// tasks (one optional slot per row, index-aligned), the selected row, the
+/// add-server form buffers, and a structural revision the list-rebuild system
+/// watches. Only the addresses/nicknames are persisted (via
+/// `settings.menu.servers`); the live query fields are re-queried each session.
+#[derive(Resource, Default)]
+struct ServerBrowser {
+    rows: Vec<ServerRow>,
+    /// One optional in-flight probe per row, index-aligned with `rows`.
+    tasks: Vec<Option<Task<ProbeResult>>>,
+    /// The selected row index (what Connect / Delete act on).
+    selected: Option<usize>,
+    /// Add-server form buffers + which field has focus.
+    add_address: String,
+    add_nickname: String,
+    add_focused: Option<AddField>,
+    /// Bumped whenever the row SET changes (load/add/delete) so the list-
+    /// rebuild system respawns the row nodes. Status updates within a row do
+    /// NOT bump this — they repaint text in place.
+    list_revision: u64,
+    /// Set when the browser (re)opens or Refresh is pressed: the next service
+    /// tick fires a fresh probe for every row.
+    needs_refresh: bool,
+    /// The browser's own status/notice line.
+    status: Option<String>,
+}
+
+impl ServerBrowser {
+    /// Reloads the working row list from persisted settings (called when the
+    /// browser opens), resetting query state and requesting a fresh round of
+    /// probes.
+    fn load_from(&mut self, servers: &[SavedServer]) {
+        self.rows = servers
+            .iter()
+            .map(|s| ServerRow {
+                address: s.address.clone(),
+                nickname: s.nickname.clone(),
+                state: QueryState::Idle,
+            })
+            .collect();
+        self.tasks = (0..self.rows.len()).map(|_| None).collect();
+        self.selected = (!self.rows.is_empty()).then_some(0);
+        self.list_revision = self.list_revision.wrapping_add(1);
+        self.needs_refresh = true;
+        self.status = None;
+    }
+
+    /// The add-form buffer for a field.
+    fn add_buffer_mut(&mut self, field: AddField) -> &mut String {
+        match field {
+            AddField::Address => &mut self.add_address,
+            AddField::Nickname => &mut self.add_nickname,
+        }
+    }
+
+    /// Inserts `s` (control-char-filtered) into the focused add-form field.
+    fn insert_add(&mut self, s: &str) {
+        let Some(field) = self.add_focused else {
+            return;
+        };
+        let filtered: String = s.chars().filter(|c| !c.is_control()).collect();
+        if filtered.is_empty() {
+            return;
+        }
+        self.add_buffer_mut(field).push_str(&filtered);
+    }
+
+    /// Deletes the last character of the focused add-form field.
+    fn backspace_add(&mut self) {
+        let Some(field) = self.add_focused else {
+            return;
+        };
+        self.add_buffer_mut(field).pop();
+    }
+
+    /// Advances add-form focus to the next field (Tab), wrapping.
+    fn cycle_add_focus(&mut self) {
+        let next = match self.add_focused {
+            None => AddField::ORDER[0],
+            Some(current) => {
+                let idx = AddField::ORDER
+                    .iter()
+                    .position(|f| *f == current)
+                    .unwrap_or(0);
+                AddField::ORDER[(idx + 1) % AddField::ORDER.len()]
+            },
+        };
+        self.add_focused = Some(next);
+    }
+}
+
+/// Resolves `host` / `host:port` to socket addresses, appending
+/// [`DEFAULT_GAME_PORT`] when no port is given. Tries the string as-is first
+/// (covers `host:port` and `ip:port`), then with the default port appended
+/// (covers a bare `host`/`ip`). Bracketed IPv6 (`[::1]:14004`) works via the
+/// as-is path; a bare IPv6 literal isn't supported (documented edge — users
+/// enter hostnames or `ip:port`).
+fn resolve_addr(address: &str) -> Result<Vec<std::net::SocketAddr>, String> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Err("empty address".to_owned());
+    }
+    for candidate in [trimmed.to_owned(), format!("{trimmed}:{DEFAULT_GAME_PORT}")] {
+        if let Ok(iter) = candidate.to_socket_addrs() {
+            let addrs: Vec<_> = iter.collect();
+            if !addrs.is_empty() {
+                return Ok(addrs);
+            }
+        }
+    }
+    Err(format!("could not resolve '{trimmed}'"))
+}
+
+/// Reads the OPTIONAL one-line status banner, returning `(version, players,
+/// motd)`. Absent (timeout / EOF) or garbled → all `None` (still reachable,
+/// ping-only). Runs on a probe thread — the read blocks.
+fn read_status_banner(
+    stream: &mut TcpStream,
+) -> (Option<String>, Option<(u32, u32)>, Option<String>) {
+    let _ = stream.set_read_timeout(Some(PROBE_STATUS_READ_TIMEOUT));
+    let mut buf = [0u8; 512];
+    let read = stream.read(&mut buf);
+    let Ok(n) = read else {
+        return (None, None, None);
+    };
+    if n == 0 {
+        return (None, None, None);
+    }
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let line = text.lines().next().unwrap_or("").trim();
+    match ron::from_str::<ServerStatusBanner>(line) {
+        Ok(banner) => (
+            (!banner.version.is_empty()).then_some(banner.version),
+            banner.players,
+            (!banner.motd.is_empty()).then_some(banner.motd),
+        ),
+        Err(_) => (None, None, None),
+    }
+}
+
+/// Probes one server: resolves its address, opens a TCP connection (the connect
+/// RTT is the ping), and optionally reads the status banner. Blocks throughout
+/// (DNS + `connect_timeout` + banner read), so it only ever runs on an
+/// [`IoTaskPool`] thread (blocking socket I/O belongs on the I/O pool, not
+/// the CPU-bound compute pool the terrain mesher uses). See the section header
+/// above for the honest scope of what it can/can't learn.
+fn probe_server(address: String) -> ProbeResult {
+    let resolved = resolve_addr(&address)?;
+    let start = Instant::now();
+    let mut last_err = String::from("no addresses resolved");
+    let mut connected = None;
+    for addr in resolved {
+        match TcpStream::connect_timeout(&addr, PROBE_CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                connected = Some(stream);
+                break;
+            },
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    let Some(mut stream) = connected else {
+        return Err(last_err);
+    };
+    let ping_ms = start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+    let (version, players, motd) = read_status_banner(&mut stream);
+    Ok(ServerStatus {
+        ping_ms: Some(ping_ms),
+        version,
+        players,
+        motd,
+    })
+}
+
+/// A one-line human summary of a row's query state (painted into its status
+/// text each frame by [`render_server_rows`]).
+fn status_summary(state: &QueryState) -> String {
+    match state {
+        QueryState::Idle => "…".to_owned(),
+        QueryState::Querying => "querying…".to_owned(),
+        QueryState::Done(Err(err)) => {
+            let mut reason = err.clone();
+            reason.truncate(40);
+            format!("unreachable ({reason})")
+        },
+        QueryState::Done(Ok(status)) => {
+            let ping = status
+                .ping_ms
+                .map_or_else(|| "—".to_owned(), |p| format!("{p} ms"));
+            let version = status.version.as_deref().unwrap_or("?");
+            let players = status
+                .players
+                .map_or_else(|| "—".to_owned(), |(n, cap)| format!("{n}/{cap}"));
+            format!("{ping}   v: {version}   players: {players}")
+        },
+    }
+}
+
+/// The server-browser concurrency engine (BL-82 EM-5.9 T56.31): on a refresh
+/// request it fires one [`IoTaskPool`] probe PER row (all concurrent,
+/// off the main thread), and every frame it drains any FINISHED probe into its
+/// row — so each row's ping/version paints the frame its own probe completes,
+/// never blocking on the slowest server. Runs every menu frame; a cheap no-op
+/// unless a refresh was requested or a probe just finished.
+fn service_server_queries(mut browser: ResMut<ServerBrowser>) {
+    poll_and_dispatch_probes(&mut browser);
+}
+
+/// The [`service_server_queries`] core, factored out so tests can drive it
+/// directly (against real local listeners) without a full Bevy `App`. On a
+/// refresh request it dispatches one concurrent [`IoTaskPool`] probe
+/// per row; every call it drains any finished probe into its row.
+fn poll_and_dispatch_probes(browser: &mut ServerBrowser) {
+    if browser.needs_refresh {
+        browser.needs_refresh = false;
+        let pool = IoTaskPool::get();
+        browser.tasks = (0..browser.rows.len()).map(|_| None).collect();
+        let addresses: Vec<String> = browser.rows.iter().map(|r| r.address.clone()).collect();
+        for (i, address) in addresses.into_iter().enumerate() {
+            browser.rows[i].state = QueryState::Querying;
+            let task = pool.spawn(async move { probe_server(address) });
+            browser.tasks[i] = Some(task);
+        }
+    }
+
+    for i in 0..browser.tasks.len() {
+        if browser.tasks[i].as_ref().is_some_and(Task::is_finished)
+            && let Some(task) = browser.tasks[i].take()
+        {
+            let result = block_on(task);
+            if let Some(row) = browser.rows.get_mut(i) {
+                row.state = QueryState::Done(result);
+            }
+        }
     }
 }
 
@@ -347,6 +709,32 @@ struct ConnectSpinnerText;
 #[derive(Component)]
 struct ConnectMotdText;
 
+/// The scrollable container the server-browser rows are (re)built into.
+#[derive(Component)]
+struct ServerListContainer;
+
+/// A server-browser row node, tagged with its index into
+/// [`ServerBrowser::rows`] (for click-to-select + selection highlighting).
+#[derive(Component, Clone, Copy)]
+struct ServerRowUi(usize);
+
+/// The live-status text of a server-browser row (ping/version/players),
+/// repainted each frame from that row's [`QueryState`].
+#[derive(Component, Clone, Copy)]
+struct ServerRowStatus(usize);
+
+/// The on-screen text mirroring an add-server field's buffer.
+#[derive(Component, Clone, Copy)]
+struct AddFieldText(AddField);
+
+/// An add-server field's bordered box (border highlights when focused).
+#[derive(Component, Clone, Copy)]
+struct AddFieldBox(AddField);
+
+/// The server browser's own status/notice line.
+#[derive(Component)]
+struct BrowserStatusText;
+
 // ---------------------------------------------------------------------------
 // Enter / exit
 // ---------------------------------------------------------------------------
@@ -361,6 +749,7 @@ fn enter_main_menu(
     settings: Res<XindelerSettings>,
     mut form: ResMut<LoginForm>,
     mut screen: ResMut<MenuScreen>,
+    mut browser: ResMut<ServerBrowser>,
     mut initialized: Local<bool>,
 ) {
     // TODO(EM-5.x): once an in-game "return to main menu" (logout) path exists,
@@ -389,6 +778,10 @@ fn enter_main_menu(
         *screen = match force.as_str() {
             "main" => MenuScreen::Main,
             "login" => MenuScreen::Login,
+            "browser" => {
+                browser.load_from(&settings.menu.servers);
+                MenuScreen::ServerBrowser
+            },
             _ => MenuScreen::Disclaimer,
         };
     }
@@ -945,6 +1338,7 @@ fn build_menu(
             MenuScreen::Disclaimer => spawn_disclaimer(panel, &theme, &fonts),
             MenuScreen::Main => spawn_main(panel, &theme, &fonts),
             MenuScreen::Login => spawn_login(panel, &theme, &fonts, &form),
+            MenuScreen::ServerBrowser => spawn_server_browser(panel, &theme, &fonts),
         });
     });
 
@@ -1025,6 +1419,9 @@ fn spawn_main(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFon
         .spawn(button_bundle(theme, fonts, "Play"))
         .observe(go_to_login);
     panel
+        .spawn(button_bundle(theme, fonts, "Multiplayer"))
+        .observe(open_server_browser);
+    panel
         .spawn(button_bundle(theme, fonts, "Options"))
         .observe(options_notice);
     panel
@@ -1064,6 +1461,9 @@ fn spawn_login(
     panel
         .spawn(button_bundle(theme, fonts, "Connect"))
         .observe(connect_clicked);
+    panel
+        .spawn(button_bundle(theme, fonts, "Server browser"))
+        .observe(open_server_browser);
     panel
         .spawn(button_bundle(theme, fonts, "Back"))
         .observe(back_to_main);
@@ -1136,6 +1536,123 @@ fn mode_label(online: bool) -> &'static str {
     }
 }
 
+/// The server browser: a scrollable saved-server list (live ping/version/
+/// players per row), an add-server form, and Refresh / Connect / Delete / Back.
+/// Builds only the STATIC chrome + the empty [`ServerListContainer`]; the rows
+/// inside it are (re)built by [`rebuild_server_list`] and repainted each frame
+/// by [`render_server_rows`].
+fn spawn_server_browser(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFonts) {
+    heading(panel, fonts, theme, "Server Browser", 30.0);
+    body_text(
+        panel,
+        fonts,
+        theme.palette.text_muted,
+        "Saved multiplayer servers. Ping / version / players are queried live and concurrently; \
+         pick a server and Connect. (Remote play is still being brought online — see the notes on \
+         Connect.)",
+        12.0,
+    );
+
+    // The scrollable list container — rows are spawned into this by
+    // `rebuild_server_list`.
+    panel
+        .spawn(scroll_view_bundle(theme, 460.0, 176.0))
+        .insert(ServerListContainer);
+
+    // Add-server form.
+    body_text(panel, fonts, theme.palette.text_muted, "Add a server", 13.0);
+    add_field(
+        panel,
+        theme,
+        fonts,
+        AddField::Address,
+        "Address (host or host:port)",
+    );
+    add_field(
+        panel,
+        theme,
+        fonts,
+        AddField::Nickname,
+        "Nickname (optional)",
+    );
+    panel
+        .spawn(button_bundle(theme, fonts, "Add to list"))
+        .observe(add_server_clicked);
+
+    // Action buttons.
+    panel
+        .spawn(button_bundle(theme, fonts, "Refresh"))
+        .observe(refresh_clicked);
+    panel
+        .spawn(button_bundle(theme, fonts, "Connect to selected"))
+        .observe(connect_selected_clicked);
+    panel
+        .spawn(button_bundle(theme, fonts, "Delete selected"))
+        .observe(delete_selected_clicked);
+    panel
+        .spawn(button_bundle(theme, fonts, "Back"))
+        .observe(browser_back);
+
+    // The browser's own status/notice line.
+    panel.spawn((
+        BrowserStatusText,
+        Text(String::new()),
+        TextFont {
+            font: bevy::text::FontSource::Handle(fonts.body.clone()),
+            font_size: bevy::text::FontSize::Px(13.0),
+            ..Default::default()
+        },
+        TextColor(theme.palette.accent),
+        Node {
+            max_width: Val::Px(460.0),
+            ..Default::default()
+        },
+    ));
+}
+
+/// A labelled, focusable add-server field (label + bordered value box), mirror
+/// of [`login_field`] for the browser's own `add_*` buffers.
+fn add_field(
+    panel: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    field: AddField,
+    label: &str,
+) {
+    body_text(panel, fonts, theme.palette.text_muted, label, 12.0);
+    panel
+        .spawn((
+            AddFieldBox(field),
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(theme.spacing.sm), Val::Px(theme.spacing.xs)),
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+                min_height: Val::Px(26.0),
+                ..Default::default()
+            },
+            BackgroundColor(theme.palette.panel_bg),
+            bevy::ui::BorderColor::all(theme.palette.panel_border),
+        ))
+        .observe(
+            move |_: On<Pointer<Click>>, mut browser: ResMut<ServerBrowser>| {
+                browser.add_focused = Some(field);
+            },
+        )
+        .with_children(|b| {
+            b.spawn((
+                AddFieldText(field),
+                Text(String::new()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(15.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text),
+            ));
+        });
+}
+
 // ---------------------------------------------------------------------------
 // Rendering (mirror state -> nodes)
 // ---------------------------------------------------------------------------
@@ -1204,6 +1721,235 @@ fn render_status_line(form: Res<LoginForm>, mut lines: Query<&mut Text, With<Sta
     for mut text in &mut lines {
         if text.0 != msg {
             text.0 = msg.clone();
+        }
+    }
+}
+
+/// Placeholder text for an empty, unfocused add-server field.
+fn add_placeholder(field: AddField) -> &'static str {
+    match field {
+        AddField::Address => "(e.g. play.example.com:14004)",
+        AddField::Nickname => "(optional display name)",
+    }
+}
+
+/// Mirrors the browser's add-form buffers into their field text (focused field
+/// gets a caret + accent border, empty unfocused fields show a placeholder) and
+/// its status/notice line — the browser's analog of [`render_login_fields`] +
+/// [`render_status_line`].
+fn render_browser_fields(
+    browser: Res<ServerBrowser>,
+    theme: Option<Res<HudTheme>>,
+    mut fields: Query<(&AddFieldText, &mut Text), Without<BrowserStatusText>>,
+    mut boxes: Query<(&AddFieldBox, &mut bevy::ui::BorderColor)>,
+    mut status: Query<&mut Text, (With<BrowserStatusText>, Without<AddFieldText>)>,
+) {
+    let Some(theme) = theme else { return };
+    for (field, mut text) in &mut fields {
+        let focused = browser.add_focused == Some(field.0);
+        let value = match field.0 {
+            AddField::Address => browser.add_address.clone(),
+            AddField::Nickname => browser.add_nickname.clone(),
+        };
+        let new = if value.is_empty() && !focused {
+            add_placeholder(field.0).to_owned()
+        } else if focused {
+            format!("{value}_")
+        } else {
+            value
+        };
+        if text.0 != new {
+            text.0 = new;
+        }
+    }
+    for (field, mut border) in &mut boxes {
+        let colour = if browser.add_focused == Some(field.0) {
+            theme.palette.accent
+        } else {
+            theme.palette.panel_border
+        };
+        *border = bevy::ui::BorderColor::all(colour);
+    }
+    let msg = browser.status.clone().unwrap_or_default();
+    for mut text in &mut status {
+        if text.0 != msg {
+            text.0 = msg.clone();
+        }
+    }
+}
+
+/// (Re)builds the server-list row nodes into [`ServerListContainer`] whenever
+/// the row SET changes (open/add/delete, tracked via
+/// [`ServerBrowser::list_revision`]) or the container was just respawned by
+/// [`build_menu`]. The per-row live status text is NOT set here — it's
+/// repainted every frame by [`render_server_rows`]. Ordered
+/// `.after(build_menu)` so it sees the freshly-spawned container the frame the
+/// browser screen appears (same pattern [`render_login_fields`] relies on).
+fn rebuild_server_list(
+    mut commands: Commands,
+    screen: Res<MenuScreen>,
+    browser: Res<ServerBrowser>,
+    theme: Option<Res<HudTheme>>,
+    fonts: Option<Res<HudFonts>>,
+    containers: Query<(Entity, Option<&Children>), With<ServerListContainer>>,
+    mut last_revision: Local<Option<u64>>,
+) {
+    if *screen != MenuScreen::ServerBrowser {
+        // Force a rebuild the next time the browser opens (the container is torn
+        // down with the rest of the menu tree on screen change).
+        *last_revision = None;
+        return;
+    }
+    let Ok((container, children)) = containers.single() else {
+        return;
+    };
+    let container_empty = children.is_none_or(|c| c.is_empty());
+    let needs_rebuild = *last_revision != Some(browser.list_revision)
+        || (container_empty && !browser.rows.is_empty());
+    if !needs_rebuild {
+        return;
+    }
+    let (Some(theme), Some(fonts)) = (theme, fonts) else {
+        return;
+    };
+
+    // Clear any existing rows before respawning.
+    if let Some(children) = children {
+        for &child in children {
+            commands.entity(child).despawn();
+        }
+    }
+
+    commands.entity(container).with_children(|list| {
+        if browser.rows.is_empty() {
+            list.spawn((
+                Text("No saved servers yet — add one below.".to_owned()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(14.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text_muted),
+                Node {
+                    padding: UiRect::all(Val::Px(theme.spacing.sm)),
+                    ..Default::default()
+                },
+            ));
+        }
+        for (i, row) in browser.rows.iter().enumerate() {
+            let name = if row.nickname.trim().is_empty() {
+                row.address.clone()
+            } else {
+                format!("{}  —  {}", row.nickname, row.address)
+            };
+            list.spawn((
+                ServerRowUi(i),
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::all(Val::Px(theme.spacing.sm)),
+                    margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+                    row_gap: Val::Px(2.0),
+                    ..Default::default()
+                },
+                BackgroundColor(theme.palette.panel_bg),
+                bevy::ui::BorderColor::all(theme.palette.panel_border),
+            ))
+            .observe(
+                move |_: On<Pointer<Click>>, mut browser: ResMut<ServerBrowser>| {
+                    browser.selected = Some(i);
+                },
+            )
+            .with_children(|r| {
+                r.spawn((
+                    Text(name),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(15.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+                r.spawn((
+                    ServerRowStatus(i),
+                    Text(status_summary(&row.state)),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(12.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text_muted),
+                ));
+            });
+        }
+    });
+    *last_revision = Some(browser.list_revision);
+}
+
+/// Repaints each server row's live status text (ping/version/players) from its
+/// current [`QueryState`] and highlights the selected row's border — so a row
+/// visibly updates the frame its own async probe completes.
+fn render_server_rows(
+    screen: Res<MenuScreen>,
+    browser: Res<ServerBrowser>,
+    theme: Option<Res<HudTheme>>,
+    mut status_texts: Query<(&ServerRowStatus, &mut Text)>,
+    mut row_borders: Query<(&ServerRowUi, &mut bevy::ui::BorderColor)>,
+) {
+    if *screen != MenuScreen::ServerBrowser {
+        return;
+    }
+    let Some(theme) = theme else { return };
+    for (tag, mut text) in &mut status_texts {
+        let new = browser
+            .rows
+            .get(tag.0)
+            .map_or_else(String::new, |row| status_summary(&row.state));
+        if text.0 != new {
+            text.0 = new;
+        }
+    }
+    for (tag, mut border) in &mut row_borders {
+        let colour = if browser.selected == Some(tag.0) {
+            theme.palette.accent
+        } else {
+            theme.palette.panel_border
+        };
+        *border = bevy::ui::BorderColor::all(colour);
+    }
+}
+
+/// Folds keyboard input into the browser's add-server form when the browser
+/// sub-screen is showing (Tab cycles Address/Nickname, Backspace deletes,
+/// Escape returns to the main menu, printable characters insert) — the
+/// browser's analog of [`read_login_input`]. Drains events (no-op) on any other
+/// sub-screen so nothing leaks between screens.
+fn read_browser_input(
+    mut keyboard: MessageReader<KeyboardInput>,
+    mut screen: ResMut<MenuScreen>,
+    mut browser: ResMut<ServerBrowser>,
+) {
+    if *screen != MenuScreen::ServerBrowser {
+        keyboard.read().for_each(drop);
+        return;
+    }
+    for ev in keyboard.read() {
+        if !ev.state.is_pressed() {
+            continue;
+        }
+        match &ev.logical_key {
+            Key::Tab => browser.cycle_add_focus(),
+            Key::Backspace => browser.backspace_add(),
+            Key::Space => browser.insert_add(" "),
+            Key::Escape => {
+                browser.add_focused = None;
+                browser.status = None;
+                *screen = MenuScreen::Main;
+            },
+            Key::Character(s) => browser.insert_add(s.as_str()),
+            _ => {},
         }
     }
 }
@@ -1304,6 +2050,125 @@ fn connect_clicked(
     mut next: ResMut<NextState<AppState>>,
 ) {
     attempt_connect(&mut form, &mut settings, &mut next);
+}
+
+// ---------------------------------------------------------------------------
+// Server-browser button actions (BL-82 EM-5.9 T56.31)
+// ---------------------------------------------------------------------------
+
+/// Opens the server browser: loads the working row list from persisted settings
+/// and requests a fresh concurrent query round.
+fn open_server_browser(
+    _activate: On<Activate>,
+    mut screen: ResMut<MenuScreen>,
+    mut browser: ResMut<ServerBrowser>,
+    settings: Res<XindelerSettings>,
+) {
+    browser.load_from(&settings.menu.servers);
+    browser.add_focused = None;
+    *screen = MenuScreen::ServerBrowser;
+}
+
+/// Adds the address (+ optional nickname) in the add-form to the persisted
+/// saved-server list, then reloads + re-queries the list.
+fn add_server_clicked(
+    _activate: On<Activate>,
+    mut browser: ResMut<ServerBrowser>,
+    mut settings: ResMut<XindelerSettings>,
+) {
+    let address = browser.add_address.trim().to_owned();
+    if address.is_empty() {
+        browser.status = Some("Enter an address to add a server.".to_owned());
+        return;
+    }
+    if settings.menu.servers.iter().any(|s| s.address == address) {
+        browser.status = Some(format!("'{address}' is already in the list."));
+        return;
+    }
+    let nickname = browser.add_nickname.trim().to_owned();
+    settings.menu.servers.push(SavedServer {
+        address: address.clone(),
+        nickname,
+    });
+    if let Err(err) = settings.save() {
+        error!("server browser: failed to persist saved servers: {err}");
+    }
+    browser.add_address.clear();
+    browser.add_nickname.clear();
+    browser.add_focused = None;
+    browser.load_from(&settings.menu.servers);
+    // Select the freshly-added server (it's the last row) for a quick Connect.
+    browser.selected = browser.rows.len().checked_sub(1);
+    browser.status = Some(format!("Added '{address}'."));
+}
+
+/// Re-fires the concurrent ping/version query for every saved server.
+fn refresh_clicked(_activate: On<Activate>, mut browser: ResMut<ServerBrowser>) {
+    browser.needs_refresh = true;
+    browser.status = Some("Refreshing…".to_owned());
+}
+
+/// Connects to the selected server by driving the SAME login connect path (sets
+/// the login form's server + Online mode, persists it, and calls
+/// [`attempt_connect`]). Because a menu-mode process is build-time-committed to
+/// the embedded transport, the online branch of `attempt_connect` still
+/// surfaces the honest deferred-remote-transport notice today (#166/#167)
+/// rather than establishing a real remote session — this wires the pick into
+/// that same path (and will reach `Connecting` unchanged once the runtime
+/// remote transport lands).
+fn connect_selected_clicked(
+    _activate: On<Activate>,
+    mut browser: ResMut<ServerBrowser>,
+    mut form: ResMut<LoginForm>,
+    mut settings: ResMut<XindelerSettings>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    let Some(row) = browser.selected.and_then(|i| browser.rows.get(i)) else {
+        browser.status = Some("Select a server first.".to_owned());
+        return;
+    };
+    let address = row.address.clone();
+    form.server = address.clone();
+    form.online = true;
+    attempt_connect(&mut form, &mut settings, &mut next);
+    // Mirror whatever `attempt_connect` decided onto the browser's status line
+    // (the deferred-online notice today; a real "Connecting…" once remote lands).
+    browser.status = form
+        .error
+        .clone()
+        .or_else(|| Some(format!("Connecting to {address}…")));
+}
+
+/// Removes the selected server from the persisted list, then reloads.
+fn delete_selected_clicked(
+    _activate: On<Activate>,
+    mut browser: ResMut<ServerBrowser>,
+    mut settings: ResMut<XindelerSettings>,
+) {
+    let Some(idx) = browser
+        .selected
+        .filter(|i| *i < settings.menu.servers.len())
+    else {
+        browser.status = Some("Select a server to delete.".to_owned());
+        return;
+    };
+    let removed = settings.menu.servers.remove(idx);
+    if let Err(err) = settings.save() {
+        error!("server browser: failed to persist saved servers: {err}");
+    }
+    browser.load_from(&settings.menu.servers);
+    browser.status = Some(format!("Removed '{}'.", removed.address));
+}
+
+/// Leaves the server browser back to the main menu.
+fn browser_back(
+    _activate: On<Activate>,
+    mut screen: ResMut<MenuScreen>,
+    mut browser: ResMut<ServerBrowser>,
+) {
+    browser.add_focused = None;
+    browser.status = None;
+    *screen = MenuScreen::Main;
 }
 
 /// The shared Connect handler (Connect button + Enter). Persists the entered
@@ -1445,5 +2310,177 @@ mod tests {
                 .contains("server address"),
             "an empty online server address must produce a validation error"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Server browser (BL-82 EM-5.9 T56.31)
+    // -----------------------------------------------------------------------
+
+    use std::{io::Write, net::TcpListener, thread};
+
+    /// A local TCP listener standing in for a server, purely for the query
+    /// protocol (NOT a real game server): accepts one connection and, if
+    /// `banner` is set, writes it before closing. Returns its `host:port`.
+    fn spawn_probe_listener(banner: Option<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next()
+                && let Some(banner) = banner
+            {
+                let _ = stream.write_all(banner.as_bytes());
+                let _ = stream.flush();
+                // Drop `stream`/`listener` → connection closes (EOF for the
+                // probe's read).
+            }
+        });
+        addr
+    }
+
+    /// A `host:port` on localhost with NOTHING listening (bind, learn the port,
+    /// drop the listener) — a connect there is refused, i.e. "unreachable".
+    fn unused_local_addr() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind for free port");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        drop(listener);
+        addr
+    }
+
+    fn saved(address: &str) -> SavedServer {
+        SavedServer {
+            address: address.to_owned(),
+            nickname: String::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_addr_appends_default_port_and_rejects_empty() {
+        // A bare loopback IP gets the default game port appended.
+        let resolved = resolve_addr("127.0.0.1").expect("resolves");
+        assert!(resolved.iter().any(|a| a.port() == DEFAULT_GAME_PORT));
+        // An explicit port is honored as-is.
+        let resolved = resolve_addr("127.0.0.1:6000").expect("resolves");
+        assert!(resolved.iter().any(|a| a.port() == 6000));
+        // Empty is an error, not a panic.
+        assert!(resolve_addr("   ").is_err());
+    }
+
+    #[test]
+    fn status_summary_reflects_each_query_state() {
+        assert_eq!(status_summary(&QueryState::Querying), "querying…");
+        let ok = QueryState::Done(Ok(ServerStatus {
+            ping_ms: Some(12),
+            version: Some("0.1.0".to_owned()),
+            players: Some((3, 20)),
+            motd: None,
+        }));
+        let summary = status_summary(&ok);
+        assert!(summary.contains("12 ms"));
+        assert!(summary.contains("0.1.0"));
+        assert!(summary.contains("3/20"));
+        let err = QueryState::Done(Err("connection refused".to_owned()));
+        assert!(status_summary(&err).starts_with("unreachable"));
+    }
+
+    /// The heart of T56.31: three servers probed CONCURRENTLY, each row filled
+    /// in independently as its own probe resolves — a full one (ping + parsed
+    /// version/players banner), a ping-only one (reachable, no banner), and an
+    /// unreachable one — all against real local sockets.
+    #[test]
+    fn concurrent_probes_populate_each_row_independently() {
+        // The `IoTaskPool` the production code uses; init it directly
+        // (no full Bevy `App` needed for this logic test).
+        IoTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+
+        let full =
+            spawn_probe_listener(Some("(version:\"9.9.9\",players:Some((1,5)),motd:\"hi\")"));
+        let ping_only = spawn_probe_listener(None);
+        let dead = unused_local_addr();
+
+        let mut browser = ServerBrowser::default();
+        browser.load_from(&[saved(&full), saved(&ping_only), saved(&dead)]);
+        assert!(browser.needs_refresh, "load_from requests a query round");
+
+        // First call dispatches all three probes concurrently; keep polling
+        // until every row has resolved (or a generous timeout).
+        let start = Instant::now();
+        loop {
+            poll_and_dispatch_probes(&mut browser);
+            let all_done = browser
+                .rows
+                .iter()
+                .all(|r| matches!(r.state, QueryState::Done(_)));
+            if all_done {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "probes did not all resolve in time"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // Row 0: full status — reachable, real ping, parsed version + players.
+        match &browser.rows[0].state {
+            QueryState::Done(Ok(status)) => {
+                assert!(status.ping_ms.is_some(), "a reachable server has a ping");
+                assert_eq!(status.version.as_deref(), Some("9.9.9"));
+                assert_eq!(status.players, Some((1, 5)));
+                assert_eq!(status.motd.as_deref(), Some("hi"));
+            },
+            other => panic!("row 0 expected full status, got {other:?}"),
+        }
+        // Row 1: reachable, ping only (no banner ⇒ version/players stay None).
+        match &browser.rows[1].state {
+            QueryState::Done(Ok(status)) => {
+                assert!(status.ping_ms.is_some());
+                assert_eq!(status.version, None);
+                assert_eq!(status.players, None);
+            },
+            other => panic!("row 1 expected ping-only status, got {other:?}"),
+        }
+        // Row 2: unreachable.
+        assert!(
+            matches!(browser.rows[2].state, QueryState::Done(Err(_))),
+            "row 2 (nothing listening) must be unreachable"
+        );
+    }
+
+    /// `load_from` builds one row per saved server, selects the first, and
+    /// requests a refresh — the state the browser opens in.
+    #[test]
+    fn load_from_builds_rows_and_selects_first() {
+        let mut browser = ServerBrowser::default();
+        browser.load_from(&[saved("a:1"), saved("b:2")]);
+        assert_eq!(browser.rows.len(), 2);
+        assert_eq!(browser.tasks.len(), 2);
+        assert_eq!(browser.selected, Some(0));
+        assert!(browser.needs_refresh);
+
+        let mut empty = ServerBrowser::default();
+        empty.load_from(&[]);
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.selected, None);
+    }
+
+    /// The add-form edits route into the address/nickname buffers and cycle
+    /// focus (Tab), mirroring the login form's own behaviour.
+    #[test]
+    fn add_form_focus_cycles_and_edits() {
+        let mut browser = ServerBrowser::default();
+        assert_eq!(browser.add_focused, None);
+        browser.cycle_add_focus();
+        assert_eq!(browser.add_focused, Some(AddField::Address));
+        browser.insert_add("host:14004");
+        assert_eq!(browser.add_address, "host:14004");
+        browser.cycle_add_focus();
+        assert_eq!(browser.add_focused, Some(AddField::Nickname));
+        browser.insert_add("My Server");
+        assert_eq!(browser.add_nickname, "My Server");
+        browser.backspace_add();
+        assert_eq!(browser.add_nickname, "My Serve");
+        // Wraps back to the first field.
+        browser.cycle_add_focus();
+        assert_eq!(browser.add_focused, Some(AddField::Address));
     }
 }
