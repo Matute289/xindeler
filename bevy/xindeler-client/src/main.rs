@@ -83,6 +83,8 @@ mod post;
 mod scene;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod settings_window;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod sfx;
 mod smoke;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod social_hud;

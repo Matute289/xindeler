@@ -39,9 +39,9 @@ use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
     CharListMirrorPlugin, ChatBridgePlugin, CombatHudMirrorPlugin, ConnectStage, EmbeddedPlayer,
     HotbarMirrorPlugin, LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin,
-    PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimServer, SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting,
-    boot_test_server,
+    PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SfxLocomotionMirrorPlugin,
+    SfxOutcomeBridgePlugin, SimBridgePlugin, SimEntityMirrorPlugin, SimServer,
+    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting, boot_test_server,
 };
 
 use crate::{
@@ -50,7 +50,7 @@ use crate::{
     entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
     hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin, lod::LodCullingPlugin,
     lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, player_input::PlayerInputPlugin,
-    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    sfx::SfxViewPlugin, social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
     terrain_stream::TerrainStreamPlugin,
 };
 
@@ -398,6 +398,21 @@ impl Plugin for ListenServerPlugin {
         // plugins above. Split into its own call — the tuple near the top of
         // this function is already at the 15-plugin ceiling.
         app.add_plugins(xindeler_audio::XindelerAudioPlugin);
+        // BL-82 EM-5.10b (T56.35): the SFX event mappers. Bridge-side:
+        // `SfxLocomotionMirrorPlugin` (NetLocomotion/NetCombatMove, reads
+        // SimMirror, added after `SimEntityMirrorPlugin` above) +
+        // `SfxOutcomeBridgePlugin` (the partial `NetOutcome` broadcast,
+        // reads `EmbeddedPlayer`, added after `PlayerBridgePlugin` above).
+        // Client-side: `SfxViewPlugin` (movement/combat/campfire mappers +
+        // `handle_outcome`), reading the mirrors above AND
+        // `XindelerAudioPlugin`'s manifest/backend just added. Split into
+        // its own call — the tuple near the top of this function is already
+        // at the 15-plugin ceiling.
+        app.add_plugins((
+            SfxLocomotionMirrorPlugin,
+            SfxOutcomeBridgePlugin,
+            SfxViewPlugin,
+        ));
 
         // BL-82 EM-5.14: the character-select screen + its char-list mirror,
         // added ONLY when launched with `--char-select` so the default boot

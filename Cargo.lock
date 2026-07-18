@@ -11921,8 +11921,12 @@ version = "0.18.0"
 dependencies = [
  "bevy",
  "kira",
+ "rand 0.10.1",
+ "ron",
+ "serde",
  "tempfile",
  "tracing",
+ "xindeler-common",
 ]
 
 [[package]]

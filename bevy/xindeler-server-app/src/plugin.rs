@@ -23,8 +23,8 @@ use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
     CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin,
-    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
-    SimTerrainStreamPlugin, TradeMirrorPlugin, tick_sim,
+    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SfxLocomotionMirrorPlugin,
+    SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, TradeMirrorPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -263,6 +263,13 @@ impl Plugin for SimServerPlugin {
         // trait impls support (same reason `AtmosphereSyncMessagePlugin`
         // above was already split out).
         app.add_plugins(CombatHudMirrorPlugin);
+        // BL-82 EM-5.10b (T56.35): the SFX event mappers' locomotion/combat-
+        // move classification (`NetLocomotion`/`NetCombatMove`) — same
+        // reasoning/ordering as `CombatHudMirrorPlugin` above (reads only
+        // `SimMirror`, no `EmbeddedPlayer` dependency, so it mirrors real
+        // remote clients' entities on this dedicated-server shell same as
+        // any other entity-visible `Net*` comp).
+        app.add_plugins(SfxLocomotionMirrorPlugin);
         // BL-82 EM-5.6: the inventory/bag + two-party-trade mirrors + request
         // applicators — same ordering reasoning as `CombatHudMirrorPlugin`
         // above (reads `SimMirror`, populated by `SimEntityMirrorPlugin`).
