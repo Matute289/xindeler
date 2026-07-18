@@ -206,6 +206,15 @@ pub fn slot_bundle(
             height: Val::Px(size_px),
             border: UiRect::all(Val::Px(2.0)),
             border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+            // BL-82 EM-5.17/5.18 legacy-inventory rebuild (STEP 4, "the icon
+            // never renders" bug): centers both the icon-text glyph and the
+            // quantity badge's flow position within the slot — the badge
+            // itself is absolutely positioned (unaffected by this), but the
+            // icon-text child (see `update_slot_visuals`) has no positioning
+            // of its own, so without this it fell back to flex's default
+            // top-left alignment and rendered nearly invisible in a corner.
+            justify_content: bevy::ui::JustifyContent::Center,
+            align_items: bevy::ui::AlignItems::Center,
             ..Default::default()
         },
         BackgroundColor(theme.palette.panel_bg),
@@ -288,10 +297,26 @@ pub(crate) fn update_slot_visuals(
                     Text(contents.icon_text.clone()),
                     TextFont {
                         font: FontSource::Handle(fonts.body.clone()),
-                        font_size: FontSize::Px(14.0),
+                        font_size: FontSize::Px(16.0),
                         ..Default::default()
                     },
                     TextColor(theme.palette.text),
+                    // BL-82 EM-5.17/5.18 legacy-inventory rebuild (STEP 4,
+                    // "the icon glyph never renders" bug): a PLAIN, auto-sized
+                    // flex child — the slot's own `Node` (see `slot_bundle`)
+                    // carries `justify_content: Center`/`align_items: Center`,
+                    // which centers this child over the rarity-background
+                    // `ImageNode`. It deliberately does NOT get an
+                    // absolute-fill `Node` of its own: `justify_content`/
+                    // `align_items` on a leaf `Text` node are no-ops (glyph
+                    // placement inside a text box is governed by `TextLayout`,
+                    // not flex align), so stretching the text node to fill the
+                    // slot would just move the glyph back to the box's
+                    // top-left — the exact bug this fixes (matches
+                    // `crate::button`'s label-centering idiom). The quantity
+                    // badge (spawned below) is the ONLY absolutely-positioned
+                    // child, so it stays out of flow in its own corner and
+                    // never fights this centered glyph.
                 ));
             });
         }

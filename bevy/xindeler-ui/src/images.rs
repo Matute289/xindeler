@@ -90,6 +90,19 @@ use bevy::{
 /// name).
 const HUD_D4_DIR: &str = "voxygen/element/ui/hud_d4";
 
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — the legacy pixel-art `bag/`
+/// asset set Matías asked to switch the inventory/equipment window to
+/// (replacing the reserved high-res `hud_d4/` art for THAT screen only; every
+/// other `HudImageKey` variant keeps resolving against [`HUD_D4_DIR`]
+/// unchanged via [`HudImageKey::dir`]). Sibling subfolders, mirroring
+/// the real on-disk layout under `assets/voxygen/element/ui/bag/`.
+/// Rarity slot backgrounds + the empty-slot art — `bag/buttons/`.
+const BAG_BUTTONS_DIR: &str = "voxygen/element/ui/bag/buttons";
+/// Ghost equipment-slot placeholders — `bag/backgrounds/`.
+const BAG_BG_DIR: &str = "voxygen/element/ui/bag/backgrounds";
+/// The stat-column icons — `bag/icons/`.
+const BAG_ICONS_DIR: &str = "voxygen/element/ui/bag/icons";
+
 /// One variant per real, WIRED-IN HUD-D4 PNG (compile-time checked — see the
 /// module doc comment for the two files deliberately NOT represented here).
 /// Variant names follow the source filename (PascalCase), not a
@@ -165,6 +178,52 @@ pub enum HudImageKey {
     SlotBgVeryRare,
     SlotEmpty,
     StaminaLiquid,
+
+    // BL-82 EM-5.17/5.18 legacy-inventory rebuild — the legacy `bag/`
+    // pixel-art set (see the `BAG_*_DIR`/`GENERIC_BUTTONS_DIR` constants'
+    // own doc comments for which subfolder each group below resolves
+    // against, via `dir()`). Only the keys the rebuilt inventory window
+    // actually renders are wired here — the fixed-size legacy panel-chrome
+    // bitmaps (`inv_bg_0.png`/`inv_frame.png`) are intentionally NOT used:
+    // the window is a responsive `bevy_ui` flex panel (themed
+    // `panel_bundle`), which the fixed 424x708 conrod frame bitmap can't
+    // stretch to without distortion.
+    /// Rarity slot backgrounds — the legacy `Quality` → colour mapping (see
+    /// `xindeler-client::inventory_ui::quality_rarity_background`).
+    InvSlot,
+    InvSlotGrey,
+    InvSlotCommon,
+    InvSlotGreen,
+    InvSlotBlue,
+    InvSlotPurple,
+    InvSlotGold,
+    InvSlotOrange,
+    InvSlotRed,
+    /// Per-`EquipSlot` ghost/silhouette placeholders shown when that slot is
+    /// empty (see `xindeler-client::inventory_ui::equip_slot_frame`).
+    GhostHead,
+    GhostChest,
+    GhostShoulders,
+    GhostHands,
+    GhostBelt,
+    GhostLegs,
+    GhostFeet,
+    GhostRing,
+    GhostBack,
+    GhostNecklace,
+    GhostTabard,
+    GhostMainhand,
+    GhostOffhand,
+    GhostLantern,
+    GhostGlider,
+    /// Stat-column icons (health/energy/protection/stun-resist/combat-
+    /// rating/stealth — see `xindeler-client::inventory_ui::StatKind`).
+    StatHealth,
+    StatEnergy,
+    StatProtection,
+    StatStunRes,
+    StatCombatRating,
+    StatStealth,
 }
 
 impl HudImageKey {
@@ -235,6 +294,36 @@ impl HudImageKey {
         Self::SlotBgVeryRare,
         Self::SlotEmpty,
         Self::StaminaLiquid,
+        Self::InvSlot,
+        Self::InvSlotGrey,
+        Self::InvSlotCommon,
+        Self::InvSlotGreen,
+        Self::InvSlotBlue,
+        Self::InvSlotPurple,
+        Self::InvSlotGold,
+        Self::InvSlotOrange,
+        Self::InvSlotRed,
+        Self::GhostHead,
+        Self::GhostChest,
+        Self::GhostShoulders,
+        Self::GhostHands,
+        Self::GhostBelt,
+        Self::GhostLegs,
+        Self::GhostFeet,
+        Self::GhostRing,
+        Self::GhostBack,
+        Self::GhostNecklace,
+        Self::GhostTabard,
+        Self::GhostMainhand,
+        Self::GhostOffhand,
+        Self::GhostLantern,
+        Self::GhostGlider,
+        Self::StatHealth,
+        Self::StatEnergy,
+        Self::StatProtection,
+        Self::StatStunRes,
+        Self::StatCombatRating,
+        Self::StatStealth,
     ];
 
     /// The filename (no directory) this key loads, exactly matching the file
@@ -305,8 +394,87 @@ impl HudImageKey {
             Self::SlotBgVeryRare => "slot_bg_very_rare.png",
             Self::SlotEmpty => "slot_empty.png",
             Self::StaminaLiquid => "stamina_liquid.png",
+            Self::InvSlot => "inv_slot.png",
+            Self::InvSlotGrey => "inv_slot_grey.png",
+            Self::InvSlotCommon => "inv_slot_common.png",
+            Self::InvSlotGreen => "inv_slot_green.png",
+            Self::InvSlotBlue => "inv_slot_blue.png",
+            Self::InvSlotPurple => "inv_slot_purple.png",
+            Self::InvSlotGold => "inv_slot_gold.png",
+            Self::InvSlotOrange => "inv_slot_orange.png",
+            Self::InvSlotRed => "inv_slot_red.png",
+            Self::GhostHead => "head.png",
+            Self::GhostChest => "chest.png",
+            Self::GhostShoulders => "shoulders.png",
+            Self::GhostHands => "hands.png",
+            Self::GhostBelt => "belt.png",
+            Self::GhostLegs => "legs.png",
+            Self::GhostFeet => "feet.png",
+            Self::GhostRing => "ring.png",
+            Self::GhostBack => "back.png",
+            Self::GhostNecklace => "necklace.png",
+            Self::GhostTabard => "tabard.png",
+            Self::GhostMainhand => "mainhand.png",
+            Self::GhostOffhand => "offhand.png",
+            Self::GhostLantern => "lantern.png",
+            Self::GhostGlider => "glider.png",
+            Self::StatHealth => "health.png",
+            Self::StatEnergy => "energy.png",
+            Self::StatProtection => "protection.png",
+            Self::StatStunRes => "stun_res.png",
+            Self::StatCombatRating => "combat_rating.png",
+            Self::StatStealth => "stealth_rating.png",
         }
     }
+
+    /// The asset subfolder this key's file lives in. Every PRE-EXISTING
+    /// variant resolves to [`HUD_D4_DIR`] (unchanged); every new legacy
+    /// `bag/`-set variant added for BL-82 EM-5.17/5.18's legacy-inventory
+    /// rebuild resolves to whichever of the [`BAG_BUTTONS_DIR`]/
+    /// [`BAG_BG_DIR`]/[`BAG_ICONS_DIR`] siblings actually holds its file on
+    /// disk.
+    #[must_use]
+    const fn dir(self) -> &'static str {
+        match self {
+            Self::StatHealth
+            | Self::StatEnergy
+            | Self::StatProtection
+            | Self::StatStunRes
+            | Self::StatCombatRating
+            | Self::StatStealth => BAG_ICONS_DIR,
+            Self::InvSlot
+            | Self::InvSlotGrey
+            | Self::InvSlotCommon
+            | Self::InvSlotGreen
+            | Self::InvSlotBlue
+            | Self::InvSlotPurple
+            | Self::InvSlotGold
+            | Self::InvSlotOrange
+            | Self::InvSlotRed => BAG_BUTTONS_DIR,
+            Self::GhostHead
+            | Self::GhostChest
+            | Self::GhostShoulders
+            | Self::GhostHands
+            | Self::GhostBelt
+            | Self::GhostLegs
+            | Self::GhostFeet
+            | Self::GhostRing
+            | Self::GhostBack
+            | Self::GhostNecklace
+            | Self::GhostTabard
+            | Self::GhostMainhand
+            | Self::GhostOffhand
+            | Self::GhostLantern
+            | Self::GhostGlider => BAG_BG_DIR,
+            _ => HUD_D4_DIR,
+        }
+    }
+
+    /// The full asset path (directory + filename) this key loads, relative to
+    /// `VELOREN_ASSETS` — what [`HudImages::load`] actually feeds to the
+    /// [`AssetServer`].
+    #[must_use]
+    fn path(self) -> String { format!("{}/{}", self.dir(), self.filename()) }
 }
 
 /// The HUD-D4 image lookup resource every widget-kit image-backed primitive
@@ -336,7 +504,7 @@ impl HudImages {
                     .with_settings(|settings: &mut ImageLoaderSettings| {
                         settings.format = ImageFormatSetting::Guess;
                     })
-                    .load(format!("{HUD_D4_DIR}/{}", key.filename()))
+                    .load(key.path())
             })
             .collect();
         Self { handles }
@@ -428,16 +596,49 @@ mod tests {
         );
     }
 
-    /// Every [`HudImageKey`] variant has a distinct filename — a copy-paste
-    /// mistake in the big `match` (two variants pointing at the same file,
-    /// or `ALL` missing a variant added later) would otherwise go unnoticed.
+    /// Every [`HudImageKey`] variant has a distinct full PATH — a copy-paste
+    /// mistake in the big `match` (two variants pointing at the same file in
+    /// the same directory, or `ALL` missing a variant added later) would
+    /// otherwise go unnoticed. Bare FILENAMES may now collide across
+    /// directories (BL-82 EM-5.17/5.18 legacy-inventory rebuild introduced
+    /// several `bag/`-set subfolders whose files share names with unrelated
+    /// `hud_d4/` files), so this checks [`HudImageKey::path`], not
+    /// `filename()`.
     #[test]
     fn every_variant_has_a_distinct_filename() {
-        let filenames: HashSet<&str> = HudImageKey::ALL.iter().map(|k| k.filename()).collect();
+        let paths: HashSet<String> = HudImageKey::ALL.iter().map(|k| k.path()).collect();
         assert_eq!(
-            filenames.len(),
+            paths.len(),
             HudImageKey::ALL.len(),
             "two HudImageKey variants must not resolve to the same file"
+        );
+    }
+
+    /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — pins that the new legacy
+    /// `bag/`-set variants resolve into the correct sibling subfolder (not
+    /// silently falling back to [`HUD_D4_DIR`], and not colliding with the
+    /// PRE-EXISTING `hud_d4/` files that happen to share a bare filename,
+    /// e.g. `inv_slot_common.png`/`slot_bg_common.png` are DIFFERENT files
+    /// in DIFFERENT directories).
+    #[test]
+    fn legacy_bag_variants_resolve_into_their_own_subfolder() {
+        assert_eq!(
+            HudImageKey::InvSlotCommon.path(),
+            "voxygen/element/ui/bag/buttons/inv_slot_common.png"
+        );
+        assert_eq!(
+            HudImageKey::GhostHead.path(),
+            "voxygen/element/ui/bag/backgrounds/head.png"
+        );
+        assert_eq!(
+            HudImageKey::StatHealth.path(),
+            "voxygen/element/ui/bag/icons/health.png"
+        );
+        // A pre-existing variant must still resolve against HUD_D4_DIR,
+        // completely unaffected by this generalization.
+        assert_eq!(
+            HudImageKey::SlotBgCommon.path(),
+            "voxygen/element/ui/hud_d4/slot_bg_common.png"
         );
     }
 
