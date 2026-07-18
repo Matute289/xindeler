@@ -263,6 +263,8 @@ impl SettingControl {
             SettingControl::VolumetricFog => "hud-settings-volumetric_fog",
             SettingControl::ContactShadows => "hud-settings-contact_shadows",
             SettingControl::Vignette => "hud-settings-vignette",
+            SettingControl::ReduceFlashing => "hud-settings-reduce_flashing",
+            SettingControl::HighContrastUi => "hud-settings-high_contrast_ui",
             SettingControl::Tier => "hud-settings-quality_preset",
             SettingControl::Language => "hud-settings-language",
         }
@@ -719,7 +721,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "Reduce flashing",
+                    localization,
                     SettingControl::ReduceFlashing,
                 );
                 toggle_row(
@@ -727,7 +729,7 @@ fn spawn_tab_pane(
                     theme,
                     fonts,
                     settings,
-                    "High-contrast UI",
+                    localization,
                     SettingControl::HighContrastUi,
                 );
                 pane.spawn(button_bundle(theme, fonts, "Show tutorial again"))
