@@ -62,6 +62,7 @@ so an upgrade waits until the dep tree catches up.
 | **5** | UI (bevy_ui + widget kit), audio & playable parity | 🔵 **in progress** — EM-5.1→5.3, 5.4–5.8 all shipped; worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total"); Wave C (menu/audio/settings/crafting/char-select/accessibility) + the EM-5.13 cutover gate still pending; **EM-5.17 (Notion-documented HUD replacement, HUD-D4 art) all 8 phases PR'd, none merged yet; EM-5.18 (equipment panel redesign — tab split + D4 click-to-equip modal) follow-up in progress, P1 dispatched.** |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86). |
+| **8** | Technical-debt cleanup — every deliberately-deferred/stubbed item accumulated across Phases 0–7 (documented no-ops, honest stubs, deferred verify steps, partial-coverage follow-ups) | 🔒 **planned, sequenced after Phase 7** (Matías, 2026-07-18) — a full ledger of every such item is being compiled (see EM-8.1 below); this phase resumes and finishes them once Phase 7 lands. |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -256,6 +257,25 @@ it cleanly; see `tasks/46-visual-detail-atmosphere-tasks.md` for the full histor
 **Day/night ↔ sim sync:** `SunCycle` (client-local real-time stub) gets a read-only mirror of the sim's
 authoritative `TimeOfDay` as part of this phase — cheap correctness win Matías asked for explicitly (was
 previously unsynced, clients could each show a different sky).
+
+---
+
+## Phase 8 — Technical-debt cleanup 🔒
+
+**Sequencing decided 2026-07-18 (Matías):** across Phases 0–7, individual PRs routinely documented
+deliberate gaps rather than fake/block/overclaim (the project's standing "honest stub" norm) — e.g.
+PR #177's `Block`/`Vehicle` SFX sub-mappers shipped as documented no-ops because no "blocks of interest"
+terrain mirror or vehicle/mount mirror exists yet in the Bevy port. Each individual PR is honest about
+its own gaps, but nothing rolls them ALL up in one place across the whole migration — they're scattered
+across PR bodies, code comments, and task-board detail. Matías asked for a single ledger, and for a
+dedicated phase to resume and close all of it out. **Phase 8 is sequenced AFTER Phase 7** (matches the
+existing Phase 6 → Phase 7 ordering Matías already set 2026-07-09) — Phases 0–7 keep moving forward
+first; this phase is where the accumulated debt gets paid down.
+
+| Task | What | Status | Docs |
+|---|---|---|---|
+| EM-8.1 | **Technical-debt ledger** — exhaustive catalog of every deliberately-deferred/stubbed item found across the codebase (`TODO`/stub/documented-no-op markers), the design docs (task boards, specs, plans), and every merged PR body, each with its blocker/reason and originating epic. | 🔵 in progress (3 parallel research sweeps running 2026-07-18) | `specs/2026-07-18-bl82-technical-debt-ledger.md` (once compiled) |
+| EM-8.2+ | Individual cleanup items — populated from the EM-8.1 ledger once it's compiled and Matías has prioritized which items to actually close (fill-in worksheet, per this repo's decision convention). Not yet broken out. | ⚪ pending EM-8.1 | `specs/2026-07-18-bl82-technical-debt-ledger.md` |
 
 ---
 
