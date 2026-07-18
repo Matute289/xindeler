@@ -62,6 +62,7 @@ so an upgrade waits until the dep tree catches up.
 | **5** | UI (bevy_ui + widget kit), audio & playable parity | 🔵 **in progress** — EM-5.1→5.3, 5.4–5.8 all shipped; worksheet locked 2026-07-11 (maximalist v1 — full parity, "reemplazo total"); Wave C (menu/audio/settings/crafting/char-select/accessibility) + the EM-5.13 cutover gate still pending; **EM-5.17 (Notion-documented HUD replacement, HUD-D4 art) all 8 phases PR'd, none merged yet; EM-5.18 (equipment panel redesign — tab split + D4 click-to-equip modal) follow-up in progress, P1 dispatched.** |
 | **6** | Upstream-sync drills & hardening | ⚪ pending |
 | **7** | Visual detail & atmosphere polish (voxel color/texture noise, foliage detail, clouds/rain/sun/stars/moon/wind/wet-ground/canopy-rain, calendar & seasons) | 🔒 **research/spec only for now** — implementation **blocked until Phase 6 completes** (Matías's explicit sequencing); EM-7.1→7.13 scaffolded (EM-7.6/7.9 fully designed + locked; EM-7.8 moved to BL-86). |
+| **8** | Technical-debt cleanup — every deliberately-deferred/stubbed item accumulated across Phases 0–7 (documented no-ops, honest stubs, deferred verify steps, partial-coverage follow-ups) | 🔵 **partially started 2026-07-18** — the bulk of Phase 8 is still sequenced after Phase 7 (Matías), but the items that don't need Phase 6/7 to be done first (EM-8.2/8.4/8.5) were greenlit to start now in parallel. Ledger: `specs/2026-07-18-bl82-technical-debt-ledger.md`. |
 | **M1** | 🔁 Bevy version-upgrade watch (standing) | ⚪ recurring — fires on each new Bevy release |
 
 **Legend:** ✅ done · 🔵 in progress · ⚪ pending · 🔒 blocked · 🟣 deferred · **[M]** = needs Matías
@@ -256,6 +257,32 @@ it cleanly; see `tasks/46-visual-detail-atmosphere-tasks.md` for the full histor
 **Day/night ↔ sim sync:** `SunCycle` (client-local real-time stub) gets a read-only mirror of the sim's
 authoritative `TimeOfDay` as part of this phase — cheap correctness win Matías asked for explicitly (was
 previously unsynced, clients could each show a different sky).
+
+---
+
+## Phase 8 — Technical-debt cleanup 🔵
+
+**Sequencing decided 2026-07-18 (Matías):** across Phases 0–7, individual PRs routinely documented
+deliberate gaps rather than fake/block/overclaim (the project's standing "honest stub" norm) — e.g.
+PR #177's `Block`/`Vehicle` SFX sub-mappers shipped as documented no-ops because no "blocks of interest"
+terrain mirror or vehicle/mount mirror exists yet in the Bevy port. Each individual PR is honest about
+its own gaps, but nothing rolls them ALL up in one place across the whole migration — they're scattered
+across PR bodies, code comments, and task-board detail. Matías asked for a single ledger, and for a
+dedicated phase to resume and close all of it out. **The bulk of Phase 8 stays sequenced AFTER Phase 7**
+(matches the existing Phase 6 → Phase 7 ordering Matías already set 2026-07-09) — but on 2026-07-18,
+Matías explicitly greenlit starting on whichever items DON'T need Phase 6/7 to be done first, in
+parallel with ongoing Phase 5 work. **Prioritization order (Matías, 2026-07-18): structural/cross-cutting
+items first (they unblock the most, including the EM-5.13 cutover gate), then per-epic items, grouped
+by the phase they originated in** — see the ledger's Part A vs. Part B split.
+
+| Task | What | Status | Docs |
+|---|---|---|---|
+| EM-8.1 | **Technical-debt ledger** — exhaustive catalog of every deliberately-deferred/stubbed item found across the codebase, design docs, and every merged PR body, each with its blocker/reason and originating epic. | ✅ compiled 2026-07-18 | `specs/2026-07-18-bl82-technical-debt-ledger.md` |
+| EM-8.2 | **Client↔player identity correlation resource** — the foundational fix for the ledger's Part A2 (`NetGroupState`/`NetDialogue`/terrain-chunk broadcasts falling back to `SendTargets::All` for lack of a way to resolve "which sim player owns this connected replicon client"). Prerequisite for EM-8.3 (registering mirrors on the real dedicated server safely). | 🔵 in progress (started 2026-07-18, doesn't need Phase 6/7) | `specs/2026-07-18-bl82-technical-debt-ledger.md` Part A2 |
+| EM-8.3 | **Dedicated-server (`xindeler-server-app`) mirror-plugin parity** — register the hotbar/chat/inventory/diary/social/SFX mirror plugins (currently `listen_server.rs`-only, ledger Part A1) onto the real dedicated server, converting the `SendTargets::All` broadcasts EM-8.2 unblocks to `SendTargets::Single` along the way. Likely the single biggest unblock for the EM-5.13 cutover gate. | ⚪ pending EM-8.2 | `specs/2026-07-18-bl82-technical-debt-ledger.md` Part A1 |
+| EM-8.4 | **Structural guard against the recurring owner-scoping bug class** — the identity-resolution/`NetOwnerOnly`-vs-`Scope`-tuple bug independently recurred 3 times (PRs #88, #95, #172); build the compile-time trait/macro binding or CI grep check PR #172's reviewer proposed but never implemented. | 🔵 in progress (started 2026-07-18, doesn't need Phase 6/7) | `specs/2026-07-18-bl82-technical-debt-ledger.md` Part A3 |
+| EM-8.5 | **Transport/decompression hardening** — real client-side TLS certificate verification for the QUIC transport (currently skipped) + a real, bounded decompression-size cap (currently `usize::MAX`) for `CompressedChunk`/LOD-object messages. Accepted as "trusted loopback only" until now; must close before any real public-facing dedicated server. | 🔵 in progress (started 2026-07-18, doesn't need Phase 6/7) | `specs/2026-07-18-bl82-technical-debt-ledger.md` Part A5 |
+| EM-8.6+ | Remaining per-epic cleanup items from the ledger's Part B (Phase 3/4/5 rows) — not yet broken out into individual tasks; will be sequenced after Phase 7 per the standing gate, grouped by originating phase. | ⚪ pending (post-Phase-7) | `specs/2026-07-18-bl82-technical-debt-ledger.md` Part B |
 
 ---
 
