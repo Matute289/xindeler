@@ -230,5 +230,12 @@ impl Plugin for NetClientPlugin {
         // persists via `XindelerSettings::save()` + applies live graphics
         // changes. Reuses `CombatHudViewPlugin`'s `XindelerUiPlugin`. Pure Bevy.
         app.add_plugins(crate::settings_window::SettingsWindowPlugin);
+        // BL-82 EM-5.16 (T56.43): the first-run tutorial overlay — verbatim
+        // reuse. This mode has no embedded/controllable local player yet
+        // (module doc comment, "Scope: spectator-only (v1)"), so the
+        // auto-show trigger degrades clean (never fires, same posture as the
+        // rest of this list) until it gets a real local player; it stays
+        // manually reachable via the Accessibility tab's reopen button.
+        app.add_plugins(crate::tutorial_overlay::TutorialOverlayPlugin);
     }
 }

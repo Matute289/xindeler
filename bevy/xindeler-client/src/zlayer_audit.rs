@@ -144,13 +144,6 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     }),
     // esc_menu.rs
     ("EscMenuRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
-    // settings_window.rs — pre-existing gap found by this audit while
-    // working on BL-82 EM-5.16 (T56.44); `SettingsWindowRoot` (EM-5.12,
-    // `spawn_settings_window`) was never registered here at all, unrelated to
-    // the i18n work itself. Fixed as a drive-by, same class of miss
-    // `zlayer_audit.rs`'s own history (16 missing entries, PR #171) already
-    // documents.
-    ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // inventory_ui.rs
     ("InventoryWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     ("BagGridRoot", RootKind::NestedChild {
@@ -174,6 +167,10 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("MenuRoot", RootKind::TopLevel), // GlobalZIndex(TOAST + 100) — same tier;
     // the main menu is the only thing on screen at that point, but stays
     // consistent with its sibling `ConnectingRoot`.
+    // tutorial_overlay.rs (BL-82 EM-5.16a): the first-run tutorial overlay's
+    // modal backdrop, same shape as `SettingsWindowRoot` below (registered by
+    // the EM-5.10a pass that found ITS pre-existing gap).
+    ("TutorialOverlayRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // social_hud.rs
     ("SocialWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS) — participates in
     // HudState's mutually-exclusive window slot + cursor-free rule, same as
@@ -203,6 +200,13 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("TheirOfferGridRoot", RootKind::NestedChild {
         parent: "TradeWindowRoot",
     }),
+    // settings_window.rs — pre-existing gap found while verifying T56.34
+    // (BL-82 EM-5.10a): `SettingsWindowRoot` (EM-5.12, PR #169) was never
+    // added here, unrelated to the audio work in this PR. Same
+    // full-screen-modal-backdrop shape as `EscMenuRoot`/`InventoryWindowRoot`
+    // above (`GlobalZIndex(zlayer::MODAL_WINDOWS)` at its spawn site,
+    // `spawn_settings_window`).
+    ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
 ];
 
 /// Scans every `.rs` file under `dir` (recursively) for a top-level `struct

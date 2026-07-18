@@ -19,11 +19,17 @@
 //! | Language       | `XindelerSettings::language` selector, LIVE hot-swap| ✅    |
 //! | Networking    | nothing configurable today (connection is automatic)| stub  |
 //! | Sound         | EM-5.10 audio — not built yet                       | stub  |
-//! | Accessibility | EM-5.16 accessibility — not built yet               | stub  |
+//! | Accessibility | `XindelerSettings::accessibility` (reduce-flashing  | ✅    |
+//! |               | dampens `combat_hud`'s damage vignette; high-contrast|      |
+//! |               | UI reconciles `HudTheme` live) + a tutorial-overlay  |      |
+//! |               | reopen button. Positional-sound subtitles stay a stub|      |
+//! |               | pending EM-5.10b (SFX) audio                        |       |
 //!
-//! Sound/Accessibility/Networking are HONEST stubs — a visible tab that names
-//! the epic that will fill it, never fake toggles for a system that isn't
-//! built.
+//! Sound/Networking are HONEST stubs — a visible tab that names the epic
+//! that will fill it, never fake toggles for a system that isn't built.
+//! Accessibility itself is real (BL-82 EM-5.16, T56.43 part 1/2) — only its
+//! positional-sound-subtitle sub-feature remains a stub, pending
+//! `SfxTriggerItem` from the not-yet-landed EM-5.10b audio phase.
 //!
 //! ## T56.44 — this screen dogfoods the reactive i18n pipeline
 //! Every static label in this window (tab names, row labels, notes, button
@@ -50,6 +56,7 @@
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
+    color::Alpha as _,
     core_pipeline::prepass::DepthPrepass,
     ecs::{
         change_detection::NonSend,
@@ -66,7 +73,7 @@ use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
     i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     panel::panel_bundle,
-    theme::{HudFonts, HudTheme},
+    theme::{HudFonts, HudPalette, HudTheme},
     zlayer,
 };
 
@@ -143,6 +150,7 @@ impl Plugin for SettingsWindowPlugin {
                     refresh_setting_labels.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_crosshair_visibility,
                     apply_graphics_settings.run_if(resource_changed::<XindelerSettings>),
+                    apply_accessibility_theme.run_if(resource_changed::<XindelerSettings>),
                 ),
             );
     }
@@ -230,6 +238,8 @@ enum SettingControl {
     VolumetricFog,
     ContactShadows,
     Vignette,
+    ReduceFlashing,
+    HighContrastUi,
     // Enum (single cycle button):
     Tier,
     Language,
@@ -704,6 +714,26 @@ fn spawn_tab_pane(
                 note(pane, fonts, theme, localization, "hud-settings-note_sound");
             },
             SettingsTab::Accessibility => {
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    "Reduce flashing",
+                    SettingControl::ReduceFlashing,
+                );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    "High-contrast UI",
+                    SettingControl::HighContrastUi,
+                );
+                pane.spawn(button_bundle(theme, fonts, "Show tutorial again"))
+                    .observe(|_a: On<Activate>, mut actions: MessageWriter<HudAction>| {
+                        actions.write(HudAction::ToggleWindow(HudWindow::Tutorial));
+                    });
                 note(
                     pane,
                     fonts,
@@ -950,6 +980,12 @@ fn value_label(
         SettingControl::VolumetricFog => on_off(g.volumetric_fog, localization),
         SettingControl::ContactShadows => on_off(g.contact_shadows, localization),
         SettingControl::Vignette => on_off(g.vignette, localization),
+        SettingControl::ReduceFlashing => {
+            on_off(settings.accessibility.reduce_flashing, localization)
+        },
+        SettingControl::HighContrastUi => {
+            on_off(settings.accessibility.high_contrast_ui, localization)
+        },
         SettingControl::Tier => localization.tr(tier_label_key(g.tier)),
         SettingControl::Language => language_display_name(&settings.language),
     }
@@ -1012,6 +1048,12 @@ fn adjust(control: SettingControl, dir: i8, settings: &mut XindelerSettings) {
             settings.graphics.contact_shadows = !settings.graphics.contact_shadows;
         },
         SettingControl::Vignette => settings.graphics.vignette = !settings.graphics.vignette,
+        SettingControl::ReduceFlashing => {
+            settings.accessibility.reduce_flashing = !settings.accessibility.reduce_flashing;
+        },
+        SettingControl::HighContrastUi => {
+            settings.accessibility.high_contrast_ui = !settings.accessibility.high_contrast_ui;
+        },
         SettingControl::Tier => {
             settings.graphics.tier = next_tier(settings.graphics.tier);
             // A non-Custom tier's preset re-applies its toggle values.
@@ -1133,6 +1175,37 @@ fn test_localization() -> Localization {
     Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
 }
 
+/// Reconciles the live [`HudTheme`] palette to `accessibility.high_contrast_ui`
+/// — brightens muted secondary text to the same value as regular body text,
+/// and makes panel backgrounds fully opaque. Unlike
+/// [`apply_graphics_settings`]'s SSAO/TAA (which reconcile a LIVE render
+/// component every widget re-reads every frame), most `bevy_ui` widgets in this
+/// crate bake their `TextColor`/ `BackgroundColor` from [`HudTheme`] ONCE at
+/// spawn time — so this system keeps the theme resource itself always correct
+/// (a widget spawned/ respawned/reopened after a toggle picks up the new
+/// palette immediately), but an ALREADY-open panel's already-baked colours only
+/// refresh the next time that panel is (re)spawned — same "applies on next
+/// launch" honesty the Video tab's shadow-cascade count already documents for a
+/// comparable live-vs-baked gap.
+fn apply_accessibility_theme(settings: Res<XindelerSettings>, mut theme: ResMut<HudTheme>) {
+    let defaults = HudPalette::default();
+    let desired = if settings.accessibility.high_contrast_ui {
+        HudPalette {
+            text_muted: defaults.text,
+            panel_bg: defaults.panel_bg.with_alpha(1.0),
+            ..defaults
+        }
+    } else {
+        defaults
+    };
+    if theme.palette.text_muted != desired.text_muted {
+        theme.palette.text_muted = desired.text_muted;
+    }
+    if theme.palette.panel_bg != desired.panel_bg {
+        theme.palette.panel_bg = desired.panel_bg;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -1224,6 +1297,80 @@ mod tests {
         adjust(SettingControl::Vignette, 1, &mut settings);
         assert_eq!(settings.graphics.tier, GraphicsTier::Ultra);
         assert!(!settings.graphics.vignette);
+    }
+
+    /// BL-82 EM-5.16 (T56.43): the two Accessibility toggles flip their real
+    /// `XindelerSettings.accessibility` fields (not a graphics setting, so
+    /// they must NOT touch the graphics tier either).
+    #[test]
+    fn accessibility_toggles_flip_their_real_fields() {
+        let mut settings = XindelerSettings::default();
+        assert!(!settings.accessibility.reduce_flashing);
+        assert!(!settings.accessibility.high_contrast_ui);
+
+        adjust(SettingControl::ReduceFlashing, 1, &mut settings);
+        assert!(settings.accessibility.reduce_flashing);
+        assert_eq!(
+            settings.graphics.tier,
+            GraphicsTier::Ultra,
+            "an accessibility toggle must not touch the graphics tier"
+        );
+
+        adjust(SettingControl::HighContrastUi, 1, &mut settings);
+        assert!(settings.accessibility.high_contrast_ui);
+
+        // Cycling again flips each back off.
+        adjust(SettingControl::ReduceFlashing, 1, &mut settings);
+        adjust(SettingControl::HighContrastUi, 1, &mut settings);
+        assert!(!settings.accessibility.reduce_flashing);
+        assert!(!settings.accessibility.high_contrast_ui);
+    }
+
+    /// [`apply_accessibility_theme`] reconciles the live [`HudTheme`]:
+    /// enabling `high_contrast_ui` brightens muted text to the same value as
+    /// regular body text and makes the panel background fully opaque;
+    /// disabling it reverts both to the plain default palette.
+    #[test]
+    fn high_contrast_toggle_reconciles_the_live_theme() {
+        let mut app = App::new();
+        app.insert_resource(XindelerSettings::default());
+        app.insert_resource(HudTheme::default());
+        app.add_systems(Update, apply_accessibility_theme);
+
+        app.update();
+        let defaults = HudPalette::default();
+        assert_eq!(
+            app.world().resource::<HudTheme>().palette.text_muted,
+            defaults.text_muted,
+            "off by default — the plain muted text colour"
+        );
+
+        app.world_mut()
+            .resource_mut::<XindelerSettings>()
+            .accessibility
+            .high_contrast_ui = true;
+        app.update();
+        let theme = app.world().resource::<HudTheme>();
+        assert_eq!(
+            theme.palette.text_muted, defaults.text,
+            "high-contrast must brighten muted text to full-contrast body text"
+        );
+        assert_eq!(
+            theme.palette.panel_bg.alpha(),
+            1.0,
+            "high-contrast must make the panel background fully opaque"
+        );
+
+        app.world_mut()
+            .resource_mut::<XindelerSettings>()
+            .accessibility
+            .high_contrast_ui = false;
+        app.update();
+        assert_eq!(
+            app.world().resource::<HudTheme>().palette,
+            defaults,
+            "turning high-contrast back off must revert the palette to the plain default"
+        );
     }
 
     /// Numeric controls step and clamp inside their bounds.

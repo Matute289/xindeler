@@ -1,0 +1,61 @@
+[package]
+name = "xindeler-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
+# This is a headless audio-glue crate (Plugin/Resource/System + the `.ogg`/`.wav`
+# `AssetLoader`) — no rendering/windowing features have any use here.
+# `bevy_asset`: `XindelerAudioAsset` + its `AssetLoader`.
+# `bevy_log`: `tracing`-backed `warn!`/`error!` in the resilient (no-device / no-CI-audio)
+# init path (matches the codebase's "log and continue, don't crash over an optional
+# subsystem" convention, e.g. `listen_server.rs`'s embedded-world-boot-failure handling).
+# `std` matches every other headless `bevy/*` crate's own minimal baseline (`xindeler-
+# oracle-host`, `xindeler-dimensions`).
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_asset",
+    "bevy_log",
+] }
+# T56.34 (EM-5.10a) — the LOCKED architecture decision (spec §Q2=B): Kira integrated
+# DIRECTLY in our own crate, not the `bevy_kira_audio` wrapper. Same crate + feature set
+# `voxygen/Cargo.toml` pinned pre-migration (`kira = "0.12", default-features = false,
+# features = ["cpal", "symphonia", "ogg", "vorbis"]`) — kept for continuity/consistency,
+# PLUS two deliberate additions this crate's own doc comment (`asset.rs`) explains in
+# full: `wav` + `pcm`. The task brief asks for an `AssetLoader` covering BOTH `.ogg` AND
+# `.wav`; the old client's pin only ever decoded `.ogg` (no `wav` feature at all) because
+# voxygen never shipped `.wav` assets. Verified empirically against kira 0.12.2 + a
+# synthesized in-memory WAV fixture: `symphonia/wav` (the demuxer) alone still fails
+# decode ("unsupported audio codec") — `symphonia/pcm` (the codec most WAV files carry)
+# is ALSO required. `cpal-realtime`/`cpal-realtime-dbus` (kira's own `default` feature
+# set) are deliberately NOT enabled — they require realtime scheduling privileges
+# (`cpal`'s `realtime` feature, Linux `RTPRIO`/dbus) this headless-friendly crate has no
+# business demanding.
+kira = { version = "0.12", default-features = false, features = [
+    "cpal",
+    "symphonia",
+    "ogg",
+    "vorbis",
+    "wav",
+    "pcm",
+] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The T56.34 verification test boots a real headless `App` (`MinimalPlugins` +
+# `XindelerAudioPlugin`) and needs `AssetServer`/`AssetPlugin` to drive a real
+# `.wav` load through the crate's own `AssetLoader`.
+bevy = { version = "=0.19.0", default-features = false, features = [
+    "std",
+    "bevy_asset",
+    "bevy_log",
+] }
+# The `.wav`-through-`AssetLoader` test roots a real `AssetPlugin { file_path
+# }` at a scratch dir (same pattern `xindeler-dimensions/src/predictive_gc.rs`
+# uses) rather than adding a custom `AssetSource`.
+tempfile = { workspace = true }
