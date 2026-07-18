@@ -81,6 +81,12 @@ mod terrain_stream;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod trade_ui;
 mod voxel_demo;
+// BL-82 holistic-review prevention measure — a hand-maintained audit test
+// enumerating every `*Root` HUD marker component (see the module doc
+// comment for why). Test-only: its registry/scan machinery has no runtime
+// purpose outside `#[test]`, so it's gated out of ordinary builds to avoid
+// dead-code warnings.
+#[cfg(test)] mod zlayer_audit;
 
 use bevy::{
     asset::AssetPlugin,

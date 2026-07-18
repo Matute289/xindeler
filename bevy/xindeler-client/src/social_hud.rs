@@ -934,11 +934,40 @@ fn sync_group_bars(
         (With<PartyEnergyBar>, Without<PartyHealthBar>),
     >,
 ) {
+    // BL-82 holistic-review perf fix (rust-perf-reviewer): `mirrored` carries
+    // every mirrored entity in the client's visible region (players, NPCs,
+    // wildlife — not just party members), so the PREVIOUS code's `mirrored
+    // .iter().find(...)` PER BAR was an O(bars × mirrored-region-size) full
+    // rescan every frame, once for each health bar AND once for each energy
+    // bar. Party sizes are small (a handful of members, bounded by
+    // `NetGroupState`), so this inverts the loop instead: collect the small
+    // bounded set of member uids these bars actually care about FIRST, then
+    // do ONE filtered pass over `mirrored` matching against that set —
+    // O(mirrored-region-size + bars) total, one region scan regardless of
+    // how many bars exist, with only bounded-by-party-size lookups per bar
+    // (no full `HashMap` needed — a small `Vec` linear-search over a
+    // handful of entries is cheaper than the allocation/hashing overhead a
+    // map keyed by the WHOLE region would cost, and simpler than building
+    // one just to serve a few lookups).
+    let member_uids: std::collections::HashSet<u64> = health_bars
+        .iter()
+        .chain(energy_bars.iter())
+        .map(|(uid, _)| uid.0)
+        .collect();
+    if member_uids.is_empty() {
+        return;
+    }
+    let matches: Vec<(u64, Option<NetHealth>, Option<NetEnergy>)> = mirrored
+        .iter()
+        .filter(|(uid, ..)| member_uids.contains(&uid.0))
+        .map(|(uid, health, energy)| (uid.0, health.copied(), energy.copied()))
+        .collect();
+
     for (member_uid, mut value) in &mut health_bars {
-        let Some(health) = mirrored
+        let Some(health) = matches
             .iter()
-            .find(|(uid, ..)| uid.0 == member_uid.0)
-            .and_then(|(_, health, _)| health)
+            .find(|(uid, ..)| *uid == member_uid.0)
+            .and_then(|(_, health, _)| *health)
         else {
             continue;
         };
@@ -948,10 +977,10 @@ fn sync_group_bars(
         }
     }
     for (member_uid, mut value) in &mut energy_bars {
-        let Some(energy) = mirrored
+        let Some(energy) = matches
             .iter()
-            .find(|(uid, ..)| uid.0 == member_uid.0)
-            .and_then(|(_, _, energy)| energy)
+            .find(|(uid, ..)| *uid == member_uid.0)
+            .and_then(|(_, _, energy)| *energy)
         else {
             continue;
         };
@@ -1189,10 +1218,26 @@ fn handle_talk_key(
 fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     // Social window: player list + search (search input is a follow-up —
     // v1 shows the full roster).
+    //
+    // BL-82 holistic-review z-index fix: [`SocialWindowRoot`] is driven by
+    // `HudState`/`HudWindow::Social` exactly like `InventoryWindowRoot`/
+    // `DiaryWindowRoot`/`FullMapRoot` — it shares the SAME mutually-exclusive
+    // "one open window" slot (`hud_state.rs`'s own doc comment) and the same
+    // cursor-free/mouselook-suspend rule (`cursor.rs`'s
+    // `HudState::any_window_open`), which is exactly what makes those three
+    // "genuinely modal" per `zlayer::MODAL_WINDOWS`'s own doc comment — so
+    // this window belongs in that tier too, not the ambient
+    // `ORBS_ACTION_BAR_PARTY_MINIMAP` layer its sibling `GroupPanelRoot` uses
+    // (that panel is always-on and never claims the HudState window slot).
+    // Before this fix it had no `GlobalZIndex` at all (default z-partition
+    // 0), sitting below the ambient chrome — the same click-routing bug
+    // class already fixed for `EscMenuRoot`/`InventoryWindowRoot`/
+    // `FullMapRoot`.
     commands
         .spawn((
             SocialWindowRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(80.0),
@@ -1271,10 +1316,21 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         });
 
     // Incoming-invite banner (always visible when a pending invite exists).
+    //
+    // BL-82 holistic-review z-index fix: [`InviteBannerRoot`] is shown/hidden
+    // purely from `CurrentGroupState::pending_invite` — like its sibling
+    // `GroupPanelRoot` (already `ORBS_ACTION_BAR_PARTY_MINIMAP` below), it
+    // never touches `HudState`/`HudWindow`, so it never claims the
+    // mutually-exclusive "one open window" slot nor participates in
+    // `HudState::any_window_open`'s cursor-free rule (`cursor.rs`) — it is
+    // ambient, always-on chrome, not a modal window (unlike `SocialWindowRoot`
+    // just above, which genuinely is one — see that spawn's own doc comment).
+    // Same tier as its sibling.
     commands
         .spawn((
             InviteBannerRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(16.0),
@@ -1329,10 +1385,18 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
 
     // Dialogue panel (v1-minimal): sender name + message + response/ack/
     // close buttons.
+    //
+    // BL-82 holistic-review z-index fix: [`DialoguePanelRoot`] is driven by
+    // the standalone `ActiveDialogue` resource, not `HudState`/`HudWindow` —
+    // same non-modal category as `InviteBannerRoot`/`GroupPanelRoot` just
+    // above (it never claims the "one open window" slot nor frees the
+    // cursor via `HudState::any_window_open`, see `cursor.rs`), so it takes
+    // the same ambient tier rather than `MODAL_WINDOWS`.
     commands
         .spawn((
             DialoguePanelRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(120.0),
@@ -1701,6 +1765,101 @@ mod tests {
         );
     }
 
+    /// BL-82 holistic-review perf fix regression (rust-perf-reviewer):
+    /// [`sync_group_bars`] now filters `mirrored` against the small bounded
+    /// set of party-member uids instead of a per-bar full-region linear
+    /// scan (see that function's own doc comment for the O(bars × N) →
+    /// O(N + bars) rewrite). This pins BOTH halves of that rewrite's
+    /// correctness directly (not just indirectly via the UI-integration
+    /// test above): a handful of NON-member mirrored entities (players/
+    /// NPCs/wildlife elsewhere in the region — exactly what made the old
+    /// per-bar `.find()` expensive) must never leak into either bar's
+    /// value, while the TWO real party members' health/energy bars each
+    /// resolve their OWN uid's mirrored value, not each other's.
+    #[test]
+    fn sync_group_bars_filters_out_non_member_mirrored_entities() {
+        let mut app = new_app();
+
+        // Non-member mirrored entities — present in the region, must be
+        // ignored entirely by both bars below.
+        app.world_mut().spawn((NetUid(90), NetHealth {
+            current: 1.0,
+            max: 1.0,
+        }));
+        app.world_mut().spawn((NetUid(91), NetHealth {
+            current: 2.0,
+            max: 2.0,
+        }));
+
+        // Two real party members, each mirrored with DISTINCT health/energy
+        // so a cross-wired lookup (member 1 reading member 2's value or
+        // vice versa) would be caught.
+        app.world_mut().spawn((
+            NetUid(1),
+            NetHealth {
+                current: 60.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 10.0,
+                max: 100.0,
+            },
+        ));
+        app.world_mut().spawn((
+            NetUid(2),
+            NetHealth {
+                current: 80.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 20.0,
+                max: 100.0,
+            },
+        ));
+
+        let health_bar_1 = app
+            .world_mut()
+            .spawn((PartyHealthBar, PartyMemberUid(1), BarValue::new(0.0, 1.0)))
+            .id();
+        let health_bar_2 = app
+            .world_mut()
+            .spawn((PartyHealthBar, PartyMemberUid(2), BarValue::new(0.0, 1.0)))
+            .id();
+        let energy_bar_1 = app
+            .world_mut()
+            .spawn((PartyEnergyBar, PartyMemberUid(1), BarValue::new(0.0, 1.0)))
+            .id();
+        let energy_bar_2 = app
+            .world_mut()
+            .spawn((PartyEnergyBar, PartyMemberUid(2), BarValue::new(0.0, 1.0)))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_group_bars)
+            .expect("sync_group_bars runs");
+
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar_1).unwrap(),
+            BarValue::new(60.0, 100.0),
+            "member 1's own health"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar_2).unwrap(),
+            BarValue::new(80.0, 100.0),
+            "member 2's own health, not member 1's"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(energy_bar_1).unwrap(),
+            BarValue::new(10.0, 100.0),
+            "member 1's own energy"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(energy_bar_2).unwrap(),
+            BarValue::new(20.0, 100.0),
+            "member 2's own energy, not member 1's"
+        );
+    }
+
     /// BL-82 EM-5.17 Phase 4's core acceptance bar (spec §3.4): given a fully
     /// mirrored party member, the rebuilt row carries a portrait-frame
     /// `ImageNode` keyed to `HudImageKey::PartyPortraitFrame`, a level badge
@@ -2048,5 +2207,51 @@ mod tests {
             .drain()
             .collect();
         assert!(sent.is_empty(), "nothing in range must send nothing");
+    }
+
+    /// BL-82 holistic-review z-index fix regression: [`SocialWindowRoot`] is
+    /// driven by `HudState`/`HudWindow::Social` the same "one open window"
+    /// mutually-exclusive slot the diary/inventory/full-map trio uses, so it
+    /// gets their `MODAL_WINDOWS` tier; [`InviteBannerRoot`]/
+    /// [`DialoguePanelRoot`] are ambient (resource-driven, never claim that
+    /// slot) like their sibling `GroupPanelRoot`, so they get the SAME
+    /// `ORBS_ACTION_BAR_PARTY_MINIMAP` tier `GroupPanelRoot` already carried
+    /// — see `spawn_social_hud`'s own per-spawn doc comments for the full
+    /// reasoning. Before this fix, all three had NO `GlobalZIndex` at all
+    /// (default z-partition 0), matching the same click-routing bug class
+    /// already fixed for `EscMenuRoot`/`InventoryWindowRoot`/`FullMapRoot`/
+    /// `InviteRoot`/`TradeWindowRoot`.
+    #[test]
+    fn social_hud_roots_carry_their_intended_z_index() {
+        let mut app = new_app();
+        app.world_mut().insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.world_mut()
+            .run_system_once(spawn_social_hud)
+            .expect("spawn_social_hud runs");
+
+        let world = app.world_mut();
+        let social_z = world
+            .query_filtered::<&GlobalZIndex, With<SocialWindowRoot>>()
+            .single(world)
+            .expect("SocialWindowRoot exists")
+            .0;
+        assert_eq!(social_z, zlayer::MODAL_WINDOWS);
+
+        let invite_banner_z = world
+            .query_filtered::<&GlobalZIndex, With<InviteBannerRoot>>()
+            .single(world)
+            .expect("InviteBannerRoot exists")
+            .0;
+        assert_eq!(invite_banner_z, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+
+        let dialogue_z = world
+            .query_filtered::<&GlobalZIndex, With<DialoguePanelRoot>>()
+            .single(world)
+            .expect("DialoguePanelRoot exists")
+            .0;
+        assert_eq!(dialogue_z, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
     }
 }
