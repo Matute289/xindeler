@@ -51,7 +51,9 @@
 use bevy::ecs::{component::Component, entity::Entity};
 use bevy_replicon::prelude::VisibilityFilter;
 
-use crate::{NetAbilityPool, NetIncomingTradeInvite, NetInventory, NetSkillSet, NetTrade};
+use crate::{
+    NetAbilityPool, NetCrafting, NetIncomingTradeInvite, NetInventory, NetSkillSet, NetTrade,
+};
 
 /// Marks a connected client's OWN connection entity with the sim `Uid` it
 /// controls. Inserted once, at login, by whichever shell resolves a
@@ -88,15 +90,40 @@ impl VisibilityFilter for NetOwnerOnly {
     // the entity at all received every player's full unlocked-skill map and
     // qualifying-ability pool — a real cross-client privacy leak once a
     // second genuine client exists (EM-4.2b). Adding both here is the fix;
-    // see `tests::skillset_and_ability_pool_are_owner_scoped_too` for a
+    // see `tests::skillset_is_owner_scoped_across_two_real_clients` for a
     // regression guard that exercises the real two-client filter, not just
     // `is_visible` in isolation.
+    //
+    // BL-82 EM-5.15 follow-up (3rd occurrence, PR #171, caught by an
+    // automated security scanner + confirmed before any fix landed):
+    // `NetCrafting` was tagged with `NetOwnerOnly` by
+    // `xindeler-sim-bridge::crafting::mirror_crafting_state`, and BOTH
+    // `xindeler-protocol::crafting`'s own module doc comment ("self-scoped
+    // ... `NetInventory`'s own privacy posture") AND this crate's
+    // `XindelerProtocolPlugin::build` registration comment ("self-scoped via
+    // `NetOwnerOnly` below") explicitly claimed owner-scoping — but exactly
+    // like EM-5.7, nobody had added `NetCrafting` to this `Scope` tuple. The
+    // same silent fallback to `RegionKey`'s entity-level visibility applied:
+    // every client that could see a player's entity at all received that
+    // player's FULL crafting projection (recipe book + salvage/repair/
+    // modular candidate slots), not just the owner. This is the exact bug
+    // class the EM-5.7 postmortem above warned would recur — tagging a
+    // component with `NetOwnerOnly` and claiming "owner-scoped" in a doc
+    // comment does NOTHING on its own; only listing the type here does.
+    // Adding `NetCrafting` is the fix; see
+    // `tests::crafting_is_owner_scoped_across_two_real_clients` for the same
+    // real two-client regression guard `skillset_is_owner_scoped_across_
+    // two_real_clients` established — a bare `is_visible` unit test would
+    // NOT have caught this, only a real `Scope`-registration test does.
+    // Anyone adding a NEW owner-scoped `Net*` mirror MUST add it here too —
+    // this is now a 3-for-3 recurring failure mode in this codebase.
     type Scope = (
         NetInventory,
         NetTrade,
         NetIncomingTradeInvite,
         NetSkillSet,
         NetAbilityPool,
+        NetCrafting,
     );
 
     fn is_visible(&self, _client: Entity, component: Option<&Self::ClientComponent>) -> bool {
@@ -222,6 +249,108 @@ mod tests {
             0,
             "a non-owning client must NEVER receive another player's NetSkillSet — this is \
              exactly the leak the Scope-tuple fix closes"
+        );
+    }
+
+    /// BL-82 EM-5.15 follow-up regression guard (3rd occurrence of the
+    /// EM-5.7 bug class — `NetCrafting`, PR #171, caught by an automated
+    /// security scanner): the EXACT same real two-client `Scope`-
+    /// registration exercise `skillset_is_owner_scoped_across_two_real_
+    /// clients` performs above, but for `NetCrafting`. Both
+    /// `xindeler-protocol::crafting`'s own module doc comment and
+    /// `xindeler-sim-bridge::crafting::mirror_crafting_state`'s doc comment
+    /// already claimed "owner-scoped via `NetOwnerOnly`" before this test
+    /// existed — proving once again that a doc-comment claim plus tagging
+    /// the component is NOT sufficient; only listing the type in `Scope`
+    /// (asserted here end-to-end) actually hides it.
+    #[test]
+    fn crafting_is_owner_scoped_across_two_real_clients() {
+        use bevy::{
+            MinimalPlugins,
+            app::{App, PluginGroup, PostUpdate},
+        };
+        use bevy_replicon::{
+            RepliconPlugins,
+            prelude::{ConnectedClient, Replicated, ServerPlugin},
+            test_app::{ServerTestAppExt, TestClientEntity},
+        };
+
+        use crate::{NetCrafting, XindelerProtocolPlugin};
+
+        fn new_app() -> App {
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                bevy::state::app::StatesPlugin,
+                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+                XindelerProtocolPlugin,
+            ))
+            .finish();
+            app
+        }
+
+        // Same rationale as `server_connection_entity` above: the client's
+        // own connection entity is a genuine shared `Entity` between both
+        // apps in this test harness, so a direct equality match is exact.
+        fn server_connection_entity(server_app: &mut App, client_app: &App) -> Entity {
+            let target = **client_app.world().resource::<TestClientEntity>();
+            server_app
+                .world_mut()
+                .query::<(Entity, &ConnectedClient)>()
+                .iter(server_app.world())
+                .map(|(e, _)| e)
+                .find(|&e| e == target)
+                .expect("the client's own connection entity exists server-side")
+        }
+
+        let mut server_app = new_app();
+        let mut owner_client = new_app();
+        let mut other_client = new_app();
+
+        server_app.connect_client(&mut owner_client);
+        let owner_entity = server_connection_entity(&mut server_app, &owner_client);
+        server_app
+            .world_mut()
+            .entity_mut(owner_entity)
+            .insert(ClientOwnedUid(42));
+
+        server_app.connect_client(&mut other_client);
+        let other_entity = server_connection_entity(&mut server_app, &other_client);
+        server_app
+            .world_mut()
+            .entity_mut(other_entity)
+            .insert(ClientOwnedUid(99));
+
+        let crafting = NetCrafting {
+            recipes: vec![],
+            salvageable: vec![],
+            components: vec![],
+            repairable: vec![],
+        };
+        server_app
+            .world_mut()
+            .spawn((Replicated, NetOwnerOnly(42), crafting));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut owner_client);
+        owner_client.update();
+        server_app.exchange_with_client(&mut other_client);
+        other_client.update();
+
+        let mut owner_query = owner_client.world_mut().query::<&NetCrafting>();
+        assert_eq!(
+            owner_query.iter(owner_client.world()).count(),
+            1,
+            "the owning client must receive NetCrafting"
+        );
+
+        let mut other_query = other_client.world_mut().query::<&NetCrafting>();
+        assert_eq!(
+            other_query.iter(other_client.world()).count(),
+            0,
+            "a non-owning client must NEVER receive another player's NetCrafting (recipe book + \
+             salvage/repair/modular candidate slots) — this is exactly the 3rd-occurrence leak \
+             the Scope-tuple fix closes"
         );
     }
 }
