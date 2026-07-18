@@ -183,3 +183,26 @@ hud-settings-game_layers = Capas de Juego
 hud-settings-menu_buttons = Botones de Menú
 hud-settings-row_background_opacity = Opacidad del Fondo de la Fila
 hud-settings-indoor_ambience = Detección de Ambiente en Interiores
+## BL-82 EM-5.16 (T56.44): la ventana de Opciones del cliente Bevy
+## (`xindeler-client::settings_window`).
+hud-settings-quality_preset = Preajuste de calidad
+hud-settings-ssao = Oclusión ambiental (SSAO)
+hud-settings-taa = Antialiasing (TAA)
+hud-settings-volumetric_fog = Niebla volumétrica
+hud-settings-contact_shadows = Sombras de contacto
+hud-settings-vignette = Viñeta
+hud-settings-shadow_cascades = Cascadas de sombra
+hud-settings-mouse_sensitivity = Sensibilidad del ratón
+hud-settings-fly_speed = Velocidad de la cámara libre
+hud-settings-language = Idioma
+hud-settings-custom_graphics = Personalizado
+hud-settings-open_controls = Abrir Controles / Reasignación
+hud-settings-note_interface = Más ajustes de elementos del HUD (barras, franja de estados) llegarán con sus propias pantallas.
+hud-settings-note_video = SSAO y el antialiasing se aplican de inmediato. El resto de opciones gráficas (y el número de cascadas de sombra) se aplican en el próximo inicio. Editar cualquiera de estas cambia el preajuste a Personalizado.
+hud-settings-note_controls = Reasigná teclado, ratón y mando en la pantalla dedicada de Controles.
+hud-settings-note_gameplay = Los ajustes de zoom de cámara y auto-caminar llegarán con el pulido de la cámara en tercera persona.
+hud-settings-note_chat = La opacidad del chat se aplica en vivo al panel de historial.
+hud-settings-note_language = La selección de idioma es en vivo — cada pantalla convertida se re-localiza al instante al cambiarlo. La cobertura se amplía pantalla por pantalla; las pantallas aún no convertidas siguen en inglés.
+hud-settings-note_networking = Todavía no hay ajustes de red configurables — el cliente se conecta automáticamente. El ajuste de conexión llegará con el navegador de servidores.
+hud-settings-note_sound = Los ajustes de sonido llegarán pronto.
+hud-settings-note_accessibility = Los ajustes de accesibilidad llegarán pronto.

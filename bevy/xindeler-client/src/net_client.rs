@@ -48,10 +48,11 @@ use crate::{
     atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
     controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
     far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
-    hud_toast::HudToastViewPlugin, inventory_ui::InventoryUiPlugin, lod::LodCullingPlugin,
-    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin,
-    palette_material::PaletteMaterialPlugin, social_hud::SocialHudViewPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin, trade_ui::TradeUiPlugin,
+    hud_toast::HudToastViewPlugin, inventory_ui::InventoryUiPlugin,
+    localization::ClientLocalizationPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
+    map_view::MapViewPlugin, palette_material::PaletteMaterialPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin, trade_ui::TradeUiPlugin,
 };
 
 /// Adds the whole net-client stack to the client `App`: `bevy_replicon`'s
@@ -159,6 +160,13 @@ impl Plugin for NetClientPlugin {
             // clean rather than panicking.
             ChatViewPlugin,
         ));
+        // BL-82 EM-5.16 (T56.44): the settings-bridge half of the reactive
+        // i18n pipeline — needs `xindeler_ui::i18n`'s `CurrentLocale`
+        // resource, which `CombatHudViewPlugin`'s own `XindelerUiPlugin`
+        // (added in the tuple above) inserts. Split into its own call — the
+        // tuple above is already at the 15-plugin ceiling (see the comment
+        // right below).
+        app.add_plugins(ClientLocalizationPlugin);
         // BL-82 EM-3.11-FH Phase C (drive-by fix, pre-existing on
         // `development`): the tuple above was already at 17 plugins before
         // this task added `LodObjectsPlugin`, one past `bevy_app`'s own

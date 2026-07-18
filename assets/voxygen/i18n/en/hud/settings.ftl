@@ -183,3 +183,27 @@ hud-settings-game_buttons = Game Buttons
 hud-settings-game_layers = Game Layers
 hud-settings-menu_buttons = Menu Buttons
 hud-settings-row_background_opacity = Row Background Opacity
+## BL-82 EM-5.16 (T56.44): the Bevy client's tabbed Settings window
+## (`xindeler-client::settings_window`) — row labels/notes for the v1 Video/
+## Gameplay/Controls/Language tabs that don't reuse an existing key above.
+hud-settings-quality_preset = Quality preset
+hud-settings-ssao = SSAO
+hud-settings-taa = Anti-aliasing (TAA)
+hud-settings-volumetric_fog = Volumetric fog
+hud-settings-contact_shadows = Contact shadows
+hud-settings-vignette = Vignette
+hud-settings-shadow_cascades = Shadow cascades
+hud-settings-mouse_sensitivity = Mouse sensitivity
+hud-settings-fly_speed = Fly-cam speed
+hud-settings-language = Language
+hud-settings-custom_graphics = Custom
+hud-settings-open_controls = Open Controls / Rebinding
+hud-settings-note_interface = Further HUD-element toggles (bars, buff strip) arrive with their screens.
+hud-settings-note_video = SSAO and anti-aliasing apply immediately. Other video options (and the shadow-cascade count) apply on the next launch. Editing any of these switches the preset to Custom.
+hud-settings-note_controls = Rebind keyboard, mouse and gamepad controls in the dedicated Controls screen.
+hud-settings-note_gameplay = Camera zoom and auto-walk settings arrive with the third-person camera polish.
+hud-settings-note_chat = Chat box opacity applies live to the scrollback panel.
+hud-settings-note_language = Language selection is live — every converted screen below re-localizes instantly when you change it. Coverage is expanding screen by screen; unconverted screens still show English.
+hud-settings-note_networking = No configurable networking settings yet — the client connects automatically. Connection tuning arrives with the server browser.
+hud-settings-note_sound = Sound settings coming soon.
+hud-settings-note_accessibility = Accessibility settings coming soon.
