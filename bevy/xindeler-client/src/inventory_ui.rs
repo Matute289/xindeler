@@ -36,50 +36,41 @@
 //! that does not exist yet (only creatures/players are mirrored today,
 //! `NetBody`) — a real follow-up, not attempted in this task.
 //!
-//! ## Items / Equipment tab split (BL-82 EM-5.18 Phase 1)
-//! The bag grid ([`BagGridRoot`]) and the 18-slot paper-doll
-//! ([`PaperdollRoot`]) used to render as SIBLINGS in the same panel row (the
-//! Phase 7 "stacked in the same panel" problem Matías flagged live-testing).
-//! They are now split into two mutually-exclusive tabs — [`InventoryTab`]
-//! (a plain resource, not a component — mirrors `diary.rs`'s `DiaryTab`
-//! shape exactly, spec §1.3/§3.1) picks which of [`ItemsTabRoot`] (wraps
-//! `BagGridRoot`) / [`EquipmentTabRoot`] (wraps `PaperdollRoot`) is mounted
-//! with `Node::display: Flex` at a time — see
-//! [`sync_inventory_tab_content_visibility`]'s own doc comment for why
-//! `Node::display`, not `Visibility`, is the correct toggle here.
-//!
-//! **Temporary regression, expected and documented (NOT a bug):** because
-//! only one tab's slots are ever mounted with `Node::display: Flex`
-//! simultaneously, a bag slot and an equip slot are never BOTH laid out at
-//! the same time once the tabs are separate — Bevy cannot drag an item
-//! between an entity with a real layout box and one that is `Display::None`.
-//! **Between this Phase 1 merging and BL-82 EM-5.18 Phase 2 (the click-slot
-//! equip-picker modal) merging, there is NO way to equip or unequip an item
-//! via any path** — this is a structural, intentional consequence of the tab
-//! split itself (spec §3.1/§3.6), not a regression introduced by mistake.
-//! Same-tab dragging (bag-to-bag reordering within Items; weapon-set-to-
-//! weapon-set within Equipment) is untouched and keeps working, since both
-//! ends of a same-tab drag stay mounted together.
+//! ## Legacy single-window layout (BL-82 EM-5.17/5.18 legacy-inventory rebuild)
+//! The bag grid ([`BagGridRoot`]) and the paper-doll ([`PaperdollRoot`]) used
+//! to render as two mutually-exclusive TABS (`InventoryTab::Items`/
+//! `InventoryTab::Equipment`, a Diablo4-style split) — Matías flagged that
+//! this "looks nothing like ours". This screen now mirrors the legacy
+//! "xindeler-old" boxy pixel-art panel instead: ONE combined window (a
+//! title, a left stat-icon column, a fixed-size paper-doll silhouette, a
+//! rarity-colored bag grid, and a footer), built from the legacy `bag/`
+//! asset set (see [`xindeler_ui::images::HudImageKey`]'s `BAG_*_DIR`/
+//! `GENERIC_BUTTONS_DIR` variants) rather than the reserved high-res
+//! `hud_d4/` art. Because the paper-doll and the bag grid are mounted
+//! SIMULTANEOUSLY again (no `Node::display` toggle hides either), drag-to-
+//! equip (a bag slot dragged directly onto an equip slot, or vice versa)
+//! works exactly as it did before any tab split ever existed — there is no
+//! structural drag-drop gap in this layout.
 //!
 //! ## Click-to-equip picker modal (BL-82 EM-5.18 Phase 2)
-//! Closes the P1 gap noted above: clicking an equip slot
-//! ([`spawn_equip_slot`]'s new `.observe(On<Pointer<Click>>, ..)`, T58.10)
-//! opens [`EquipPickerRoot`] — a SIBLING of [`InventoryWindowRoot`] (not
-//! nested inside its `Row` panel), listing every bag item whose (server-
-//! computed, T58.7) `NetItemStack::equippable_slots` contains the clicked
-//! slot, plus an "Unequip" row when the slot is already occupied
-//! ([`rebuild_equip_picker_contents`], T58.12). Picking a row (or Unequip)
-//! sends the SAME `InventoryActionRequest(InventoryManip::Swap(..))` drag-
-//! drop already sent (spec §3.3) and closes the picker. [`EquipPickerState`]
-//! (a plain resource, outside `HudState` — no `HudWindow` variant fits a
-//! transient sub-modal of an already-open window) tracks which slot (if any)
-//! is open; [`sync_equip_picker_visibility`] toggles the root's
-//! `Visibility` (NOT `Node::display` — this root has no `Row`-direction
-//! flex siblings of its own, unlike P1's tab toggle, so `Visibility` is safe
-//! here). `Escape` closes the picker ([`close_equip_picker_on_escape`],
-//! T58.13) — see that system's own doc comment for why this is collision-
-//! free with `camera.rs`/`chat.rs`/`map_view.rs`'s own independent `Escape`
-//! consumers.
+//! A convenience alternative to drag-drop, unaffected by the tab removal
+//! above: clicking an equip slot ([`spawn_equip_slot`]'s
+//! `.observe(On<Pointer<Click>>, ..)`, T58.10) opens [`EquipPickerRoot`] — a
+//! SIBLING of [`InventoryWindowRoot`] (not nested inside its panel), listing
+//! every bag item whose (server-computed, T58.7) `NetItemStack::
+//! equippable_slots` contains the clicked slot, plus an "Unequip" row when
+//! the slot is already occupied ([`rebuild_equip_picker_contents`], T58.12).
+//! Picking a row (or Unequip) sends the SAME `InventoryActionRequest(
+//! InventoryManip::Swap(..))` drag-drop already sends (spec §3.3) and closes
+//! the picker. [`EquipPickerState`] (a plain resource, outside `HudState` —
+//! no `HudWindow` variant fits a transient sub-modal of an already-open
+//! window) tracks which slot (if any) is open;
+//! [`sync_equip_picker_visibility`] toggles the root's `Visibility` (this
+//! root has no `Row`-direction flex siblings of its own, so `Visibility` is
+//! safe here — see that system's own doc comment). `Escape` closes the
+//! picker ([`close_equip_picker_on_escape`], T58.13) — see that system's own
+//! doc comment for why this is collision-free with `camera.rs`/`chat.rs`/
+//! `map_view.rs`'s own independent `Escape` consumers.
 
 use bevy::{
     ecs::schedule::common_conditions::not,
@@ -92,7 +83,8 @@ use common::comp::inventory::{
 };
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
-    InventoryActionRequest, NetInventory, NetItemStack, NetLocalPlayer, inventory::ALL_EQUIP_SLOTS,
+    InventoryActionRequest, NetEnergy, NetHealth, NetInventory, NetItemStack, NetLocalPlayer,
+    NetPoise, inventory::ALL_EQUIP_SLOTS,
 };
 use xindeler_ui::{
     button::{Activate, button_bundle},
@@ -133,34 +125,36 @@ const EQUIP_GROUP: SlotGroup = SlotGroup(2);
 /// blocker.
 const EQUIP_PICKER_GROUP: SlotGroup = SlotGroup(6);
 
-/// BL-82 EM-5.17 T57.14 — the confirmed 18-of-22-slot Equipment panel layout
-/// (spec §3.7, Matías's direct confirmation): two full weapon SETS
-/// (Mainhand+Offhand each) flank a center armor column; the 4 `Bag1`-`Bag4`
-/// slots are EXCLUDED (they belong on the Items/Inventory tab, not
-/// Equipment — this screen's bag GRID already covers them via physical
-/// `InvSlotId` addressing, unrelated to these loadout-provided `EquipSlot`
-/// bag slots). All three constants index into [`ALL_EQUIP_SLOTS`].
-///
-/// Which physical side shows Active vs. Inactive doesn't matter per spec
-/// ("doesn't matter visually") — Active-on-the-left is an arbitrary, stable
-/// convention.
-const LEFT_WEAPON_SET_INDICES: [usize; 2] = [16, 17]; // ActiveMainhand, ActiveOffhand
-/// The right-flanking weapon set — see [`LEFT_WEAPON_SET_INDICES`].
-const RIGHT_WEAPON_SET_INDICES: [usize; 2] = [18, 19]; // InactiveMainhand, InactiveOffhand
-/// The center armor column, top-to-bottom render order. Per spec §3.7:
-/// Head/Neck/Shoulders/Chest, then Legs (inserted between Chest and Feet:
-/// "Chest → Legs → Feet"), then Lantern+Glider immediately below Feet, then
-/// the rest of the Notion doc's original-10 slots (Hands/Ring1/Ring2/Back),
-/// then Tabard (placed adjacent to Back — "near Chest/Back" per spec; the
-/// EXACT spot is flagged non-blocking, worth a later confirm from Matías —
-/// see the Phase 7 report), then Belt.
-const CENTER_COLUMN_INDICES: [usize; 14] = [
-    0, 1, 2, 3, // Head, Neck, Shoulders, Chest
-    9, 10, // Legs, Feet ("Chest -> Legs -> Feet")
-    20, 21, // Lantern, Glider ("below Feet")
-    4, 5, 6, 7,  // Hands, Ring1, Ring2, Back
-    11, // Tabard — placed next to Back; flagged, non-blocking (see module doc comment)
-    8,  // Belt
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — the same 18-of-22-slot
+/// Equipment layout (spec §3.7, `Bag1`-`Bag4` still excluded — this screen's
+/// bag GRID already covers physical `InvSlotId` addressing, unrelated to
+/// these loadout-provided `EquipSlot` bag slots), now positioned as an
+/// ABSOLUTE cross/silhouette inside the fixed-size [`PaperdollRoot`] instead
+/// of three flex columns — approximating legacy "xindeler-old"'s paper-doll
+/// art (tunable later during smoke: these `(left_px, top_px, size_px)`
+/// triples are a first pass, not pixel-perfect against the reference art).
+/// [`spawn_bag_grid_once_capacity_known`] walks this table directly (no more
+/// per-column `*_INDICES` split); [`spawn_equip_slot`] resolves each
+/// `EquipSlot`'s [`ALL_EQUIP_SLOTS`] discriminant itself.
+const PAPERDOLL_SLOT_LAYOUT: &[(EquipSlot, f32, f32, f32)] = &[
+    (EquipSlot::Armor(ArmorSlot::Head), 108.0, 4.0, 44.0),
+    (EquipSlot::Armor(ArmorSlot::Neck), 108.0, 52.0, 40.0),
+    (EquipSlot::Armor(ArmorSlot::Shoulders), 44.0, 96.0, 44.0),
+    (EquipSlot::Armor(ArmorSlot::Chest), 100.0, 96.0, 52.0),
+    (EquipSlot::Armor(ArmorSlot::Hands), 162.0, 96.0, 44.0),
+    (EquipSlot::Armor(ArmorSlot::Belt), 108.0, 150.0, 40.0),
+    (EquipSlot::Armor(ArmorSlot::Legs), 104.0, 196.0, 46.0),
+    (EquipSlot::Armor(ArmorSlot::Ring2), 48.0, 148.0, 34.0),
+    (EquipSlot::Armor(ArmorSlot::Ring1), 170.0, 148.0, 34.0),
+    (EquipSlot::Armor(ArmorSlot::Back), 44.0, 190.0, 44.0),
+    (EquipSlot::Armor(ArmorSlot::Feet), 166.0, 190.0, 44.0),
+    (EquipSlot::Lantern, 210.0, 8.0, 36.0),
+    (EquipSlot::Glider, 210.0, 50.0, 36.0),
+    (EquipSlot::Armor(ArmorSlot::Tabard), 210.0, 92.0, 36.0),
+    (EquipSlot::ActiveMainhand, 18.0, 250.0, 54.0),
+    (EquipSlot::ActiveOffhand, 178.0, 250.0, 54.0),
+    (EquipSlot::InactiveMainhand, 78.0, 262.0, 40.0),
+    (EquipSlot::InactiveOffhand, 140.0, 262.0, 40.0),
 ];
 
 /// Marks the whole inventory window root (toggled by [`HudState`]).
@@ -170,56 +164,52 @@ struct InventoryWindowRoot;
 /// entities, spawned once real capacity is known).
 #[derive(Component)]
 struct BagGridRoot;
-/// Marks the paper-doll ROW container (the 3 flanking/center columns below
-/// are its children) — spawned at `Startup` since the slot COUNT (18) is
-/// fixed/known ahead of time, unlike the bag.
+/// Marks the left stat-icon column container (BL-82 EM-5.17/5.18 legacy-
+/// inventory rebuild) — 6 icon+value rows, one per [`StatKind`].
+#[derive(Component)]
+struct StatColumn;
+
+/// Marks the fixed-size (250x330px) paper-doll silhouette container — every
+/// [`PAPERDOLL_SLOT_LAYOUT`] slot is spawned directly into this entity with
+/// an absolute position (BL-82 EM-5.17/5.18 legacy-inventory rebuild;
+/// previously a `Row` of 3 flex columns, now a single `Relative`-positioned
+/// canvas). Spawned at `Startup` since the slot COUNT (18) is fixed/known
+/// ahead of time, unlike the bag.
 #[derive(Component)]
 struct PaperdollRoot;
-/// The left flanking weapon-set column (BL-82 EM-5.17 T57.14) — see
-/// [`LEFT_WEAPON_SET_INDICES`].
-#[derive(Component)]
-struct LeftWeaponColumnRoot;
-/// The center armor column — see [`CENTER_COLUMN_INDICES`].
-#[derive(Component)]
-struct CenterEquipColumnRoot;
-/// The right flanking weapon-set column — see [`RIGHT_WEAPON_SET_INDICES`].
-#[derive(Component)]
-struct RightWeaponColumnRoot;
 
-/// The two tabs this inventory window splits into (BL-82 EM-5.18 Phase 1,
-/// spec §1/§3.1): "Items" = the bag grid ([`BagGridRoot`]), "Equipment" = the
-/// paper-doll ([`PaperdollRoot`] + its 3 columns). Mirrors `diary.rs`'s
-/// `DiaryTab` shape (a plain [`Resource`], not a component) but simplified —
-/// there's no dynamic tab list here (always exactly these 2), so the tab
-/// buttons spawn once in [`spawn_inventory_window`] rather than via a
-/// `sync_diary_tabs`-style reactive rebuild.
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum InventoryTab {
-    #[default]
-    Items,
-    Equipment,
+/// One of the 6 left-column stat readouts (BL-82 EM-5.17/5.18 legacy-
+/// inventory rebuild) — see [`StatKind`] and [`sync_inventory_stats`].
+#[derive(Component, Clone, Copy)]
+struct StatValueText(StatKind);
+
+/// Which stat a [`StatValueText`] displays — mirrors legacy "xindeler-old"'s
+/// stat-icon column (spec: health/energy/protection/stun-resist/combat-
+/// rating/stealth). Only Health/Energy/StunRes are backed by a REAL mirrored
+/// value today ([`sync_inventory_stats`]); the other three are documented
+/// "0" placeholders pending a protocol mirror field (see that system's own
+/// doc comment).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum StatKind {
+    Health,
+    Energy,
+    Protection,
+    CombatRating,
+    StunRes,
+    Stealth,
 }
 
-/// Marks the tab-button row container (BL-82 EM-5.18 Phase 1) — mirrors
-/// `diary.rs`'s `DiaryTabBar`.
+/// Marks the footer's coin-count [`Text`] (BL-82 EM-5.17/5.18 legacy-
+/// inventory rebuild). Coin/currency isn't mirrored to the client yet — this
+/// stays a documented "0" placeholder (see [`spawn_inventory_window`]'s own
+/// doc comment).
 #[derive(Component)]
-struct InventoryTabBar;
-/// Tags a tab button with which [`InventoryTab`] it selects on click —
-/// mirrors `diary.rs`'s `DiaryTabButton`.
-#[derive(Component, Clone, Copy)]
-struct InventoryTabButton(InventoryTab);
-/// Wraps [`BagGridRoot`] — the Items tab's content root (BL-82 EM-5.18 Phase
-/// 1, spec §3.1). `BagGridRoot`'s own internal spawn logic
-/// ([`spawn_bag_grid_once_capacity_known`]) is completely unchanged; this is
-/// purely a new parent one level up.
+struct CoinText;
+
+/// Marks the footer's `occupied/total` bag-slot-count [`Text`] — kept live by
+/// [`sync_slot_count`].
 #[derive(Component)]
-struct ItemsTabRoot;
-/// Wraps [`PaperdollRoot`] (its 3 flanking/center columns) — the Equipment
-/// tab's content root (BL-82 EM-5.18 Phase 1, spec §3.1). `PaperdollRoot`'s
-/// own internal spawn logic is completely unchanged; this is purely a new
-/// parent one level up.
-#[derive(Component)]
-struct EquipmentTabRoot;
+struct SlotCountText;
 
 /// BL-82 EM-5.18 Phase 2 (T58.11, spec §3.3) — which [`EquipSlot`] the
 /// click-to-equip picker modal currently shows candidates for (`None` =
@@ -282,24 +272,22 @@ impl Plugin for InventoryUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BagGridSpawned>()
             .init_resource::<LastSeenBag>()
-            .init_resource::<InventoryTab>()
             .init_resource::<EquipPickerState>()
             .add_systems(
                 Startup,
                 (
-                    spawn_inventory_window.after(xindeler_ui::theme::init_theme),
+                    // BL-82 EM-5.17/5.18 legacy-inventory rebuild — this
+                    // spawn now reads `HudImages` directly (stat icons, the
+                    // gold-coin readout), unlike the earlier tab-split
+                    // version, so it also needs `.after(images::
+                    // init_images)`, not just `.after(theme::init_theme)`.
+                    spawn_inventory_window
+                        .after(xindeler_ui::theme::init_theme)
+                        .after(xindeler_ui::images::init_images),
                     // BL-82 EM-5.18 T58.11 — a top-level SIBLING of
                     // `InventoryWindowRoot`, not nested inside it.
                     spawn_equip_picker_root.after(xindeler_ui::theme::init_theme),
                     force_open_inventory_for_smoke_capture,
-                    // BL-82 EM-5.18 T58.15 (P3 parity check) — the
-                    // Equipment-tab counterpart to
-                    // `force_open_inventory_for_smoke_capture`, so a live
-                    // `--smoke-screenshot` can capture the 18-slot
-                    // paper-doll specifically instead of only the default
-                    // Items tab (`--smoke-screenshot` has no real mouse to
-                    // click the Equipment tab button with).
-                    force_select_equipment_tab_for_smoke_capture,
                 ),
             )
             .add_systems(
@@ -315,10 +303,6 @@ impl Plugin for InventoryUiPlugin {
                         .after(xindeler_input::InputResolveSet)
                         .run_if(not(text_input_focused)),
                     sync_inventory_window_visibility,
-                    // BL-82 EM-5.18 Phase 1 — the Items/Equipment tab toggle;
-                    // see this system's own doc comment for why `Node::
-                    // display`, not `Visibility`.
-                    sync_inventory_tab_content_visibility,
                     spawn_bag_grid_once_capacity_known,
                     sync_slot_contents.after(spawn_bag_grid_once_capacity_known),
                     // BL-82 EM-5.17 T57.15 — must run after slots exist so a
@@ -332,56 +316,61 @@ impl Plugin for InventoryUiPlugin {
                     sync_equip_picker_visibility,
                     rebuild_equip_picker_contents,
                     close_equip_picker_on_escape,
+                    // BL-82 EM-5.17/5.18 legacy-inventory rebuild — the
+                    // left stat column + footer readouts.
+                    sync_inventory_stats,
+                    sync_slot_count,
                 ),
             );
     }
 }
 
-/// A short display label for an [`InventoryTab`] — no i18n depth needed yet
-/// (matches this crate's other placeholder-label posture, e.g. `diary.rs`'s
-/// `group_label` for the parts real i18n doesn't cover).
-fn inventory_tab_label(tab: InventoryTab) -> &'static str {
-    match tab {
-        InventoryTab::Items => "Items",
-        InventoryTab::Equipment => "Equipment",
-    }
-}
+/// The 6 stat rows the left column shows, in render order, paired with the
+/// icon this v1 layout gives each one — see [`StatKind`]'s own doc comment
+/// for which of these are backed by a real mirrored value today.
+const STAT_ROWS: [(StatKind, HudImageKey); 6] = [
+    (StatKind::Health, HudImageKey::StatHealth),
+    (StatKind::Energy, HudImageKey::StatEnergy),
+    (StatKind::Protection, HudImageKey::StatProtection),
+    (StatKind::CombatRating, HudImageKey::StatCombatRating),
+    (StatKind::StunRes, HudImageKey::StatStunRes),
+    (StatKind::Stealth, HudImageKey::StatStealth),
+];
 
 /// Spawns the (initially hidden) inventory window: a full-screen dim
-/// backdrop containing a themed panel with a 2-button tab bar
-/// ([`InventoryTabBar`]) followed by [`ItemsTabRoot`] (wraps the bag grid,
-/// [`BagGridRoot`] — an EMPTY container; [`spawn_bag_grid_once_capacity_known`]
-/// fills it in once the real capacity is known) and [`EquipmentTabRoot`]
-/// (wraps the paper-doll, [`PaperdollRoot`] — all 22 equip slots, fixed size,
-/// spawned now).
+/// backdrop containing ONE themed panel (BL-82 EM-5.17/5.18 legacy-inventory
+/// rebuild — see the module doc comment's "Legacy single-window layout"
+/// section for why this replaced the earlier Items/Equipment tab split),
+/// laid out top-to-bottom as:
+/// 1. A centered title ("Inventario" — the player's real character name isn't
+///    mirrored to the client today, so this can't yet render "Inventario de
+///    <name>"; `// TODO` below flags the missing protocol mirror field).
+/// 2. A `Row` of the left [`StatColumn`] (6 icon+value rows, kept live by
+///    [`sync_inventory_stats`]) and the fixed-size (250x330px) center
+///    [`PaperdollRoot`] (all 18 shown equip slots, absolutely positioned per
+///    [`PAPERDOLL_SLOT_LAYOUT`] — spawned empty here, filled by
+///    [`spawn_bag_grid_once_capacity_known`] once real inventory data exists,
+///    same latch the bag grid already used).
+/// 3. The rarity-colored [`BagGridRoot`] (a 9-column `Display::Grid`, 40px
+///    slots — spawned empty, same latch).
+/// 4. A footer `Row`: a gold-coin readout (left, currency isn't mirrored either
+///    — `// TODO`) and the `occupied/total` [`SlotCountText`] (right, kept live
+///    by [`sync_slot_count`]).
 ///
-/// BL-82 EM-5.18 Phase 1 (spec §3.1): before this change, `PaperdollRoot` and
-/// `BagGridRoot` spawned as SIBLINGS directly under this panel row — the
-/// "stacked in the same panel" problem Matías flagged live-testing. They are
-/// now each wrapped in their own tab-content root, and only ONE of
-/// `ItemsTabRoot`/`EquipmentTabRoot` is ever mounted with `Node::display:
-/// Flex` at a time (see [`sync_inventory_tab_content_visibility`]). Both
-/// tabs' INTERNAL content (the bag grid's later fill-in, the paper-doll's 3
-/// columns/`*_INDICES` constants/`spawn_equip_slot`) is byte-identical to
-/// Phase 7 — only this new wrapping parent + the tab bar are added. The tab
-/// set is fixed (always exactly 2), so — unlike `diary.rs`'s
-/// `sync_diary_tabs`, which reactively rebuilds a DYNAMIC tab list — the 2
-/// tab buttons spawn once, right here, with no reactive rebuild system
-/// needed.
-///
-/// BL-82 EM-5.17/5.18 click-routing fix: `InventoryWindowRoot` is one of the
-/// three consumers the zlayer scheme's own doc comment names for
-/// `MODAL_WINDOWS` (diary/inventory/full-map), and [`spawn_equip_picker_root`]
-/// below already assumed it carried that tier (its own doc comment says "one
-/// tier ABOVE `InventoryWindowRoot`'s own `MODAL_WINDOWS`") — but this spawn
-/// tuple never actually applied `GlobalZIndex(MODAL_WINDOWS)`, unlike
-/// `diary.rs`'s `DiaryWindowRoot`. Left at the default z-partition (0), this
-/// root sat BELOW the always-on ambient chrome once it gained its own higher
-/// z-index this phase (hotbar/orbs = `ORBS_ACTION_BAR_PARTY_MINIMAP`=20) —
-/// wherever the Inventory window visually overlapped that chrome,
-/// `bevy_ui` picking (which resolves the highest z-partition first) routed
-/// clicks to the chrome in front instead of the inventory panel underneath.
-fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+/// BL-82 EM-5.17/5.18 click-routing fix (kept from the prior tab-split
+/// version, unrelated to this restructure): `InventoryWindowRoot` is one of
+/// the three consumers the zlayer scheme's own doc comment names for
+/// `MODAL_WINDOWS` (diary/inventory/full-map) — without this z-index, the
+/// window would sit BELOW the always-on ambient chrome (hotbar/orbs =
+/// `ORBS_ACTION_BAR_PARTY_MINIMAP`=20), and `bevy_ui` picking (which
+/// resolves the highest z-partition first) would route clicks to the chrome
+/// in front instead of the inventory panel underneath.
+fn spawn_inventory_window(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    images: Res<HudImages>,
+) {
     commands
         .spawn((
             InventoryWindowRoot,
@@ -402,7 +391,7 @@ fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>, fonts: R
             // radius) — a SECOND `Node` in the same spawn tuple would
             // REPLACE it wholesale (the exact EM-5.2 regression class; see
             // `xindeler-client::combat_hud`'s own doc comment for the full
-            // story), so the row-layout overrides are applied via
+            // story), so the column-layout overrides are applied via
             // `.entry::<Node>().and_modify(..)` (in-place field mutation) —
             // on its own statement, since `EntityEntryCommands` doesn't
             // itself expose `with_children`.
@@ -411,102 +400,153 @@ fn spawn_inventory_window(mut commands: Commands, theme: Res<HudTheme>, fonts: R
             // so it requires `'static` — an owned `Val` copied out of
             // `theme` BEFORE the closure, not a borrow of `theme` itself
             // (which only lives for this function call).
-            let column_gap = Val::Px(theme.spacing.lg);
+            let row_gap = Val::Px(8.0);
             panel_entity.entry::<Node>().and_modify(move |mut node| {
-                node.flex_direction = FlexDirection::Row;
-                node.column_gap = column_gap;
+                node.flex_direction = FlexDirection::Column;
+                node.row_gap = row_gap;
             });
             panel_entity.with_children(|panel| {
-                // BL-82 EM-5.18 Phase 1 — the 2-button tab bar, mirroring
-                // `diary.rs::sync_diary_tabs`'s per-button `.observe(On<
-                // Activate>)` idiom verbatim (spec §1.3/§3.1), just spawned
-                // once here instead of via a reactive rebuild (the tab set
-                // never changes).
+                // 1. Title.
                 panel
-                    .spawn((InventoryTabBar, Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(4.0),
-                        min_width: Val::Px(140.0),
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::Center,
                         ..Default::default()
-                    }))
-                    .with_children(|tab_bar| {
-                        for tab in [InventoryTab::Items, InventoryTab::Equipment] {
-                            tab_bar
-                                .spawn(button_bundle(&theme, &fonts, inventory_tab_label(tab)))
-                                .insert(InventoryTabButton(tab))
-                                .observe(
-                                    move |activate: On<Activate>,
-                                          buttons: Query<&InventoryTabButton>,
-                                          mut selected: ResMut<InventoryTab>| {
-                                        if let Ok(button) = buttons.get(activate.entity) {
-                                            *selected = button.0;
-                                        }
-                                    },
-                                );
-                        }
+                    })
+                    .with_children(|title_row| {
+                        title_row.spawn((
+                            // TODO(BL-82 follow-up): the local player's
+                            // character name needs a protocol mirror field
+                            // to render "Inventario de <name>" — this stays
+                            // the plain legacy title until that exists.
+                            Text("Inventario".to_owned()),
+                            TextFont {
+                                font: bevy::text::FontSource::Handle(fonts.title.clone()),
+                                font_size: bevy::text::FontSize::Px(22.0),
+                                ..Default::default()
+                            },
+                            TextColor(theme.palette.text),
+                        ));
                     });
 
-                // `ItemsTabRoot` starts `Flex` (Items is the default tab);
-                // `EquipmentTabRoot` starts `None` — matching `InventoryTab`'s
-                // `#[default]` variant. `sync_inventory_tab_content_visibility`
-                // is the only system that ever changes either afterward.
+                // 2. Stat column + paper-doll.
                 panel
-                    .spawn((ItemsTabRoot, Node {
-                        display: Display::Flex,
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(12.0),
+                        align_items: AlignItems::FlexStart,
                         ..Default::default()
-                    }))
-                    .with_children(|items_tab| {
-                        items_tab.spawn((BagGridRoot, Node {
-                            display: Display::Grid,
-                            grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(8, 48.0)],
-                            row_gap: Val::Px(4.0),
-                            column_gap: Val::Px(4.0),
-                            max_width: Val::Px(8.0 * 52.0),
+                    })
+                    .with_children(|main_row| {
+                        main_row
+                            .spawn((StatColumn, Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(6.0),
+                                min_width: Val::Px(92.0),
+                                ..Default::default()
+                            }))
+                            .with_children(|stat_column| {
+                                for (kind, icon) in STAT_ROWS {
+                                    stat_column
+                                        .spawn(Node {
+                                            flex_direction: FlexDirection::Row,
+                                            column_gap: Val::Px(6.0),
+                                            align_items: AlignItems::Center,
+                                            ..Default::default()
+                                        })
+                                        .with_children(|stat_row| {
+                                            stat_row.spawn((
+                                                bevy::ui::widget::ImageNode::new(images.get(icon)),
+                                                Node {
+                                                    width: Val::Px(20.0),
+                                                    height: Val::Px(20.0),
+                                                    ..Default::default()
+                                                },
+                                            ));
+                                            stat_row.spawn((
+                                                StatValueText(kind),
+                                                Text("0".to_owned()),
+                                                TextFont {
+                                                    font: bevy::text::FontSource::Handle(
+                                                        fonts.body.clone(),
+                                                    ),
+                                                    font_size: bevy::text::FontSize::Px(14.0),
+                                                    ..Default::default()
+                                                },
+                                                TextColor(theme.palette.text),
+                                            ));
+                                        });
+                                }
+                            });
+
+                        main_row.spawn((PaperdollRoot, Node {
+                            width: Val::Px(250.0),
+                            height: Val::Px(330.0),
+                            position_type: PositionType::Relative,
                             ..Default::default()
                         }));
                     });
 
+                // 3. Bag grid.
+                panel.spawn((BagGridRoot, Node {
+                    display: Display::Grid,
+                    grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(9, 40.0)],
+                    row_gap: Val::Px(2.0),
+                    column_gap: Val::Px(2.0),
+                    ..Default::default()
+                }));
+
+                // 4. Footer.
                 panel
-                    .spawn((EquipmentTabRoot, Node {
-                        display: Display::None,
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
                         ..Default::default()
-                    }))
-                    .with_children(|equipment_tab| {
-                        // BL-82 EM-5.17 T57.14 — `PaperdollRoot` is a ROW of 3
-                        // columns (left weapon set / center armor column /
-                        // right weapon set), not a flat 2-col grid of all 22
-                        // slots — see the module doc comment's layout
-                        // constants for the confirmed arrangement. Unchanged
-                        // by this Phase 1 restructure other than its new
-                        // `EquipmentTabRoot` parent.
-                        equipment_tab
-                            .spawn((PaperdollRoot, Node {
-                                display: Display::Flex,
+                    })
+                    .with_children(|footer| {
+                        footer
+                            .spawn(Node {
                                 flex_direction: FlexDirection::Row,
-                                column_gap: Val::Px(8.0),
-                                align_items: AlignItems::FlexStart,
+                                column_gap: Val::Px(4.0),
+                                align_items: AlignItems::Center,
                                 ..Default::default()
-                            }))
-                            .with_children(|paperdoll| {
-                                paperdoll.spawn((LeftWeaponColumnRoot, Node {
-                                    display: Display::Flex,
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(4.0),
-                                    ..Default::default()
-                                }));
-                                paperdoll.spawn((CenterEquipColumnRoot, Node {
-                                    display: Display::Flex,
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(4.0),
-                                    ..Default::default()
-                                }));
-                                paperdoll.spawn((RightWeaponColumnRoot, Node {
-                                    display: Display::Flex,
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(4.0),
-                                    ..Default::default()
-                                }));
+                            })
+                            .with_children(|coin_row| {
+                                coin_row.spawn((
+                                    bevy::ui::widget::ImageNode::new(
+                                        images.get(HudImageKey::GoldCoin),
+                                    ),
+                                    Node {
+                                        width: Val::Px(16.0),
+                                        height: Val::Px(16.0),
+                                        ..Default::default()
+                                    },
+                                ));
+                                coin_row.spawn((
+                                    CoinText,
+                                    // TODO(BL-82 follow-up): currency isn't
+                                    // mirrored to the client yet — this stays
+                                    // a documented "0" placeholder.
+                                    Text("0".to_owned()),
+                                    TextFont {
+                                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                                        font_size: bevy::text::FontSize::Px(14.0),
+                                        ..Default::default()
+                                    },
+                                    TextColor(theme.palette.text),
+                                ));
                             });
+                        footer.spawn((
+                            SlotCountText,
+                            Text("0/0".to_owned()),
+                            TextFont {
+                                font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                                font_size: bevy::text::FontSize::Px(14.0),
+                                ..Default::default()
+                            },
+                            TextColor(theme.palette.text_muted),
+                        ));
                     });
             });
         });
@@ -528,9 +568,7 @@ fn spawn_bag_grid_once_capacity_known(
     mut spawned: ResMut<BagGridSpawned>,
     player: Query<&NetInventory, With<NetLocalPlayer>>,
     bag_root: Query<Entity, With<BagGridRoot>>,
-    left_weapon_root: Query<Entity, With<LeftWeaponColumnRoot>>,
-    center_root: Query<Entity, With<CenterEquipColumnRoot>>,
-    right_weapon_root: Query<Entity, With<RightWeaponColumnRoot>>,
+    paperdoll_root: Query<Entity, With<PaperdollRoot>>,
 ) {
     if spawned.0 {
         return;
@@ -544,48 +582,34 @@ fn spawn_bag_grid_once_capacity_known(
 
     commands.entity(bag_root_entity).with_children(|parent| {
         for net_slot in &inventory.slots {
-            // BL-82 EM-5.17 T57.13/T57.16 — every bag slot starts with a
-            // (currently invisible/transparent, per `ImageNode::default()`)
-            // rarity-background image node: `sync_slot_contents` swaps its
-            // `image`/tint in once the slot is occupied (see that system's
-            // doc comment) rather than this spawn site inserting/removing
-            // the component later — a slot with items constantly moving in
-            // and out just needs the ONE component mutated in place. Also
-            // T57.16: `TooltipBackground(InventoryTooltipBg)` reskins this
-            // slot's hover tooltip.
+            // BL-82 EM-5.17 T57.13/T57.16 — every bag slot starts with the
+            // legacy empty-slot art (`InvSlot`): `sync_slot_contents` swaps
+            // its `image`/tint in once the slot is occupied (see that
+            // system's doc comment) rather than this spawn site inserting/
+            // removing the component later — a slot with items constantly
+            // moving in and out just needs the ONE component mutated in
+            // place. Also T57.16: `TooltipBackground(InventoryTooltipBg)`
+            // reskins this slot's hover tooltip.
             parent.spawn((
                 slot_bundle(
                     &theme,
                     BAG_GROUP,
                     SlotAddress::from_inv_slot_idx(net_slot.slot.idx()),
-                    48.0,
+                    40.0,
                 ),
-                bevy::ui::widget::ImageNode::default(),
+                bevy::ui::widget::ImageNode::new(images.get(HudImageKey::InvSlot)),
                 TooltipBackground(HudImageKey::InventoryTooltipBg),
             ));
         }
     });
 
-    // BL-82 EM-5.17 T57.14 — the 18-of-22-slot Equipment panel: 3 columns,
-    // each spawned from its own `*_INDICES` constant (module doc comment).
-    if let Ok(left_entity) = left_weapon_root.single() {
-        commands.entity(left_entity).with_children(|parent| {
-            for &idx in &LEFT_WEAPON_SET_INDICES {
-                spawn_equip_slot(parent, &theme, &images, idx);
-            }
-        });
-    }
-    if let Ok(center_entity) = center_root.single() {
-        commands.entity(center_entity).with_children(|parent| {
-            for &idx in &CENTER_COLUMN_INDICES {
-                spawn_equip_slot(parent, &theme, &images, idx);
-            }
-        });
-    }
-    if let Ok(right_entity) = right_weapon_root.single() {
-        commands.entity(right_entity).with_children(|parent| {
-            for &idx in &RIGHT_WEAPON_SET_INDICES {
-                spawn_equip_slot(parent, &theme, &images, idx);
+    // BL-82 EM-5.17/5.18 legacy-inventory rebuild — the same 18-of-22-slot
+    // Equipment panel, now spawned directly into the single `PaperdollRoot`
+    // canvas with an absolute position per `PAPERDOLL_SLOT_LAYOUT`.
+    if let Ok(paperdoll_entity) = paperdoll_root.single() {
+        commands.entity(paperdoll_entity).with_children(|parent| {
+            for &(equip_slot, left, top, size) in PAPERDOLL_SLOT_LAYOUT {
+                spawn_equip_slot(parent, &theme, &images, equip_slot, left, top, size);
             }
         });
     }
@@ -593,13 +617,19 @@ fn spawn_bag_grid_once_capacity_known(
     spawned.0 = true;
 }
 
-/// Spawns one Equipment-panel slot (BL-82 EM-5.17 T57.14) at
-/// `ALL_EQUIP_SLOTS[idx]` — a themed [`slot_bundle`] carrying its own bespoke
-/// `equip_empty_*.png` frame (via [`equip_slot_frame`]; ALL 18 shown slots have
-/// a dedicated frame — see the Phase 7 report for why the originally-flagged
-/// `slot_empty.png` interim fallback ended up unnecessary) plus T57.16's
-/// `TooltipBackground` reskin. [`sync_two_handed_offhand_disable`] is the only
-/// system that later mutates this same [`bevy::ui::widget::ImageNode`]'s tint
+/// Spawns one Equipment-panel slot (BL-82 EM-5.17/5.18 legacy-inventory
+/// rebuild) for the given `equip_slot`, absolutely positioned at
+/// `(left, top)` (px, within the 250x330 [`PaperdollRoot`] canvas), `size`
+/// px square — a themed [`slot_bundle`] carrying its own ghost/silhouette
+/// placeholder (via [`equip_slot_frame`]) plus T57.16's `TooltipBackground`
+/// reskin. `slot_bundle` already carries a real `Node` (width/height/
+/// border/…) — a SECOND `Node` in the same spawn tuple would REPLACE it
+/// wholesale (the exact EM-5.2 regression class; see `spawn_inventory_
+/// window`'s own doc comment for the full story), so the absolute-position
+/// override is applied via `.entry::<Node>().and_modify(..)` AFTER spawn,
+/// the same pattern this file already uses for the window panel's row-
+/// layout override. [`sync_two_handed_offhand_disable`] is the only system
+/// that later mutates this same [`bevy::ui::widget::ImageNode`]'s tint
 /// (never its `image` handle — the frame itself never changes, only whether
 /// it's greyed).
 ///
@@ -615,21 +645,33 @@ fn spawn_equip_slot(
     parent: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     images: &HudImages,
-    idx: usize,
+    equip_slot: EquipSlot,
+    left: f32,
+    top: f32,
+    size: f32,
 ) {
-    let equip_slot = ALL_EQUIP_SLOTS[idx];
+    let discriminant = ALL_EQUIP_SLOTS
+        .iter()
+        .position(|&s| s == equip_slot)
+        .expect("PAPERDOLL_SLOT_LAYOUT only lists slots present in ALL_EQUIP_SLOTS");
     #[expect(
         clippy::cast_possible_truncation,
         reason = "ALL_EQUIP_SLOTS has 22 entries, far below u32::MAX"
     )]
-    let address = SlotAddress::from_equip_slot_discriminant(idx as u32);
-    parent
-        .spawn((
-            slot_bundle(theme, EQUIP_GROUP, address, 48.0),
-            bevy::ui::widget::ImageNode::new(images.get(equip_slot_frame(equip_slot))),
-            TooltipBackground(HudImageKey::InventoryTooltipBg),
-        ))
-        .observe(on_equip_slot_click(equip_slot));
+    let address = SlotAddress::from_equip_slot_discriminant(discriminant as u32);
+    let mut slot_entity = parent.spawn((
+        slot_bundle(theme, EQUIP_GROUP, address, size),
+        bevy::ui::widget::ImageNode::new(images.get(equip_slot_frame(equip_slot))),
+        TooltipBackground(HudImageKey::InventoryTooltipBg),
+    ));
+    slot_entity.entry::<Node>().and_modify(move |mut node| {
+        node.position_type = PositionType::Absolute;
+        node.left = Val::Px(left);
+        node.top = Val::Px(top);
+        node.width = Val::Px(size);
+        node.height = Val::Px(size);
+    });
+    slot_entity.observe(on_equip_slot_click(equip_slot));
 }
 
 /// BL-82 EM-5.18 T58.10 — builds the per-entity `.observe(On<Pointer<
@@ -649,81 +691,72 @@ fn on_equip_slot_click(
     }
 }
 
-/// BL-82 EM-5.17 T57.14 — the per-`EquipSlot` `equip_empty_*.png` frame
-/// (spec §3.7's confirmed layout). All 18 slots the Equipment panel shows
-/// (see [`LEFT_WEAPON_SET_INDICES`]/[`CENTER_COLUMN_INDICES`]/
-/// [`RIGHT_WEAPON_SET_INDICES`]) have a REAL dedicated frame asset —
-/// `Ring1`/`Ring2` share the ORIGINAL single `equip_empty_ring.png` (the
-/// Notion doc's 9-files-for-10-slots count already folded the two ring
-/// slots together); the other 8 newly-added slots (4 weapon slots, Legs,
-/// Lantern, Glider, Tabard) each got their OWN bespoke frame in this same
-/// phase (the 8 new PNGs this diff adds) — so, contrary to this task's
-/// original brief (which anticipated a `slot_empty.png` fallback for
-/// whichever new slots shipped without dedicated art), NO fallback is
-/// actually needed: every arm below has real, distinct art. `Bag1`-`Bag4`
-/// are unreachable here — the Equipment panel never spawns them (excluded
-/// per spec; they belong on the Items/Inventory tab).
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — the per-`EquipSlot` ghost/
+/// silhouette placeholder shown when that slot is empty, matching legacy
+/// "xindeler-old"'s `bag.rs` (the `bag/backgrounds/*.png` ghost art). All 18
+/// slots [`PAPERDOLL_SLOT_LAYOUT`] shows have a REAL dedicated ghost asset;
+/// `Ring1`/`Ring2` share the single `ring.png` ghost (legacy has no separate
+/// left/right ring silhouette). `Bag1`-`Bag4` are unreachable here — the
+/// paper-doll never spawns them (excluded per spec; they belong on the bag
+/// grid, addressed via physical `InvSlotId`, not this table).
 fn equip_slot_frame(slot: EquipSlot) -> HudImageKey {
     match slot {
-        EquipSlot::Armor(ArmorSlot::Head) => HudImageKey::EquipEmptyHelmet,
-        EquipSlot::Armor(ArmorSlot::Neck) => HudImageKey::EquipEmptyNecklace,
-        EquipSlot::Armor(ArmorSlot::Shoulders) => HudImageKey::EquipEmptyShoulders,
-        EquipSlot::Armor(ArmorSlot::Chest) => HudImageKey::EquipEmptyChest,
-        EquipSlot::Armor(ArmorSlot::Hands) => HudImageKey::EquipEmptyHands,
-        EquipSlot::Armor(ArmorSlot::Ring1 | ArmorSlot::Ring2) => HudImageKey::EquipEmptyRing,
-        EquipSlot::Armor(ArmorSlot::Back) => HudImageKey::EquipEmptyBack,
-        EquipSlot::Armor(ArmorSlot::Belt) => HudImageKey::EquipEmptyBelt,
-        EquipSlot::Armor(ArmorSlot::Legs) => HudImageKey::EquipEmptyLegs,
-        EquipSlot::Armor(ArmorSlot::Feet) => HudImageKey::EquipEmptyFeet,
-        EquipSlot::Armor(ArmorSlot::Tabard) => HudImageKey::EquipEmptyTabard,
-        EquipSlot::ActiveMainhand => HudImageKey::EquipEmptyActiveMainhand,
-        EquipSlot::ActiveOffhand => HudImageKey::EquipEmptyActiveOffhand,
-        EquipSlot::InactiveMainhand => HudImageKey::EquipEmptyInactiveMainhand,
-        EquipSlot::InactiveOffhand => HudImageKey::EquipEmptyInactiveOffhand,
-        EquipSlot::Lantern => HudImageKey::EquipEmptyLantern,
-        EquipSlot::Glider => HudImageKey::EquipEmptyGlider,
+        EquipSlot::Armor(ArmorSlot::Head) => HudImageKey::GhostHead,
+        EquipSlot::Armor(ArmorSlot::Neck) => HudImageKey::GhostNecklace,
+        EquipSlot::Armor(ArmorSlot::Shoulders) => HudImageKey::GhostShoulders,
+        EquipSlot::Armor(ArmorSlot::Chest) => HudImageKey::GhostChest,
+        EquipSlot::Armor(ArmorSlot::Hands) => HudImageKey::GhostHands,
+        EquipSlot::Armor(ArmorSlot::Ring1 | ArmorSlot::Ring2) => HudImageKey::GhostRing,
+        EquipSlot::Armor(ArmorSlot::Back) => HudImageKey::GhostBack,
+        EquipSlot::Armor(ArmorSlot::Belt) => HudImageKey::GhostBelt,
+        EquipSlot::Armor(ArmorSlot::Legs) => HudImageKey::GhostLegs,
+        EquipSlot::Armor(ArmorSlot::Feet) => HudImageKey::GhostFeet,
+        EquipSlot::Armor(ArmorSlot::Tabard) => HudImageKey::GhostTabard,
+        EquipSlot::ActiveMainhand | EquipSlot::InactiveMainhand => HudImageKey::GhostMainhand,
+        EquipSlot::ActiveOffhand | EquipSlot::InactiveOffhand => HudImageKey::GhostOffhand,
+        EquipSlot::Lantern => HudImageKey::GhostLantern,
+        EquipSlot::Glider => HudImageKey::GhostGlider,
         EquipSlot::Armor(ArmorSlot::Bag1 | ArmorSlot::Bag2 | ArmorSlot::Bag3 | ArmorSlot::Bag4) => {
             unreachable!(
-                "Bag1-4 are excluded from the Equipment panel (spec §3.7) and never spawned via \
+                "Bag1-4 are excluded from the paper-doll (spec §3.7) and never spawned via \
                  spawn_equip_slot"
             )
         },
     }
 }
 
-/// BL-82 EM-5.17 T57.13 — folds Xindeler's real 8-tier [`Quality`]
-/// (`common/src/comp/inventory/item/mod.rs:73-82`) down to the rarity asset
-/// pack's 6 slot-background textures (spec §3.7: "a mapping decision, not a
-/// blocker, but worth a short confirmation" — this is that documented
-/// choice, made now rather than left silent):
-/// - `Low` + `Common` fold together into the pack's own "Common" tier (both are
-///   the two lowest/mundane tiers, and the pack itself has no separate "very
-///   common"/"junk" visual).
-/// - `Moderate` -> Uncommon, `High` -> Rare, `Epic` -> VeryRare, `Legendary` ->
-///   Legendary keep a natural 1:1 step up the remaining tiers.
-/// - `Artifact` (the highest REAL player-facing tier) maps to the pack's top
-///   "Mythic" visual (there is no dedicated 7th texture).
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — folds Xindeler's real
+/// 8-tier [`Quality`] (`common/src/comp/inventory/item/mod.rs:73-82`) down to
+/// the legacy `bag/buttons/inv_slot_*.png` rarity set (matching legacy
+/// "xindeler-old"'s `bag.rs` colour mapping), replacing the earlier
+/// `hud_d4/slot_bg_*.png` 6-texture fold:
+/// - `Low` -> Grey, `Common` -> Common (legacy has a distinct "junk" grey tier
+///   the earlier `hud_d4` pack didn't).
+/// - `Moderate` -> Green, `High` -> Blue, `Epic` -> Purple, `Legendary` -> Gold
+///   — a natural 1:1 step up the remaining named tiers.
+/// - `Artifact` (the highest REAL player-facing tier) maps to Orange, the
+///   legacy pack's top named colour.
 /// - `Debug` is a dev-only tier that should never reach a player's bag (per the
-///   spec's own note) — folded to `Mythic` too, purely so this match stays
-///   total without a panic path; it is not expected to ever actually render in
-///   play.
+///   earlier spec's own note) — folded to Red, purely so this match stays total
+///   without a panic path; not expected to ever actually render in play.
 fn quality_rarity_background(quality: Quality) -> HudImageKey {
     match quality {
-        Quality::Low | Quality::Common => HudImageKey::SlotBgCommon,
-        Quality::Moderate => HudImageKey::SlotBgUncommon,
-        Quality::High => HudImageKey::SlotBgRare,
-        Quality::Epic => HudImageKey::SlotBgVeryRare,
-        Quality::Legendary => HudImageKey::SlotBgLegendary,
-        Quality::Artifact | Quality::Debug => HudImageKey::SlotBgMythic,
+        Quality::Low => HudImageKey::InvSlotGrey,
+        Quality::Common => HudImageKey::InvSlotCommon,
+        Quality::Moderate => HudImageKey::InvSlotGreen,
+        Quality::High => HudImageKey::InvSlotBlue,
+        Quality::Epic => HudImageKey::InvSlotPurple,
+        Quality::Legendary => HudImageKey::InvSlotGold,
+        Quality::Artifact => HudImageKey::InvSlotOrange,
+        Quality::Debug => HudImageKey::InvSlotRed,
     }
 }
 
 /// The bag slot's rarity-background [`bevy::ui::widget::ImageNode`] for the
 /// given (possibly absent) occupant — see [`quality_rarity_background`] for
-/// the tier mapping. An empty slot gets back a plain
-/// [`bevy::ui::widget::ImageNode::default`] (fully transparent — see that
-/// type's own doc comment), the SAME state every bag slot starts in at
-/// spawn.
+/// the tier mapping. An empty slot gets back the legacy empty-slot art
+/// (`HudImageKey::InvSlot`), the SAME state every bag slot starts in at
+/// spawn ([`spawn_bag_grid_once_capacity_known`]).
 fn bag_rarity_image_node(
     item: Option<&NetItemStack>,
     images: &HudImages,
@@ -732,7 +765,7 @@ fn bag_rarity_image_node(
         Some(item) => {
             bevy::ui::widget::ImageNode::new(images.get(quality_rarity_background(item.quality)))
         },
-        None => bevy::ui::widget::ImageNode::default(),
+        None => bevy::ui::widget::ImageNode::new(images.get(HudImageKey::InvSlot)),
     }
 }
 
@@ -749,24 +782,6 @@ fn bag_rarity_image_node(
 fn force_open_inventory_for_smoke_capture(mut state: ResMut<HudState>) {
     if std::env::var("XINDELER_SMOKE_OPEN_INVENTORY").is_ok_and(|v| v != "0") {
         state.toggle(HudWindow::Inventory);
-    }
-}
-
-/// BL-82 EM-5.18 T58.15 (P3 parity check) — forces `InventoryTab::Equipment`
-/// once at boot when `XINDELER_SMOKE_INVENTORY_TAB=equipment` is set, the
-/// same env-var-gated, smoke-only debug-override convention
-/// [`force_open_inventory_for_smoke_capture`] (immediately above) already
-/// establishes: `--smoke-screenshot` has no real mouse to click the
-/// Equipment tab button with, so this is how a live visual parity check
-/// against Phase 7's shipped, Matías-approved 18-slot paper-doll layout
-/// (spec/task T58.15) can capture the Equipment tab specifically, rather
-/// than only ever capturing the default (`InventoryTab::Items`) tab. A
-/// no-op (the tab stays on its `Default` value, `Items`) unless the env var
-/// is set to exactly `"equipment"` — harmless in every normal run, and in
-/// every OTHER smoke capture that doesn't set it.
-fn force_select_equipment_tab_for_smoke_capture(mut tab: ResMut<InventoryTab>) {
-    if std::env::var("XINDELER_SMOKE_INVENTORY_TAB").as_deref() == Ok("equipment") {
-        *tab = InventoryTab::Equipment;
     }
 }
 
@@ -799,51 +814,6 @@ fn sync_inventory_window_visibility(
     } else {
         Visibility::Hidden
     };
-}
-
-/// Toggles [`ItemsTabRoot`]'s and [`EquipmentTabRoot`]'s content to match the
-/// currently-selected [`InventoryTab`] — via `Node::display` (`Flex`/`None`),
-/// NOT `Visibility` (BL-82 EM-5.18 Phase 1, spec §3.1).
-///
-/// ## Why `Display`, not `Visibility` (a real bug this crate already fixed once)
-/// `Visibility::Hidden` only skips RENDERING an entity — it does NOT remove
-/// it from `taffy`'s layout computation, so a `Row`-direction panel with both
-/// tab-content containers as siblings would still lay them out SIDE BY SIDE
-/// regardless of which one is "hidden," summing BOTH widths into the row and
-/// mis-sizing/off-centering the whole panel. This is the exact same bug
-/// `diary.rs::sync_tab_content_visibility`'s own doc comment documents (a
-/// live `--smoke-screenshot` of the Diary window caught it there: the
-/// darkened backdrop rendered, but no panel content was ever visible
-/// anywhere on screen, because all three of Stats/Tree/Abilities summed their
-/// widths regardless of which was "selected"). This inventory panel is the
-/// IDENTICAL shape (`FlexDirection::Row` with tab-content siblings), so this
-/// system copies that fix verbatim: `Node::display = Display::None` removes
-/// an entity from layout entirely (zero size, as if it weren't there), so
-/// only the ONE currently-selected tab's content ever contributes to the
-/// row's width. Do not "fix" this back to `Visibility` — that would
-/// reintroduce the exact bug `diary.rs` already root-caused once in this
-/// same crate.
-fn sync_inventory_tab_content_visibility(
-    selected: Res<InventoryTab>,
-    mut items: Query<&mut Node, (With<ItemsTabRoot>, Without<EquipmentTabRoot>)>,
-    mut equipment: Query<&mut Node, (With<EquipmentTabRoot>, Without<ItemsTabRoot>)>,
-) {
-    if !selected.is_changed() {
-        return;
-    }
-    fn display_for(is_selected: bool) -> Display {
-        if is_selected {
-            Display::Flex
-        } else {
-            Display::None
-        }
-    }
-    if let Ok(mut node) = items.single_mut() {
-        node.display = display_for(matches!(*selected, InventoryTab::Items));
-    }
-    if let Ok(mut node) = equipment.single_mut() {
-        node.display = display_for(matches!(*selected, InventoryTab::Equipment));
-    }
 }
 
 /// Reconciles every bag/equip slot's [`SlotContents`] (+, for BAG slots
@@ -978,6 +948,82 @@ fn sync_two_handed_offhand_disable(
 /// tint, not a reusable palette colour).
 fn disabled_offhand_tint() -> Color { Color::srgba(0.32, 0.32, 0.32, 0.75) }
 
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — writes the left [`StatColumn`]
+/// readouts from the local player's already-mirrored [`NetHealth`]/
+/// [`NetEnergy`]/[`NetPoise`] (the SAME `Net*` components `combat_hud.rs::
+/// sync_local_player_bars` already reads off `NetLocalPlayer` — no new
+/// mirror). Health/Energy show the pool's `max` (rounded); StunRes uses
+/// `poise.max` as a v1 stand-in (poise IS the sim's stun-resistance pool
+/// today; a dedicated "stun resistance" stat doesn't exist separately).
+/// Protection/CombatRating/Stealth have NO mirrored source yet — they stay
+/// the "0" placeholder [`spawn_inventory_window`] already writes.
+/// `// TODO(BL-82 follow-up)`: those three need a protocol mirror field
+/// before they can show a real number; this system deliberately does NOT
+/// invent a value for them. Runs every frame (not `Changed<>`-gated) since
+/// the write is 3 tiny `String` diffs on a handful of `Text` components —
+/// negligible relative to this crate's other per-frame systems, and the
+/// window is hidden most of the time anyway.
+fn sync_inventory_stats(
+    player: Query<
+        (Option<&NetHealth>, Option<&NetEnergy>, Option<&NetPoise>),
+        With<NetLocalPlayer>,
+    >,
+    mut values: Query<(&StatValueText, &mut Text)>,
+) {
+    let Ok((health, energy, poise)) = player.single() else {
+        return;
+    };
+    for (stat, mut text) in &mut values {
+        let new_text = match stat.0 {
+            StatKind::Health => health.map(|h| format!("{}", h.max.round())),
+            StatKind::Energy => energy.map(|e| format!("{}", e.max.round())),
+            StatKind::StunRes => poise.map(|p| format!("{}", p.max.round())),
+            // TODO(BL-82 follow-up): Protection/CombatRating/Stealth need a
+            // protocol mirror field — no real value exists to show yet.
+            StatKind::Protection | StatKind::CombatRating | StatKind::Stealth => None,
+        };
+        if let Some(new_text) = new_text
+            && text.0 != new_text
+        {
+            text.0 = new_text;
+        }
+    }
+}
+
+/// BL-82 EM-5.17/5.18 legacy-inventory rebuild — keeps the footer's
+/// [`SlotCountText`] ("occupied/total") in sync with the local player's
+/// [`NetInventory`]. Runs unconditionally (NOT `Changed<NetInventory>`-gated,
+/// same posture as [`sync_inventory_stats`]): the mirror can settle the
+/// player's real bag capacity a frame or two AFTER the first (possibly
+/// still-empty) `NetInventory` insertion, and a `Changed`-gate latched that
+/// early empty snapshot as a permanent "0/0" (caught in the EM-5.18 rebuild
+/// smoke — the grid rendered its real ~36 empty slots but the footer stayed
+/// "0/0"). Recomputing every frame is a single ~36-element `Vec` count —
+/// negligible, and always correct.
+fn sync_slot_count(
+    player: Query<&NetInventory, With<NetLocalPlayer>>,
+    mut counts: Query<&mut Text, With<SlotCountText>>,
+) {
+    let Ok(inventory) = player.single() else {
+        return;
+    };
+    let Ok(mut text) = counts.single_mut() else {
+        return;
+    };
+    let occupied = inventory
+        .slots
+        .iter()
+        .filter(|slot| slot.item.is_some())
+        .count();
+    let new_text = format!("{}/{}", occupied, inventory.slots.len());
+    if text.0 != new_text {
+        text.0 = new_text;
+    }
+}
+
+// TODO(BL-82 follow-up): real .vox item icons need an offscreen voxel-icon
+// render pipeline — the 3-char `icon_text` glyph below is a documented v1
+// placeholder (see `xindeler_ui::slot`'s own module doc comment).
 fn net_item_to_slot_contents(item: Option<&xindeler_protocol::NetItemStack>) -> SlotContents {
     match item {
         Some(item) => SlotContents {
@@ -1122,9 +1168,11 @@ fn spawn_equip_picker_root(mut commands: Commands, theme: Res<HudTheme>, images:
 /// Toggles [`EquipPickerRoot`]'s **`Visibility`** (NOT `Node::display`, spec
 /// §3.3) from [`EquipPickerState::open_slot`] — this root has no
 /// `Row`-direction flex siblings of its own (it's the only content under its
-/// backdrop, unlike P1's tab-content pair), so `Visibility::Hidden` doesn't
-/// hit the layout-summing hazard [`sync_inventory_tab_content_visibility`]'s
-/// own doc comment documents; toggling it here is safe and simpler.
+/// backdrop), so `Visibility::Hidden` doesn't hit the layout-summing hazard
+/// `diary.rs`'s own `sync_tab_content_visibility` doc comment documents
+/// (a `Row`-direction panel with hidden-but-still-laid-out siblings summing
+/// their widths regardless of which is "selected"); toggling it here is
+/// safe and simpler.
 fn sync_equip_picker_visibility(
     picker: Res<EquipPickerState>,
     mut root: Query<&mut Visibility, With<EquipPickerRoot>>,
@@ -1451,6 +1499,14 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        // BL-82 EM-5.17/5.18 legacy-inventory rebuild — `spawn_inventory_
+        // window` now reads `HudImages` directly (stat icons, gold coin),
+        // so this test needs a real (test) `HudImages`, same as this file's
+        // other `new_app_with_hud_resources`-style fixtures.
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
 
         app.world_mut()
             .run_system_once(spawn_inventory_window)
@@ -1465,45 +1521,46 @@ mod tests {
         assert_eq!(z_index, zlayer::MODAL_WINDOWS);
     }
 
-    /// BL-82 EM-5.17 T57.13 — pins the documented 8-tier-to-6-texture rarity
-    /// fold (this function's own doc comment) so a future `Quality` variant
-    /// addition/reorder can't silently change which pack texture a tier
-    /// shows without a test noticing. `Low`/`Common` share one texture;
-    /// `Artifact`/`Debug` share the top one; every other tier is a distinct
-    /// 1:1 step.
+    /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — pins the documented
+    /// 8-tier-to-legacy-rarity-set fold (this function's own doc comment) so
+    /// a future `Quality` variant addition/reorder can't silently change
+    /// which legacy `inv_slot_*.png` colour a tier shows without a test
+    /// noticing. Every tier now maps to a DISTINCT legacy colour (unlike the
+    /// earlier `hud_d4`-set fold, which shared two textures across pairs of
+    /// tiers).
     #[test]
-    fn quality_rarity_background_folds_all_eight_tiers_to_the_six_pack_textures() {
+    fn quality_rarity_background_maps_every_tier_to_a_distinct_legacy_colour() {
         assert_eq!(
             quality_rarity_background(Quality::Low),
-            HudImageKey::SlotBgCommon
+            HudImageKey::InvSlotGrey
         );
         assert_eq!(
             quality_rarity_background(Quality::Common),
-            HudImageKey::SlotBgCommon
+            HudImageKey::InvSlotCommon
         );
         assert_eq!(
             quality_rarity_background(Quality::Moderate),
-            HudImageKey::SlotBgUncommon
+            HudImageKey::InvSlotGreen
         );
         assert_eq!(
             quality_rarity_background(Quality::High),
-            HudImageKey::SlotBgRare
+            HudImageKey::InvSlotBlue
         );
         assert_eq!(
             quality_rarity_background(Quality::Epic),
-            HudImageKey::SlotBgVeryRare
+            HudImageKey::InvSlotPurple
         );
         assert_eq!(
             quality_rarity_background(Quality::Legendary),
-            HudImageKey::SlotBgLegendary
+            HudImageKey::InvSlotGold
         );
         assert_eq!(
             quality_rarity_background(Quality::Artifact),
-            HudImageKey::SlotBgMythic
+            HudImageKey::InvSlotOrange
         );
         assert_eq!(
             quality_rarity_background(Quality::Debug),
-            HudImageKey::SlotBgMythic
+            HudImageKey::InvSlotRed
         );
     }
 
@@ -1677,67 +1734,113 @@ mod tests {
         );
     }
 
-    /// BL-82 EM-5.18 Phase 1 (T58.5): selecting `InventoryTab::Equipment`
-    /// flips `EquipmentTabRoot`'s `Node::display` to `Flex` and
-    /// `ItemsTabRoot`'s to `None` — and the reverse holds for the default
-    /// (`Items`) selection. Asserted via `Node::display`, NOT `Visibility` —
-    /// that distinction is the entire point of this system (see its own doc
-    /// comment for why `Visibility::Hidden` alone would NOT be equivalent
-    /// here).
+    /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — `spawn_inventory_window`
+    /// produces the single combined legacy layout: exactly one [`StatColumn`]
+    /// (with 6 [`StatValueText`] rows), one fixed-size [`PaperdollRoot`], one
+    /// [`BagGridRoot`], and one [`SlotCountText`] — all mounted
+    /// SIMULTANEOUSLY (no tab machinery hides any of them), replacing the
+    /// earlier tab-split's `ItemsTabRoot`/`EquipmentTabRoot` pair.
     #[test]
-    fn sync_inventory_tab_content_visibility_toggles_node_display_per_selected_tab() {
+    fn spawn_inventory_window_produces_stat_column_paperdoll_and_slot_count() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.insert_resource(InventoryTab::default());
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
 
-        let items_root = app
-            .world_mut()
-            .spawn((ItemsTabRoot, Node {
-                display: Display::Flex,
-                ..Default::default()
-            }))
-            .id();
-        let equipment_root = app
-            .world_mut()
-            .spawn((EquipmentTabRoot, Node {
-                display: Display::None,
-                ..Default::default()
-            }))
-            .id();
-
-        // `Res<InventoryTab>::is_changed()` is true on the tick the resource
-        // is inserted, so this first run already exercises the default
-        // (`Items`) branch.
         app.world_mut()
-            .run_system_once(sync_inventory_tab_content_visibility)
-            .expect("system runs");
+            .run_system_once(spawn_inventory_window)
+            .expect("spawn_inventory_window runs");
 
+        let world = app.world_mut();
         assert_eq!(
-            app.world().get::<Node>(items_root).unwrap().display,
-            Display::Flex,
-            "Items is the default tab"
+            world.query::<&StatColumn>().iter(world).count(),
+            1,
+            "exactly one stat column"
         );
         assert_eq!(
-            app.world().get::<Node>(equipment_root).unwrap().display,
-            Display::None,
-            "Equipment tab content stays unmounted while Items is selected"
+            world.query::<&StatValueText>().iter(world).count(),
+            6,
+            "one row per StatKind"
         );
+        assert_eq!(
+            world.query::<&PaperdollRoot>().iter(world).count(),
+            1,
+            "exactly one paper-doll root, mounted unconditionally (no tab display toggle)"
+        );
+        assert_eq!(
+            world.query::<&BagGridRoot>().iter(world).count(),
+            1,
+            "exactly one bag grid root, mounted unconditionally"
+        );
+        assert_eq!(
+            world.query::<&SlotCountText>().iter(world).count(),
+            1,
+            "exactly one footer slot-count readout"
+        );
+    }
 
-        *app.world_mut().resource_mut::<InventoryTab>() = InventoryTab::Equipment;
+    /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — `PaperdollRoot`'s own
+    /// `Node` is the fixed-size (250x330px) `Relative`-positioned canvas the
+    /// module doc comment describes, NOT the earlier tab-split's flex `Row`.
+    #[test]
+    fn paperdoll_root_is_a_fixed_size_relative_canvas() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+
         app.world_mut()
-            .run_system_once(sync_inventory_tab_content_visibility)
-            .expect("system runs");
+            .run_system_once(spawn_inventory_window)
+            .expect("spawn_inventory_window runs");
 
-        assert_eq!(
-            app.world().get::<Node>(items_root).unwrap().display,
-            Display::None,
-            "Items tab content unmounts once Equipment is selected"
-        );
-        assert_eq!(
-            app.world().get::<Node>(equipment_root).unwrap().display,
-            Display::Flex,
-            "Equipment tab content mounts once selected"
-        );
+        let world = app.world_mut();
+        let node = world
+            .query_filtered::<&Node, With<PaperdollRoot>>()
+            .single(world)
+            .expect("PaperdollRoot exists");
+        assert_eq!(node.width, Val::Px(250.0));
+        assert_eq!(node.height, Val::Px(330.0));
+        assert_eq!(node.position_type, PositionType::Relative);
+    }
+
+    /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — every
+    /// [`PAPERDOLL_SLOT_LAYOUT`] entry names a real [`ALL_EQUIP_SLOTS`] slot
+    /// (so `spawn_equip_slot`'s `.position(..).expect(..)` can never panic at
+    /// runtime), the table is the confirmed 18 shown slots, and it excludes
+    /// the four `Bag1-4` slots (which belong on the bag grid, not the
+    /// paper-doll — and whose `equip_slot_frame` arm is `unreachable!`).
+    #[test]
+    fn paperdoll_layout_is_the_eighteen_shown_equip_slots() {
+        assert_eq!(PAPERDOLL_SLOT_LAYOUT.len(), 18);
+        for &(slot, ..) in PAPERDOLL_SLOT_LAYOUT {
+            assert!(
+                ALL_EQUIP_SLOTS.contains(&slot),
+                "{slot:?} is not a canonical EquipSlot — spawn_equip_slot would panic"
+            );
+            assert!(
+                !matches!(
+                    slot,
+                    EquipSlot::Armor(
+                        ArmorSlot::Bag1 | ArmorSlot::Bag2 | ArmorSlot::Bag3 | ArmorSlot::Bag4
+                    )
+                ),
+                "Bag1-4 must never appear on the paper-doll (spec §3.7)"
+            );
+        }
     }
 
     /// BL-82 EM-5.18 Phase 1 (T58.5): pins `handle_slot_drops`' existing
