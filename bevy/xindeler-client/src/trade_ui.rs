@@ -40,6 +40,7 @@ use xindeler_ui::{
     panel::panel_bundle,
     slot::{HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
+    zlayer,
 };
 
 use crate::inventory_ui::{BAG_GROUP, bag_address_to_inv_slot};
@@ -96,9 +97,32 @@ impl Plugin for TradeUiPlugin {
 /// `OFFER_SLOT_COUNT` is a client-side v1 constant, so there's no need to
 /// wait for a `NetTrade` to arrive before spawning them, unlike
 /// `crate::inventory_ui`'s capacity-dependent bag grid).
+///
+/// BL-82 holistic-review z-index fix: both [`InviteRoot`] and
+/// [`TradeWindowRoot`] are visually modal — real, centered/near-centered,
+/// interactive windows that temporarily own the player's attention, the same
+/// paint-order category `zlayer::MODAL_WINDOWS`'s own doc comment names for
+/// the diary/inventory/full-map trio — but `panel_bundle` (the bundle both
+/// spawn from) never inserts a `GlobalZIndex`, so without an explicit one
+/// here they'd default to z-partition 0, sitting BELOW the always-on ambient
+/// chrome (`ORBS_ACTION_BAR_PARTY_MINIMAP`=20) the same way
+/// `InventoryWindowRoot`/`EscMenuRoot`/`FullMapRoot` did before their own
+/// fixes this session — `bevy_ui` picking (highest z-partition first) would
+/// route clicks to the chrome in front instead of these windows underneath.
+/// Note this is purely a paint-order/z-tier fix: unlike the diary/inventory/
+/// social trio, the trade window doesn't participate in `HudState`'s
+/// mutually-exclusive window slot (no `HudWindow::Trade` variant exists) and
+/// so does NOT free the OS cursor via `cursor.rs`'s
+/// `HudState::any_window_open` — that's a pre-existing gap this patch
+/// neither introduces nor fixes.
 fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     // --- Invite prompt ---
-    let mut invite_entity = commands.spawn((InviteRoot, Visibility::Hidden, panel_bundle(&theme)));
+    let mut invite_entity = commands.spawn((
+        InviteRoot,
+        Visibility::Hidden,
+        GlobalZIndex(zlayer::MODAL_WINDOWS),
+        panel_bundle(&theme),
+    ));
     invite_entity.entry::<Node>().and_modify(|mut node| {
         node.position_type = PositionType::Absolute;
         node.top = Val::Px(90.0);
@@ -139,8 +163,12 @@ fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
     });
 
     // --- Trade window ---
-    let mut window_entity =
-        commands.spawn((TradeWindowRoot, Visibility::Hidden, panel_bundle(&theme)));
+    let mut window_entity = commands.spawn((
+        TradeWindowRoot,
+        Visibility::Hidden,
+        GlobalZIndex(zlayer::MODAL_WINDOWS),
+        panel_bundle(&theme),
+    ));
     window_entity.entry::<Node>().and_modify(|mut node| {
         node.position_type = PositionType::Absolute;
         node.top = Val::Percent(20.0);
@@ -388,6 +416,7 @@ fn handle_offer_slot_drops(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
     use common::comp::inventory::{
         item::{ItemDefinitionIdOwned, Quality},
         slot::InvSlotId,
@@ -395,6 +424,48 @@ mod tests {
     use xindeler_protocol::NetItemStack;
 
     use super::*;
+
+    fn new_app_with_hud_resources() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app
+    }
+
+    /// BL-82 holistic-review z-index fix regression: [`InviteRoot`] and
+    /// [`TradeWindowRoot`] are both genuinely modal windows (see
+    /// [`spawn_trade_ui`]'s own doc comment for why) but `panel_bundle`
+    /// never inserts a `GlobalZIndex` — before this fix, neither carried
+    /// one at all (default z-partition 0), sitting BELOW the always-on
+    /// ambient chrome the same way `InventoryWindowRoot`/`EscMenuRoot`/
+    /// `FullMapRoot` did before their own prior fixes this session. Pins
+    /// that both now carry `GlobalZIndex(zlayer::MODAL_WINDOWS)`.
+    #[test]
+    fn invite_and_trade_window_roots_carry_the_modal_windows_z_index() {
+        let mut app = new_app_with_hud_resources();
+        app.world_mut()
+            .run_system_once(spawn_trade_ui)
+            .expect("spawn_trade_ui runs");
+
+        let world = app.world_mut();
+        let invite_z = world
+            .query_filtered::<&GlobalZIndex, With<InviteRoot>>()
+            .single(world)
+            .expect("InviteRoot exists")
+            .0;
+        assert_eq!(invite_z, zlayer::MODAL_WINDOWS);
+
+        let trade_z = world
+            .query_filtered::<&GlobalZIndex, With<TradeWindowRoot>>()
+            .single(world)
+            .expect("TradeWindowRoot exists")
+            .0;
+        assert_eq!(trade_z, zlayer::MODAL_WINDOWS);
+    }
 
     #[test]
     fn offer_entry_renders_a_short_icon_and_quantity() {
