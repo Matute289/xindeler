@@ -327,6 +327,7 @@ impl Plugin for MapViewPlugin {
                     close_full_map_on_escape,
                     force_open_map_for_smoke_verification,
                     sync_full_map_visibility,
+                    sync_objectives_visibility,
                     recenter_full_map_on_open,
                     sync_minimap,
                     // ecs-design-reviewer finding: both this system and
@@ -602,9 +603,22 @@ fn spawn_map_screens(
     // non-goal, confirmed) — ships the title row + an EMPTY container ready
     // for a future system to append rows into, never hardcoded placeholder
     // objectives.
+    //
+    // BL-82 HUD redesign round 6 (separate concern from the action-bar-frame
+    // removal, same general HUD area): Matías's ask — an empty "OBJECTIVES"
+    // header with nothing under it must not render at all. Spawned
+    // `Visibility::Hidden` here; [`sync_objectives_visibility`] flips it to
+    // `Visibility::Inherited` once [`ObjectivesContainer`] actually gains a
+    // real row (a future objective-data system's job — this phase still
+    // never hardcodes one), and back to `Hidden` if it empties out again.
+    // Since no such system exists yet, this column is hidden today by
+    // construction, not by a special-cased "no data" branch — the SAME
+    // children-count check governs both "never had any" and "had some, lost
+    // them all."
     commands
         .spawn((
             ObjectivesRoot,
+            Visibility::Hidden,
             bevy::ui::GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
@@ -936,6 +950,44 @@ fn sync_full_map_visibility(
     } else {
         Visibility::Hidden
     };
+}
+
+/// BL-82 HUD redesign round 6 — Matías's ask: an empty "OBJECTIVES" header
+/// with no rows under it must not render at all, instead of showing a
+/// perpetually-empty label/box. Gates [`ObjectivesRoot`]'s [`Visibility`] on
+/// whether [`ObjectivesContainer`] currently has at least one real child row
+/// — the same signal a future objective-data system's own row-append/-remove
+/// already changes, so no NEW plumbing is needed once that system exists;
+/// today (no such system, see this module's own Phase 3 doc-comment section)
+/// the container is always empty and this keeps the whole column hidden by
+/// construction.
+///
+/// Reads `Children` unconditionally every frame (not gated on
+/// `Changed<Children>`) — cheap at this screen's scale (one query, one
+/// `Visibility` write only on an actual state flip via the diff-before-write
+/// check below), and avoids the same `Changed`-baseline trap
+/// `hotbar.rs::sync_hotbar_slots`'s own doc comment documents (a `Changed`
+/// filter established AFTER the one real mutation already happened would
+/// never fire again).
+fn sync_objectives_visibility(
+    container: Query<Option<&Children>, With<ObjectivesContainer>>,
+    mut root: Query<&mut Visibility, With<ObjectivesRoot>>,
+) {
+    let Ok(children) = container.single() else {
+        return;
+    };
+    let has_objectives = children.is_some_and(|children| !children.is_empty());
+    let Ok(mut visibility) = root.single_mut() else {
+        return;
+    };
+    let target = if has_objectives {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if *visibility != target {
+        *visibility = target;
+    }
 }
 
 /// The first time the full map opens in a session, re-centers its pan onto
@@ -1341,6 +1393,16 @@ mod tests {
             .clone()
     }
 
+    /// BL-82 HUD redesign round 6 — mirrors [`node_of`] but for
+    /// [`Visibility`], used by the [`ObjectivesRoot`] visibility-gating
+    /// tests.
+    fn node_visibility_of<T: bevy::ecs::component::Component>(world: &mut World) -> Visibility {
+        *world
+            .query_filtered::<&Visibility, With<T>>()
+            .single(world)
+            .expect("the tagged entity exists")
+    }
+
     /// Regression test for the top-right reposition (spec §3.3): the
     /// minimap panel's `Node` must use `top`/`right`, not the pre-Phase-3
     /// `bottom`/`right` — a real, intentional layout change this phase makes
@@ -1513,6 +1575,81 @@ mod tests {
         assert_eq!(
             children, 0,
             "the objectives container must spawn with no rows (no quest data system exists yet)"
+        );
+    }
+
+    /// BL-82 HUD redesign round 6 — [`ObjectivesRoot`] must spawn
+    /// `Visibility::Hidden`: since [`ObjectivesContainer`] always spawns
+    /// empty (no quest/objective data system exists yet, see the test
+    /// above), the "OBJECTIVES" header must never render on its own with an
+    /// empty box underneath it.
+    #[test]
+    fn objectives_root_spawns_hidden() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+
+        let visibility = node_visibility_of::<ObjectivesRoot>(app.world_mut());
+        assert_eq!(
+            visibility,
+            Visibility::Hidden,
+            "an empty objectives column must spawn hidden, not showing a bare \"OBJECTIVES\" \
+             label over nothing"
+        );
+    }
+
+    /// [`sync_objectives_visibility`] flips [`ObjectivesRoot`] to
+    /// `Visibility::Inherited` once [`ObjectivesContainer`] gains a real
+    /// child row (standing in here for a future objective-data system
+    /// appending one), and back to `Hidden` once that row is removed again —
+    /// the same signal governs both directions, not a one-way reveal.
+    #[test]
+    fn objectives_visibility_tracks_whether_the_container_has_rows() {
+        let mut app = new_phase3_app();
+        app.world_mut()
+            .run_system_once(spawn_map_screens)
+            .expect("spawn_map_screens runs");
+        app.update();
+
+        let container = app
+            .world_mut()
+            .query_filtered::<Entity, With<ObjectivesContainer>>()
+            .single(app.world_mut())
+            .expect("the objectives container exists");
+
+        // Still empty — stays hidden.
+        app.world_mut()
+            .run_system_once(sync_objectives_visibility)
+            .expect("system runs");
+        assert_eq!(
+            node_visibility_of::<ObjectivesRoot>(app.world_mut()),
+            Visibility::Hidden
+        );
+
+        // A real row appears (standing in for a future objective-data
+        // system's own append) — the column must reveal itself.
+        let row = app.world_mut().spawn(Node::default()).id();
+        app.world_mut().entity_mut(container).add_child(row);
+        app.world_mut()
+            .run_system_once(sync_objectives_visibility)
+            .expect("system runs");
+        assert_eq!(
+            node_visibility_of::<ObjectivesRoot>(app.world_mut()),
+            Visibility::Inherited,
+            "the column must become visible once the container has at least one real row"
+        );
+
+        // The row is removed again — the column must hide itself again, not
+        // stay stuck visible from the earlier reveal.
+        app.world_mut().entity_mut(row).despawn();
+        app.world_mut()
+            .run_system_once(sync_objectives_visibility)
+            .expect("system runs");
+        assert_eq!(
+            node_visibility_of::<ObjectivesRoot>(app.world_mut()),
+            Visibility::Hidden,
+            "the column must hide itself again once its last row is removed"
         );
     }
 
