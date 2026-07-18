@@ -29,9 +29,9 @@
 //! that math has any referent left once the art is gone. What replaces it:
 //! [`SLOT_ROW_WIDTH_PX`]/[`SLOT_ROW_HEIGHT_PX`] derive the ability-slot row's
 //! box DIRECTLY from the slot geometry itself
-//! (`crate::hotbar::SLOT_SIZE_PX`/`SLOTS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`) — no
-//! trim factor, no leading inset, no "flat opaque backing" safe-zone, because
-//! there is no background art left whose own transparent padding or
+//! (`crate::hotbar::SLOT_SIZE_PX`/`SLOT_COLS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`) —
+//! no trim factor, no leading inset, no "flat opaque backing" safe-zone,
+//! because there is no background art left whose own transparent padding or
 //! decorative corner curl needs working around. The row's own box edges ARE
 //! its visible content's edges. The four per-seam gap constants
 //! ([`HEALTH_TO_LEFT_ROW_GAP_PX`] etc.) keep the SAME "real, opaque-to-opaque
@@ -60,13 +60,21 @@
 //! the exact measured bounding boxes and the crop that fixes it.
 use bevy::{math::Rect, ui::Val};
 
-/// Size (px, both axes) of each of the three resource orbs — spec §3.1's
-/// "~160×160". The source `orb_frame_*.png`/`*_liquid.png` files are a wider
-/// `1408×768`-ish canvas (not literally square, see the module doc comment's
-/// asset-gap note) — [`ORB_SOURCE_CROP`] fixes the squash this used to cause
-/// by cropping a square sub-region of the source BEFORE it's stretched onto
-/// this square box.
-pub const ORB_SIZE_PX: f32 = 160.0;
+/// Size (px, both axes) of each of the three resource orbs. The source
+/// `orb_frame_*.png`/`*_liquid.png` files are a wider `1408×768`-ish canvas
+/// (not literally square, see the module doc comment's asset-gap note) —
+/// [`ORB_SOURCE_CROP`] fixes the squash this used to cause by cropping a square
+/// sub-region of the source BEFORE it's stretched onto this square box.
+///
+/// BL-82 HUD overhaul (this pass): shrunk `160.0 -> 112.0` (0.70×) as Matías's
+/// goal #2 — bring the whole bottom-centre cluster's SCALE down toward
+/// Veloren's thin bottom strip (`captura-veloren.png`), which reads much
+/// smaller than our previous HUD, WITHOUT changing the HUD-D4 art style. Every
+/// orb crop/inset/margin constant in this module is expressed as a factor of
+/// `ORB_SIZE_PX / 768.0`, so they all re-scale in lockstep off this one value;
+/// the minimap is a SEPARATE screen (`map_view.rs`) and is deliberately left
+/// untouched, per Matías's explicit ask.
+pub const ORB_SIZE_PX: f32 = 112.0;
 
 /// BL-82 EM-5.17 Phase 0 follow-up (Matías's HUD art-alignment report) — the
 /// SQUARE pixel-space sub-rect of the HUD-D4 orb pack's native canvas that
@@ -436,10 +444,10 @@ pub const STAMINA_FRAME_RIGHT_MARGIN_PX: f32 =
 pub const CUTHULHU_FRAME_LEFT_MARGIN_PX: f32 =
     83.0 * ORB_SIZE_PX / 768.0 - (CUTHULHU_FRAME_WIDTH_PX - ORB_SIZE_PX) / 2.0;
 
-/// BL-82 HUD redesign round 6 — the ability-slot row itself has NO baked-in
+/// BL-82 HUD redesign round 6 — the ability-slot grid itself has NO baked-in
 /// transparent margin of its own to account for: it's a plain transparent
-/// flex container sized to EXACTLY `crate::hotbar::SLOTS_PER_HALF` slots +
-/// gaps ([`SLOT_ROW_WIDTH_PX`]), not an ornate background PNG with its own
+/// grid container sized to EXACTLY `crate::hotbar::SLOT_COLS_PER_HALF` columns
+/// and gaps ([`SLOT_ROW_WIDTH_PX`]), not an ornate background PNG with its own
 /// asset-specific padding the way `action_bar_bg_left.png`/`_right.png` used
 /// to have (round 5's now-deleted `ACTION_BAR_LEFT/RIGHT_*_MARGIN_PX`). So
 /// the `box_gap = target_real_gap - margin_A - margin_B` formula round 5
@@ -522,35 +530,37 @@ pub const CUTHULHU_LIQUID_INSET_PX: f32 = 20.0;
 /// liquid circle is still visibly larger than its frame").
 pub const STAMINA_LIQUID_INSET_PX: f32 = 20.0;
 
-/// BL-82 HUD redesign round 6 — replaces the deleted
-/// `ACTION_BAR_HALF_HEIGHT_PX`. Height (px) of each ability-slot row's own
-/// container — kept equal to [`ORB_SIZE_PX`] (not just
-/// [`crate::hotbar::SLOT_SIZE_PX`]) so the row's container still spans the SAME
-/// vertical band as the orbs either side of it; `hotbar.rs`'s `align_items:
-/// AlignItems::Center` then centres the (shorter) slots within that band,
-/// matching the orbs' own vertical centre exactly the way the old
-/// action-bar-half background did.
+/// Height (px) of each ability-slot grid's own container — kept equal to
+/// [`ORB_SIZE_PX`] so the container still spans the SAME vertical band as the
+/// orbs either side of it; `hotbar.rs`'s `align_content: AlignContent::Center`
+/// then centres the (shorter) 2-row grid within that band, matching the orbs'
+/// own vertical centre.
+///
+/// BL-82 HUD overhaul (this pass): the block is now 2 rows tall
+/// (`crate::hotbar::SLOT_ROWS_PER_HALF`), so the grid content is
+/// `2 * SLOT_SIZE_PX` (`84px`) — still comfortably shorter than the `112px`
+/// orb band, so it centres cleanly with margin above and below.
 pub const SLOT_ROW_HEIGHT_PX: f32 = ORB_SIZE_PX;
 
-/// BL-82 HUD redesign round 6 — replaces the deleted
-/// `ACTION_BAR_HALF_WIDTH_PX`/ `ACTION_BAR_WIDTH_TRIM`. Width (px) of each
-/// ability-slot row's own container, derived DIRECTLY from the slot geometry
-/// itself — `crate::hotbar::SLOTS_PER_HALF` slots of
+/// Width (px) of each ability-slot GRID's own container, derived DIRECTLY from
+/// the slot geometry itself — `crate::hotbar::SLOT_COLS_PER_HALF` columns of
 /// `crate::hotbar::SLOT_SIZE_PX` each, separated by
-/// `crate::hotbar::SLOTS_PER_HALF - 1` gaps of
-/// `crate::hotbar::HOTBAR_SLOT_GAP_PX`. Unlike the deleted constants this
-/// replaces, there is no trim factor, no leading inset, and no "flat opaque
-/// backing" safe-zone to fit inside: with the ornate `action_bar_bg_left.png`/
-/// `_right.png` frame art gone, the row's box has no background art of its
-/// own at all (a plain transparent flex container) — its bounding box IS
-/// exactly its visible content's bounding box, so this is a straight sum, not
-/// a tuned-by-eye multiplier the way the old (now-deleted)
-/// `ACTION_BAR_WIDTH_TRIM` used to be. See
+/// `crate::hotbar::SLOT_COLS_PER_HALF - 1` gaps of
+/// `crate::hotbar::HOTBAR_SLOT_GAP_PX`. The grid's box has no background art of
+/// its own (a plain transparent [`bevy::ui::Display::Grid`] container) — its
+/// bounding box IS exactly its visible content's bounding box, so this is a
+/// straight sum.
+///
+/// BL-82 HUD overhaul (this pass): with the block now a 2×3 grid (goal #3) the
+/// WIDTH is driven by the COLUMN count (`crate::hotbar::SLOT_COLS_PER_HALF`,
+/// `3`), not the old flat `SLOTS_PER_HALF` (which counted a whole 1×5 row) — 3
+/// columns of the smaller `42px` slots is far narrower than the old 5×`58px`
+/// row, directly serving goal #2's shrink. See
 /// [`tests::slot_row_width_matches_the_slot_geometry_exactly`] for the pinned
 /// regression.
-pub const SLOT_ROW_WIDTH_PX: f32 = crate::hotbar::SLOTS_PER_HALF as f32
+pub const SLOT_ROW_WIDTH_PX: f32 = crate::hotbar::SLOT_COLS_PER_HALF as f32
     * crate::hotbar::SLOT_SIZE_PX
-    + (crate::hotbar::SLOTS_PER_HALF as f32 - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
+    + (crate::hotbar::SLOT_COLS_PER_HALF as f32 - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
 
 /// Horizontal gap (px) between adjacent cluster pieces — health orb / left
 /// action-bar half / stamina orb / right action-bar half / mana orb. Was a
@@ -1048,18 +1058,20 @@ mod tests {
     /// remains worth pinning: the formula itself, computed the exact same way
     /// `crate::hotbar`'s own row-spawning code does, so a future edit to
     /// [`SLOT_ROW_WIDTH_PX`]'s definition or to
-    /// `crate::hotbar::SLOT_SIZE_PX`/`SLOTS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`
+    /// `crate::hotbar::SLOT_SIZE_PX`/`SLOT_COLS_PER_HALF`/`HOTBAR_SLOT_GAP_PX`
     /// can't silently desync the two.
     #[test]
     fn slot_row_width_matches_the_slot_geometry_exactly() {
-        let slots_per_half = crate::hotbar::SLOTS_PER_HALF as f32;
-        let expected = slots_per_half * crate::hotbar::SLOT_SIZE_PX
-            + (slots_per_half - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
+        // BL-82 HUD overhaul: width is driven by the COLUMN count (the 2×3
+        // grid), not the old flat `SLOTS_PER_HALF`.
+        let cols = crate::hotbar::SLOT_COLS_PER_HALF as f32;
+        let expected =
+            cols * crate::hotbar::SLOT_SIZE_PX + (cols - 1.0) * crate::hotbar::HOTBAR_SLOT_GAP_PX;
         assert!(
             (SLOT_ROW_WIDTH_PX - expected).abs() < f32::EPSILON,
-            "SLOT_ROW_WIDTH_PX ({SLOT_ROW_WIDTH_PX}) must equal exactly SLOTS_PER_HALF * \
-             SLOT_SIZE_PX + (SLOTS_PER_HALF - 1) * HOTBAR_SLOT_GAP_PX ({expected}) — with no \
-             background frame art left, the row's box has nothing else in it"
+            "SLOT_ROW_WIDTH_PX ({SLOT_ROW_WIDTH_PX}) must equal exactly SLOT_COLS_PER_HALF * \
+             SLOT_SIZE_PX + (SLOT_COLS_PER_HALF - 1) * HOTBAR_SLOT_GAP_PX ({expected}) — with no \
+             background frame art left, the grid's box has nothing else in it"
         );
     }
 }

@@ -80,27 +80,25 @@ pub struct HudPalette {
     /// future selection/focus highlight on a hotbar slot using `accent`
     /// would otherwise visually blend with an active cooldown sweep.
     pub cooldown_overlay: Color,
-    /// Opaque dark fill drawn as the BOTTOM layer of every hotbar skill slot
-    /// (`hotbar.rs`'s `SkillSlotBackground`), UNDER the ornate
-    /// `skill_slot_border.png` frame art. BL-82 HUD polish round 7: the frame
-    /// asset is an ornate gothic ring whose opaque silhouette fills only
-    /// ~50% of its own bounding box and reaches the box edge on merely ~2% of
-    /// each edge (median 31px inset) — so two adjacent slots' frames NEVER
-    /// touch no matter how tight the crop or how small
-    /// (`hotbar.rs::HOTBAR_SLOT_GAP_PX = 0.0`) the gap, and the game world
-    /// showed through every concave notch AND the transparent centre, reading
-    /// as a wide gap between slots (Matías's `captura11.png`; rounds 5/6
-    /// couldn't fix it by crop/gap tuning because the gap is intrinsic to the
-    /// asset's shape, not a measurement error). Filling the whole square box
-    /// with this OPAQUE dark first makes adjacent slot boxes touch flush and
-    /// turns every notch/centre into continuous dark rather than grass —
-    /// exactly how `hud-ejemplo-2.png`'s reference slots (solid dark squares
-    /// with a thin frame) read flush. Kept a near-black warm tone matching
-    /// the frame art's own darkest metal (sampled ~(19,18,16)/255) so the
-    /// fill and frame read as one piece; opaque (`alpha = 1.0`) so no game
-    /// world bleeds through — see
-    /// `slot_bg_is_opaque_and_dark_enough_to_hide_the_game_world_behind_a_slot`.
-    pub slot_bg: Color,
+    /// The "this slot is EMPTY" stone cue drawn in the CENTRE of an unfilled
+    /// hotbar skill slot (`hotbar.rs`'s `SkillSlotBackground`), UNDER the
+    /// ornate `skill_slot_border.png` frame ring.
+    ///
+    /// BL-82 HUD overhaul (this pass) replaces round 7's opaque near-black
+    /// full-box `slot_bg` fill. Round 7 filled the WHOLE slot box opaque so
+    /// adjacent frames read flush — but Matías found the resulting solid black
+    /// boxes too heavy and asked for transparent slots back (the game world
+    /// showing through the ring's notches is now acceptable), with only the
+    /// specifically-EMPTY slot state carrying a subtle grey stone treatment in
+    /// its centre so "is this slot empty?" still reads at a glance without a
+    /// heavy flat plate. So this role is now: (a) a mid GREY stone tone, not
+    /// near-black — it must read as a deliberate "empty socket" cue, distinct
+    /// from the frame's own dark metal (see
+    /// `slot_empty_stone_is_a_readable_mid_grey_not_near_black`); (b) only
+    /// partially opaque, since `hotbar.rs` insets it to the ring's centre hole
+    /// (not the full box) and hides it entirely once the slot holds an
+    /// ability — the ring's own notches stay see-through either way.
+    pub slot_empty_stone: Color,
 }
 
 impl Default for HudPalette {
@@ -124,7 +122,7 @@ impl Default for HudPalette {
             buff_bad: Color::srgba(0.80, 0.25, 0.25, 1.0),
             danger: Color::srgba(0.85, 0.10, 0.10, 0.55),
             cooldown_overlay: Color::srgba(0.35, 0.55, 0.75, 0.6),
-            slot_bg: Color::srgba(0.075, 0.070, 0.060, 1.0),
+            slot_empty_stone: Color::srgba(0.34, 0.33, 0.31, 0.72),
         }
     }
 }
@@ -284,31 +282,32 @@ mod tests {
         );
     }
 
-    /// BL-82 HUD polish round 7 (Matías's `captura11.png` "visible gap between
-    /// skill slots" report, 7th round): `slot_bg` is the flush-look fix —
-    /// `skill_slot_border.png` is an ornate ring that fills only ~50% of its
-    /// own bounding box and reaches its box edge on merely ~2% of each edge,
-    /// so no crop or `HOTBAR_SLOT_GAP_PX` value can make two adjacent frames
-    /// touch; `hotbar.rs` fills the whole slot box with this OPAQUE dark first
-    /// so the boxes touch flush and the game world stops showing through the
-    /// frame's concave notches and transparent centre. For that to work the
-    /// role MUST be (a) fully opaque — any translucency lets the grass bleed
-    /// straight back through, reintroducing the exact bug — and (b) genuinely
-    /// dark, so it reads as one piece with the near-black frame metal rather
-    /// than as a bright plate behind it.
+    /// BL-82 HUD overhaul: `slot_empty_stone` replaces round 7's opaque
+    /// near-black full-box `slot_bg`. It is the "empty socket" cue drawn in an
+    /// unfilled slot's centre hole (`hotbar.rs`'s `SkillSlotBackground`), so it
+    /// must read as a deliberate MID-GREY stone, NOT the frame's own near-black
+    /// metal (which is what round 7's dark fill looked like, and which Matías
+    /// rejected as too heavy). It is also partially translucent — `hotbar.rs`
+    /// insets it to the centre and hides it on filled slots, so it never needs
+    /// to fully occlude the game world the way round 7's flush fill did.
     #[test]
-    fn slot_bg_is_opaque_and_dark_enough_to_hide_the_game_world_behind_a_slot() {
-        let color = HudPalette::default().slot_bg.to_srgba();
-        assert_eq!(
-            color.alpha, 1.0,
-            "slot_bg must be fully opaque, else the game world bleeds through the frame's concave \
-             notches/centre and the round-7 flush fix regresses: {color:?}"
-        );
+    fn slot_empty_stone_is_a_readable_mid_grey_not_near_black() {
+        let color = HudPalette::default().slot_empty_stone.to_srgba();
         let luma = 0.299 * color.red + 0.587 * color.green + 0.114 * color.blue;
         assert!(
-            luma < 0.15,
-            "slot_bg should be near-black to read as one piece with the frame metal: {color:?} \
-             (luma {luma})"
+            luma > 0.2,
+            "slot_empty_stone must be a readable mid grey, distinct from the frame's near-black \
+             metal, so an empty slot's stone cue is visible at a glance: {color:?} (luma {luma})"
+        );
+        assert!(
+            luma < 0.6,
+            "slot_empty_stone should still read as dim STONE, not a bright plate: {color:?} (luma \
+             {luma})"
+        );
+        assert!(
+            color.alpha > 0.0 && color.alpha < 1.0,
+            "slot_empty_stone is a partial-cover centre cue, not an opaque full-box fill: \
+             {color:?}"
         );
     }
 }
