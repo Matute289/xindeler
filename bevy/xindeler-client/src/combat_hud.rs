@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use bevy::{prelude::*, ui::GlobalZIndex};
+use xindeler_app::XindelerSettings;
 use xindeler_protocol::{
     NetBuffs, NetCombo, NetEnergy, NetHealth, NetLocalPlayer, NetPoise, NetXp,
 };
@@ -647,6 +648,7 @@ fn sync_buff_strip(
 /// (no new mirror needed for this part).
 fn sync_death_screen_and_vignette(
     player: Query<&NetHealth, With<NetLocalPlayer>>,
+    settings: Res<XindelerSettings>,
     mut death_screen: Query<&mut Visibility, With<DeathScreenRoot>>,
     mut vignette: Query<&mut BackgroundColor, With<DamageVignette>>,
 ) {
@@ -672,8 +674,18 @@ fn sync_death_screen_and_vignette(
     // at, say, 95%).
     const VIGNETTE_THRESHOLD: f32 = 0.3;
     if let Ok(mut color) = vignette.single_mut() {
-        let severity = ((VIGNETTE_THRESHOLD - fraction) / VIGNETTE_THRESHOLD).clamp(0.0, 1.0);
-        color.0 = Color::srgba(0.5, 0.0, 0.0, severity * 0.6);
+        // BL-82 EM-5.16 (T56.43): accessibility's `reduce_flashing` toggle
+        // suppresses this screen-covering red flash entirely — it's the only
+        // screen-flash-style effect this client has today. The death screen
+        // above (a static, non-flashing full-stop) is untouched by this
+        // toggle; it still shows at 0 health either way.
+        let alpha = if settings.accessibility.reduce_flashing {
+            0.0
+        } else {
+            let severity = ((VIGNETTE_THRESHOLD - fraction) / VIGNETTE_THRESHOLD).clamp(0.0, 1.0);
+            severity * 0.6
+        };
+        color.0 = Color::srgba(0.5, 0.0, 0.0, alpha);
     }
 }
 
@@ -785,6 +797,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.insert_resource(HudTheme::default());
+        app.insert_resource(XindelerSettings::default());
         app
     }
 
@@ -1380,6 +1393,51 @@ mod tests {
             .0
             .alpha();
         assert_eq!(vignette_alpha, 0.0);
+    }
+
+    /// BL-82 EM-5.16 (T56.43): `accessibility.reduce_flashing` suppresses the
+    /// low-health damage vignette entirely, even at zero health — the death
+    /// screen (a static, non-flashing full-stop) still shows regardless, so
+    /// the player never loses the "you died" signal, only the flashing one.
+    #[test]
+    fn reduce_flashing_suppresses_the_damage_vignette() {
+        let mut app = new_app();
+        app.world_mut()
+            .resource_mut::<XindelerSettings>()
+            .accessibility
+            .reduce_flashing = true;
+        let death_screen = app
+            .world_mut()
+            .spawn((DeathScreenRoot, Visibility::Hidden))
+            .id();
+        let vignette = app
+            .world_mut()
+            .spawn((DamageVignette, BackgroundColor(Color::NONE)))
+            .id();
+        app.world_mut().spawn((NetLocalPlayer, NetHealth {
+            current: 0.0,
+            max: 100.0,
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_death_screen_and_vignette)
+            .expect("system runs");
+
+        assert_eq!(
+            *app.world().get::<Visibility>(death_screen).unwrap(),
+            Visibility::Visible,
+            "the death screen must still show at zero health regardless of reduce_flashing"
+        );
+        let vignette_alpha = app
+            .world()
+            .get::<BackgroundColor>(vignette)
+            .unwrap()
+            .0
+            .alpha();
+        assert_eq!(
+            vignette_alpha, 0.0,
+            "reduce_flashing must fully suppress the vignette even at zero health"
+        );
     }
 
     /// The buff strip spawns one icon per distinct active buff kind off the

@@ -167,6 +167,10 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("MenuRoot", RootKind::TopLevel), // GlobalZIndex(TOAST + 100) — same tier;
     // the main menu is the only thing on screen at that point, but stays
     // consistent with its sibling `ConnectingRoot`.
+    // tutorial_overlay.rs (BL-82 EM-5.16a): the first-run tutorial overlay's
+    // modal backdrop, same shape as `SettingsWindowRoot` below (registered by
+    // the EM-5.10a pass that found ITS pre-existing gap).
+    ("TutorialOverlayRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // social_hud.rs
     ("SocialWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS) — participates in
     // HudState's mutually-exclusive window slot + cursor-free rule, same as

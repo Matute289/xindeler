@@ -358,6 +358,11 @@ impl Plugin for ListenServerPlugin {
         // changes to the camera. Reuses the widget kit `CombatHudViewPlugin`
         // already added (`XindelerUiPlugin`). Pure Bevy.
         app.add_plugins(crate::settings_window::SettingsWindowPlugin);
+        // BL-82 EM-5.16 (T56.43): the first-run tutorial overlay — auto-shows
+        // once a real local player exists (unless already dismissed),
+        // re-openable from the Accessibility tab above. Reuses the widget kit
+        // `CombatHudViewPlugin` already added (`XindelerUiPlugin`). Pure Bevy.
+        app.add_plugins(crate::tutorial_overlay::TutorialOverlayPlugin);
         // BL-82 EM-5.3: the skillbar/hotbar screen (drag-to-assign, keybind
         // labels, cooldown sweeps) reading the mirror above. Reuses the
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)
