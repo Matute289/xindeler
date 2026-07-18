@@ -24,6 +24,11 @@ mod atmosphere;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod boss_nameplate;
 mod camera;
+// BL-82 EM-5.14: char-select screen + 3D preview (listen-server only — the
+// char-list mirror lives in the embedded-player bridge).
+#[cfg(feature = "listen-server")]
+mod char_preview;
+#[cfg(feature = "listen-server")] mod char_select;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod chat;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
@@ -276,7 +281,12 @@ fn main() -> AppExit {
     // provider.
     if listen_server {
         #[cfg(feature = "listen-server")]
-        app.add_plugins(listen_server::ListenServerPlugin);
+        {
+            // BL-82 EM-5.14: `--char-select` opens the character-select screen
+            // + creation wizard instead of auto-loading the first character.
+            let char_select = std::env::args().any(|a| a == "--char-select");
+            app.add_plugins(listen_server::ListenServerPlugin { char_select });
+        }
     } else if let Some(addr) = connect_addr.as_deref() {
         #[cfg(feature = "net-client")]
         {

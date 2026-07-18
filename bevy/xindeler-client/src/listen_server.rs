@@ -33,23 +33,24 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::{RepliconPlugins, ServerPlugin};
-use xindeler_app::settings::userdata_dir;
+use xindeler_app::{AppState, settings::userdata_dir};
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
-    LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    SocialMirrorPlugin, boot_embedded_player, boot_test_server,
+    CharListMirrorPlugin, ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin,
+    LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player, boot_test_server,
 };
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
-    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
-    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
-    map_view::MapViewPlugin, player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, char_select::CharSelectViewPlugin, chat::ChatViewPlugin,
+    combat_hud::CombatHudViewPlugin, controls_screen::ControlsScreenPlugin,
+    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
+    hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin, lod::LodCullingPlugin,
+    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, player_input::PlayerInputPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -83,7 +84,14 @@ use crate::{
 /// when the player is absent or fails to connect (spectator mode). Trade-off:
 /// the listen server hosts the sim AND a loopback Client, heavier than the
 /// passive persister, which is why the two halves were split.
-pub struct ListenServerPlugin;
+pub struct ListenServerPlugin {
+    /// BL-82 EM-5.14: when `true` (the `--char-select` launch flag), boot into
+    /// the character-select screen ([`AppState::CharSelect`]) with a manual-
+    /// selection embedded player instead of the default "auto-load the first
+    /// character and spawn straight in" behaviour. `false` preserves the
+    /// original boot exactly.
+    pub char_select: bool,
+}
 
 impl Plugin for ListenServerPlugin {
     fn build(&self, app: &mut App) {
@@ -341,6 +349,21 @@ impl Plugin for ListenServerPlugin {
         // smoke override.
         app.add_plugins(crate::targeting::TargetSelectionPlugin);
 
+        // BL-82 EM-5.14: the character-select screen + its char-list mirror,
+        // added ONLY when launched with `--char-select` so the default boot
+        // (auto-load + spawn straight in) is completely unaffected. `CharList
+        // MirrorPlugin` (bridge) broadcasts the embedded player's roster;
+        // `CharSelectViewPlugin` (client) is the screen + 3D preview. Both are
+        // dormant unless `AppState::CharSelect` is active.
+        if self.char_select {
+            app.add_plugins((CharListMirrorPlugin, CharSelectViewPlugin));
+            // Override the compiled-in default (`AppState::Demo`) so the client
+            // opens on the char-select screen. `insert_state` after
+            // `XindelerAppPlugin`'s `init_state` cleanly rewrites the initial
+            // state (same pattern the EM-5.9 main-menu path uses).
+            app.insert_state(AppState::CharSelect);
+        }
+
         // Boot the embedded world now and hand it to the bridge.
         let data_dir = userdata_dir().join("listen-server");
         if let Err(err) = std::fs::create_dir_all(&data_dir) {
@@ -363,7 +386,15 @@ impl Plugin for ListenServerPlugin {
                 // still insert the sim and run — the terrain-anchor persister
                 // fallback covers streaming, just without a controllable player.
                 match boot_embedded_player(&mut sim) {
-                    Ok(player) => {
+                    Ok(mut player) => {
+                        // BL-82 EM-5.14: in char-select mode the player must
+                        // NOT auto-pick a character — park it awaiting the UI's
+                        // selection. Set BEFORE the first tick (we are still in
+                        // `build`, no frame has run), which is the contract of
+                        // `set_manual_selection`.
+                        if self.char_select {
+                            player.set_manual_selection(true);
+                        }
                         app.insert_non_send(sim);
                         app.insert_non_send(player);
                         info!(
