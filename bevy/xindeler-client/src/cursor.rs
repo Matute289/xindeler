@@ -38,6 +38,7 @@
 //! `xindeler_ui`/chat-consuming module in this crate.
 
 use bevy::{input_focus::InputFocus, prelude::*};
+use xindeler_app::AppState;
 use xindeler_ui::hud_state::HudState;
 
 use crate::{camera::CursorFree, chat::ChatInputBox};
@@ -82,13 +83,23 @@ impl Plugin for CursorControlPlugin {
 fn update_cursor_free(
     hud_state: Res<HudState>,
     focus: Res<InputFocus>,
+    state: Res<State<AppState>>,
     chat_inputs: Query<Entity, With<ChatInputBox>>,
     mut cursor_free: ResMut<CursorFree>,
 ) {
     let chat_focused = chat_inputs
         .single()
         .is_ok_and(|entity| focus.get() == Some(entity));
-    let free = hud_state.any_window_open() || chat_focused;
+    // BL-82 EM-5.9 (T56.29): the main menu + connecting screen are pure
+    // `bevy_ui` overlays the player CLICKS — the cursor must stay free/visible
+    // there regardless of `HudState` (there is no gameplay mouselook to grab
+    // for). `Demo`/`InGame` keep the legacy window/chat-driven behaviour so the
+    // demo fly-cam and real gameplay mouselook still grab as before.
+    let menu_open = matches!(
+        state.get(),
+        AppState::MainMenu | AppState::Connecting | AppState::CharSelect
+    );
+    let free = menu_open || hud_state.any_window_open() || chat_focused;
     // Write only on a real change so `Changed`-gated readers (and the
     // resource's change tick) aren't churned every frame.
     if cursor_free.0 != free {
@@ -108,6 +119,11 @@ mod tests {
         app.init_resource::<HudState>();
         app.init_resource::<InputFocus>();
         app.init_resource::<CursorFree>();
+        // `update_cursor_free` reads `State<AppState>` (BL-82 EM-5.9): insert it
+        // directly (no `StatesPlugin`/transition machinery needed — these tests
+        // only read `state.get()`). `InGame` keeps the legacy window/chat-driven
+        // behaviour these cases assert.
+        app.insert_resource(State::new(AppState::InGame));
         app
     }
 
@@ -151,6 +167,30 @@ mod tests {
         assert!(
             app.world().resource::<CursorFree>().0,
             "chat input focus must resolve the cursor to free"
+        );
+    }
+
+    /// BL-82 EM-5.9 (T56.29): in the main menu (and the connecting screen) the
+    /// cursor must be free/visible so the player can click the menu — even with
+    /// no HUD window open and no chat focus (there is no gameplay mouselook to
+    /// grab for). This is what makes the menu buttons clickable.
+    #[test]
+    fn main_menu_forces_the_cursor_free() {
+        let mut app = new_app();
+        // Start from a stale `false` to prove the state actively frees it.
+        app.world_mut().resource_mut::<CursorFree>().0 = false;
+        app.insert_resource(State::new(AppState::MainMenu));
+        // No window open, no chat focus — only the AppState should free it.
+        app.world_mut().spawn((ChatInputBox, EditableText::new("")));
+
+        app.world_mut()
+            .run_system_once(update_cursor_free)
+            .expect("system runs");
+
+        assert!(
+            app.world().resource::<CursorFree>().0,
+            "the main menu must resolve the cursor to free (visible/clickable) regardless of \
+             HudState — the menu is clicked, not mouselooked"
         );
     }
 

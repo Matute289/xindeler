@@ -58,10 +58,15 @@ mod light;
 mod listen_server;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod;
+// BL-82 EM-5.9 (T56.29): the main menu + first-run disclaimer + login. Only
+// under `listen-server` — the menu drives the offline embedded-world boot, so
+// a build without that host has nothing for its Play button to launch and
+// keeps booting straight into the demo scene.
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod_objects;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod map_view;
+#[cfg(feature = "listen-server")] mod menu;
 #[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
 mod perf_log;
@@ -94,7 +99,7 @@ use bevy::{
     prelude::*,
     window::{PresentMode, WindowResolution},
 };
-use xindeler_app::XindelerAppPlugin;
+use xindeler_app::{AppState, XindelerAppPlugin};
 use xindeler_render_voxel::VoxelRenderPlugin;
 
 /// Window present mode, overridable via `XINDELER_PRESENT_MODE` (EM-3.11b,
@@ -280,9 +285,33 @@ fn main() -> AppExit {
     // EM-4.2b remote net-client are mutually exclusive: all three drive the
     // SAME pipeline (one ChunkVolumeProvider), so only one may install a
     // provider.
+    //
+    // BL-82 EM-5.9 (T56.29): this ALSO picks the initial `AppState`. An
+    // explicit `--listen-server`/`--connect` bypass boots straight into
+    // gameplay (`InGame`) with the eager world boot, exactly as before — every
+    // smoke path is unchanged. A plain interactive launch (no bypass, built
+    // with the `listen-server` world host) instead opens the main menu
+    // (`MainMenu`) and defers the offline world boot to the menu's Play flow.
+    // The demo scene stays the fallback for `--smoke-atmosphere` and no-feature
+    // builds.
+    // BL-82 EM-5.9 (T56.29) verification hook: `XINDELER_SMOKE_AUTOCONNECT=1`
+    // makes the main menu auto-Play (offline) a few frames in (see
+    // `menu::smoke_autoconnect`), so a `--smoke-screenshot` run can capture the
+    // full menu → Connecting → in-game chain end to end. It boots a REAL world,
+    // so the screenshot harness needs the same long world-boot/terrain warmup
+    // `--listen-server` uses — hence `world_boots` (not just `listen_server`)
+    // gates the smoke warmup + the player-framing rig below.
+    let world_boots = listen_server
+        || (cfg!(feature = "listen-server")
+            && matches!(smoke_mode, Some(smoke::SmokeMode::Screenshot(_)))
+            && connect_addr.is_none()
+            && std::env::var("XINDELER_SMOKE_AUTOCONNECT").is_ok());
+
+    let initial_state: AppState;
     if listen_server {
         #[cfg(feature = "listen-server")]
-        app.add_plugins(listen_server::ListenServerPlugin);
+        app.add_plugins(listen_server::ListenServerPlugin { boot_eagerly: true });
+        initial_state = AppState::InGame;
     } else if let Some(addr) = connect_addr.as_deref() {
         #[cfg(feature = "net-client")]
         {
@@ -305,23 +334,62 @@ fn main() -> AppExit {
             // arm type-checks identically regardless of feature set.
             let _ = addr;
         }
+        initial_state = AppState::InGame;
     } else {
-        app.add_plugins(voxel_demo::VoxelDemoPlugin);
+        // No world bypass flag. Under the `listen-server` feature, an
+        // interactive launch — or a `--smoke-screenshot` run with
+        // `XINDELER_SMOKE_MENU=1` (so the harness can capture the menu itself)
+        // — shows the main menu; `--smoke-atmosphere`/`--smoke-screenshot`
+        // otherwise keep the demo scene. A no-feature build always gets the
+        // demo (nothing to host the offline world its Play button would boot).
+        #[cfg(feature = "listen-server")]
+        {
+            let smoke_menu = matches!(smoke_mode, Some(smoke::SmokeMode::Screenshot(_)))
+                && std::env::var("XINDELER_SMOKE_MENU").is_ok();
+            // `world_boots` here is true only for the `XINDELER_SMOKE_AUTOCONNECT`
+            // hook (a screenshot run that should reach gameplay through the menu).
+            if smoke_mode.is_none() || smoke_menu || world_boots {
+                app.add_plugins(listen_server::ListenServerPlugin {
+                    boot_eagerly: false,
+                });
+                app.add_plugins(menu::MainMenuPlugin);
+                initial_state = AppState::MainMenu;
+            } else {
+                app.add_plugins(voxel_demo::VoxelDemoPlugin);
+                initial_state = AppState::Demo;
+            }
+        }
+        #[cfg(not(feature = "listen-server"))]
+        {
+            app.add_plugins(voxel_demo::VoxelDemoPlugin);
+            initial_state = AppState::Demo;
+        }
     }
+
+    // BL-82 EM-5.9: override `XindelerAppPlugin`'s compiled-in default
+    // (`AppState::Demo`). `insert_state` after `init_state` cleanly rewrites the
+    // initial state + its entry transition (verified against bevy_state 0.19's
+    // `insert_state_can_overwrite_init_state`), so `OnEnter(initial_state)`
+    // fires for the state we actually want, not `Demo`.
+    app.insert_state(initial_state);
 
     match smoke_mode {
         Some(smoke::SmokeMode::Screenshot(path)) => {
             app.add_plugins(smoke::SmokeScreenshotPlugin {
                 path,
                 // The world boot (~5–10 s) + terrain streaming needs a much
-                // longer warmup than the static demo scene.
-                listen_server,
+                // longer warmup than the static demo scene. `world_boots`
+                // covers both `--listen-server` and the EM-5.9 menu
+                // auto-connect (`XINDELER_SMOKE_AUTOCONNECT`), which also boots
+                // a real world.
+                listen_server: world_boots,
             });
             // EM-3.7b smoke scaffolding: with no real keyboard, drive the
             // embedded player forward so the third-person camera shows it
-            // walking on the real terrain in the capture. Listen-server only.
+            // walking on the real terrain in the capture. Any path that boots a
+            // real world (listen-server OR the EM-5.9 menu auto-connect).
             #[cfg(feature = "listen-server")]
-            if listen_server {
+            if world_boots {
                 app.add_plugins(player_input::SmokeAutoMovePlugin);
                 // BL-82 EM-3.12: dedicated framing for the camera-collision
                 // bug repro (Matías's "miro al personaje desde abajo" report

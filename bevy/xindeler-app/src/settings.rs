@@ -54,6 +54,13 @@ pub struct XindelerSettings {
     /// speed/fast-multiplier/mouse-sensitivity move out of a hardcoded
     /// `FlyCam::default()` and into user-facing, persisted settings.
     pub camera: CameraSettings,
+    /// BL-82 EM-5.9 (T56.29) — the main-menu / login section: the first-run
+    /// pre-alpha disclaimer gate + the remembered login fields the login
+    /// screen pre-fills. `#[serde(default)]` on this struct + [`Default`]
+    /// keeps every older `settings.ron` (written before this key existed)
+    /// loading unchanged, exactly the backward-compat guarantee `ui_scale`/
+    /// `controls` already established.
+    pub menu: MenuSettings,
 }
 
 impl Default for XindelerSettings {
@@ -63,8 +70,31 @@ impl Default for XindelerSettings {
             ui_scale: 1.0,
             controls: xindeler_input::KeyMap::default(),
             camera: CameraSettings::default(),
+            menu: MenuSettings::default(),
         }
     }
+}
+
+/// BL-82 EM-5.9 (T56.29) — persisted main-menu / login state: the first-run
+/// disclaimer acknowledgement + the last-used login fields the login screen
+/// pre-fills, mirroring legacy `voxygen`'s `NetworkingSettings`
+/// (`username`/`default_server`) + `show_disclaimer` gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MenuSettings {
+    /// Whether the player has accepted the one-time pre-alpha disclaimer.
+    /// `false` (the derived default) shows the disclaimer once, before the main
+    /// menu; accepting it flips this to `true` and persists so it never shows
+    /// again.
+    pub disclaimer_accepted: bool,
+    /// Last username typed on the login screen (pre-filled next launch).
+    pub username: String,
+    /// Last server address typed on the login screen (pre-filled next launch).
+    /// Empty = the legacy default host is offered.
+    pub server_address: String,
+    /// Whether the login screen's Online/Offline toggle last sat on Online.
+    /// `false` (the derived default) = Offline (singleplayer embedded world).
+    pub online: bool,
 }
 
 /// Camera-rig tunables a player expects to control (mouse sensitivity, debug
