@@ -60,7 +60,7 @@ use serde::Deserialize;
 use xindeler_app::{AppState, SavedServer, XindelerSettings};
 use xindeler_sim_bridge::{ConnectStage, EmbeddedPlayer, SimServer};
 use xindeler_ui::{
-    button::{Activate, button_bundle},
+    button::{Activate, HudButtonImages, button_bundle, image_button_bundle},
     hud_state::HudState,
     panel::panel_bundle,
     scroll::scroll_view_bundle,
@@ -88,6 +88,11 @@ impl Plugin for MainMenuPlugin {
             // Load the data-driven tips + credits once at startup (RON under
             // `assets/xindeler/ui/`); the loading screen reads them each connect.
             .add_systems(Startup, load_loading_screen_assets)
+            // BL-82 main-menu visual parity: load the real, pre-existing legacy
+            // main-menu chrome art (background, logo, button + input textures)
+            // once at startup so the menu matches the frozen `voxygen/src/menu/`
+            // reference instead of the flat placeholder it shipped with.
+            .add_systems(Startup, load_menu_images)
             .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
             .add_systems(OnExit(AppState::MainMenu), despawn_menu_root)
             .add_systems(OnEnter(AppState::Connecting), enter_connecting)
@@ -805,6 +810,7 @@ fn enter_connecting(
     mut commands: Commands,
     theme: Option<Res<HudTheme>>,
     fonts: Option<Res<HudFonts>>,
+    images: Option<Res<MenuImages>>,
     form: Res<LoginForm>,
     tips: Res<LoadingTips>,
     credits: Res<Credits>,
@@ -851,7 +857,14 @@ fn enter_connecting(
     };
     let theme: HudTheme = *theme;
     let tip = pick_tip(&tips);
-    build_connecting_screen(&mut commands, &theme, &fonts, &tip, &credits);
+    build_connecting_screen(
+        &mut commands,
+        &theme,
+        &fonts,
+        images.as_deref(),
+        &tip,
+        &credits,
+    );
 }
 
 /// Spawns the loading screen tree (called once on `OnEnter(Connecting)`).
@@ -859,156 +872,169 @@ fn build_connecting_screen(
     commands: &mut Commands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&MenuImages>,
     tip: &str,
     credits: &Credits,
 ) {
-    commands
-        .spawn((
-            ConnectingRoot,
-            // Above every HUD layer so it fully covers the (still loading)
-            // gameplay chrome that spawns behind it.
-            GlobalZIndex(zlayer::TOAST + 100),
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(theme.spacing.md),
-                padding: UiRect::all(Val::Px(theme.spacing.lg)),
+    let mut root = commands.spawn((
+        ConnectingRoot,
+        // Above every HUD layer so it fully covers the (still loading)
+        // gameplay chrome that spawns behind it.
+        GlobalZIndex(zlayer::TOAST + 100),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(theme.spacing.md),
+            padding: UiRect::all(Val::Px(theme.spacing.lg)),
+            ..Default::default()
+        },
+        BackgroundColor(MENU_BACKDROP),
+    ));
+    // Full-screen background art behind the loading UI (legacy paints a menu
+    // background on the connecting screen too; kept deterministic by reusing
+    // the same static `bg_main.jpg` rather than the legacy random `bg_N`).
+    // Dimmed via the image tint so the (panel-less) loading text stays legible
+    // over the photo backdrop.
+    if let Some(images) = images {
+        root.insert(bevy::ui::widget::ImageNode {
+            image: images.background.clone(),
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            color: Color::srgb(0.35, 0.35, 0.40),
+            ..Default::default()
+        });
+    }
+    root.with_children(|screen| {
+        // Title.
+        screen.spawn((
+            Text("Xindeler".to_owned()),
+            TextFont {
+                font: bevy::text::FontSource::Handle(fonts.title.clone()),
+                font_size: bevy::text::FontSize::Px(40.0),
                 ..Default::default()
             },
-            BackgroundColor(MENU_BACKDROP),
-        ))
-        .with_children(|screen| {
-            // Title.
-            screen.spawn((
-                Text("Xindeler".to_owned()),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.title.clone()),
-                    font_size: bevy::text::FontSize::Px(40.0),
+            TextColor(theme.palette.text),
+        ));
+
+        // Stage line + spinner (row).
+        screen
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(theme.spacing.sm),
+                align_items: AlignItems::Center,
+                ..Default::default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    ConnectSpinnerText,
+                    Text(SPINNER_FRAMES[0].to_owned()),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(18.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.accent),
+                ));
+                row.spawn((
+                    ConnectStageText,
+                    Text(stage_label(ConnectStage::Starting).to_owned()),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(18.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+            });
+
+        // Progress bar: a fixed-width track with a fill whose width tracks
+        // the REAL stage fraction (updated in `render_connecting`).
+        screen
+            .spawn((
+                Node {
+                    width: Val::Px(360.0),
+                    height: Val::Px(10.0),
+                    border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
                     ..Default::default()
                 },
-                TextColor(theme.palette.text),
-            ));
-
-            // Stage line + spinner (row).
-            screen
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(theme.spacing.sm),
-                    align_items: AlignItems::Center,
-                    ..Default::default()
-                })
-                .with_children(|row| {
-                    row.spawn((
-                        ConnectSpinnerText,
-                        Text(SPINNER_FRAMES[0].to_owned()),
-                        TextFont {
-                            font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                            font_size: bevy::text::FontSize::Px(18.0),
-                            ..Default::default()
-                        },
-                        TextColor(theme.palette.accent),
-                    ));
-                    row.spawn((
-                        ConnectStageText,
-                        Text(stage_label(ConnectStage::Starting).to_owned()),
-                        TextFont {
-                            font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                            font_size: bevy::text::FontSize::Px(18.0),
-                            ..Default::default()
-                        },
-                        TextColor(theme.palette.text),
-                    ));
-                });
-
-            // Progress bar: a fixed-width track with a fill whose width tracks
-            // the REAL stage fraction (updated in `render_connecting`).
-            screen
-                .spawn((
+                BackgroundColor(theme.palette.xp_bg),
+            ))
+            .with_children(|track| {
+                let frac = ConnectStage::Starting.progress_fraction();
+                track.spawn((
+                    ConnectBarFill,
                     Node {
-                        width: Val::Px(360.0),
-                        height: Val::Px(10.0),
+                        width: Val::Percent(frac * 100.0),
+                        height: Val::Percent(100.0),
                         border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
                         ..Default::default()
                     },
-                    BackgroundColor(theme.palette.xp_bg),
-                ))
-                .with_children(|track| {
-                    let frac = ConnectStage::Starting.progress_fraction();
-                    track.spawn((
-                        ConnectBarFill,
-                        Node {
-                            width: Val::Percent(frac * 100.0),
-                            height: Val::Percent(100.0),
-                            border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
-                            ..Default::default()
-                        },
-                        BackgroundColor(theme.palette.accent),
-                    ));
-                });
+                    BackgroundColor(theme.palette.accent),
+                ));
+            });
 
-            // MOTD line (empty until the boot resolves).
+        // MOTD line (empty until the boot resolves).
+        screen.spawn((
+            ConnectMotdText,
+            Text(String::new()),
+            TextFont {
+                font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                font_size: bevy::text::FontSize::Px(16.0),
+                ..Default::default()
+            },
+            TextColor(theme.palette.accent),
+            Node {
+                max_width: Val::Px(520.0),
+                ..Default::default()
+            },
+        ));
+
+        // Rotating gameplay tip.
+        screen.spawn((
+            Text(format!("Tip: {tip}")),
+            TextFont {
+                font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                font_size: bevy::text::FontSize::Px(14.0),
+                ..Default::default()
+            },
+            TextColor(theme.palette.text_muted),
+            Node {
+                max_width: Val::Px(520.0),
+                margin: UiRect::top(Val::Px(theme.spacing.md)),
+                ..Default::default()
+            },
+        ));
+
+        // Credits footer.
+        if !credits.engine_note.is_empty() || !credits.entries.is_empty() {
+            let mut lines = Vec::new();
+            if !credits.engine_note.is_empty() {
+                lines.push(credits.engine_note.clone());
+            }
+            for entry in &credits.entries {
+                lines.push(format!("{}: {}", entry.role, entry.names.join(", ")));
+            }
             screen.spawn((
-                ConnectMotdText,
-                Text(String::new()),
+                Text(lines.join("\n")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(16.0),
-                    ..Default::default()
-                },
-                TextColor(theme.palette.accent),
-                Node {
-                    max_width: Val::Px(520.0),
-                    ..Default::default()
-                },
-            ));
-
-            // Rotating gameplay tip.
-            screen.spawn((
-                Text(format!("Tip: {tip}")),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(14.0),
+                    font_size: bevy::text::FontSize::Px(11.0),
                     ..Default::default()
                 },
                 TextColor(theme.palette.text_muted),
                 Node {
                     max_width: Val::Px(520.0),
-                    margin: UiRect::top(Val::Px(theme.spacing.md)),
+                    margin: UiRect::top(Val::Px(theme.spacing.lg)),
                     ..Default::default()
                 },
             ));
-
-            // Credits footer.
-            if !credits.engine_note.is_empty() || !credits.entries.is_empty() {
-                let mut lines = Vec::new();
-                if !credits.engine_note.is_empty() {
-                    lines.push(credits.engine_note.clone());
-                }
-                for entry in &credits.entries {
-                    lines.push(format!("{}: {}", entry.role, entry.names.join(", ")));
-                }
-                screen.spawn((
-                    Text(lines.join("\n")),
-                    TextFont {
-                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(11.0),
-                        ..Default::default()
-                    },
-                    TextColor(theme.palette.text_muted),
-                    Node {
-                        max_width: Val::Px(520.0),
-                        margin: UiRect::top(Val::Px(theme.spacing.lg)),
-                        ..Default::default()
-                    },
-                ));
-            }
-        });
+        }
+    });
 }
 
 /// Removes the loading screen when leaving [`AppState::Connecting`], and drops
@@ -1278,10 +1304,109 @@ fn load_loading_screen_assets(mut commands: Commands) {
 }
 
 // ---------------------------------------------------------------------------
+// Menu chrome art (BL-82 main-menu visual parity)
+// ---------------------------------------------------------------------------
+//
+// The Bevy menu (built across EM-5.9 #166-168) shipped with a flat dark
+// backdrop + plain themed buttons/fields — no reused art. This resource loads
+// the SAME real, pre-existing legacy main-menu assets the frozen conrod
+// reference (`voxygen/src/menu/main/ui/mod.rs`'s `Imgs`) loads, so the Bevy
+// screen matches the legacy client's actual look instead of approximating it.
+// Loaded once at `Startup` (hot-reloadable in dev), mirroring `chat.rs`'s
+// `ChatIcons` / the inventory rebuild's asset-reuse precedent this session.
+
+/// The real legacy main-menu chrome art, reused verbatim. Legacy asset key →
+/// real file (all present as LFS blobs in this repo):
+/// - `voxygen.background.bg_main`                        →
+///   `background/bg_main.jpg`
+/// - `voxygen.element.v_logo`                            → `element/v_logo.png`
+/// - `voxygen.element.ui.generic.buttons.button{,_hover,_press}`
+/// - `voxygen.element.ui.generic.textbox`                → the input-field
+///   frame
+#[derive(Resource, Debug, Clone)]
+struct MenuImages {
+    /// The static title-screen background (`bg_main.jpg`, 1920×1080) — the
+    /// legacy menu's signature full-screen art (the frozen reference paints it
+    /// behind every non-connecting screen; a random `bg_N` is used only on the
+    /// connecting screen, which this port keeps deterministic by reusing
+    /// `bg_main` there too — see [`build_connecting_screen`]).
+    background: Handle<Image>,
+    /// The wordmark logo shown at the top of the menu panel (`v_logo.png`,
+    /// 346×111).
+    logo: Handle<Image>,
+    /// The carved-button chrome, swapped on hover/press by the widget kit's
+    /// [`update_image_button_visuals`](xindeler_ui::button).
+    button: Handle<Image>,
+    button_hover: Handle<Image>,
+    button_press: Handle<Image>,
+    /// The input-field frame drawn behind login / add-server text fields
+    /// (`textbox.png`, 169×25).
+    textbox: Handle<Image>,
+}
+
+impl MenuImages {
+    fn load(asset_server: &AssetServer) -> Self {
+        let load = |path: &str| asset_server.load(path.to_owned());
+        Self {
+            background: load("voxygen/background/bg_main.jpg"),
+            logo: load("voxygen/element/v_logo.png"),
+            button: load("voxygen/element/ui/generic/buttons/button.png"),
+            button_hover: load("voxygen/element/ui/generic/buttons/button_hover.png"),
+            button_press: load("voxygen/element/ui/generic/buttons/button_press.png"),
+            textbox: load("voxygen/element/ui/generic/textbox.png"),
+        }
+    }
+
+    /// The three button-state textures the widget kit's
+    /// [`image_button_bundle`] hover/press swapper expects.
+    fn button_images(&self) -> HudButtonImages {
+        HudButtonImages {
+            normal: self.button.clone(),
+            hover: self.button_hover.clone(),
+            pressed: self.button_press.clone(),
+        }
+    }
+}
+
+/// `Startup` system inserting [`MenuImages`] (loaded via the real
+/// [`AssetServer`]), mirroring [`load_loading_screen_assets`].
+fn load_menu_images(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(MenuImages::load(&asset_server));
+}
+
+/// The logo's native aspect ratio (346×111 `v_logo.png`) — used so the panel
+/// header image keeps its proportions at a fixed display width.
+const LOGO_ASPECT: f32 = 346.0 / 111.0;
+
+/// Spawns the wordmark logo at the top of the menu panel (image-backed,
+/// aspect-preserved). Shown on every sub-screen so the branding is constant,
+/// mirroring the legacy menu's ever-present `v_logo`.
+fn spawn_logo(panel: &mut ChildSpawnerCommands, images: &MenuImages) {
+    panel.spawn((
+        bevy::ui::widget::ImageNode {
+            image: images.logo.clone(),
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..Default::default()
+        },
+        Node {
+            width: Val::Px(220.0),
+            aspect_ratio: Some(LOGO_ASPECT),
+            align_self: AlignSelf::Center,
+            margin: UiRect::bottom(Val::Px(4.0)),
+            ..Default::default()
+        },
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // Build (spawn the current screen)
 // ---------------------------------------------------------------------------
 
-/// Fully opaque menu backdrop (covers the empty gameplay chrome behind it).
+/// Opaque fallback backdrop shown behind the menu while the background art is
+/// still loading (and in the headless tests, which spawn the menu without a
+/// [`MenuImages`] resource). Once [`MenuImages::background`] resolves, the
+/// full-screen `bg_main.jpg` [`ImageNode`](bevy::ui::widget::ImageNode) covers
+/// it.
 const MENU_BACKDROP: Color = Color::srgb(0.04, 0.05, 0.08);
 
 /// (Re)builds the menu tree whenever the current [`MenuScreen`] changes (or the
@@ -1291,6 +1416,7 @@ fn build_menu(
     mut commands: Commands,
     theme: Option<Res<HudTheme>>,
     fonts: Option<Res<HudFonts>>,
+    images: Option<Res<MenuImages>>,
     screen: Res<MenuScreen>,
     form: Res<LoginForm>,
     roots: Query<Entity, With<MenuRoot>>,
@@ -1304,6 +1430,7 @@ fn build_menu(
         return;
     };
     let theme: HudTheme = *theme;
+    let images = images.as_deref();
 
     for root in &roots {
         commands.entity(root).despawn();
@@ -1322,9 +1449,36 @@ fn build_menu(
             align_items: AlignItems::Center,
             ..Default::default()
         },
+        // Fallback backdrop while the art loads (and in the headless tests,
+        // which spawn the menu without a `MenuImages` resource). Covered by the
+        // full-screen `bg_main.jpg` below once it resolves.
         BackgroundColor(MENU_BACKDROP),
     ));
+    // The legacy menu's signature full-screen background art.
+    if let Some(images) = images {
+        root.insert(bevy::ui::widget::ImageNode {
+            image: images.background.clone(),
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..Default::default()
+        });
+    }
     root.with_children(|screen_node| {
+        // Version line, top-centre (legacy paints `Veloren {version}` here).
+        screen_node.spawn((
+            Text(format!("Xindeler v{}", env!("CARGO_PKG_VERSION"))),
+            TextFont {
+                font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                font_size: bevy::text::FontSize::Px(12.0),
+                ..Default::default()
+            },
+            TextColor(theme.palette.text_muted),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(6.0),
+                ..Default::default()
+            },
+        ));
+
         let mut panel_entity = screen_node.spawn(panel_bundle(&theme));
         let row_gap_px = theme.spacing.md;
         panel_entity.entry::<Node>().and_modify(move |mut node| {
@@ -1334,16 +1488,78 @@ fn build_menu(
             node.max_width = Val::Px(560.0);
             node.align_items = AlignItems::Stretch;
         });
-        panel_entity.with_children(|panel| match *screen {
-            MenuScreen::Disclaimer => spawn_disclaimer(panel, &theme, &fonts),
-            MenuScreen::Main => spawn_main(panel, &theme, &fonts),
-            MenuScreen::Login => spawn_login(panel, &theme, &fonts, &form),
-            MenuScreen::ServerBrowser => spawn_server_browser(panel, &theme, &fonts),
+        panel_entity.with_children(|panel| {
+            // The wordmark logo crowns the disclaimer/main/login screens
+            // (legacy's ever-present `v_logo`). The content-heavy server browser
+            // is its own dense layout (legacy's `servers.rs` likewise has no big
+            // central logo), so it's skipped there to keep the panel inside the
+            // viewport height. Only when the art is loaded.
+            if let Some(images) = images
+                && *screen != MenuScreen::ServerBrowser
+            {
+                spawn_logo(panel, images);
+            }
+            match *screen {
+                MenuScreen::Disclaimer => spawn_disclaimer(panel, &theme, &fonts, images),
+                MenuScreen::Main => spawn_main(panel, &theme, &fonts, images),
+                MenuScreen::Login => spawn_login(panel, &theme, &fonts, images, &form),
+                MenuScreen::ServerBrowser => spawn_server_browser(panel, &theme, &fonts, images),
+            }
         });
     });
 
     *last_built = Some(*screen);
 }
+
+/// Spawns a menu button — image-backed with the legacy carved-button chrome
+/// (`button.png` + hover/press) when [`MenuImages`] is loaded, falling back to
+/// the flat themed button otherwise (the headless tests spawn the menu without
+/// the image resource). Returns the button entity so the caller can chain its
+/// `.observe(...)` action, exactly like a bare `button_bundle` spawn.
+fn menu_button<'a>(
+    panel: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: Option<&MenuImages>,
+    label: &str,
+) -> bevy::ecs::system::EntityCommands<'a> {
+    match images {
+        Some(images) => {
+            let mut button = panel.spawn(image_button_bundle(
+                theme,
+                fonts,
+                label,
+                images.button_images(),
+            ));
+            // Uniform button width (legacy's buttons are all one plate width),
+            // centred in the panel — an explicit width overrides the panel's
+            // `align_items: Stretch`, so also re-centre via `align_self`.
+            button.entry::<Node>().and_modify(|mut node| {
+                node.width = Val::Px(MENU_BUTTON_WIDTH);
+                node.height = Val::Px(MENU_BUTTON_HEIGHT);
+                node.align_self = AlignSelf::Center;
+            });
+            // Stretch the carved-button plate across the (wider than native)
+            // button box so long labels still sit on real button chrome.
+            // `image_button_bundle` defaults to `NodeImageMode::Auto`, which
+            // would leave a long button's texture short of its edges; the
+            // hover/press swapper only mutates `image`, so the mode survives.
+            button
+                .entry::<bevy::ui::widget::ImageNode>()
+                .and_modify(|mut image| {
+                    image.image_mode = bevy::ui::widget::NodeImageMode::Stretch;
+                });
+            button
+        },
+        None => panel.spawn(button_bundle(theme, fonts, label)),
+    }
+}
+
+/// Uniform menu-button dimensions (roughly the `button.png` plate's 106×26
+/// aspect, scaled up) — wide enough for the longest label
+/// ("I understand — continue") so every button shows the carved plate chrome.
+const MENU_BUTTON_WIDTH: f32 = 300.0;
+const MENU_BUTTON_HEIGHT: f32 = 42.0;
 
 /// A section/title heading line.
 fn heading(
@@ -1384,8 +1600,12 @@ fn body_text(
 }
 
 /// The first-run pre-alpha disclaimer.
-fn spawn_disclaimer(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFonts) {
-    heading(panel, fonts, theme, "Xindeler", 34.0);
+fn spawn_disclaimer(
+    panel: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: Option<&MenuImages>,
+) {
     heading(panel, fonts, theme, "Disclaimer", 22.0);
     body_text(
         panel,
@@ -1397,17 +1617,17 @@ fn spawn_disclaimer(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &
          work in progress.",
         15.0,
     );
-    panel
-        .spawn(button_bundle(theme, fonts, "I understand — continue"))
-        .observe(accept_disclaimer);
-    panel
-        .spawn(button_bundle(theme, fonts, "Quit"))
-        .observe(quit_game);
+    menu_button(panel, theme, fonts, images, "I understand — continue").observe(accept_disclaimer);
+    menu_button(panel, theme, fonts, images, "Quit").observe(quit_game);
 }
 
 /// The main menu: Play / Options / Quit.
-fn spawn_main(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFonts) {
-    heading(panel, fonts, theme, "Xindeler", 40.0);
+fn spawn_main(
+    panel: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: Option<&MenuImages>,
+) {
     body_text(
         panel,
         fonts,
@@ -1415,18 +1635,10 @@ fn spawn_main(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFon
         "A voxel RPG — BL-82 Bevy client",
         14.0,
     );
-    panel
-        .spawn(button_bundle(theme, fonts, "Play"))
-        .observe(go_to_login);
-    panel
-        .spawn(button_bundle(theme, fonts, "Multiplayer"))
-        .observe(open_server_browser);
-    panel
-        .spawn(button_bundle(theme, fonts, "Options"))
-        .observe(options_notice);
-    panel
-        .spawn(button_bundle(theme, fonts, "Quit"))
-        .observe(quit_game);
+    menu_button(panel, theme, fonts, images, "Play").observe(go_to_login);
+    menu_button(panel, theme, fonts, images, "Multiplayer").observe(open_server_browser);
+    menu_button(panel, theme, fonts, images, "Options").observe(options_notice);
+    menu_button(panel, theme, fonts, images, "Quit").observe(quit_game);
     status_line(panel, fonts, theme);
 }
 
@@ -1435,19 +1647,40 @@ fn spawn_login(
     panel: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&MenuImages>,
     form: &LoginForm,
 ) {
     heading(panel, fonts, theme, "Play", 30.0);
 
     // Offline/Online mode toggle.
-    panel
-        .spawn(button_bundle(theme, fonts, mode_label(form.online)))
+    menu_button(panel, theme, fonts, images, mode_label(form.online))
         .insert(ModeToggleLabel)
         .observe(toggle_mode);
 
-    login_field(panel, theme, fonts, LoginField::Username, "Username");
-    login_field(panel, theme, fonts, LoginField::Password, "Password");
-    login_field(panel, theme, fonts, LoginField::Server, "Server address");
+    login_field(
+        panel,
+        theme,
+        fonts,
+        images,
+        LoginField::Username,
+        "Username",
+    );
+    login_field(
+        panel,
+        theme,
+        fonts,
+        images,
+        LoginField::Password,
+        "Password",
+    );
+    login_field(
+        panel,
+        theme,
+        fonts,
+        images,
+        LoginField::Server,
+        "Server address",
+    );
 
     body_text(
         panel,
@@ -1458,15 +1691,9 @@ fn spawn_login(
         12.0,
     );
 
-    panel
-        .spawn(button_bundle(theme, fonts, "Connect"))
-        .observe(connect_clicked);
-    panel
-        .spawn(button_bundle(theme, fonts, "Server browser"))
-        .observe(open_server_browser);
-    panel
-        .spawn(button_bundle(theme, fonts, "Back"))
-        .observe(back_to_main);
+    menu_button(panel, theme, fonts, images, "Connect").observe(connect_clicked);
+    menu_button(panel, theme, fonts, images, "Server browser").observe(open_server_browser);
+    menu_button(panel, theme, fonts, images, "Back").observe(back_to_main);
     status_line(panel, fonts, theme);
 }
 
@@ -1476,27 +1703,37 @@ fn login_field(
     panel: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&MenuImages>,
     field: LoginField,
     label: &str,
 ) {
     body_text(panel, fonts, theme.palette.text_muted, label, 13.0);
-    panel
-        .spawn((
-            FieldBox(field),
-            // `bevy_ui`'s picking backend treats a node WITHOUT a `Pickable`
-            // component as pickable (see `combat_hud`'s own note), so this box
-            // receives `Pointer<Click>` for focus without one.
-            Node {
-                width: Val::Percent(100.0),
-                padding: UiRect::axes(Val::Px(theme.spacing.sm), Val::Px(theme.spacing.xs)),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
-                min_height: Val::Px(28.0),
-                ..Default::default()
-            },
-            BackgroundColor(theme.palette.panel_bg),
-            bevy::ui::BorderColor::all(theme.palette.panel_border),
-        ))
+    let mut field_box = panel.spawn((
+        FieldBox(field),
+        // `bevy_ui`'s picking backend treats a node WITHOUT a `Pickable`
+        // component as pickable (see `combat_hud`'s own note), so this box
+        // receives `Pointer<Click>` for focus without one.
+        Node {
+            width: Val::Percent(100.0),
+            padding: UiRect::axes(Val::Px(theme.spacing.sm), Val::Px(theme.spacing.xs)),
+            border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+            min_height: Val::Px(28.0),
+            ..Default::default()
+        },
+        BackgroundColor(theme.palette.panel_bg),
+        bevy::ui::BorderColor::all(theme.palette.panel_border),
+    ));
+    // Legacy input-field frame (`textbox.png`) behind the value; the themed
+    // focus border still highlights on top (see `render_login_fields`).
+    if let Some(images) = images {
+        field_box.insert(bevy::ui::widget::ImageNode {
+            image: images.textbox.clone(),
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..Default::default()
+        });
+    }
+    field_box
         .observe(move |_: On<Pointer<Click>>, mut form: ResMut<LoginForm>| {
             form.focused = Some(field);
         })
@@ -1541,7 +1778,12 @@ fn mode_label(online: bool) -> &'static str {
 /// Builds only the STATIC chrome + the empty [`ServerListContainer`]; the rows
 /// inside it are (re)built by [`rebuild_server_list`] and repainted each frame
 /// by [`render_server_rows`].
-fn spawn_server_browser(panel: &mut ChildSpawnerCommands, theme: &HudTheme, fonts: &HudFonts) {
+fn spawn_server_browser(
+    panel: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: Option<&MenuImages>,
+) {
     heading(panel, fonts, theme, "Server Browser", 30.0);
     body_text(
         panel,
@@ -1556,7 +1798,7 @@ fn spawn_server_browser(panel: &mut ChildSpawnerCommands, theme: &HudTheme, font
     // The scrollable list container — rows are spawned into this by
     // `rebuild_server_list`.
     panel
-        .spawn(scroll_view_bundle(theme, 460.0, 176.0))
+        .spawn(scroll_view_bundle(theme, 460.0, 120.0))
         .insert(ServerListContainer);
 
     // Add-server form.
@@ -1565,6 +1807,7 @@ fn spawn_server_browser(panel: &mut ChildSpawnerCommands, theme: &HudTheme, font
         panel,
         theme,
         fonts,
+        images,
         AddField::Address,
         "Address (host or host:port)",
     );
@@ -1572,26 +1815,18 @@ fn spawn_server_browser(panel: &mut ChildSpawnerCommands, theme: &HudTheme, font
         panel,
         theme,
         fonts,
+        images,
         AddField::Nickname,
         "Nickname (optional)",
     );
-    panel
-        .spawn(button_bundle(theme, fonts, "Add to list"))
-        .observe(add_server_clicked);
+    menu_button(panel, theme, fonts, images, "Add to list").observe(add_server_clicked);
 
     // Action buttons.
-    panel
-        .spawn(button_bundle(theme, fonts, "Refresh"))
-        .observe(refresh_clicked);
-    panel
-        .spawn(button_bundle(theme, fonts, "Connect to selected"))
+    menu_button(panel, theme, fonts, images, "Refresh").observe(refresh_clicked);
+    menu_button(panel, theme, fonts, images, "Connect to selected")
         .observe(connect_selected_clicked);
-    panel
-        .spawn(button_bundle(theme, fonts, "Delete selected"))
-        .observe(delete_selected_clicked);
-    panel
-        .spawn(button_bundle(theme, fonts, "Back"))
-        .observe(browser_back);
+    menu_button(panel, theme, fonts, images, "Delete selected").observe(delete_selected_clicked);
+    menu_button(panel, theme, fonts, images, "Back").observe(browser_back);
 
     // The browser's own status/notice line.
     panel.spawn((
@@ -1616,24 +1851,32 @@ fn add_field(
     panel: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&MenuImages>,
     field: AddField,
     label: &str,
 ) {
     body_text(panel, fonts, theme.palette.text_muted, label, 12.0);
-    panel
-        .spawn((
-            AddFieldBox(field),
-            Node {
-                width: Val::Percent(100.0),
-                padding: UiRect::axes(Val::Px(theme.spacing.sm), Val::Px(theme.spacing.xs)),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
-                min_height: Val::Px(26.0),
-                ..Default::default()
-            },
-            BackgroundColor(theme.palette.panel_bg),
-            bevy::ui::BorderColor::all(theme.palette.panel_border),
-        ))
+    let mut field_box = panel.spawn((
+        AddFieldBox(field),
+        Node {
+            width: Val::Percent(100.0),
+            padding: UiRect::axes(Val::Px(theme.spacing.sm), Val::Px(theme.spacing.xs)),
+            border: UiRect::all(Val::Px(2.0)),
+            border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+            min_height: Val::Px(26.0),
+            ..Default::default()
+        },
+        BackgroundColor(theme.palette.panel_bg),
+        bevy::ui::BorderColor::all(theme.palette.panel_border),
+    ));
+    if let Some(images) = images {
+        field_box.insert(bevy::ui::widget::ImageNode {
+            image: images.textbox.clone(),
+            image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+            ..Default::default()
+        });
+    }
+    field_box
         .observe(
             move |_: On<Pointer<Click>>, mut browser: ResMut<ServerBrowser>| {
                 browser.add_focused = Some(field);
@@ -2543,7 +2786,7 @@ mod tests {
 
         app.world_mut()
             .run_system_once(move |mut commands: Commands| {
-                build_connecting_screen(&mut commands, &theme, &fonts, "", &credits);
+                build_connecting_screen(&mut commands, &theme, &fonts, None, "", &credits);
             })
             .expect("build_connecting_screen runs");
 
