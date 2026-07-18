@@ -23,20 +23,27 @@
 //!
 //! ## BL-82 EM-5.17 Phase 4 — HUD-D4 party-frame reskin (spec §3.4)
 //! The group/party panel's member rows are reskinned into the Diablo-style
-//! layout. `HudImageKey::PartyPortraitFrame` (`party_portrait_frame.png`) is a
-//! WIDE ornate chrome plate — a circular portrait hole carved into its LEFT
-//! and a plaque on its RIGHT with two horizontal carved grooves — rendered as
-//! a full-size DECORATIVE OVERLAY per member (the orb-frame idiom of
-//! `bar.rs::spawn_orb_bar`), NOT as a tiny square "photo". Its transparent
-//! hole + grooves reveal live elements slotted BEHIND it: a neutral portrait
-//! fill + the name label in the hole, the health bar in the upper groove, the
-//! mana/energy bar in the lower groove, plus a `PartyLevelBadge` straddling
-//! the hole's bottom rim. All are absolutely positioned by the asset's
-//! MEASURED source-pixel regions (see the `PARTY_HOLE`/`PARTY_*_GROOVE`
-//! constants) scaled uniformly, so they stay pixel-aligned to the chrome at
-//! any size. This is a RENDER-LAYER reskin of [`SocialMirrorPlugin`]'s
-//! already-mirrored data — no new protocol/mirror work. Three real data gaps,
-//! each documented at its call site rather than silently invented:
+//! layout. `HudImageKey::PartyPortraitFrame` (`party_portrait_frame.png`,
+//! swapped to the "v2" art in the party-frame-v2 follow-up) is a WIDE ornate
+//! chrome plate — a circular portrait hole carved into its LEFT and a plaque
+//! on its RIGHT with, top to bottom, a pill-shaped name capsule, an upper
+//! groove, and a lower groove — rendered as a full-size DECORATIVE OVERLAY
+//! per member (the orb-frame idiom of `bar.rs::spawn_orb_bar`), NOT as a
+//! tiny square "photo". Its transparent hole + two grooves reveal live
+//! elements slotted BEHIND it: a neutral portrait fill in the hole, the
+//! health bar in the upper groove, the mana/energy bar in the lower groove,
+//! plus a `PartyLevelBadge` straddling the hole's bottom rim. The name
+//! capsule is DIFFERENT from those: it's not a transparent cutout at all —
+//! it's an opaque, lighter-toned stone inset (v2's own addition, directly
+//! above the health groove) — so the name label is painted ON TOP of the
+//! frame chrome instead of slotted behind it (see the paint-order comment at
+//! the composition call site). All regions are absolutely positioned by the
+//! asset's MEASURED source-pixel regions (see the `PARTY_HOLE`/
+//! `PARTY_NAME_CAPSULE`/`PARTY_*_GROOVE` constants) scaled uniformly, so they
+//! stay pixel-aligned to the chrome at any size. This is a RENDER-LAYER
+//! reskin of [`SocialMirrorPlugin`]'s already-mirrored data — no new
+//! protocol/mirror work. Three real data gaps, each documented at its call
+//! site rather than silently invented:
 //! - **Voice-chat state**: no protocol field carries a live per-member voice
 //!   state — every row defaults to [`PartyVoiceState::Inactive`] (see that
 //!   enum's own doc comment).
@@ -92,21 +99,30 @@ use xindeler_ui::{
 use crate::chat::text_input_focused;
 
 // BL-82 EM-5.17 Phase 4 (party-frame composition fix) — `party_portrait_
-// frame.png` is a WIDE ~1408×768 decorative chrome plate: an ornate circular
-// portrait hole carved into its LEFT, and a plaque on its RIGHT with two
-// horizontal carved grooves. It is rendered ONCE per member as a full-size
-// overlay whose TRANSPARENT hole + grooves reveal live elements slotted
-// BEHIND it — a portrait fill + name in the hole, the health bar in the
-// upper groove, the mana/energy bar in the lower groove. (The bug this
-// replaces stretched the whole wide plate into a 64×64 box as if it were the
-// character's own tiny "photo", with the bars as separate side-by-side
-// widgets to its right.) The measurements below are the asset's own
-// SOURCE-pixel regions (flood-fill of its enclosed transparent regions — see
-// the PR body for the measurement script); everything is scaled by
-// `PARTY_FRAME_SCALE`, a single uniform factor, so the circle stays round and
-// the bars stay pixel-aligned to the grooves at any `PARTY_FRAME_WIDTH_PX`.
-const PARTY_FRAME_SRC_W: f32 = 1408.0;
-const PARTY_FRAME_SRC_H: f32 = 768.0;
+// frame.png` is a WIDE decorative chrome plate: an ornate circular portrait
+// hole carved into its LEFT, and a plaque on its RIGHT with two horizontal
+// carved grooves. It is rendered ONCE per member as a full-size overlay
+// whose TRANSPARENT hole + grooves reveal live elements slotted BEHIND it —
+// a portrait fill in the hole, the health bar in the upper groove, the
+// mana/energy bar in the lower groove. (The bug this replaces stretched the
+// whole wide plate into a 64×64 box as if it were the character's own tiny
+// "photo", with the bars as separate side-by-side widgets to its right.) The
+// measurements below are the asset's own SOURCE-pixel regions (flood-fill of
+// its enclosed transparent regions — see the PR body for the measurement
+// script); everything is scaled by `PARTY_FRAME_SCALE`, a single uniform
+// factor, so the circle stays round and the bars stay pixel-aligned to the
+// grooves at any `PARTY_FRAME_WIDTH_PX`.
+//
+// party-frame-v2 follow-up — swapped from the original 1408×768 art to a
+// NEW 1380×752 asset (visually similar layout, same "circle + plaque with
+// grooves" composition, but every region shifted by a handful of source
+// pixels — re-measured from scratch with the same flood-fill methodology,
+// never assumed identical to v1). The new art also adds a pill-shaped name
+// capsule directly above the health groove (`PARTY_NAME_CAPSULE`) — see that
+// constant's own doc comment for why it's measured differently (it's opaque,
+// not a transparent cutout).
+const PARTY_FRAME_SRC_W: f32 = 1380.0;
+const PARTY_FRAME_SRC_H: f32 = 752.0;
 /// Rendered width of one party frame; height derives from the native aspect
 /// ratio so the circle stays circular and the grooves stay aligned.
 ///
@@ -124,12 +140,39 @@ const PARTY_FRAME_HEIGHT_PX: f32 = PARTY_FRAME_WIDTH_PX * PARTY_FRAME_SRC_H / PA
 const PARTY_FRAME_SCALE: f32 = PARTY_FRAME_WIDTH_PX / PARTY_FRAME_SRC_W;
 
 /// Circular portrait hole `[x, y, w, h]` in source pixels (enclosed
-/// transparent region; measured center ≈ (357, 385), diameter ≈ 386).
-const PARTY_HOLE: [f32; 4] = [166.0, 191.0, 383.0, 389.0];
-/// Upper carved groove → HEALTH bar `[x, y, w, h]` in source pixels.
-const PARTY_HP_GROOVE: [f32; 4] = [691.0, 298.0, 535.0, 58.0];
-/// Lower carved groove → MANA/ENERGY bar `[x, y, w, h]` in source pixels.
-const PARTY_MP_GROOVE: [f32; 4] = [691.0, 413.0, 534.0, 57.0];
+/// transparent region of the v2 asset; measured center ≈ (354, 378.5),
+/// diameter ≈ 384-387, flood-fill fill-ratio ≈ 0.78 — matches π/4, i.e. a
+/// clean circle).
+const PARTY_HOLE: [f32; 4] = [162.0, 185.0, 384.0, 387.0];
+/// Upper carved groove → HEALTH bar `[x, y, w, h]` in source pixels
+/// (enclosed transparent region of the v2 asset, flood-fill fill-ratio ≈
+/// 0.95).
+const PARTY_HP_GROOVE: [f32; 4] = [683.0, 290.0, 534.0, 62.0];
+/// Lower carved groove → MANA/ENERGY bar `[x, y, w, h]` in source pixels
+/// (enclosed transparent region of the v2 asset, flood-fill fill-ratio ≈
+/// 0.98).
+const PARTY_MP_GROOVE: [f32; 4] = [683.0, 405.0, 534.0, 58.0];
+/// Pill-shaped NAME capsule `[x, y, w, h]` in source pixels, directly above
+/// [`PARTY_HP_GROOVE`] — v2's new addition (spec: Matías, party-frame-v2
+/// follow-up). Unlike [`PARTY_HOLE`]/[`PARTY_HP_GROOVE`]/[`PARTY_MP_GROOVE`]
+/// this is **not** a transparent cutout — the flood-fill that finds those
+/// three finds nothing here (this region's alpha is fully opaque). It's an
+/// opaque, lighter-toned stone inset visually distinguished from the
+/// surrounding darker raised metal border by brightness alone, so it was
+/// measured with a row-mean luminance scan (avoiding the ornate end-caps,
+/// x∈[780,1120]) smoothed over a 5px window: a flat "plateau" of
+/// luminance≈60-64 sits between two beveled-metal transitions (a highlight
+/// then a dark groove line above, ≈y194-223; a dark groove line then a
+/// highlight below, ≈y274-289) — exactly the "lighter grey region bounded by
+/// a darker raised metal border" shape described in the task brief. The
+/// left/right bounds visually line up with the same plaque "lane" as
+/// [`PARTY_HP_GROOVE`]/[`PARTY_MP_GROOVE`] (confirmed by overlaying this
+/// bbox on the source asset). Because this is painted ON TOP of the opaque
+/// frame chrome (not revealed through a hole — see the paint-order comment
+/// at the composition call site), the name text is allowed to slightly
+/// overflow this precisely-measured plateau at render time, the same
+/// tolerance already accepted by [`PARTY_NAME_FONT_PX`] before this change.
+const PARTY_NAME_CAPSULE: [f32; 4] = [683.0, 224.0, 534.0, 49.0];
 
 /// The level badge straddles the portrait hole's bottom rim; its size is a
 /// fraction of the (scaled) hole diameter so it tracks `PARTY_FRAME_WIDTH_PX`.
@@ -450,8 +493,9 @@ fn sync_group_state(
 /// Smoke-only (env-gated) party injector — populates a fake 3-member group
 /// with mirrored health/energy/level so `--smoke-screenshot` has a real,
 /// deterministic party frame to capture (verifying the HUD-D4 composition:
-/// portrait + name inside the circular hole, health/mana bars slotted into the
-/// two carved grooves, chrome frame as the top overlay). A no-op unless
+/// portrait alone in the circular hole, name in the v2 asset's pill-shaped
+/// capsule above the health groove, health/mana bars slotted into the two
+/// carved grooves, chrome frame as the top overlay). A no-op unless
 /// `XINDELER_SMOKE_PARTY` is set — the same env-var-gated, smoke-only idiom as
 /// `diary`/`inventory_ui`'s open-for-smoke systems. Nothing sets that var in
 /// production or tests, so it can never affect real group state.
@@ -648,16 +692,24 @@ fn sync_group_panel(
         commands.entity(row_entity).add_child(frame_container);
 
         // Child paint order within `frame_container` is back-to-front (Bevy UI
-        // paints later siblings on top): (1) portrait fill, (2) name+voice,
-        // (3/4) the two groove bars, (5) the frame chrome PNG on top (its
-        // transparent hole + grooves reveal 1-4, its opaque metal masks any
-        // overflow), (6) the level badge on top of the chrome. No per-child
-        // `GlobalZIndex` is needed — unlike the orb frame overlay
-        // (`bar.rs::spawn_orb_bar`, which spills its wings OUTSIDE its
-        // container over a sibling panel and therefore needs an explicit
-        // z-tier), nothing here escapes `frame_container`, so local child
-        // order is the whole story and the panel keeps its single
-        // `ORBS_ACTION_BAR_PARTY_MINIMAP` tier.
+        // paints later siblings on top): (1) portrait fill, (2/3) the two
+        // groove bars, (4) the frame chrome PNG on top of 1-3 (its
+        // transparent hole + grooves reveal them, its opaque metal masks any
+        // overflow), (5) name+voice ON TOP of the chrome, (6) the level
+        // badge also on top of the chrome. Name+voice moved from BEFORE the
+        // chrome to AFTER it (party-frame-v2 follow-up): v2's name capsule is
+        // an OPAQUE stone inset, not a transparent cutout like the hole/
+        // grooves, so there is no hole for it to be "revealed through" —
+        // painting it behind the chrome would just bury it under the opaque
+        // capsule art. The level badge already worked this way (it's also a
+        // separate opaque image straddling the hole's rim on top of the
+        // chrome), so this makes name+voice consistent with that existing
+        // precedent rather than a new pattern. No per-child `GlobalZIndex` is
+        // needed — unlike the orb frame overlay (`bar.rs::spawn_orb_bar`,
+        // which spills its wings OUTSIDE its container over a sibling panel
+        // and therefore needs an explicit z-tier), nothing here escapes
+        // `frame_container`, so local child order is the whole story and the
+        // panel keeps its single `ORBS_ACTION_BAR_PARTY_MINIMAP` tier.
         let hole_cx = PARTY_HOLE[0] + PARTY_HOLE[2] / 2.0;
 
         // (1) Portrait placeholder fill — a flat neutral disc filling the
@@ -671,77 +723,7 @@ fn sync_group_panel(
             .id();
         commands.entity(frame_container).add_child(placeholder_fill);
 
-        // (2) Name (+ voice icon) — small, centred over the lower half of the
-        // portrait hole (Matías's spec: "name shown small near/inside the
-        // circle area"). Clipped to the hole width so a long alias is masked
-        // by the chrome's ring rather than spilling across the plaque.
-        let mut name_row_node = party_region_node([
-            PARTY_HOLE[0],
-            PARTY_HOLE[1] + PARTY_HOLE[3] * 0.58,
-            PARTY_HOLE[2],
-            PARTY_HOLE[3] * 0.30,
-        ]);
-        name_row_node.flex_direction = FlexDirection::Row;
-        name_row_node.column_gap = theme.spacing.xs_px();
-        name_row_node.align_items = AlignItems::Center;
-        name_row_node.justify_content = JustifyContent::Center;
-        name_row_node.overflow = bevy::ui::Overflow::clip_x();
-        let name_row_entity = commands.spawn(name_row_node).id();
-        commands.entity(frame_container).add_child(name_row_entity);
-
-        let label = if is_leader {
-            format!("★ {}", member.name)
-        } else {
-            member.name.clone()
-        };
-        let name_entity = commands
-            .spawn((
-                PartyNameLabel,
-                Text(label),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
-                    ..Default::default()
-                },
-                // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) —
-                // the now-much-shorter `name_row_node` (a fraction of the
-                // shrunk `PARTY_HOLE`) is narrow enough that Bevy's default
-                // soft-wrap broke a longer name across 2-3 lines, spilling
-                // down over the HP/MP bars instead of being clipped to one
-                // line (live-tested, visually confirmed via
-                // `--smoke-screenshot`). `clip_x()` below only clips
-                // horizontal overflow — it does nothing about vertical
-                // wrapping — so wrapping must be disabled explicitly too.
-                TextLayout::no_wrap(),
-                TextColor(if is_leader {
-                    theme.palette.accent
-                } else {
-                    theme.palette.text
-                }),
-            ))
-            .id();
-        commands.entity(name_row_entity).add_child(name_entity);
-
-        // Voice-chat state has no mirrored data source yet (see
-        // `PartyVoiceState`'s own doc comment) — always Inactive until a
-        // real field lands.
-        let voice_icon_entity = commands
-            .spawn((
-                PartyVoiceIconImage,
-                Node {
-                    width: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
-                    height: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
-                    flex_shrink: 0.0,
-                    ..Default::default()
-                },
-                ImageNode::new(images.get(voice_icon_key(PartyVoiceState::Inactive))),
-            ))
-            .id();
-        commands
-            .entity(name_row_entity)
-            .add_child(voice_icon_entity);
-
-        // (3/4) The two groove bars — `spawn_bar` reused VERBATIM (same
+        // (2/3) The two groove bars — `spawn_bar` reused VERBATIM (same
         // `BarValue`/fill machinery + `sync_group_bars` per-frame refresh),
         // each wrapped in an absolutely-positioned slot sized to a measured
         // groove so the bar fills the carved recess exactly. Health -> upper
@@ -823,7 +805,7 @@ fn sync_group_panel(
             },
         }
 
-        // (5) The frame chrome PNG — full-size overlay ON TOP of (1)-(4). Its
+        // (4) The frame chrome PNG — full-size overlay ON TOP of (1)-(3). Its
         // transparent circular hole + two grooves reveal them; the opaque
         // plaque/ring masks any overflow. `Pickable::IGNORE` so it never
         // steals pointer events (matches `spawn_orb_bar`'s overlay convention).
@@ -843,6 +825,76 @@ fn sync_group_panel(
             ))
             .id();
         commands.entity(frame_container).add_child(frame_entity);
+
+        // (5) Name (+ voice icon) — centred inside the v2 asset's new
+        // pill-shaped name capsule, directly above the health groove
+        // (Matías's party-frame-v2 spec: name moves OUT of the portrait
+        // circle and INTO the capsule; the circle keeps just the portrait).
+        // Painted AFTER (on top of) the frame chrome — see the paint-order
+        // comment above `frame_container`'s children for why: the capsule is
+        // opaque art, not a transparent cutout, so there's nothing to
+        // "reveal" the name through. Clipped to the capsule width so a long
+        // alias is masked rather than spilling across the plaque.
+        let mut name_row_node = party_region_node(PARTY_NAME_CAPSULE);
+        name_row_node.flex_direction = FlexDirection::Row;
+        name_row_node.column_gap = theme.spacing.xs_px();
+        name_row_node.align_items = AlignItems::Center;
+        name_row_node.justify_content = JustifyContent::Center;
+        name_row_node.overflow = bevy::ui::Overflow::clip_x();
+        let name_row_entity = commands.spawn(name_row_node).id();
+        commands.entity(frame_container).add_child(name_row_entity);
+
+        let label = if is_leader {
+            format!("★ {}", member.name)
+        } else {
+            member.name.clone()
+        };
+        let name_entity = commands
+            .spawn((
+                PartyNameLabel,
+                Text(label),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
+                    ..Default::default()
+                },
+                // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — the
+                // shrunk `name_row_node` (now sized to the small
+                // `PARTY_NAME_CAPSULE`) is narrow enough that Bevy's default
+                // soft-wrap broke a longer name across 2-3 lines, spilling
+                // down over the HP/MP bars instead of being clipped to one
+                // line (live-tested, visually confirmed via
+                // `--smoke-screenshot`). `clip_x()` below only clips
+                // horizontal overflow — it does nothing about vertical
+                // wrapping — so wrapping must be disabled explicitly too.
+                TextLayout::no_wrap(),
+                TextColor(if is_leader {
+                    theme.palette.accent
+                } else {
+                    theme.palette.text
+                }),
+            ))
+            .id();
+        commands.entity(name_row_entity).add_child(name_entity);
+
+        // Voice-chat state has no mirrored data source yet (see
+        // `PartyVoiceState`'s own doc comment) — always Inactive until a
+        // real field lands.
+        let voice_icon_entity = commands
+            .spawn((
+                PartyVoiceIconImage,
+                Node {
+                    width: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    height: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    flex_shrink: 0.0,
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(voice_icon_key(PartyVoiceState::Inactive))),
+            ))
+            .id();
+        commands
+            .entity(name_row_entity)
+            .add_child(voice_icon_entity);
 
         // (6) Level badge — straddles the portrait hole's bottom rim, ON TOP
         // of the chrome. The badge PNG is decorative; the level NUMBER only
