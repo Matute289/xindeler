@@ -45,6 +45,27 @@ kira = { version = "0.12", default-features = false, features = [
     "pcm",
 ] }
 tracing = { workspace = true }
+# BL-82 EM-5.10b (T56.35): the `SfxEvent`/`SfxTriggerItem` vocabulary the
+# frozen `sfx.ron` deserializes into references sim types directly
+# (`CharacterAbilityType`, `ToolKind`, `PoiseState`, `UtteranceKind`,
+# `BlockKind`, ...) — same "logic crate as TYPE LIBRARY only" pattern
+# `xindeler-protocol`/`xindeler-client` already establish (legal shell → logic
+# direction; the isolation law forbids the reverse). `no-assets`: this crate
+# never touches `common`'s `assets_manager`-backed statics, only its plain
+# data types — same convention `xindeler-client`'s own `common` dep follows.
+common = { package = "xindeler-common", path = "../../common", default-features = false, features = [
+    "no-assets",
+] }
+# Parses the frozen `sfx.ron` manifest (an async Bevy `AssetLoader`, same
+# `ron::de::from_bytes` pattern `xindeler-render-voxel::palette::
+# BlockPaletteLoader` already established).
+ron = { workspace = true }
+serde = { workspace = true }
+# Picks a random file out of a multi-file `SfxTriggerItem::files` list (the
+# old client's own `files.choose(&mut rng)` behaviour, `voxygen/src/audio/
+# mod.rs::emit_sfx`) and (later) the block/campfire mappers' own randomized
+# ambience timing.
+rand = { workspace = true }
 
 [dev-dependencies]
 # The T56.34 verification test boots a real headless `App` (`MinimalPlugins` +

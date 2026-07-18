@@ -176,6 +176,12 @@ pub use social::{
     apply_local_group_actions, mirror_dialogue, mirror_group_state, mirror_player_list,
 };
 
+mod sfx;
+pub use sfx::{
+    SfxLocomotionMirrorPlugin, SfxOutcomeBridgePlugin, broadcast_embedded_outcomes,
+    mirror_locomotion_and_combat_state,
+};
+
 use std::{
     collections::HashMap,
     path::Path,

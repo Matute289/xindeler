@@ -66,6 +66,7 @@
 mod asset;
 mod diagnostics;
 mod manager;
+pub mod sfx;
 mod volume;
 
 pub use asset::{XindelerAudioAsset, XindelerAudioAssetLoader};
@@ -107,6 +108,15 @@ impl Plugin for XindelerAudioPlugin {
                 diagnostics::pump_audio_diagnostics,
             ),
         );
+
+        // BL-82 EM-5.10b (T56.35): the sfx.ron manifest + playback asset
+        // cache. Folded into THIS plugin (extend, don't fork) rather than a
+        // second plugin callers would need to remember to add — every
+        // consumer of `XindelerAudioPlugin` gets SFX-ready-to-trigger for
+        // free; nothing plays a sound until `xindeler-client::sfx`'s
+        // event-mapper systems are ALSO added (a separate plugin, since they
+        // need `xindeler-protocol` types this crate does not depend on).
+        app.add_plugins(sfx::SfxManifestPlugin);
     }
 }
 

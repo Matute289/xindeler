@@ -28,6 +28,7 @@ pub mod login;
 pub mod map;
 pub mod narrative;
 pub mod owner_visibility;
+pub mod sfx;
 pub mod skillset;
 pub mod social;
 pub mod trade;
@@ -69,6 +70,7 @@ pub use crate::{
     map::{MAP_IMAGE_MAX_DIM, NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     owner_visibility::{ClientOwnedUid, NetOwnerOnly},
+    sfx::{NetCombatMove, NetGroundBlock, NetLocomotion, NetMoveState, NetOutcome},
     skillset::{
         LocalUnlockSkillRequest, NetAbilityPool, NetSkillGroup, NetSkillSet, UnlockSkillRequest,
     },
@@ -830,7 +832,13 @@ impl Plugin for XindelerProtocolPlugin {
             // Its client → sim intent reuses the existing
             // `InventoryActionRequest` (crafting is a `CraftEvent` inside
             // `InventoryManip::CraftRecipe`) — no new message registered here.
-            .replicate::<NetCrafting>();
+            .replicate::<NetCrafting>()
+            // BL-82 EM-5.10b (T56.35): the SFX event mappers' locomotion/
+            // combat-move classification (spec §3.2) — broadcast like every
+            // other entity-visible comp above (NOT owner-scoped: hearing a
+            // NEARBY entity's footsteps/attack sounds is the whole point).
+            .replicate::<NetLocomotion>()
+            .replicate::<NetCombatMove>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
@@ -934,6 +942,12 @@ impl Plugin for XindelerProtocolPlugin {
         // entity replication either — same reasoning as `HudToast` above.
         app.add_server_message::<NetChatMsg>(XindelerChannel::Events.delivery())
             .make_message_independent::<NetChatMsg>();
+        // BL-82 EM-5.10b (T56.35): the partial `Outcome` projection driving
+        // `xindeler-client::sfx::handle_outcome`. Same reasoning as
+        // `NetChatMsg`/`HudToast` above — a discrete one-shot happening, no
+        // entity references, must not queue behind entity replication.
+        app.add_server_message::<NetOutcome>(XindelerChannel::Events.delivery())
+            .make_message_independent::<NetOutcome>();
         // BL-82 EM-4.2d: per-client interest management. Registering this
         // filter does NOT itself add `RegionKey`/`ClientVisibleRegions` to any
         // entity — it only teaches replicon how to interpret them where they

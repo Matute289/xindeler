@@ -274,6 +274,15 @@ pub struct EmbeddedPlayer {
     /// `xindeler-sim-bridge::chat::broadcast_embedded_chat` right after, so
     /// this never grows unbounded even across the same-frame ordering.
     pending_chat: Vec<comp::ChatMsg>,
+    /// `Outcome`s the embedded Client received THIS tick (BL-82 EM-5.10b,
+    /// T56.35), captured from `client.tick()`'s returned frontend events by
+    /// [`tick_player`] — the ONLY place they surface (the sim's own
+    /// `ServerGeneral::Outcomes` message is already per-connection-filtered
+    /// server-side before it ever reaches this Client, so this queue is
+    /// exactly "what this player would hear"). Drained by
+    /// `xindeler-sim-bridge::sfx::broadcast_embedded_outcomes` right after,
+    /// same never-grows-unbounded shape as [`Self::pending_chat`].
+    pending_outcomes: Vec<common::outcome::Outcome>,
 }
 
 /// Coarse, **real** connection/boot stages surfaced to the client's
@@ -572,6 +581,14 @@ impl EmbeddedPlayer {
     /// [`tick_player`] populates it (see [`Self::pending_chat`]'s doc).
     pub(crate) fn drain_pending_chat(&mut self) -> Vec<comp::ChatMsg> {
         std::mem::take(&mut self.pending_chat)
+    }
+
+    /// Takes every `Outcome` captured this tick (BL-82 EM-5.10b, T56.35),
+    /// leaving the internal queue empty — called once per frame by
+    /// `xindeler-sim-bridge::sfx::broadcast_embedded_outcomes`, right after
+    /// [`tick_player`] populates it (see [`Self::pending_outcomes`]'s doc).
+    pub(crate) fn drain_pending_outcomes(&mut self) -> Vec<common::outcome::Outcome> {
+        std::mem::take(&mut self.pending_outcomes)
     }
 
     /// Applies a client → server chat/command send request (BL-82 EM-5.4) to
@@ -925,6 +942,7 @@ pub fn boot_embedded_player_reporting(
         last_tick_wall: None,
         pending_dialogue: Vec::new(),
         pending_chat: Vec::new(),
+        pending_outcomes: Vec::new(),
     })
 }
 
@@ -1132,6 +1150,11 @@ pub(crate) fn tick_player(
     // broadcast_embedded_chat` drains + broadcasts them right after (same
     // `Update` frame, chained after this system).
     collect_chat_events(&mut player, &events);
+    // BL-82 EM-5.10b (T56.35): same reasoning as chat above, for
+    // `Event::Outcome` — the SFX `handle_outcome` port needs the sim's
+    // `Outcome` stream, and `client.tick()`'s returned events are the only
+    // place it surfaces client-side.
+    collect_outcome_events(&mut player, &events);
 }
 
 /// Appends every `ClientEvent::Chat` this frame's dispatch produced onto
@@ -1142,6 +1165,18 @@ fn collect_chat_events(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
         .pending_chat
         .extend(events.iter().filter_map(|event| match event {
             ClientEvent::Chat(msg) => Some(msg.clone()),
+            _ => None,
+        }));
+}
+
+/// Appends every `ClientEvent::Outcome` this frame's dispatch produced onto
+/// [`EmbeddedPlayer::pending_outcomes`] (BL-82 EM-5.10b, T56.35) — the same
+/// small factored-out shape [`collect_chat_events`] already established.
+fn collect_outcome_events(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
+    player
+        .pending_outcomes
+        .extend(events.iter().filter_map(|event| match event {
+            ClientEvent::Outcome(outcome) => Some(outcome.clone()),
             _ => None,
         }));
 }
