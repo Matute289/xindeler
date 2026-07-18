@@ -87,10 +87,10 @@ use xindeler_protocol::{
     NetPoise, inventory::ALL_EQUIP_SLOTS,
 };
 use xindeler_ui::{
-    button::{Activate, button_bundle},
+    button::{Activate, HudButtonImages, button_bundle, image_button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
     images::{HudImageKey, HudImages},
-    panel::{image_panel_bundle, panel_bundle},
+    panel::image_panel_bundle,
     scroll::scroll_view_bundle,
     slot::{
         HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle,
@@ -160,6 +160,16 @@ const PAPERDOLL_SLOT_LAYOUT: &[(EquipSlot, f32, f32, f32)] = &[
 /// Marks the whole inventory window root (toggled by [`HudState`]).
 #[derive(Component)]
 struct InventoryWindowRoot;
+/// BL-82 EM-5.18 legacy-inventory round 2 — the title-bar red-X close button
+/// (top-right), reusing [`image_button_bundle`] so it inherits the SAME
+/// hover/press texture-swap
+/// ([`xindeler_ui::button::update_image_button_visuals`]) every image-backed
+/// HUD button gets. Its [`Activate`] observer writes [`HudAction::CloseWindow`]
+/// — the SAME generic action flow the `I` keybind and `HudState::close` already
+/// use, so clicking it closes the window through the one real state machine, no
+/// bespoke close path.
+#[derive(Component)]
+struct InventoryCloseButton;
 /// Marks the bag grid container (children are the bag [`xindeler_ui::slot`]
 /// entities, spawned once real capacity is known).
 #[derive(Component)]
@@ -337,14 +347,52 @@ const STAT_ROWS: [(StatKind, HudImageKey); 6] = [
     (StatKind::Stealth, HudImageKey::StatStealth),
 ];
 
-/// Spawns the (initially hidden) inventory window: a full-screen dim
-/// backdrop containing ONE themed panel (BL-82 EM-5.17/5.18 legacy-inventory
-/// rebuild — see the module doc comment's "Legacy single-window layout"
-/// section for why this replaced the earlier Items/Equipment tab split),
-/// laid out top-to-bottom as:
-/// 1. A centered title ("Inventario" — the player's real character name isn't
+/// BL-82 EM-5.18 legacy-inventory round 2 — the window is sized to the NATIVE
+/// pixel dimensions of its chrome plate ([`HudImageKey::InventoryChrome`] =
+/// `bag/inv_bg_0.png`, 424x708) so the plate's painted golden border, corner
+/// filigree and its two carved region dividers render at their true
+/// proportions (the `ImageNode` is `NodeImageMode::Stretch`, so a node of the
+/// SAME aspect stretches 1:1 → no distortion — the concern the old
+/// "intentionally NOT used" note raised only bites a MISMATCHED box). The four
+/// content bands below get FIXED heights measured from the plate's horizontal
+/// divider rows (a flood-scan of the asset found rules at y=46 [title], y=468
+/// [bag] and y=688 [footer]); they sum EXACTLY to [`INV_WINDOW_H`] so every
+/// band aligns to its painted compartment.
+///
+/// TODO(BL-82 hud-scale): these are FIXED logical pixels — the Bevy HUD has no
+/// hud-scale/DPI system yet (consistent with every sibling window today), so
+/// the 708px-tall plate leaves only ~6px margin on a 720p client and will clip
+/// on a shorter window or under OS/UI downscaling. When a HUD-scale resource
+/// lands, multiply `INV_WINDOW_*`/`INV_*_BAND_H` by it uniformly (all bands
+/// scale together, preserving the divider alignment).
+const INV_WINDOW_W: f32 = 424.0;
+const INV_WINDOW_H: f32 = 708.0;
+/// Title-bar band: portrait + centred title + close button (plate y 0..46).
+const INV_TITLE_BAND_H: f32 = 46.0;
+/// Main band: stat column + paper-doll (plate y 46..468).
+const INV_MAIN_BAND_H: f32 = 422.0;
+/// Bag-grid band (plate y 468..688).
+const INV_BAG_BAND_H: f32 = 220.0;
+/// Footer band: coin readout + slot count (plate y 688..708).
+const INV_FOOTER_BAND_H: f32 = 20.0;
+/// Horizontal inset so each band's content clears the plate's painted border.
+const INV_SIDE_INSET: f32 = 16.0;
+
+/// Spawns the (initially hidden) inventory window: a full-screen dim backdrop
+/// containing ONE panel (BL-82 EM-5.17/5.18 legacy-inventory rebuild — see the
+/// module doc comment's "Legacy single-window layout" section for why this
+/// replaced the earlier Items/Equipment tab split). Round 2 (EM-5.18) backs
+/// the panel with the ornate legacy chrome plate
+/// ([`HudImageKey::InventoryChrome`] = `inv_bg_0.png`) at its native 424x708
+/// size and lays the content into four FIXED-height bands that butt against
+/// the plate's painted divider rows (`INV_*_BAND_H`), top-to-bottom as:
+/// 1. A full-width title BAR (BL-82 EM-5.18 legacy-inventory round 2, matching
+///    legacy "xindeler-old"'s `bag.rs`): the flat 2D character portrait
+///    ([`HudImageKey::CharacterPortrait`], `char_art`) pinned top-left, the
+///    centred title ("Inventario" — the player's real character name isn't
 ///    mirrored to the client today, so this can't yet render "Inventario de
-///    <name>"; `// TODO` below flags the missing protocol mirror field).
+///    <name>"; `// TODO` below flags the missing protocol mirror field), and
+///    the red-X close button ([`spawn_close_button`]) pinned top-right.
 /// 2. A `Row` of the left [`StatColumn`] (6 icon+value rows, kept live by
 ///    [`sync_inventory_stats`]) and the fixed-size (250x330px) center
 ///    [`PaperdollRoot`] (all 18 shown equip slots, absolutely positioned per
@@ -387,33 +435,75 @@ fn spawn_inventory_window(
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         ))
         .with_children(|backdrop| {
-            // `panel_bundle` already carries a real `Node` (padding/border/
-            // radius) — a SECOND `Node` in the same spawn tuple would
-            // REPLACE it wholesale (the exact EM-5.2 regression class; see
-            // `xindeler-client::combat_hud`'s own doc comment for the full
-            // story), so the column-layout overrides are applied via
-            // `.entry::<Node>().and_modify(..)` (in-place field mutation) —
-            // on its own statement, since `EntityEntryCommands` doesn't
-            // itself expose `with_children`.
-            let mut panel_entity = backdrop.spawn(panel_bundle(&theme));
-            // `and_modify`'s closure is queued into `Commands` (runs later),
-            // so it requires `'static` — an owned `Val` copied out of
-            // `theme` BEFORE the closure, not a borrow of `theme` itself
-            // (which only lives for this function call).
-            let row_gap = Val::Px(8.0);
+            // Round 2 (BL-82 EM-5.18): the window is now the ornate legacy
+            // chrome plate ([`HudImageKey::InventoryChrome`] = `inv_bg_0.png`)
+            // via `image_panel_bundle`, sized to the plate's native 424x708 so
+            // its golden border/filigree/dividers render undistorted (see the
+            // `INV_WINDOW_*`/`INV_*_BAND_H` constants). `image_panel_bundle`
+            // already carries a real `Node` (its own padding + the `ImageNode`)
+            // — a SECOND `Node` in the same spawn tuple would REPLACE it
+            // wholesale (the EM-5.2 regression class; see
+            // `xindeler-client::combat_hud`'s own doc comment), so the
+            // fixed-size + column-layout overrides are applied via
+            // `.entry::<Node>().and_modify(..)` (in-place field mutation) — on
+            // its own statement, since `EntityEntryCommands` doesn't itself
+            // expose `with_children`. Padding is zeroed here: the plate paints
+            // its own border and each band insets its OWN content
+            // (`INV_SIDE_INSET`), and `row_gap` is zeroed because the bands are
+            // fixed-height and butt directly against the plate's painted
+            // divider rows.
+            let mut panel_entity = backdrop.spawn(image_panel_bundle(
+                &theme,
+                images.get(HudImageKey::InventoryChrome),
+            ));
             panel_entity.entry::<Node>().and_modify(move |mut node| {
                 node.flex_direction = FlexDirection::Column;
-                node.row_gap = row_gap;
+                node.width = Val::Px(INV_WINDOW_W);
+                node.height = Val::Px(INV_WINDOW_H);
+                node.padding = UiRect::all(Val::Px(0.0));
+                node.row_gap = Val::Px(0.0);
             });
             panel_entity.with_children(|panel| {
-                // 1. Title.
+                // 1. Title bar — a full-width row matching legacy
+                // "xindeler-old"'s `bag.rs`: the character portrait pinned
+                // top-left (`char_art`), the centred title, and the red-X
+                // close button pinned top-right (`close_btn`). The title node's
+                // `flex_grow: 1` makes it consume all free space between the
+                // portrait and close button, and its `Justify::Center` centres
+                // the text within THAT gap. Because the portrait (30px) and
+                // close (24px) differ slightly in width, the title's optical
+                // centre sits a few px off true window-centre — negligible at
+                // this scale, and matching the reference's own eyeballed
+                // placement. (`SpaceBetween` is belt-and-braces here: the
+                // title's `flex_grow` already eats all slack, so the portrait
+                // and close land at the two insets regardless.)
                 panel
                     .spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(INV_TITLE_BAND_H),
+                        flex_shrink: 0.0,
                         flex_direction: FlexDirection::Row,
-                        justify_content: JustifyContent::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(6.0),
+                        padding: UiRect::horizontal(Val::Px(INV_SIDE_INSET)),
                         ..Default::default()
                     })
                     .with_children(|title_row| {
+                        // Top-left: character portrait (flat 2D pixel-art
+                        // bust — see `HudImageKey::CharacterPortrait`).
+                        title_row.spawn((
+                            bevy::ui::widget::ImageNode::new(
+                                images.get(HudImageKey::CharacterPortrait),
+                            ),
+                            Node {
+                                width: Val::Px(30.0),
+                                height: Val::Px(28.0),
+                                flex_shrink: 0.0,
+                                ..Default::default()
+                            },
+                        ));
+                        // Centre: title (centred within the remaining space).
                         title_row.spawn((
                             // TODO(BL-82 follow-up): the local player's
                             // character name needs a protocol mirror field
@@ -426,15 +516,39 @@ fn spawn_inventory_window(
                                 ..Default::default()
                             },
                             TextColor(theme.palette.text),
+                            bevy::text::TextLayout {
+                                justify: bevy::text::Justify::Center,
+                                ..Default::default()
+                            },
+                            Node {
+                                flex_grow: 1.0,
+                                ..Default::default()
+                            },
                         ));
+                        // Top-right: red-X close button.
+                        spawn_close_button(title_row, &theme, &fonts, &images);
                     });
 
-                // 2. Stat column + paper-doll.
+                // 2. Main band — stat column (far left) + paper-doll. Fixed to
+                // the plate's middle compartment (`INV_MAIN_BAND_H`);
+                // `SpaceBetween` pins the stat column to the left inset and
+                // pushes the paper-doll toward the plate's centre columns,
+                // matching the reference `captura10.png` composition.
                 panel
                     .spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(INV_MAIN_BAND_H),
+                        flex_shrink: 0.0,
                         flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(12.0),
+                        justify_content: JustifyContent::SpaceBetween,
                         align_items: AlignItems::FlexStart,
+                        column_gap: Val::Px(12.0),
+                        padding: UiRect {
+                            left: Val::Px(INV_SIDE_INSET),
+                            right: Val::Px(INV_SIDE_INSET),
+                            top: Val::Px(10.0),
+                            bottom: Val::Px(0.0),
+                        },
                         ..Default::default()
                     })
                     .with_children(|main_row| {
@@ -487,21 +601,42 @@ fn spawn_inventory_window(
                         }));
                     });
 
-                // 3. Bag grid.
-                panel.spawn((BagGridRoot, Node {
-                    display: Display::Grid,
-                    grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(9, 40.0)],
-                    row_gap: Val::Px(2.0),
-                    column_gap: Val::Px(2.0),
-                    ..Default::default()
-                }));
-
-                // 4. Footer.
+                // 3. Bag-grid band — the grid centred inside the plate's
+                // lower compartment (`INV_BAG_BAND_H`, below the carved
+                // divider at plate y=468).
                 panel
                     .spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(INV_BAG_BAND_H),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(Val::Px(INV_SIDE_INSET)),
+                        ..Default::default()
+                    })
+                    .with_children(|bag_band| {
+                        bag_band.spawn((BagGridRoot, Node {
+                            display: Display::Grid,
+                            grid_template_columns: vec![bevy::ui::RepeatedGridTrack::px(9, 40.0)],
+                            row_gap: Val::Px(2.0),
+                            column_gap: Val::Px(2.0),
+                            ..Default::default()
+                        }));
+                    });
+
+                // 4. Footer band — coin readout (left) + slot count (right) in
+                // the plate's thin bottom strip (`INV_FOOTER_BAND_H`, below the
+                // divider at plate y=688).
+                panel
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(INV_FOOTER_BAND_H),
+                        flex_shrink: 0.0,
                         flex_direction: FlexDirection::Row,
                         justify_content: JustifyContent::SpaceBetween,
                         align_items: AlignItems::Center,
+                        padding: UiRect::horizontal(Val::Px(INV_SIDE_INSET)),
                         ..Default::default()
                     })
                     .with_children(|footer| {
@@ -550,6 +685,55 @@ fn spawn_inventory_window(
                     });
             });
         });
+}
+
+/// BL-82 EM-5.18 legacy-inventory round 2 — spawns the title-bar red-X close
+/// button as an [`image_button_bundle`] (so it inherits the shared
+/// hover/press texture-swap
+/// [`xindeler_ui::button::update_image_button_visuals`] every image-backed HUD
+/// button already gets), sized to the `close_btn.png` art with an empty
+/// (icon-only) label and zero padding. `Activate` fires
+/// [`on_close_button_click`]. `image_button_bundle` already carries a real
+/// `Node` — a SECOND `Node` in the same spawn tuple would REPLACE it wholesale
+/// (the EM-5.2 regression class; see [`spawn_inventory_window`]'s own doc
+/// comment), so the size/padding override is applied via
+/// `.entry::<Node>().and_modify(..)`, the same pattern [`spawn_equip_slot`]
+/// uses.
+fn spawn_close_button(
+    parent: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    images: &HudImages,
+) {
+    let mut button = parent.spawn((
+        InventoryCloseButton,
+        image_button_bundle(theme, fonts, "", HudButtonImages {
+            normal: images.get(HudImageKey::CloseBtn),
+            hover: images.get(HudImageKey::CloseBtnHover),
+            pressed: images.get(HudImageKey::CloseBtnPress),
+        }),
+    ));
+    button.entry::<Node>().and_modify(move |mut node| {
+        node.width = Val::Px(24.0);
+        node.height = Val::Px(25.0);
+        node.flex_shrink = 0.0;
+        node.padding = UiRect::all(Val::Px(0.0));
+    });
+    button.observe(on_close_button_click());
+}
+
+/// BL-82 EM-5.18 legacy-inventory round 2 — the close button's [`Activate`]
+/// handler, split out (like [`on_equip_slot_click`]) so a sibling test can
+/// attach the EXACT same wiring to a bare entity. Writes
+/// [`HudAction::CloseWindow`] — the SAME generic action the ESC/close control
+/// already routes through [`xindeler_ui::hud_state::apply_hud_actions`]
+/// (`HudState::close`), so the button closes the window through the one real
+/// state machine rather than mutating `HudState` behind its back.
+fn on_close_button_click() -> impl Fn(On<Activate>, MessageWriter<HudAction>) + Send + Sync + 'static
+{
+    move |_: On<Activate>, mut actions: MessageWriter<HudAction>| {
+        actions.write(HudAction::CloseWindow);
+    }
 }
 
 /// Fills the (spawned-empty) paper-doll + bag grid containers with real
@@ -1021,9 +1205,20 @@ fn sync_slot_count(
     }
 }
 
-// TODO(BL-82 follow-up): real .vox item icons need an offscreen voxel-icon
-// render pipeline — the 3-char `icon_text` glyph below is a documented v1
-// placeholder (see `xindeler_ui::slot`'s own module doc comment).
+// TODO(BL-82 follow-up — its OWN EM task, NOT round 2): real `.vox` item icons
+// are a substantial subsystem, not a tweak. `NetItemStack` already carries the
+// `item_id: ItemDefinitionIdOwned` that would key them, but rendering them the
+// way legacy "xindeler-old" does needs an OFFSCREEN voxel→2D-icon render
+// pipeline: xindeler-old's `voxygen/src/hud/item_imgs.rs` maps each `ItemKey`
+// through `item_image_manifest.ron` (~5.7k lines, ~1400 `VoxTrans` entries —
+// nearly every icon is a `.vox` model with a per-item ortho rotation/zoom/
+// offset), which conrod renders via its built-in `Graphic::Voxel` offscreen
+// cache. Porting that to Bevy = a render-to-texture target + `.vox` segment
+// meshing + the manifest + `ItemKey` resolution (which crosses the logic/shell
+// isolation boundary this module deliberately keeps closed — see
+// `xindeler_protocol::inventory::NetItemStack`'s own doc comment). The 3-char
+// `icon_text` glyph below stays the documented v1 placeholder (see
+// `xindeler_ui::slot`'s own module doc comment) until that task lands.
 fn net_item_to_slot_contents(item: Option<&xindeler_protocol::NetItemStack>) -> SlotContents {
     match item {
         Some(item) => SlotContents {
@@ -1128,8 +1323,8 @@ fn push_loot_pickup_notifications(
 /// tier ABOVE `InventoryWindowRoot`'s own `MODAL_WINDOWS`, so it renders
 /// stacked on top of the already-open Inventory window) containing a
 /// centered [`image_panel_bundle`] (reusing [`HudImageKey::InventoryBg`] —
-/// unused elsewhere today, since [`spawn_inventory_window`] itself still uses
-/// the flat [`panel_bundle`]) wrapping a [`scroll_view_bundle`]
+/// distinct from the legacy chrome plate [`HudImageKey::InventoryChrome`] that
+/// [`spawn_inventory_window`] now renders) wrapping a [`scroll_view_bundle`]
 /// ([`EquipPickerContentRoot`], the parent [`rebuild_equip_picker_contents`]
 /// fills in). A top-level SIBLING of [`InventoryWindowRoot`] — NOT nested in
 /// its `Row` panel (spec §3.3) — so opening it never perturbs the
@@ -1784,6 +1979,87 @@ mod tests {
             1,
             "exactly one footer slot-count readout"
         );
+    }
+
+    /// BL-82 EM-5.18 legacy-inventory round 2 — `spawn_inventory_window`
+    /// produces the title-bar chrome legacy "xindeler-old" shows: exactly one
+    /// [`InventoryCloseButton`] (top-right red-X), and at least one `ImageNode`
+    /// wired to [`HudImageKey::CharacterPortrait`] (top-left bust). Guards the
+    /// two most visible gaps Matías flagged against the `captura10.png`
+    /// reference from silently regressing.
+    #[test]
+    fn spawn_inventory_window_produces_portrait_and_close_button() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let images = HudImages::load(&asset_server);
+        let portrait_handle = images.get(HudImageKey::CharacterPortrait);
+        let chrome_handle = images.get(HudImageKey::InventoryChrome);
+        app.insert_resource(images);
+
+        app.world_mut()
+            .run_system_once(spawn_inventory_window)
+            .expect("spawn_inventory_window runs");
+
+        let world = app.world_mut();
+        assert_eq!(
+            world.query::<&InventoryCloseButton>().iter(world).count(),
+            1,
+            "exactly one title-bar close button"
+        );
+        let has_portrait = world
+            .query::<&bevy::ui::widget::ImageNode>()
+            .iter(world)
+            .any(|node| node.image == portrait_handle);
+        assert!(
+            has_portrait,
+            "the title bar must render the CharacterPortrait bust top-left"
+        );
+        // Round 2 gap 4: the window panel must be backed by the ornate legacy
+        // chrome plate (`inv_bg_0.png`), not the earlier flat themed panel —
+        // guards the frame from silently regressing to `panel_bundle`.
+        let has_chrome = world
+            .query::<&bevy::ui::widget::ImageNode>()
+            .iter(world)
+            .any(|node| node.image == chrome_handle);
+        assert!(
+            has_chrome,
+            "the window must render the InventoryChrome plate as its background"
+        );
+    }
+
+    /// BL-82 EM-5.18 legacy-inventory round 2 — clicking the close button's
+    /// real observer wiring ([`on_close_button_click`], the SAME closure
+    /// [`spawn_close_button`] attaches) writes [`HudAction::CloseWindow`], the
+    /// generic action `apply_hud_actions` turns into `HudState::close`.
+    #[test]
+    fn close_button_click_writes_close_window_action() {
+        use bevy::ecs::message::Messages;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_message::<HudAction>();
+
+        let entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(entity)
+            .observe(on_close_button_click());
+
+        app.world_mut().trigger(Activate { entity });
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<HudAction>>()
+            .drain()
+            .collect();
+        assert_eq!(sent, vec![HudAction::CloseWindow]);
     }
 
     /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — `PaperdollRoot`'s own
