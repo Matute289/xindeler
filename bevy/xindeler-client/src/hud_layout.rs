@@ -778,21 +778,29 @@ pub const CENTER_LEFT: Val = Val::Percent(50.0);
 /// The health orb's screen-space `(left, right)` x-edges for a given window
 /// width — `width / 2.0` (the `CENTER_LEFT` anchor resolves against the REAL
 /// window, `Val::Percent` is untouched by `UiScale`) plus
-/// [`CLUSTER::health_orb_left`]'s margin offset. Exists purely so the
-/// overlap-avoidance test suite (this module's own + `chat.rs`'s, BL-82
-/// HUD-responsive-scaling pass) can reason about exactly where the health
-/// orb sits without duplicating this arithmetic by hand — `chat.rs`'s actual
-/// production fix (`PANEL_BOTTOM_PX`) guarantees zero overlap via a purely
-/// VERTICAL separation instead (see that constant's own doc comment for why
-/// a width-based avoidance can't work across every window size), so nothing
-/// in non-test code needs this at runtime — `#[cfg(test)]` rather than
-/// `#[allow(dead_code)]`, since it's genuinely only ever called from tests.
+/// [`CLUSTER::health_orb_left`]'s margin offset.
+///
+/// BL-82 chat-panel-polish pass: this used to be `#[cfg(test)]`-only —
+/// `chat.rs`'s original overlap-avoidance fix (a fixed bottom offset, now
+/// named `PANEL_BOTTOM_LIFTED_PX`) guaranteed zero overlap via a purely
+/// VERTICAL separation, sitting the
+/// WHOLE panel above the cluster regardless of X, so nothing in non-test code
+/// needed this arithmetic at runtime. Now that `chat.rs` anchors the panel to
+/// the true bottom-left corner (Matías's ask, given the upcoming
+/// action-bar-frame removal), the panel's own Y-range can coincide with the
+/// orb row's, so a REAL runtime call site
+/// (`chat.rs::chat_panel_needs_lift`) reads this directly every time the
+/// window resizes, to decide per-width whether X alone already keeps the two
+/// clear or a Y lift is still required — see that function's own doc comment
+/// for the full width-band analysis (real desktop resolutions, e.g. 1920×1080,
+/// land in the unsafe band, so the Y-lift fallback is still load-bearing, not
+/// dead weight).
+///
 /// Can go negative (or spill past `width`) for a window narrower than the
 /// cluster's own ~1196px total span (BL-82 HUD polish round 3 widened this
 /// from the earlier ~1013px) — the orb is simply partially or fully
 /// off-screen at that point, a real but SEPARATE known limitation of this
 /// cluster's fixed-width design, not something this function hides.
-#[cfg(test)]
 #[must_use]
 pub fn health_orb_screen_x(window_width: f32) -> (f32, f32) {
     let left = window_width / 2.0 + CLUSTER.health_orb_left;

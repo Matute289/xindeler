@@ -89,18 +89,84 @@ const PANEL_WIDTH: f32 = 320.0;
 /// seen nor clicked.
 const INPUT_MIN_HEIGHT_PX: f32 = 26.0;
 
-/// Safety margin (px) [`PANEL_BOTTOM_PX`] adds on top of
+const PANEL_LEFT_PX: f32 = 16.0;
+
+/// The panel's `bottom` offset (px) when it can sit flush in the true
+/// bottom-LEFT corner — i.e. whenever [`chat_panel_needs_lift`] says the
+/// health-orb cluster doesn't reach into the panel's own `x` span at the
+/// current window width. Matches [`PANEL_LEFT_PX`] for a visually symmetric
+/// corner margin (BL-82 chat-panel-polish pass — Matías's "sit in the
+/// bottom-left corner" ask, given the upcoming action-bar-frame removal).
+const PANEL_BOTTOM_CORNER_PX: f32 = PANEL_LEFT_PX;
+
+/// Safety margin (px) [`PANEL_BOTTOM_LIFTED_PX`] adds on top of
 /// [`hud_layout::CLUSTER_TOTAL_HEIGHT_PX`].
 const PANEL_BOTTOM_SAFETY_MARGIN_PX: f32 = 24.0;
 
-/// The panel's `bottom` offset (px) — sits the whole chat panel above the
-/// bottom-centre health-orb cluster so the two AABBs never overlap on the Y
-/// axis at any window width (the BL-82 HUD-responsive-scaling fix; see the
-/// `chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size`
-/// test for the full argument).
-const PANEL_BOTTOM_PX: f32 = hud_layout::CLUSTER_TOTAL_HEIGHT_PX + PANEL_BOTTOM_SAFETY_MARGIN_PX;
+/// The panel's `bottom` offset (px) in the FALLBACK case — sits the whole
+/// panel above the bottom-centre health-orb cluster so the two AABBs never
+/// overlap on the Y axis, the same "clear the whole row's height, regardless
+/// of X" strategy this constant used unconditionally before the corner-polish
+/// pass (BL-82 HUD-responsive-scaling fix, PR #138). Still load-bearing: see
+/// [`chat_panel_needs_lift`]'s own doc comment for why plain corner-flush
+/// placement can't be used at every window width.
+const PANEL_BOTTOM_LIFTED_PX: f32 =
+    hud_layout::CLUSTER_TOTAL_HEIGHT_PX + PANEL_BOTTOM_SAFETY_MARGIN_PX;
 
-const PANEL_LEFT_PX: f32 = 16.0;
+/// Window width assumed when the real primary window isn't queryable yet (a
+/// pre-`Startup`-ordering edge) — matches [`crate::smoke::TARGET_SIZE`]'s
+/// default window width, the same convention [`FALLBACK_WINDOW_HEIGHT_PX`]
+/// already follows for height.
+const FALLBACK_WINDOW_WIDTH_PX: f32 = 1280.0;
+
+/// Whether the chat panel's `x` span ([`PANEL_LEFT_PX`] to `+ `[`PANEL_WIDTH`])
+/// would overlap the health orb's own `x` span at `window_width_px` — i.e.
+/// whether [`chat_panel_bottom`] must fall back to lifting the whole panel
+/// above the cluster ([`PANEL_BOTTOM_LIFTED_PX`]) instead of sitting flush in
+/// the true corner ([`PANEL_BOTTOM_CORNER_PX`]).
+///
+/// BL-82 chat-panel-polish pass: moving the panel down to the true
+/// bottom-left corner (Matías's ask) puts its `y` span in the SAME band as
+/// the health-orb row's — a purely vertical "sit above the cluster" strategy
+/// (PR #138's original [`PANEL_BOTTOM_LIFTED_PX`]-unconditionally fix) no
+/// longer keeps them apart on its own, so this checks `x` instead, via
+/// [`hud_layout::health_orb_screen_x`] (promoted out of `#[cfg(test)]` for
+/// exactly this real call site).
+///
+/// This can't be dropped in favour of ALWAYS trusting `x`-separation, though:
+/// the health orb's own `x` position is `window_width / 2.0 +
+/// CLUSTER.health_orb_left`, a NEGATIVE-ish constant offset from screen
+/// centre, so it slides right as the window widens — meaning there is a real
+/// width BAND (empirically, roughly `1010`–`1970px` given today's cluster
+/// geometry, which covers ordinary desktop resolutions like `1280×720` and
+/// `1920×1080`) where the orb's `x` span genuinely reaches into the panel's.
+/// Below that band the orb is off-screen-left (safe); above it the orb has
+/// slid clear to the right (safe) — but the band itself is real and common,
+/// so the [`PANEL_BOTTOM_LIFTED_PX`] fallback stays load-bearing, not dead
+/// weight, and this function (not a flat "always use the corner" swap) is
+/// the actual fix. See
+/// `chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size`
+/// for the regression test sweeping a wide range of widths.
+#[must_use]
+fn chat_panel_needs_lift(window_width_px: f32) -> bool {
+    let (orb_left, orb_right) = hud_layout::health_orb_screen_x(window_width_px);
+    let chat_left = PANEL_LEFT_PX;
+    let chat_right = PANEL_LEFT_PX + PANEL_WIDTH;
+    chat_left < orb_right && orb_left < chat_right
+}
+
+/// The panel's `bottom` offset (px) for `window_width_px` — the true corner
+/// margin ([`PANEL_BOTTOM_CORNER_PX`]) whenever that's safe, else the
+/// cluster-clearing fallback ([`PANEL_BOTTOM_LIFTED_PX`]). See
+/// [`chat_panel_needs_lift`]'s doc comment for the full reasoning.
+#[must_use]
+fn chat_panel_bottom(window_width_px: f32) -> f32 {
+    if chat_panel_needs_lift(window_width_px) {
+        PANEL_BOTTOM_LIFTED_PX
+    } else {
+        PANEL_BOTTOM_CORNER_PX
+    }
+}
 
 /// [`chat_scroll_height`]'s clamp bounds (px).
 const MIN_SCROLL_HEIGHT_PX: f32 = 220.0;
@@ -317,6 +383,10 @@ impl ChatInput {
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatPanelRoot;
+/// The header row hosting the minimize/restore button — see the doc comment
+/// where it's spawned (in [`spawn_chat_panel`]) for why it needs its own tag.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatHeaderRow;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatScrollArea;
 /// The on-screen input line. `pub(crate)` because [`text_input_focused`] (a
@@ -370,7 +440,10 @@ impl Plugin for ChatViewPlugin {
         }
         app.add_systems(
             Startup,
-            spawn_chat_panel.after(xindeler_ui::theme::init_theme),
+            (
+                spawn_chat_panel.after(xindeler_ui::theme::init_theme),
+                force_collapse_chat_for_smoke_capture,
+            ),
         );
         app.add_systems(
             Update,
@@ -380,6 +453,7 @@ impl Plugin for ChatViewPlugin {
                 sync_chat_tabs,
                 chat_smoke_verify,
                 sync_chat_scroll_height_to_window,
+                sync_chat_panel_bottom_to_window,
                 // Reads `ActionState` — after the frame's real input resolution.
                 toggle_chat_via_hotkey.after(xindeler_input::InputResolveSet),
                 blur_chat_input_on_escape,
@@ -780,6 +854,21 @@ fn chat_focus_smoke_verify(
 /// (a pre-`Startup`-ordering edge).
 const FALLBACK_WINDOW_HEIGHT_PX: f32 = 720.0;
 
+/// Force-collapses the chat panel once at boot when
+/// `XINDELER_SMOKE_CHAT_COLLAPSED` is set — the same env-var-gated,
+/// smoke-only debug-override convention `diary.rs`'s own
+/// `force_open_diary_for_smoke_capture` already establishes:
+/// `--smoke-screenshot` has no real keyboard to press F5 with, so this is
+/// how a live visual smoke check can confirm the collapsed (minimized)
+/// panel's real on-screen size, without adding a bespoke input-injection
+/// mechanism to the harness itself. A no-op unless the env var is set —
+/// harmless in every normal run.
+fn force_collapse_chat_for_smoke_capture(mut state: ResMut<ChatUiState>) {
+    if std::env::var("XINDELER_SMOKE_CHAT_COLLAPSED").is_ok_and(|v| v != "0") {
+        state.collapsed = true;
+    }
+}
+
 /// Spawns the panel root (bottom-left), the header (minimize button), the tab
 /// row, the scrollback, and the input row (a plain [`ChatInputBox`] `Text`
 /// line + an overlaid placeholder hint).
@@ -789,8 +878,10 @@ fn spawn_chat_panel(
     fonts: Res<HudFonts>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let initial_scroll_height = windows.single().map_or_else(
-        |_| chat_scroll_height(FALLBACK_WINDOW_HEIGHT_PX),
+    let window = windows.single().ok();
+    let initial_window_width = window.map_or(FALLBACK_WINDOW_WIDTH_PX, Window::width);
+    let initial_scroll_height = window.map_or_else(
+        || chat_scroll_height(FALLBACK_WINDOW_HEIGHT_PX),
         |window| chat_scroll_height(window.height()),
     );
 
@@ -807,7 +898,7 @@ fn spawn_chat_panel(
                 None,
                 Some(PANEL_LEFT_PX),
                 None,
-                Some(PANEL_BOTTOM_PX),
+                Some(chat_panel_bottom(initial_window_width)),
             ),
         ))
         .id();
@@ -819,15 +910,19 @@ fn spawn_chat_panel(
         .and_modify(|mut node| node.flex_direction = FlexDirection::Column);
     commands.entity(root).with_children(|parent| {
         // Header row: the minimize/restore button — OUTSIDE `ChatCollapsible`
-        // so it stays visible while the panel is collapsed.
+        // so it stays visible while the panel is collapsed. Tagged
+        // `ChatHeaderRow` so `sync_chat_collapsed` can shrink its `width` to
+        // hug the button while collapsed (see that system's doc comment for
+        // why: at the full `PANEL_WIDTH` the collapsed strip read as a big,
+        // mostly-empty box rather than a slim single-line indicator).
         parent
-            .spawn(Node {
+            .spawn((ChatHeaderRow, Node {
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::FlexEnd,
                 width: Val::Px(PANEL_WIDTH),
                 margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
                 ..Default::default()
-            })
+            }))
             .with_children(|header| {
                 header
                     .spawn(button_bundle(&theme, &fonts, CHAT_MINIMIZE_LABEL))
@@ -929,6 +1024,27 @@ fn sync_chat_scroll_height_to_window(
     for mut node in &mut areas {
         if node.height != desired {
             node.height = desired;
+        }
+    }
+}
+
+/// Keeps the panel's `bottom` offset tracking [`chat_panel_bottom`] as the
+/// real window is live-resized — the true bottom-left corner margin whenever
+/// that's safe, falling back to clearing the whole health-orb cluster
+/// whenever the current window width puts the two in each other's way (a
+/// no-op write-guard avoids re-triggering layout every frame, matching
+/// [`sync_chat_scroll_height_to_window`]'s own pattern).
+fn sync_chat_panel_bottom_to_window(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut roots: Query<&mut Node, With<ChatPanelRoot>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let desired = Val::Px(chat_panel_bottom(window.width()));
+    for mut node in &mut roots {
+        if node.bottom != desired {
+            node.bottom = desired;
         }
     }
 }
@@ -1210,11 +1326,48 @@ fn toggle_chat_via_hotkey(action_state: Res<ActionState>, mut state: ResMut<Chat
     }
 }
 
-/// Hides every [`ChatCollapsible`] element while collapsed and relabels the
-/// minimize button (`"Hide"` <-> `"Chat"`).
+/// Hides every [`ChatCollapsible`] element while collapsed, relabels the
+/// minimize button (`"Hide"` <-> `"Chat"`), and shrinks the panel root's own
+/// padding + the header row's width down to hug just that button.
+///
+/// The padding/width shrink is the actual fix for "the collapsed indicator
+/// looks like it has room for several lines of text" (BL-82
+/// chat-panel-polish pass, Matías's report): with every `ChatCollapsible`
+/// child hidden, the panel's only remaining content IS the header row — but
+/// that row used to stay pinned at the full [`PANEL_WIDTH`] (so it lines up
+/// with the tabs/scrollback/input row while EXPANDED), leaving a wide,
+/// mostly-empty bordered rectangle around the right-aligned button once
+/// collapsed. Auto-sizing the row (and tightening the panel's own outer
+/// padding from `md` to `sm`) while collapsed lets the WHOLE box shrink down
+/// to "one button, reasonably padded" — a true single-line strip — without
+/// touching the expanded layout at all.
 fn sync_chat_collapsed(
     state: Res<ChatUiState>,
-    mut collapsible: Query<&mut Node, With<ChatCollapsible>>,
+    theme: Res<HudTheme>,
+    mut collapsible: Query<
+        &mut Node,
+        (
+            With<ChatCollapsible>,
+            Without<ChatPanelRoot>,
+            Without<ChatHeaderRow>,
+        ),
+    >,
+    mut panel_root: Query<
+        &mut Node,
+        (
+            With<ChatPanelRoot>,
+            Without<ChatCollapsible>,
+            Without<ChatHeaderRow>,
+        ),
+    >,
+    mut header_row: Query<
+        &mut Node,
+        (
+            With<ChatHeaderRow>,
+            Without<ChatCollapsible>,
+            Without<ChatPanelRoot>,
+        ),
+    >,
     buttons: Query<&Children, With<ChatMinimizeButton>>,
     mut texts: Query<&mut Text>,
 ) {
@@ -1226,6 +1379,20 @@ fn sync_chat_collapsed(
             Display::None
         } else {
             Display::Flex
+        };
+    }
+    if let Ok(mut root_node) = panel_root.single_mut() {
+        root_node.padding = UiRect::all(Val::Px(if state.collapsed {
+            theme.spacing.sm
+        } else {
+            theme.spacing.md
+        }));
+    }
+    if let Ok(mut header_node) = header_row.single_mut() {
+        header_node.width = if state.collapsed {
+            Val::Auto
+        } else {
+            Val::Px(PANEL_WIDTH)
         };
     }
     let label = if state.collapsed {
@@ -1941,6 +2108,20 @@ mod tests {
             .world_mut()
             .spawn((ChatCollapsible, Node::default()))
             .id();
+        let panel_root = app
+            .world_mut()
+            .spawn((ChatPanelRoot, Node {
+                padding: UiRect::all(Val::Px(HudTheme::default().spacing.md)),
+                ..Default::default()
+            }))
+            .id();
+        let header_row = app
+            .world_mut()
+            .spawn((ChatHeaderRow, Node {
+                width: Val::Px(PANEL_WIDTH),
+                ..Default::default()
+            }))
+            .id();
         let label = app
             .world_mut()
             .spawn(Text(CHAT_MINIMIZE_LABEL.to_owned()))
@@ -1969,6 +2150,17 @@ mod tests {
             app.world().get::<Text>(label).unwrap().0,
             CHAT_RESTORE_LABEL
         );
+        assert_eq!(
+            app.world().get::<Node>(header_row).unwrap().width,
+            Val::Auto,
+            "collapsed: the header row must shrink to hug the button, not stay pinned at \
+             PANEL_WIDTH — the 'looks like room for several lines' regression guard"
+        );
+        assert_eq!(
+            app.world().get::<Node>(panel_root).unwrap().padding,
+            UiRect::all(Val::Px(HudTheme::default().spacing.sm)),
+            "collapsed: the panel's own outer padding must tighten from `md` to `sm`"
+        );
 
         app.world_mut().resource_mut::<ChatUiState>().collapsed = false;
         app.world_mut()
@@ -1992,6 +2184,17 @@ mod tests {
         assert_eq!(
             app.world().get::<Text>(label).unwrap().0,
             CHAT_MINIMIZE_LABEL
+        );
+        assert_eq!(
+            app.world().get::<Node>(header_row).unwrap().width,
+            Val::Px(PANEL_WIDTH),
+            "re-expanding must restore the header row's width so it lines up with the \
+             tabs/scrollback/input row again"
+        );
+        assert_eq!(
+            app.world().get::<Node>(panel_root).unwrap().padding,
+            UiRect::all(Val::Px(HudTheme::default().spacing.md)),
+            "re-expanding must restore the panel's outer padding to `md`"
         );
     }
 
@@ -2382,22 +2585,39 @@ mod tests {
         );
     }
 
+    /// The BL-82 HUD-responsive-scaling regression guard (PR #138), updated
+    /// for the chat-panel-polish pass: `chat_panel_bottom` (not a flat
+    /// constant any more) must keep the panel clear of the health orb's own
+    /// bounding box at every window width, whether that width lands in the
+    /// "orb reaches into the corner" danger band (needs the
+    /// [`PANEL_BOTTOM_LIFTED_PX`] fallback) or not (safe to sit flush at
+    /// [`PANEL_BOTTOM_CORNER_PX`]). Sweeps a wide range — narrower AND wider
+    /// than [`chat_panel_needs_lift`]'s own doc-comment-documented
+    /// `1010`–`1970px` danger band — so a future geometry change can't
+    /// silently shrink/misplace that band without tripping this test.
     #[test]
     fn chat_panel_never_overlaps_the_health_orb_bounding_box_at_any_window_size() {
         const CHROME_HEIGHT_PX: f32 = 140.0;
         let window_sizes: &[(f32, f32)] = &[
-            (1280.0, 720.0),
-            (960.0, 540.0),
-            (800.0, 600.0),
             (480.0, 320.0),
+            (800.0, 600.0),
+            (960.0, 540.0),
+            (1010.0, 600.0),
+            (1280.0, 720.0),
+            (1440.0, 900.0),
+            (1600.0, 900.0),
+            (1920.0, 1080.0),
+            (1970.0, 1080.0),
+            (2200.0, 1200.0),
+            (2560.0, 1440.0),
         ];
 
         for &(width, height) in window_sizes {
+            let bottom = chat_panel_bottom(width);
             let chat_left = PANEL_LEFT_PX;
             let chat_right = PANEL_LEFT_PX + PANEL_WIDTH;
-            let chat_top_from_bottom =
-                PANEL_BOTTOM_PX + chat_scroll_height(height) + CHROME_HEIGHT_PX;
-            let chat_bottom_from_bottom = PANEL_BOTTOM_PX;
+            let chat_top_from_bottom = bottom + chat_scroll_height(height) + CHROME_HEIGHT_PX;
+            let chat_bottom_from_bottom = bottom;
 
             let (orb_left, orb_right) = hud_layout::health_orb_screen_x(width);
             let orb_bottom_from_bottom = hud_layout::CLUSTER_BOTTOM_PX;
@@ -2412,6 +2632,47 @@ mod tests {
                 "chat panel overlaps the health orb at window size {width}x{height}"
             );
         }
+    }
+
+    /// [`chat_panel_needs_lift`]/[`chat_panel_bottom`]: a narrow window (the
+    /// orb off-screen-left) and a very wide one (the orb slid clear to the
+    /// right) both get the true corner margin; a common desktop width lands
+    /// in the danger band and gets lifted above the whole cluster instead.
+    ///
+    /// **BL-82 HUD redesign round 6 note**: this test was originally written
+    /// (this PR) against round-5's cluster geometry, where 1920px (1080p) sat
+    /// inside the danger band. Round 6 (merged afterward) pulled the whole
+    /// bottom-centre cluster inward toward screen centre (removed the
+    /// action-bar frame art, tightened every gap) — re-measured directly via
+    /// [`hud_layout::health_orb_screen_x`] post-merge: at 1920px the health
+    /// orb's left edge now sits at `x≈426`, past [`PANEL_LEFT_PX`] +
+    /// [`PANEL_WIDTH`] (`336`), so it no longer overlaps the panel's box.
+    /// 1080p is genuinely SAFE now — a real, welcome side effect of round 6's
+    /// tightening, not a bug in either round. Only 1280px (still squarely
+    /// inside the narrower band) remains a danger-band example here.
+    #[test]
+    fn chat_panel_bottom_sits_flush_in_the_corner_except_in_the_orb_danger_band() {
+        assert!(!chat_panel_needs_lift(480.0), "narrow: orb is off-screen");
+        assert_eq!(chat_panel_bottom(480.0), PANEL_BOTTOM_CORNER_PX);
+
+        assert!(
+            chat_panel_needs_lift(1280.0),
+            "1280px is a common desktop width squarely in the danger band"
+        );
+        assert_eq!(chat_panel_bottom(1280.0), PANEL_BOTTOM_LIFTED_PX);
+
+        assert!(
+            !chat_panel_needs_lift(1920.0),
+            "1920px (1080p): round 6's tighter cluster geometry pulled the orb clear of the \
+             panel's box — safe for the true corner margin now (see this test's own doc comment)"
+        );
+        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_CORNER_PX);
+
+        assert!(
+            !chat_panel_needs_lift(2560.0),
+            "very wide: the orb has slid clear past the panel's right edge"
+        );
+        assert_eq!(chat_panel_bottom(2560.0), PANEL_BOTTOM_CORNER_PX);
     }
 
     #[test]
