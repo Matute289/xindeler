@@ -100,8 +100,19 @@ const HUD_D4_DIR: &str = "voxygen/element/ui/hud_d4";
 const BAG_BUTTONS_DIR: &str = "voxygen/element/ui/bag/buttons";
 /// Ghost equipment-slot placeholders — `bag/backgrounds/`.
 const BAG_BG_DIR: &str = "voxygen/element/ui/bag/backgrounds";
-/// The stat-column icons — `bag/icons/`.
+/// The stat-column icons + the title-bar character portrait — `bag/icons/`.
 const BAG_ICONS_DIR: &str = "voxygen/element/ui/bag/icons";
+/// BL-82 EM-5.18 legacy-inventory round 2 — the `bag/` ROOT itself, which
+/// holds the full-window chrome plates (`inv_bg_0.png`) directly (not in a
+/// sibling subfolder like the icons/buttons/backgrounds groups above).
+const BAG_DIR: &str = "voxygen/element/ui/bag";
+/// BL-82 EM-5.18 legacy-inventory round 2 — the shared generic UI buttons
+/// (the red-X close button used by legacy "xindeler-old"'s bag/skillbar/map
+/// windows, `bag.rs`'s
+/// `Button::image(close_btn).hover_image(..).press_image(..)`). Its own sibling
+/// subfolder, mirroring the real on-disk layout under `assets/voxygen/element/
+/// ui/generic/buttons/`.
+const GENERIC_BUTTONS_DIR: &str = "voxygen/element/ui/generic/buttons";
 
 /// One variant per real, WIRED-IN HUD-D4 PNG (compile-time checked — see the
 /// module doc comment for the two files deliberately NOT represented here).
@@ -183,11 +194,14 @@ pub enum HudImageKey {
     // pixel-art set (see the `BAG_*_DIR`/`GENERIC_BUTTONS_DIR` constants'
     // own doc comments for which subfolder each group below resolves
     // against, via `dir()`). Only the keys the rebuilt inventory window
-    // actually renders are wired here — the fixed-size legacy panel-chrome
-    // bitmaps (`inv_bg_0.png`/`inv_frame.png`) are intentionally NOT used:
-    // the window is a responsive `bevy_ui` flex panel (themed
-    // `panel_bundle`), which the fixed 424x708 conrod frame bitmap can't
-    // stretch to without distortion.
+    // actually renders are wired here. Round 2 (see [`Self::InventoryChrome`])
+    // adopts `inv_bg_0.png` as the window chrome after all — the earlier
+    // "intentionally NOT used, can't stretch without distortion" concern is
+    // resolved by sizing the window to the asset's NATIVE 424x708 aspect and
+    // scaling uniformly rather than stretching to a mismatched box (the
+    // fixed-aspect, measured-region idiom PR #157 established). `inv_frame.png`
+    // (the frame-only overlay variant) remains unused: `inv_bg_0.png` already
+    // bundles the frame + fill + dividers in one plate.
     /// Rarity slot backgrounds — the legacy `Quality` → colour mapping (see
     /// `xindeler-client::inventory_ui::quality_rarity_background`).
     InvSlot,
@@ -224,6 +238,30 @@ pub enum HudImageKey {
     StatStunRes,
     StatCombatRating,
     StatStealth,
+    /// BL-82 EM-5.18 legacy-inventory round 2 — the title-bar character
+    /// portrait (top-left of the inventory window), a FLAT 2D pixel-art bust
+    /// (legacy "xindeler-old"'s `bag.rs` `char_art`, `Image::new(char_art)` —
+    /// NOT a live 3D render). `bag/icons/character.png`.
+    CharacterPortrait,
+    /// The red-X close button (top-right of the inventory window) + its
+    /// hover/press states — the same three `generic/buttons/close_btn*.png`
+    /// textures legacy "xindeler-old"'s `bag.rs` drives through
+    /// `Button::image(..).hover_image(..).press_image(..)`.
+    CloseBtn,
+    CloseBtnHover,
+    CloseBtnPress,
+    /// BL-82 EM-5.18 legacy-inventory round 2 — the whole ornate window
+    /// chrome bitmap (`bag/inv_bg_0.png`, 424x708): the golden filigree
+    /// border + corner ornaments, a dark translucent fill, and the two carved
+    /// region dividers (title-bar rule near the top, bag-grid rule near the
+    /// bottom) — the SAME single background plate legacy "xindeler-old"'s
+    /// `bag.rs` draws behind the inventory. Superseding this module's earlier
+    /// "`inv_bg_0.png` intentionally NOT used" note: it is now used, but the
+    /// window is sized to the asset's NATIVE 424x708 aspect and scaled
+    /// UNIFORMLY (never stretched to a mismatched box), so the "distortion"
+    /// the old note warned about does not arise — the same fixed-aspect,
+    /// measured-region idiom PR #157's party portrait frame established.
+    InventoryChrome,
 }
 
 impl HudImageKey {
@@ -324,6 +362,11 @@ impl HudImageKey {
         Self::StatStunRes,
         Self::StatCombatRating,
         Self::StatStealth,
+        Self::CharacterPortrait,
+        Self::CloseBtn,
+        Self::CloseBtnHover,
+        Self::CloseBtnPress,
+        Self::InventoryChrome,
     ];
 
     /// The filename (no directory) this key loads, exactly matching the file
@@ -424,6 +467,11 @@ impl HudImageKey {
             Self::StatStunRes => "stun_res.png",
             Self::StatCombatRating => "combat_rating.png",
             Self::StatStealth => "stealth_rating.png",
+            Self::CharacterPortrait => "character.png",
+            Self::CloseBtn => "close_btn.png",
+            Self::CloseBtnHover => "close_btn_hover.png",
+            Self::CloseBtnPress => "close_btn_press.png",
+            Self::InventoryChrome => "inv_bg_0.png",
         }
     }
 
@@ -441,7 +489,10 @@ impl HudImageKey {
             | Self::StatProtection
             | Self::StatStunRes
             | Self::StatCombatRating
-            | Self::StatStealth => BAG_ICONS_DIR,
+            | Self::StatStealth
+            | Self::CharacterPortrait => BAG_ICONS_DIR,
+            Self::CloseBtn | Self::CloseBtnHover | Self::CloseBtnPress => GENERIC_BUTTONS_DIR,
+            Self::InventoryChrome => BAG_DIR,
             Self::InvSlot
             | Self::InvSlotGrey
             | Self::InvSlotCommon
