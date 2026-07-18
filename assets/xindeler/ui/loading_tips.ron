@@ -1,0 +1,25 @@
+// BL-82 EM-5.9 (T56.30) — rotating gameplay tips shown on the connecting /
+// loading screen. Data-driven (edit here, no recompile). A random entry is
+// picked each time the loading screen appears.
+//
+// Keep tips short (one line), spoiler-free, and true of the CURRENT build —
+// a tip that promises a feature the client can't do yet is worse than none.
+// Plain `Vec<String>`, so RON is just a list of strings.
+[
+    "Press 'L' to see all default key bindings.",
+    "Type /say or /s to chat only with players right around you.",
+    "Type /region or /r to chat with players a couple hundred blocks away.",
+    "Type /group or /g to chat only with your current group.",
+    "Send a private message with /tell followed by a player name.",
+    "Keep an eye out for food, chests and other loot spread across the world.",
+    "Inventory full of raw food? Try crafting better meals from it.",
+    "Open the map to find dungeons and points of interest worth exploring.",
+    "Adjust the graphics for your machine in the Esc menu if things run slow.",
+    "Press the social key to see who else is online.",
+    "Sit near a campfire to slowly recover from your injuries.",
+    "Roll to move faster and dodge incoming attacks.",
+    "Open the crafting menu to build better bags, armour and tools.",
+    "Xindeler is early, pre-alpha software — expect rough edges, and thanks for playing!",
+    "Your class shapes your playstyle: spend skill points in the character diary.",
+    "Drag an ability from the diary onto your hotbar to bind it to a key.",
+]

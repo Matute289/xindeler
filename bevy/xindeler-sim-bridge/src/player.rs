@@ -276,6 +276,73 @@ pub struct EmbeddedPlayer {
     pending_chat: Vec<comp::ChatMsg>,
 }
 
+/// Coarse, **real** connection/boot stages surfaced to the client's
+/// connecting/loading screen (BL-82 EM-5.9 T56.30).
+///
+/// Every variant corresponds to a genuine step of the offline boot — the
+/// multi-second embedded world generation, then each round of the real
+/// `client::Client::new` handshake (mapped 1:1 from the engine's own
+/// [`client::ClientInitStage`], see [`ConnectStage::from_init_stage`]). The
+/// connecting screen reads whichever stage the boot thread last reported; it
+/// is progress driven by actual state transitions, never a timer.
+///
+/// The `#[repr(u8)]` discriminants are also the boot ORDER, so
+/// [`ConnectStage::progress_fraction`] can derive a monotonic 0–1 bar without a
+/// separate lookup table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ConnectStage {
+    /// The boot thread has been spawned but has not reported anything yet.
+    #[default]
+    Starting = 0,
+    /// Generating the embedded singleplayer world (`boot_test_server`) — the
+    /// slow, multi-second step (world gen + map/LFS data).
+    GeneratingWorld = 1,
+    /// [`client::ClientInitStage::ConnectionEstablish`] — opening the loopback
+    /// connection to the just-booted sim.
+    EstablishingConnection = 2,
+    /// [`client::ClientInitStage::WatingForServerVersion`].
+    CheckingVersion = 3,
+    /// [`client::ClientInitStage::Authentication`].
+    Authenticating = 4,
+    /// [`client::ClientInitStage::LoadingInitData`] — downloading the map,
+    /// recipes and other one-time init data.
+    LoadingWorldData = 5,
+    /// [`client::ClientInitStage::StartingClient`] — the client is ingesting
+    /// the init data.
+    PreparingClient = 6,
+    /// Handshake complete; the local player is spawning into the world.
+    EnteringWorld = 7,
+}
+
+impl ConnectStage {
+    /// Maps the engine's own handshake stage onto our coarser
+    /// [`ConnectStage`]. Kept exhaustive so a future upstream `ClientInitStage`
+    /// variant forces a compile error here rather than silently vanishing from
+    /// the loading screen.
+    pub fn from_init_stage(stage: &client::ClientInitStage) -> Self {
+        use client::ClientInitStage;
+        match stage {
+            ClientInitStage::ConnectionEstablish => Self::EstablishingConnection,
+            ClientInitStage::WatingForServerVersion => Self::CheckingVersion,
+            ClientInitStage::Authentication => Self::Authenticating,
+            ClientInitStage::LoadingInitData => Self::LoadingWorldData,
+            ClientInitStage::StartingClient => Self::PreparingClient,
+        }
+    }
+
+    /// The boot-order ordinal (`Starting` = 0 … `EnteringWorld` = 7).
+    pub fn ordinal(self) -> u8 { self as u8 }
+
+    /// A monotonic 0.0–1.0 fraction for the progress bar, derived from the boot
+    /// order. `Starting` reads as a small non-zero sliver so the bar is never
+    /// empty once the screen is up; `EnteringWorld` is full.
+    pub fn progress_fraction(self) -> f32 {
+        const LAST: f32 = ConnectStage::EnteringWorld as u8 as f32;
+        (self.ordinal() as f32 / LAST).clamp(0.04, 1.0)
+    }
+}
+
 /// Non-blocking life-cycle stages, advanced one per frame by [`tick_player`].
 /// Mirrors the smoke bot's blocking phases (`drive_client`), but each step
 /// yields back to the Bevy schedule instead of spinning.
@@ -309,6 +376,27 @@ impl EmbeddedPlayer {
     /// Whether the player has reached the in-game stage (used to gate the
     /// terrain-anchor fallback in `lib.rs`).
     pub fn is_in_game(&self) -> bool { self.stage == PlayerStage::InGame }
+
+    /// The server's message-of-the-day, as received during the handshake
+    /// (BL-82 EM-5.9 T56.30) — `None` if the server sent an empty MOTD. Read by
+    /// the connecting screen to greet the player on entry. For the offline
+    /// embedded server this is whatever `description.ron` (or its default) set.
+    pub fn server_motd(&self) -> Option<String> {
+        let motd = self.client.server_description().motd.trim();
+        (!motd.is_empty()).then(|| motd.to_owned())
+    }
+
+    /// The server's rules text, if any (BL-82 EM-5.9 T56.30). Usually `None`
+    /// for the offline embedded server.
+    pub fn server_rules(&self) -> Option<String> {
+        self.client
+            .server_description()
+            .rules
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_owned)
+    }
 
     /// Whether we've reached a terminal failure (connect/tick died); the
     /// persister fallback should then cover terrain streaming.
@@ -675,6 +763,20 @@ fn resolve_chat_send(
 /// Returns `Err` if the port can't be read or the handshake fails — the caller
 /// logs and falls back to the persister anchor.
 pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, String> {
+    boot_embedded_player_reporting(sim, &|_| {})
+}
+
+/// Like [`boot_embedded_player`], but forwards each round of the real
+/// `Client::new` handshake to `progress` as a [`ConnectStage`] (BL-82 EM-5.9
+/// T56.30), so the client's connecting/loading screen can show genuine,
+/// non-faked stage transitions. `progress` is called from THIS thread
+/// (synchronously, from inside `Client::new`); the connecting screen runs the
+/// boot on a worker thread and has `progress` write into a shared cell the Bevy
+/// main thread polls — hence the `Send + Sync` bound.
+pub fn boot_embedded_player_reporting(
+    sim: &mut SimServer,
+    progress: &(dyn Fn(ConnectStage) + Send + Sync),
+) -> Result<EmbeddedPlayer, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     // BL-82 fix: grant Admin to the embedded player's OWN login identity
@@ -764,7 +866,10 @@ pub fn boot_embedded_player(sim: &mut SimServer) -> Result<EmbeddedPlayer, Strin
                     "",
                     None,
                     |_| true,
-                    &|stage| tracing::debug!(?stage, "embedded player init"),
+                    &|stage| {
+                        tracing::debug!(?stage, "embedded player init");
+                        progress(ConnectStage::from_init_stage(&stage));
+                    },
                     |_| {},
                     PathBuf::default(),
                     ClientType::Game,
@@ -2037,5 +2142,60 @@ mod tests {
             None,
             "a whitespace-only command name must resolve to None"
         );
+    }
+
+    /// BL-82 EM-5.9 T56.30: every engine handshake stage maps to a distinct,
+    /// correctly-ordered [`ConnectStage`], and the derived progress fraction is
+    /// monotonic across the whole boot order (so the loading bar only ever
+    /// advances). Guards the loading screen against a silently-dropped stage.
+    #[test]
+    fn connect_stage_maps_and_progresses_monotonically() {
+        use client::ClientInitStage;
+
+        // The five real handshake stages map 1:1 and stay in boot order.
+        let mapped = [
+            ClientInitStage::ConnectionEstablish,
+            ClientInitStage::WatingForServerVersion,
+            ClientInitStage::Authentication,
+            ClientInitStage::LoadingInitData,
+            ClientInitStage::StartingClient,
+        ]
+        .map(|s| ConnectStage::from_init_stage(&s));
+        assert_eq!(mapped, [
+            ConnectStage::EstablishingConnection,
+            ConnectStage::CheckingVersion,
+            ConnectStage::Authenticating,
+            ConnectStage::LoadingWorldData,
+            ConnectStage::PreparingClient,
+        ]);
+
+        // The full boot order, including the non-handshake bookends.
+        let order = [
+            ConnectStage::Starting,
+            ConnectStage::GeneratingWorld,
+            ConnectStage::EstablishingConnection,
+            ConnectStage::CheckingVersion,
+            ConnectStage::Authenticating,
+            ConnectStage::LoadingWorldData,
+            ConnectStage::PreparingClient,
+            ConnectStage::EnteringWorld,
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pair[0].ordinal() < pair[1].ordinal(),
+                "ordinal must strictly increase: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+            assert!(
+                pair[0].progress_fraction() < pair[1].progress_fraction(),
+                "progress must strictly increase: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // The bar is never empty and never over-full.
+        assert!(ConnectStage::Starting.progress_fraction() >= 0.04);
+        assert_eq!(ConnectStage::EnteringWorld.progress_fraction(), 1.0);
     }
 }

@@ -23,20 +23,27 @@
 //!
 //! ## BL-82 EM-5.17 Phase 4 — HUD-D4 party-frame reskin (spec §3.4)
 //! The group/party panel's member rows are reskinned into the Diablo-style
-//! layout. `HudImageKey::PartyPortraitFrame` (`party_portrait_frame.png`) is a
-//! WIDE ornate chrome plate — a circular portrait hole carved into its LEFT
-//! and a plaque on its RIGHT with two horizontal carved grooves — rendered as
-//! a full-size DECORATIVE OVERLAY per member (the orb-frame idiom of
-//! `bar.rs::spawn_orb_bar`), NOT as a tiny square "photo". Its transparent
-//! hole + grooves reveal live elements slotted BEHIND it: a neutral portrait
-//! fill + the name label in the hole, the health bar in the upper groove, the
-//! mana/energy bar in the lower groove, plus a `PartyLevelBadge` straddling
-//! the hole's bottom rim. All are absolutely positioned by the asset's
-//! MEASURED source-pixel regions (see the `PARTY_HOLE`/`PARTY_*_GROOVE`
-//! constants) scaled uniformly, so they stay pixel-aligned to the chrome at
-//! any size. This is a RENDER-LAYER reskin of [`SocialMirrorPlugin`]'s
-//! already-mirrored data — no new protocol/mirror work. Three real data gaps,
-//! each documented at its call site rather than silently invented:
+//! layout. `HudImageKey::PartyPortraitFrame` (`party_portrait_frame.png`,
+//! swapped to the "v2" art in the party-frame-v2 follow-up) is a WIDE ornate
+//! chrome plate — a circular portrait hole carved into its LEFT and a plaque
+//! on its RIGHT with, top to bottom, a pill-shaped name capsule, an upper
+//! groove, and a lower groove — rendered as a full-size DECORATIVE OVERLAY
+//! per member (the orb-frame idiom of `bar.rs::spawn_orb_bar`), NOT as a
+//! tiny square "photo". Its transparent hole + two grooves reveal live
+//! elements slotted BEHIND it: a neutral portrait fill in the hole, the
+//! health bar in the upper groove, the mana/energy bar in the lower groove,
+//! plus a `PartyLevelBadge` straddling the hole's bottom rim. The name
+//! capsule is DIFFERENT from those: it's not a transparent cutout at all —
+//! it's an opaque, lighter-toned stone inset (v2's own addition, directly
+//! above the health groove) — so the name label is painted ON TOP of the
+//! frame chrome instead of slotted behind it (see the paint-order comment at
+//! the composition call site). All regions are absolutely positioned by the
+//! asset's MEASURED source-pixel regions (see the `PARTY_HOLE`/
+//! `PARTY_NAME_CAPSULE`/`PARTY_*_GROOVE` constants) scaled uniformly, so they
+//! stay pixel-aligned to the chrome at any size. This is a RENDER-LAYER
+//! reskin of [`SocialMirrorPlugin`]'s already-mirrored data — no new
+//! protocol/mirror work. Three real data gaps, each documented at its call
+//! site rather than silently invented:
 //! - **Voice-chat state**: no protocol field carries a live per-member voice
 //!   state — every row defaults to [`PartyVoiceState::Inactive`] (see that
 //!   enum's own doc comment).
@@ -92,41 +99,102 @@ use xindeler_ui::{
 use crate::chat::text_input_focused;
 
 // BL-82 EM-5.17 Phase 4 (party-frame composition fix) — `party_portrait_
-// frame.png` is a WIDE ~1408×768 decorative chrome plate: an ornate circular
-// portrait hole carved into its LEFT, and a plaque on its RIGHT with two
-// horizontal carved grooves. It is rendered ONCE per member as a full-size
-// overlay whose TRANSPARENT hole + grooves reveal live elements slotted
-// BEHIND it — a portrait fill + name in the hole, the health bar in the
-// upper groove, the mana/energy bar in the lower groove. (The bug this
-// replaces stretched the whole wide plate into a 64×64 box as if it were the
-// character's own tiny "photo", with the bars as separate side-by-side
-// widgets to its right.) The measurements below are the asset's own
-// SOURCE-pixel regions (flood-fill of its enclosed transparent regions — see
-// the PR body for the measurement script); everything is scaled by
-// `PARTY_FRAME_SCALE`, a single uniform factor, so the circle stays round and
-// the bars stay pixel-aligned to the grooves at any `PARTY_FRAME_WIDTH_PX`.
-const PARTY_FRAME_SRC_W: f32 = 1408.0;
-const PARTY_FRAME_SRC_H: f32 = 768.0;
+// frame.png` is a WIDE decorative chrome plate: an ornate circular portrait
+// hole carved into its LEFT, and a plaque on its RIGHT with two horizontal
+// carved grooves. It is rendered ONCE per member as a full-size overlay
+// whose TRANSPARENT hole + grooves reveal live elements slotted BEHIND it —
+// a portrait fill in the hole, the health bar in the upper groove, the
+// mana/energy bar in the lower groove. (The bug this replaces stretched the
+// whole wide plate into a 64×64 box as if it were the character's own tiny
+// "photo", with the bars as separate side-by-side widgets to its right.) The
+// measurements below are the asset's own SOURCE-pixel regions (flood-fill of
+// its enclosed transparent regions — see the PR body for the measurement
+// script); everything is scaled by `PARTY_FRAME_SCALE`, a single uniform
+// factor, so the circle stays round and the bars stay pixel-aligned to the
+// grooves at any `PARTY_FRAME_WIDTH_PX`.
+//
+// party-frame-v2 follow-up — swapped from the original 1408×768 art to a
+// NEW 1380×752 asset (visually similar layout, same "circle + plaque with
+// grooves" composition, but every region shifted by a handful of source
+// pixels — re-measured from scratch with the same flood-fill methodology,
+// never assumed identical to v1). The new art also adds a pill-shaped name
+// capsule directly above the health groove (`PARTY_NAME_CAPSULE`) — see that
+// constant's own doc comment for why it's measured differently (it's opaque,
+// not a transparent cutout).
+const PARTY_FRAME_SRC_W: f32 = 1380.0;
+const PARTY_FRAME_SRC_H: f32 = 752.0;
 /// Rendered width of one party frame; height derives from the native aspect
 /// ratio so the circle stays circular and the grooves stay aligned.
-const PARTY_FRAME_WIDTH_PX: f32 = 320.0;
+///
+/// BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — was `320.0`: at
+/// that size barely 2 rows fit in a normal ~1280×744 window (live-tested,
+/// Matías's report), nowhere near enough for a real 6-12-member party.
+/// `160.0` halves both axes (height derives to ~87px, down from ~174px),
+/// taking a normal window from ~2 comfortable rows to ~6-7 (see the PR
+/// body's "N rows fit" arithmetic), while every measured region below
+/// still lines up exactly, because they're all re-derived from
+/// `PARTY_FRAME_SCALE`.
+const PARTY_FRAME_WIDTH_PX: f32 = 160.0;
 const PARTY_FRAME_HEIGHT_PX: f32 = PARTY_FRAME_WIDTH_PX * PARTY_FRAME_SRC_H / PARTY_FRAME_SRC_W;
 /// Asset-pixel → rendered-pixel scale (uniform on both axes).
 const PARTY_FRAME_SCALE: f32 = PARTY_FRAME_WIDTH_PX / PARTY_FRAME_SRC_W;
 
 /// Circular portrait hole `[x, y, w, h]` in source pixels (enclosed
-/// transparent region; measured center ≈ (357, 385), diameter ≈ 386).
-const PARTY_HOLE: [f32; 4] = [166.0, 191.0, 383.0, 389.0];
-/// Upper carved groove → HEALTH bar `[x, y, w, h]` in source pixels.
-const PARTY_HP_GROOVE: [f32; 4] = [691.0, 298.0, 535.0, 58.0];
-/// Lower carved groove → MANA/ENERGY bar `[x, y, w, h]` in source pixels.
-const PARTY_MP_GROOVE: [f32; 4] = [691.0, 413.0, 534.0, 57.0];
+/// transparent region of the v2 asset; measured center ≈ (354, 378.5),
+/// diameter ≈ 384-387, flood-fill fill-ratio ≈ 0.78 — matches π/4, i.e. a
+/// clean circle).
+const PARTY_HOLE: [f32; 4] = [162.0, 185.0, 384.0, 387.0];
+/// Upper carved groove → HEALTH bar `[x, y, w, h]` in source pixels
+/// (enclosed transparent region of the v2 asset, flood-fill fill-ratio ≈
+/// 0.95).
+const PARTY_HP_GROOVE: [f32; 4] = [683.0, 290.0, 534.0, 62.0];
+/// Lower carved groove → MANA/ENERGY bar `[x, y, w, h]` in source pixels
+/// (enclosed transparent region of the v2 asset, flood-fill fill-ratio ≈
+/// 0.98).
+const PARTY_MP_GROOVE: [f32; 4] = [683.0, 405.0, 534.0, 58.0];
+/// Pill-shaped NAME capsule `[x, y, w, h]` in source pixels, directly above
+/// [`PARTY_HP_GROOVE`] — v2's new addition (spec: Matías, party-frame-v2
+/// follow-up). Unlike [`PARTY_HOLE`]/[`PARTY_HP_GROOVE`]/[`PARTY_MP_GROOVE`]
+/// this is **not** a transparent cutout — the flood-fill that finds those
+/// three finds nothing here (this region's alpha is fully opaque). It's an
+/// opaque, lighter-toned stone inset visually distinguished from the
+/// surrounding darker raised metal border by brightness alone, so it was
+/// measured with a row-mean luminance scan (avoiding the ornate end-caps,
+/// x∈[780,1120]) smoothed over a 5px window: a flat "plateau" of
+/// luminance≈60-64 sits between two beveled-metal transitions (a highlight
+/// then a dark groove line above, ≈y194-223; a dark groove line then a
+/// highlight below, ≈y274-289) — exactly the "lighter grey region bounded by
+/// a darker raised metal border" shape described in the task brief. The
+/// left/right bounds visually line up with the same plaque "lane" as
+/// [`PARTY_HP_GROOVE`]/[`PARTY_MP_GROOVE`] (confirmed by overlaying this
+/// bbox on the source asset). Because this is painted ON TOP of the opaque
+/// frame chrome (not revealed through a hole — see the paint-order comment
+/// at the composition call site), the name text is allowed to slightly
+/// overflow this precisely-measured plateau at render time, the same
+/// tolerance already accepted by [`PARTY_NAME_FONT_PX`] before this change.
+const PARTY_NAME_CAPSULE: [f32; 4] = [683.0, 224.0, 534.0, 49.0];
 
 /// The level badge straddles the portrait hole's bottom rim; its size is a
 /// fraction of the (scaled) hole diameter so it tracks `PARTY_FRAME_WIDTH_PX`.
 const PARTY_LEVEL_BADGE_FRAC: f32 = 0.36;
 /// The voice-chat icon size — small, sitting inline next to the name label.
-const PARTY_VOICE_ICON_SIZE_PX: f32 = 16.0;
+///
+/// Unlike the `PARTY_*` regions above, this (and the two font sizes below)
+/// is NOT one of the asset's measured source-pixel regions, so it never
+/// scaled with `PARTY_FRAME_SCALE` in the first place — it was a plain
+/// absolute px sized to look right against the OLD 320px-wide frame. Shrunk
+/// by hand alongside the frame (roughly proportional, with a legibility
+/// floor) so it still fits inside the now-smaller name row instead of
+/// overflowing it. Was `16.0`.
+const PARTY_VOICE_ICON_SIZE_PX: f32 = 11.0;
+/// The party-member name label's (and the "out of range" label's) font
+/// size — another absolute px never covered by `PARTY_FRAME_SCALE` (see
+/// [`PARTY_VOICE_ICON_SIZE_PX`]'s doc comment). Was `12.0`; shrunk so it
+/// still fits inside the smaller name row without clipping.
+const PARTY_NAME_FONT_PX: f32 = 10.0;
+/// The level badge's number font size — same absolute-px caveat as
+/// [`PARTY_NAME_FONT_PX`]. Was `11.0`.
+const PARTY_LEVEL_BADGE_FONT_PX: f32 = 9.0;
 
 /// Builds an absolutely-positioned [`Node`] covering a measured SOURCE-pixel
 /// region `[x, y, w, h]` of `party_portrait_frame.png`, scaled to rendered
@@ -425,8 +493,9 @@ fn sync_group_state(
 /// Smoke-only (env-gated) party injector — populates a fake 3-member group
 /// with mirrored health/energy/level so `--smoke-screenshot` has a real,
 /// deterministic party frame to capture (verifying the HUD-D4 composition:
-/// portrait + name inside the circular hole, health/mana bars slotted into the
-/// two carved grooves, chrome frame as the top overlay). A no-op unless
+/// portrait alone in the circular hole, name in the v2 asset's pill-shaped
+/// capsule above the health groove, health/mana bars slotted into the two
+/// carved grooves, chrome frame as the top overlay). A no-op unless
 /// `XINDELER_SMOKE_PARTY` is set — the same env-var-gated, smoke-only idiom as
 /// `diary`/`inventory_ui`'s open-for-smoke systems. Nothing sets that var in
 /// production or tests, so it can never affect real group state.
@@ -582,13 +651,27 @@ fn sync_group_panel(
             .and_then(|(_, _, _, xp)| xp)
             .map(|xp| xp.level);
 
-        // `row_entity` is the outer per-member CONTAINER (a Column): the
-        // decorative frame block on top, then the Kick/Make-Leader actions on
-        // their own row below it.
+        // `row_entity` is the outer per-member CONTAINER: the decorative
+        // frame block on the left, the Kick/Make-Leader actions beside it on
+        // the right, vertically centred against the (taller) frame.
+        //
+        // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — was a
+        // Column (frame ON TOP of a separate actions row BELOW it). At the
+        // frame's old 320px width that vertical stack was already the
+        // majority of a ~235px-tall row; simply shrinking the frame's own
+        // size couldn't get anywhere near fitting 6+ rows in a normal
+        // window, because `button_bundle`'s ~40px-tall Kick/Make-Leader
+        // buttons (an unrelated shared widget, deliberately NOT resized
+        // here — shrinking it would also shrink every OTHER button in the
+        // client) were being added on top of the frame's height every row.
+        // Laying them out beside the frame instead means the row's total
+        // height is `max(frame_height, actions_row_height)`, not their sum
+        // — see the PR body for the row-count arithmetic this unlocks.
         let row_entity = commands
             .spawn((GroupMemberRow, Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: theme.spacing.xs_px(),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: theme.spacing.sm_px(),
                 ..Default::default()
             }))
             .id();
@@ -609,16 +692,24 @@ fn sync_group_panel(
         commands.entity(row_entity).add_child(frame_container);
 
         // Child paint order within `frame_container` is back-to-front (Bevy UI
-        // paints later siblings on top): (1) portrait fill, (2) name+voice,
-        // (3/4) the two groove bars, (5) the frame chrome PNG on top (its
-        // transparent hole + grooves reveal 1-4, its opaque metal masks any
-        // overflow), (6) the level badge on top of the chrome. No per-child
-        // `GlobalZIndex` is needed — unlike the orb frame overlay
-        // (`bar.rs::spawn_orb_bar`, which spills its wings OUTSIDE its
-        // container over a sibling panel and therefore needs an explicit
-        // z-tier), nothing here escapes `frame_container`, so local child
-        // order is the whole story and the panel keeps its single
-        // `ORBS_ACTION_BAR_PARTY_MINIMAP` tier.
+        // paints later siblings on top): (1) portrait fill, (2/3) the two
+        // groove bars, (4) the frame chrome PNG on top of 1-3 (its
+        // transparent hole + grooves reveal them, its opaque metal masks any
+        // overflow), (5) name+voice ON TOP of the chrome, (6) the level
+        // badge also on top of the chrome. Name+voice moved from BEFORE the
+        // chrome to AFTER it (party-frame-v2 follow-up): v2's name capsule is
+        // an OPAQUE stone inset, not a transparent cutout like the hole/
+        // grooves, so there is no hole for it to be "revealed through" —
+        // painting it behind the chrome would just bury it under the opaque
+        // capsule art. The level badge already worked this way (it's also a
+        // separate opaque image straddling the hole's rim on top of the
+        // chrome), so this makes name+voice consistent with that existing
+        // precedent rather than a new pattern. No per-child `GlobalZIndex` is
+        // needed — unlike the orb frame overlay (`bar.rs::spawn_orb_bar`,
+        // which spills its wings OUTSIDE its container over a sibling panel
+        // and therefore needs an explicit z-tier), nothing here escapes
+        // `frame_container`, so local child order is the whole story and the
+        // panel keeps its single `ORBS_ACTION_BAR_PARTY_MINIMAP` tier.
         let hole_cx = PARTY_HOLE[0] + PARTY_HOLE[2] / 2.0;
 
         // (1) Portrait placeholder fill — a flat neutral disc filling the
@@ -632,67 +723,7 @@ fn sync_group_panel(
             .id();
         commands.entity(frame_container).add_child(placeholder_fill);
 
-        // (2) Name (+ voice icon) — small, centred over the lower half of the
-        // portrait hole (Matías's spec: "name shown small near/inside the
-        // circle area"). Clipped to the hole width so a long alias is masked
-        // by the chrome's ring rather than spilling across the plaque.
-        let mut name_row_node = party_region_node([
-            PARTY_HOLE[0],
-            PARTY_HOLE[1] + PARTY_HOLE[3] * 0.58,
-            PARTY_HOLE[2],
-            PARTY_HOLE[3] * 0.30,
-        ]);
-        name_row_node.flex_direction = FlexDirection::Row;
-        name_row_node.column_gap = theme.spacing.xs_px();
-        name_row_node.align_items = AlignItems::Center;
-        name_row_node.justify_content = JustifyContent::Center;
-        name_row_node.overflow = bevy::ui::Overflow::clip_x();
-        let name_row_entity = commands.spawn(name_row_node).id();
-        commands.entity(frame_container).add_child(name_row_entity);
-
-        let label = if is_leader {
-            format!("★ {}", member.name)
-        } else {
-            member.name.clone()
-        };
-        let name_entity = commands
-            .spawn((
-                PartyNameLabel,
-                Text(label),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(12.0),
-                    ..Default::default()
-                },
-                TextColor(if is_leader {
-                    theme.palette.accent
-                } else {
-                    theme.palette.text
-                }),
-            ))
-            .id();
-        commands.entity(name_row_entity).add_child(name_entity);
-
-        // Voice-chat state has no mirrored data source yet (see
-        // `PartyVoiceState`'s own doc comment) — always Inactive until a
-        // real field lands.
-        let voice_icon_entity = commands
-            .spawn((
-                PartyVoiceIconImage,
-                Node {
-                    width: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
-                    height: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
-                    flex_shrink: 0.0,
-                    ..Default::default()
-                },
-                ImageNode::new(images.get(voice_icon_key(PartyVoiceState::Inactive))),
-            ))
-            .id();
-        commands
-            .entity(name_row_entity)
-            .add_child(voice_icon_entity);
-
-        // (3/4) The two groove bars — `spawn_bar` reused VERBATIM (same
+        // (2/3) The two groove bars — `spawn_bar` reused VERBATIM (same
         // `BarValue`/fill machinery + `sync_group_bars` per-frame refresh),
         // each wrapped in an absolutely-positioned slot sized to a measured
         // groove so the bar fills the carved recess exactly. Health -> upper
@@ -749,6 +780,13 @@ fn sync_group_panel(
                 ]);
                 oor_node.align_items = AlignItems::Center;
                 oor_node.justify_content = JustifyContent::Center;
+                // Same clip_x() + `TextLayout::no_wrap()` pairing as the
+                // name label below — this container is narrower now too
+                // (BL-82 EM-5.17 Phase 4 follow-up, party-frame shrink), so
+                // without it "(out of range)" would wrap across several
+                // lines and spill past the plaque instead of truncating to
+                // one line.
+                oor_node.overflow = bevy::ui::Overflow::clip_x();
                 let oor_container = commands.spawn(oor_node).id();
                 commands.entity(frame_container).add_child(oor_container);
                 let out_of_range = commands
@@ -756,9 +794,10 @@ fn sync_group_panel(
                         Text("(out of range)".to_owned()),
                         TextFont {
                             font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                            font_size: bevy::text::FontSize::Px(12.0),
+                            font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
                             ..Default::default()
                         },
+                        TextLayout::no_wrap(),
                         TextColor(theme.palette.text_muted),
                     ))
                     .id();
@@ -766,7 +805,7 @@ fn sync_group_panel(
             },
         }
 
-        // (5) The frame chrome PNG — full-size overlay ON TOP of (1)-(4). Its
+        // (4) The frame chrome PNG — full-size overlay ON TOP of (1)-(3). Its
         // transparent circular hole + two grooves reveal them; the opaque
         // plaque/ring masks any overflow. `Pickable::IGNORE` so it never
         // steals pointer events (matches `spawn_orb_bar`'s overlay convention).
@@ -786,6 +825,76 @@ fn sync_group_panel(
             ))
             .id();
         commands.entity(frame_container).add_child(frame_entity);
+
+        // (5) Name (+ voice icon) — centred inside the v2 asset's new
+        // pill-shaped name capsule, directly above the health groove
+        // (Matías's party-frame-v2 spec: name moves OUT of the portrait
+        // circle and INTO the capsule; the circle keeps just the portrait).
+        // Painted AFTER (on top of) the frame chrome — see the paint-order
+        // comment above `frame_container`'s children for why: the capsule is
+        // opaque art, not a transparent cutout, so there's nothing to
+        // "reveal" the name through. Clipped to the capsule width so a long
+        // alias is masked rather than spilling across the plaque.
+        let mut name_row_node = party_region_node(PARTY_NAME_CAPSULE);
+        name_row_node.flex_direction = FlexDirection::Row;
+        name_row_node.column_gap = theme.spacing.xs_px();
+        name_row_node.align_items = AlignItems::Center;
+        name_row_node.justify_content = JustifyContent::Center;
+        name_row_node.overflow = bevy::ui::Overflow::clip_x();
+        let name_row_entity = commands.spawn(name_row_node).id();
+        commands.entity(frame_container).add_child(name_row_entity);
+
+        let label = if is_leader {
+            format!("★ {}", member.name)
+        } else {
+            member.name.clone()
+        };
+        let name_entity = commands
+            .spawn((
+                PartyNameLabel,
+                Text(label),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
+                    ..Default::default()
+                },
+                // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — the
+                // shrunk `name_row_node` (now sized to the small
+                // `PARTY_NAME_CAPSULE`) is narrow enough that Bevy's default
+                // soft-wrap broke a longer name across 2-3 lines, spilling
+                // down over the HP/MP bars instead of being clipped to one
+                // line (live-tested, visually confirmed via
+                // `--smoke-screenshot`). `clip_x()` below only clips
+                // horizontal overflow — it does nothing about vertical
+                // wrapping — so wrapping must be disabled explicitly too.
+                TextLayout::no_wrap(),
+                TextColor(if is_leader {
+                    theme.palette.accent
+                } else {
+                    theme.palette.text
+                }),
+            ))
+            .id();
+        commands.entity(name_row_entity).add_child(name_entity);
+
+        // Voice-chat state has no mirrored data source yet (see
+        // `PartyVoiceState`'s own doc comment) — always Inactive until a
+        // real field lands.
+        let voice_icon_entity = commands
+            .spawn((
+                PartyVoiceIconImage,
+                Node {
+                    width: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    height: Val::Px(PARTY_VOICE_ICON_SIZE_PX),
+                    flex_shrink: 0.0,
+                    ..Default::default()
+                },
+                ImageNode::new(images.get(voice_icon_key(PartyVoiceState::Inactive))),
+            ))
+            .id();
+        commands
+            .entity(name_row_entity)
+            .add_child(voice_icon_entity);
 
         // (6) Level badge — straddles the portrait hole's bottom rim, ON TOP
         // of the chrome. The badge PNG is decorative; the level NUMBER only
@@ -816,7 +925,7 @@ fn sync_group_panel(
                     Text(format!("{level}")),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(11.0),
+                        font_size: bevy::text::FontSize::Px(PARTY_LEVEL_BADGE_FONT_PX),
                         ..Default::default()
                     },
                     TextColor(theme.palette.text),
@@ -830,17 +939,17 @@ fn sync_group_panel(
         // self-target button is confusing UX, not just a no-op
         // (bevy-migration-reviewer follow-up).
         //
-        // Spawned on their OWN row (`actions_row_entity`) BELOW the decorative
-        // frame, lightly indented, rather than inside the frame — the frame is
-        // pure decorative chrome with no room for buttons, and keeping the
-        // actions out of it means the frame's fixed aspect ratio is never
-        // stretched by button content.
+        // Spawned as `row_entity`'s second child, BESIDE the decorative
+        // frame (not inside it — the frame is pure decorative chrome with
+        // no room for buttons, and keeping the actions out of it means the
+        // frame's fixed aspect ratio is never stretched by button content).
+        // No manual left margin here: `row_entity`'s own `column_gap`
+        // already spaces this from `frame_container`.
         if Some(member.uid) != my_uid {
             let actions_row_entity = commands
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
                     column_gap: theme.spacing.sm_px(),
-                    margin: UiRect::left(theme.spacing.sm_px()),
                     ..Default::default()
                 })
                 .id();
@@ -934,11 +1043,40 @@ fn sync_group_bars(
         (With<PartyEnergyBar>, Without<PartyHealthBar>),
     >,
 ) {
+    // BL-82 holistic-review perf fix (rust-perf-reviewer): `mirrored` carries
+    // every mirrored entity in the client's visible region (players, NPCs,
+    // wildlife — not just party members), so the PREVIOUS code's `mirrored
+    // .iter().find(...)` PER BAR was an O(bars × mirrored-region-size) full
+    // rescan every frame, once for each health bar AND once for each energy
+    // bar. Party sizes are small (a handful of members, bounded by
+    // `NetGroupState`), so this inverts the loop instead: collect the small
+    // bounded set of member uids these bars actually care about FIRST, then
+    // do ONE filtered pass over `mirrored` matching against that set —
+    // O(mirrored-region-size + bars) total, one region scan regardless of
+    // how many bars exist, with only bounded-by-party-size lookups per bar
+    // (no full `HashMap` needed — a small `Vec` linear-search over a
+    // handful of entries is cheaper than the allocation/hashing overhead a
+    // map keyed by the WHOLE region would cost, and simpler than building
+    // one just to serve a few lookups).
+    let member_uids: std::collections::HashSet<u64> = health_bars
+        .iter()
+        .chain(energy_bars.iter())
+        .map(|(uid, _)| uid.0)
+        .collect();
+    if member_uids.is_empty() {
+        return;
+    }
+    let matches: Vec<(u64, Option<NetHealth>, Option<NetEnergy>)> = mirrored
+        .iter()
+        .filter(|(uid, ..)| member_uids.contains(&uid.0))
+        .map(|(uid, health, energy)| (uid.0, health.copied(), energy.copied()))
+        .collect();
+
     for (member_uid, mut value) in &mut health_bars {
-        let Some(health) = mirrored
+        let Some(health) = matches
             .iter()
-            .find(|(uid, ..)| uid.0 == member_uid.0)
-            .and_then(|(_, health, _)| health)
+            .find(|(uid, ..)| *uid == member_uid.0)
+            .and_then(|(_, health, _)| *health)
         else {
             continue;
         };
@@ -948,10 +1086,10 @@ fn sync_group_bars(
         }
     }
     for (member_uid, mut value) in &mut energy_bars {
-        let Some(energy) = mirrored
+        let Some(energy) = matches
             .iter()
-            .find(|(uid, ..)| uid.0 == member_uid.0)
-            .and_then(|(_, _, energy)| energy)
+            .find(|(uid, ..)| *uid == member_uid.0)
+            .and_then(|(_, _, energy)| *energy)
         else {
             continue;
         };
@@ -1189,10 +1327,26 @@ fn handle_talk_key(
 fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
     // Social window: player list + search (search input is a follow-up —
     // v1 shows the full roster).
+    //
+    // BL-82 holistic-review z-index fix: [`SocialWindowRoot`] is driven by
+    // `HudState`/`HudWindow::Social` exactly like `InventoryWindowRoot`/
+    // `DiaryWindowRoot`/`FullMapRoot` — it shares the SAME mutually-exclusive
+    // "one open window" slot (`hud_state.rs`'s own doc comment) and the same
+    // cursor-free/mouselook-suspend rule (`cursor.rs`'s
+    // `HudState::any_window_open`), which is exactly what makes those three
+    // "genuinely modal" per `zlayer::MODAL_WINDOWS`'s own doc comment — so
+    // this window belongs in that tier too, not the ambient
+    // `ORBS_ACTION_BAR_PARTY_MINIMAP` layer its sibling `GroupPanelRoot` uses
+    // (that panel is always-on and never claims the HudState window slot).
+    // Before this fix it had no `GlobalZIndex` at all (default z-partition
+    // 0), sitting below the ambient chrome — the same click-routing bug
+    // class already fixed for `EscMenuRoot`/`InventoryWindowRoot`/
+    // `FullMapRoot`.
     commands
         .spawn((
             SocialWindowRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::MODAL_WINDOWS),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(80.0),
@@ -1226,19 +1380,38 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         });
 
     // Group/party panel: always visible while in a group. BL-82 EM-5.17
-    // Phase 4: repositioned to spec §3.4's confirmed anchor (top-left column,
-    // `top:100,left:20`, `row_gap:20` between member rows) — was top-right,
-    // which the pre-reskin flat layout used purely to avoid overlapping the
-    // Social window (now at top-right still, so the two remain disjoint).
-    // `GlobalZIndex` per spec §4.4: party frames share the ambient always-on
-    // HUD chrome layer with the orbs/action-bar/minimap.
+    // Phase 4: repositioned to spec §3.4's confirmed anchor (top-left
+    // column, `top:100,left:20`) — was top-right, which the pre-reskin flat
+    // layout used purely to avoid overlapping the Social window (now at
+    // top-right still, so the two remain disjoint). `GlobalZIndex` per spec
+    // §4.4: party frames share the ambient always-on HUD chrome layer with
+    // the orbs/action-bar/minimap.
     //
-    // Width 340px comfortably contains each member row's decorative frame
-    // (`PARTY_FRAME_WIDTH_PX` = 320px, see `sync_group_panel`) plus the
-    // indented Kick/Make-Leader actions row below it, so party-frame content
-    // stays inside its own panel and never bleeds into neighbouring panels'
-    // screen space (chat's fixed bottom-left footprint, the centered ESC
-    // menu). Keep this >= `PARTY_FRAME_WIDTH_PX` if the frame is ever resized.
+    // BL-82 EM-5.17 Phase 4 follow-up (party-frame shrink) — `row_gap`
+    // between member rows was `20.0`; combined with the OLD frame's ~235px
+    // per-row footprint (a 320px-wide frame stacked ABOVE a separate
+    // actions row) that meant barely 2 rows fit in a normal ~744px-tall
+    // window. Now that a member row's actions sit BESIDE the (much
+    // smaller) frame instead of below it — see `row_entity`'s own doc
+    // comment above, in this same function — the row-to-row gap is
+    // tightened to `theme.spacing.xs_px()` too, so the saved frame height
+    // isn't immediately eaten back up by generous spacing.
+    //
+    // Width grew from 340px to 420px even though the frame itself shrank:
+    // the frame is no longer the widest thing in a row — with the actions
+    // row now BESIDE it instead of below, `frame(160px) + gap + Kick/Make
+    // Leader buttons` is wider than the old vertical stack ever was. Keep
+    // this >= that combined width if either the frame or the buttons are
+    // ever resized again (live-verified with real "Kick"/"Make Leader"
+    // button text via `--smoke-screenshot`, ~20-40px of slack left).
+    //
+    // Known follow-up (bevy-migration-reviewer, this PR): this panel still
+    // has no scroll container — a ~744px-tall window fits roughly 6-7 rows
+    // at this size (see the PR body's arithmetic), not a full 12-member
+    // party without scrolling. Good enough to unblock a typical 4-6-member
+    // party; a genuinely oversized roster still needs `overflow_y`/a
+    // scrollable list, tracked as a separate follow-up rather than folded
+    // into this size-only fix.
     commands
         .spawn((
             GroupPanelRoot,
@@ -1248,9 +1421,9 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 position_type: PositionType::Absolute,
                 top: Val::Px(100.0),
                 left: Val::Px(20.0),
-                width: Val::Px(340.0),
+                width: Val::Px(420.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(20.0),
+                row_gap: theme.spacing.sm_px(),
                 ..Default::default()
             },
         ))
@@ -1265,16 +1438,27 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 );
             parent.spawn((GroupMembersRoot, Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(20.0),
+                row_gap: theme.spacing.xs_px(),
                 ..Default::default()
             }));
         });
 
     // Incoming-invite banner (always visible when a pending invite exists).
+    //
+    // BL-82 holistic-review z-index fix: [`InviteBannerRoot`] is shown/hidden
+    // purely from `CurrentGroupState::pending_invite` — like its sibling
+    // `GroupPanelRoot` (already `ORBS_ACTION_BAR_PARTY_MINIMAP` below), it
+    // never touches `HudState`/`HudWindow`, so it never claims the
+    // mutually-exclusive "one open window" slot nor participates in
+    // `HudState::any_window_open`'s cursor-free rule (`cursor.rs`) — it is
+    // ambient, always-on chrome, not a modal window (unlike `SocialWindowRoot`
+    // just above, which genuinely is one — see that spawn's own doc comment).
+    // Same tier as its sibling.
     commands
         .spawn((
             InviteBannerRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(16.0),
@@ -1329,10 +1513,18 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
 
     // Dialogue panel (v1-minimal): sender name + message + response/ack/
     // close buttons.
+    //
+    // BL-82 holistic-review z-index fix: [`DialoguePanelRoot`] is driven by
+    // the standalone `ActiveDialogue` resource, not `HudState`/`HudWindow` —
+    // same non-modal category as `InviteBannerRoot`/`GroupPanelRoot` just
+    // above (it never claims the "one open window" slot nor frees the
+    // cursor via `HudState::any_window_open`, see `cursor.rs`), so it takes
+    // the same ambient tier rather than `MODAL_WINDOWS`.
     commands
         .spawn((
             DialoguePanelRoot,
             Visibility::Hidden,
+            GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
             Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(120.0),
@@ -1701,6 +1893,101 @@ mod tests {
         );
     }
 
+    /// BL-82 holistic-review perf fix regression (rust-perf-reviewer):
+    /// [`sync_group_bars`] now filters `mirrored` against the small bounded
+    /// set of party-member uids instead of a per-bar full-region linear
+    /// scan (see that function's own doc comment for the O(bars × N) →
+    /// O(N + bars) rewrite). This pins BOTH halves of that rewrite's
+    /// correctness directly (not just indirectly via the UI-integration
+    /// test above): a handful of NON-member mirrored entities (players/
+    /// NPCs/wildlife elsewhere in the region — exactly what made the old
+    /// per-bar `.find()` expensive) must never leak into either bar's
+    /// value, while the TWO real party members' health/energy bars each
+    /// resolve their OWN uid's mirrored value, not each other's.
+    #[test]
+    fn sync_group_bars_filters_out_non_member_mirrored_entities() {
+        let mut app = new_app();
+
+        // Non-member mirrored entities — present in the region, must be
+        // ignored entirely by both bars below.
+        app.world_mut().spawn((NetUid(90), NetHealth {
+            current: 1.0,
+            max: 1.0,
+        }));
+        app.world_mut().spawn((NetUid(91), NetHealth {
+            current: 2.0,
+            max: 2.0,
+        }));
+
+        // Two real party members, each mirrored with DISTINCT health/energy
+        // so a cross-wired lookup (member 1 reading member 2's value or
+        // vice versa) would be caught.
+        app.world_mut().spawn((
+            NetUid(1),
+            NetHealth {
+                current: 60.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 10.0,
+                max: 100.0,
+            },
+        ));
+        app.world_mut().spawn((
+            NetUid(2),
+            NetHealth {
+                current: 80.0,
+                max: 100.0,
+            },
+            NetEnergy {
+                current: 20.0,
+                max: 100.0,
+            },
+        ));
+
+        let health_bar_1 = app
+            .world_mut()
+            .spawn((PartyHealthBar, PartyMemberUid(1), BarValue::new(0.0, 1.0)))
+            .id();
+        let health_bar_2 = app
+            .world_mut()
+            .spawn((PartyHealthBar, PartyMemberUid(2), BarValue::new(0.0, 1.0)))
+            .id();
+        let energy_bar_1 = app
+            .world_mut()
+            .spawn((PartyEnergyBar, PartyMemberUid(1), BarValue::new(0.0, 1.0)))
+            .id();
+        let energy_bar_2 = app
+            .world_mut()
+            .spawn((PartyEnergyBar, PartyMemberUid(2), BarValue::new(0.0, 1.0)))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_group_bars)
+            .expect("sync_group_bars runs");
+
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar_1).unwrap(),
+            BarValue::new(60.0, 100.0),
+            "member 1's own health"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(health_bar_2).unwrap(),
+            BarValue::new(80.0, 100.0),
+            "member 2's own health, not member 1's"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(energy_bar_1).unwrap(),
+            BarValue::new(10.0, 100.0),
+            "member 1's own energy"
+        );
+        assert_eq!(
+            *app.world().get::<BarValue>(energy_bar_2).unwrap(),
+            BarValue::new(20.0, 100.0),
+            "member 2's own energy, not member 1's"
+        );
+    }
+
     /// BL-82 EM-5.17 Phase 4's core acceptance bar (spec §3.4): given a fully
     /// mirrored party member, the rebuilt row carries a portrait-frame
     /// `ImageNode` keyed to `HudImageKey::PartyPortraitFrame`, a level badge
@@ -2048,5 +2335,51 @@ mod tests {
             .drain()
             .collect();
         assert!(sent.is_empty(), "nothing in range must send nothing");
+    }
+
+    /// BL-82 holistic-review z-index fix regression: [`SocialWindowRoot`] is
+    /// driven by `HudState`/`HudWindow::Social` the same "one open window"
+    /// mutually-exclusive slot the diary/inventory/full-map trio uses, so it
+    /// gets their `MODAL_WINDOWS` tier; [`InviteBannerRoot`]/
+    /// [`DialoguePanelRoot`] are ambient (resource-driven, never claim that
+    /// slot) like their sibling `GroupPanelRoot`, so they get the SAME
+    /// `ORBS_ACTION_BAR_PARTY_MINIMAP` tier `GroupPanelRoot` already carried
+    /// — see `spawn_social_hud`'s own per-spawn doc comments for the full
+    /// reasoning. Before this fix, all three had NO `GlobalZIndex` at all
+    /// (default z-partition 0), matching the same click-routing bug class
+    /// already fixed for `EscMenuRoot`/`InventoryWindowRoot`/`FullMapRoot`/
+    /// `InviteRoot`/`TradeWindowRoot`.
+    #[test]
+    fn social_hud_roots_carry_their_intended_z_index() {
+        let mut app = new_app();
+        app.world_mut().insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.world_mut()
+            .run_system_once(spawn_social_hud)
+            .expect("spawn_social_hud runs");
+
+        let world = app.world_mut();
+        let social_z = world
+            .query_filtered::<&GlobalZIndex, With<SocialWindowRoot>>()
+            .single(world)
+            .expect("SocialWindowRoot exists")
+            .0;
+        assert_eq!(social_z, zlayer::MODAL_WINDOWS);
+
+        let invite_banner_z = world
+            .query_filtered::<&GlobalZIndex, With<InviteBannerRoot>>()
+            .single(world)
+            .expect("InviteBannerRoot exists")
+            .0;
+        assert_eq!(invite_banner_z, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+
+        let dialogue_z = world
+            .query_filtered::<&GlobalZIndex, With<DialoguePanelRoot>>()
+            .single(world)
+            .expect("DialoguePanelRoot exists")
+            .0;
+        assert_eq!(dialogue_z, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
     }
 }

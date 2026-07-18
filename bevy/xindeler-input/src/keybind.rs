@@ -210,7 +210,14 @@ impl KeyBindings {
             GameInput::ZoomOut => key(K::Minus),
             GameInput::ZoomLock => None,
             GameInput::CameraClamp => key(K::Quote),
-            GameInput::CycleCamera => key(K::Digit0),
+            // BL-82 HUD 2x3-grid redesign: the hotbar's 12th labelled slot
+            // (right side, row 2, middle) shows the "0" key per Matías's exact
+            // keybind map (`1..0` across the two number rows, the classic
+            // ARPG/Veloren hotbar layout) — so `Slot10` moves onto `Digit0`
+            // and the badge reads its real binding truthfully. `CycleCamera`
+            // vacates `Digit0` onto `KeyQ` (freed by `Slot10` below, and
+            // otherwise unbound) — a clean swap, no new conflict.
+            GameInput::CycleCamera => key(K::KeyQ),
             GameInput::Slot1 => key(K::Digit1),
             GameInput::Slot2 => key(K::Digit2),
             GameInput::Slot3 => key(K::Digit3),
@@ -220,7 +227,10 @@ impl KeyBindings {
             GameInput::Slot7 => key(K::Digit7),
             GameInput::Slot8 => key(K::Digit8),
             GameInput::Slot9 => key(K::Digit9),
-            GameInput::Slot10 => key(K::KeyQ),
+            // BL-82 HUD 2x3-grid redesign: was `KeyQ`; now `Digit0` so the
+            // 12-slot hotbar's number rows read `1..0` (see `CycleCamera`
+            // above for the companion swap that freed `Digit0`).
+            GameInput::Slot10 => key(K::Digit0),
             GameInput::NextSlot | GameInput::PreviousSlot | GameInput::CurrentSlot => None,
             GameInput::SwapLoadout => key(K::Tab),
             GameInput::Select => key(K::KeyX),

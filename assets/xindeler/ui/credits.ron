@@ -1,0 +1,16 @@
+// BL-82 EM-5.9 (T56.30) — connecting / loading screen credits.
+//
+// A short, data-driven acknowledgements block (edit here, no recompile). This
+// is deliberately NOT the full asset-attribution manifest (that is a separate,
+// much larger per-asset licensing document); it is the small "who made this"
+// note the loading screen shows, plus the engine attribution Xindeler owes the
+// upstream Veloren project it is built on (GPL-3.0).
+(
+    // Shown prominently under the credits heading.
+    engine_note: "Xindeler is built on the Veloren engine (GPL-3.0), with thanks to the Veloren community.",
+    // Role -> the people credited for it. Keep concise.
+    entries: [
+        (role: "Xindeler", names: ["The Xindeler team"]),
+        (role: "Engine", names: ["The Veloren contributors"]),
+    ],
+)

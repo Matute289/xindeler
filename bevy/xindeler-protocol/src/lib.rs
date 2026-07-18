@@ -18,6 +18,7 @@ pub mod ai_mode;
 pub mod aurora_overlay;
 pub mod charlist;
 pub mod chat;
+pub mod crafting;
 pub mod dimension_id;
 pub mod hotbar;
 pub mod interest;
@@ -51,6 +52,9 @@ pub use crate::{
         LocalCharDelete, LocalCharSelect, NetCharList, NetCharListEntry,
     },
     chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
+    crafting::{
+        NetCrafting, NetModularComponentSlot, NetRecipe, NetRecipeInput, NetRepairableSlot,
+    },
     dimension_id::DimensionId,
     hotbar::{
         AssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldownEntry, NetCooldowns,
@@ -818,7 +822,15 @@ impl Plugin for XindelerProtocolPlugin {
             // `NetInventory`'s own privacy posture: skillset unlock state is
             // self-only HUD data, per spec §3.2's own example list).
             .replicate::<NetSkillSet>()
-            .replicate::<NetAbilityPool>();
+            .replicate::<NetAbilityPool>()
+            // BL-82 EM-5.15: the crafting mirror (recipe book + salvage/
+            // repair/modular candidate lists, spec §3.2/§6) — self-scoped via
+            // `NetOwnerOnly` (mirrors `NetInventory`'s own privacy posture:
+            // recipe book + bag-derived candidates are self-only HUD data).
+            // Its client → sim intent reuses the existing
+            // `InventoryActionRequest` (crafting is a `CraftEvent` inside
+            // `InventoryManip::CraftRecipe`) — no new message registered here.
+            .replicate::<NetCrafting>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the
@@ -1678,5 +1690,75 @@ mod tests {
             .collect();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].message, select);
+    }
+
+    /// BL-82 EM-5.15: the crafting mirror (`NetCrafting`) round-trips server →
+    /// client exactly like the other `Net*` mirrors above — the acceptance bar
+    /// `ecs-design-reviewer` checks for "every new `Net*` mirror gets a
+    /// round-trip test" (spec §3.2). Exercises a non-trivial payload (a recipe
+    /// with inputs + a modular-component candidate) so the nested
+    /// `SpriteKind`/`ToolKind`/`Slot` common types are all proven on the wire,
+    /// not just an empty default.
+    #[test]
+    fn net_crafting_mirror_replicates() {
+        use common::comp::inventory::{
+            item::{ItemDefinitionIdOwned, Quality, tool::ToolKind},
+            slot::{InvSlotId, Slot},
+        };
+
+        use crate::crafting::{
+            NetCrafting, NetModularComponentSlot, NetRecipe, NetRecipeInput, NetRepairableSlot,
+        };
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let crafting = NetCrafting {
+            recipes: vec![NetRecipe {
+                key: "craftsman_hammer".to_owned(),
+                output_id: ItemDefinitionIdOwned::Simple(
+                    "common.items.tool.craftsman_hammer".to_owned(),
+                ),
+                output_name: "Craftsman Hammer".to_owned(),
+                output_amount: 1,
+                output_quality: Quality::Common,
+                inputs: vec![NetRecipeInput {
+                    name: "Iron Ingot".to_owned(),
+                    required: 3,
+                    available: 1,
+                }],
+                craftable: false,
+                craft_sprite: None,
+                craft_slots: vec![],
+            }],
+            salvageable: vec![InvSlotId::new(0, 2)],
+            components: vec![NetModularComponentSlot {
+                slot: InvSlotId::new(0, 3),
+                is_primary: true,
+                is_secondary: false,
+                toolkind: ToolKind::Sword,
+            }],
+            repairable: vec![NetRepairableSlot {
+                slot: Slot::Inventory(InvSlotId::new(0, 4)),
+                durability_lost: 5,
+                max_durability: 12,
+            }],
+        };
+
+        server_app.world_mut().spawn((Replicated, crafting.clone()));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let mut q = client_app.world_mut().query::<&NetCrafting>();
+        let got = q
+            .single(client_app.world())
+            .expect("the crafting mirror reaches the client");
+        assert_eq!(
+            *got, crafting,
+            "the crafting mirror round-trips byte-for-byte"
+        );
     }
 }
