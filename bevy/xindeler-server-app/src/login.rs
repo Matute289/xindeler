@@ -110,7 +110,10 @@ use server::{
     state_ext::StateExt,
 };
 use specs::{Builder, WorldExt};
-use xindeler_protocol::{LoginError, LoginRequest, LoginResult, LoginSuccess, NetCharacterSummary};
+use xindeler_protocol::{
+    ActiveReplicaSessions, ClientViewpoint, DimensionId, LoginError, LoginRequest, LoginResult,
+    LoginSuccess, NetCharacterSummary,
+};
 use xindeler_sim_bridge::SimServer;
 
 /// View distance granted to a replicon-authenticated character. `LoginRequest`
@@ -148,14 +151,15 @@ pub fn boot_replicon_character_loader(server_data_dir: &Path) -> RepliconCharact
 #[derive(Resource, Default)]
 pub struct PendingLogins(HashMap<ClientId, LoginSession>);
 
-/// Sim entity → `ClientId` for every replicon login that has FULLY completed
-/// (reached `Presence::Character`) — unlike [`PendingLogins`] (which only
-/// tracks logins still in flight and is pruned as soon as one finishes), this
-/// persists for the lifetime of the session so a LATER duplicate login for
-/// the same account can find the old client to kick. See the module doc
-/// comment's "known gaps" section for what this does and doesn't cover.
-#[derive(Resource, Default)]
-pub struct ActiveReplicaSessions(HashMap<specs::Entity, ClientId>);
+// BL-82 EM-8.2: `ActiveReplicaSessions` (the "which client owns this fully-
+// logged-in session" map the duplicate-login-kick logic below relies on) now
+// lives in `xindeler_protocol` (imported above), keyed by `Uid` rather than
+// `specs::Entity` — see that type's own doc comment for why the relocation
+// was necessary (this crate is binary-only, so nothing else could ever reach
+// a type defined here) and why the key changed (this crate is deliberately
+// the one legal `specs` consumer alongside `xindeler-sim-bridge`; the shared
+// `xindeler_protocol` crate is not). This module still owns every WRITE to
+// it — only the type's home moved.
 
 struct LoginSession {
     /// The sim entity created for this login (via `create_entity_synced`, so
@@ -365,7 +369,21 @@ fn advance_auth(
                     // Also close the OLD client's actual replicon/quinnet
                     // connection (`kick` above only cleans up the SIM-side
                     // entity) — see `ActiveReplicaSessions`'s doc comment.
-                    if let Some(old_client_id) = active.0.remove(&old_entity)
+                    // BL-82 EM-8.2: the session map is now keyed by the OLD
+                    // entity's stable `Uid`, not `specs::Entity` — resolved
+                    // here since this is the only place that still has the
+                    // OLD entity handle at all (this mirrors the SAME
+                    // `Uid` read `handle_character_data` below does for a
+                    // fresh session's own entry).
+                    let old_uid = sim
+                        .server
+                        .state()
+                        .ecs()
+                        .read_storage::<common::uid::Uid>()
+                        .get(old_entity)
+                        .map(|uid| uid.0.get());
+                    if let Some(old_uid) = old_uid
+                        && let Some(old_client_id) = active.remove(old_uid)
                         && let Some(old_client_entity) = old_client_id.entity()
                     {
                         disconnects.write(DisconnectRequest {
@@ -646,11 +664,29 @@ fn handle_character_data(
                         sim.server.state().ecs(),
                         target_entity,
                     );
-                    // Track this as a fully logged-in session so a LATER
+                    // This entity's own stable sim identity — resolved ONCE,
+                    // reused below for the `ActiveReplicaSessions` session
+                    // key, the `ClientOwnedUid` wire-visibility tag, and
+                    // (BL-82 EM-8.2) this client's initial `ClientViewpoint`.
+                    // Absent only if `Uid` is somehow missing (defensive —
+                    // every character entity gets one at creation).
+                    let uid = sim
+                        .server
+                        .state()
+                        .ecs()
+                        .read_storage::<common::uid::Uid>()
+                        .get(target_entity)
+                        .map(|uid| uid.0.get());
+                    // Track this as a fully logged-in session, keyed by the
+                    // player's stable `Uid` (BL-82 EM-8.2 — see
+                    // `xindeler_protocol::ActiveReplicaSessions`'s own doc
+                    // comment for why the type moved AND why it's now keyed
+                    // by `Uid` rather than `specs::Entity`), so a LATER
                     // duplicate login for the same account can find (and
-                    // kick) this client — see `ActiveReplicaSessions`'s doc
-                    // comment.
-                    active.0.insert(target_entity, client_id);
+                    // kick) this client.
+                    if let Some(uid) = uid {
+                        active.insert(uid, client_id);
+                    }
                     // BL-82 EM-4.9 follow-up: link this session's own
                     // connection entity to the sim entity it controls, so
                     // `xindeler-sim-bridge::player_transfer` can keep this
@@ -668,22 +704,47 @@ fn handle_character_data(
                         // correlation, for the per-owner inventory/trade
                         // visibility filter (`xindeler_protocol::
                         // owner_visibility` — see that module's doc
-                        // comment). Reads the sim's own `Uid` for
-                        // `target_entity` (already resolved by
-                        // `update_character_data` just above) and tags this
-                        // connection entity with it; absent only if `Uid`
-                        // is somehow missing (defensive — every character
-                        // entity gets one at creation).
-                        if let Some(uid) = sim
-                            .server
-                            .state()
-                            .ecs()
-                            .read_storage::<common::uid::Uid>()
-                            .get(target_entity)
-                        {
+                        // comment).
+                        if let Some(uid) = uid {
                             commands
                                 .entity(client_entity)
-                                .insert(xindeler_protocol::ClientOwnedUid(uid.0.get()));
+                                .insert(xindeler_protocol::ClientOwnedUid(uid));
+                            // BL-82 EM-8.2: a REAL, character-position-derived
+                            // initial `ClientViewpoint` — closes the
+                            // technical-debt ledger's (Part A2) "Login's
+                            // initial viewpoint" gap. Before this, EVERY
+                            // client (logged in or not) only ever got
+                            // `xindeler-sim-bridge::
+                            // apply_default_viewpoint_for_new_clients`'s
+                            // world-centre spectator stopgap — that
+                            // function's own doc comment already anticipates
+                            // this: it only ever acts on a client that does
+                            // NOT already have a `ClientViewpoint`, so this
+                            // insert (this system runs `.before(tick_sim)`,
+                            // and the stopgap runs `.after(tick_sim)` in the
+                            // SAME `FixedUpdate` pass, so Bevy's automatic
+                            // command-sync point makes this component visible
+                            // to it same-tick) makes the stopgap a permanent
+                            // no-op for THIS client from its very first tick.
+                            // Dimension is always `DimensionId::default()` at
+                            // login: a character's dimension is a purely
+                            // ephemeral, never-persisted Bevy-side (ORACLE
+                            // event) concept, so every fresh login naturally
+                            // starts in the default dimension regardless of
+                            // where the account was last active.
+                            if let Some(pos) = sim
+                                .server
+                                .state()
+                                .ecs()
+                                .read_storage::<common::comp::Pos>()
+                                .get(target_entity)
+                            {
+                                commands.entity(client_entity).insert(ClientViewpoint::new(
+                                    DimensionId::default(),
+                                    vek::Vec2::new(pos.0.x, pos.0.y),
+                                    DEFAULT_VIEW_DISTANCE,
+                                ));
+                            }
                         }
                     }
                     reply(

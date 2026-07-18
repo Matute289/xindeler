@@ -15,10 +15,30 @@
 //!   to the ONE player this process actually has a UI for — the embedded local
 //!   player ([`EmbeddedPlayer::uid`]). A genuinely multi-remote-client
 //!   dedicated server would need a connected-client↔sim-player-identity
-//!   correlation this codebase doesn't have yet (see
-//!   `xindeler_protocol::interest`'s own doc comment for the identical gap
-//!   named for `ClientViewpoint`) to scope these per-recipient instead —
-//!   flagged as a follow-up, not silently assumed away.
+//!   correlation to scope these per-recipient instead of broadcasting — BL-82
+//!   EM-8.2 closes that gap (technical-debt ledger Part A2):
+//!   [`xindeler_protocol::ActiveReplicaSessions`] now answers "which `ClientId`
+//!   controls the sim player identified by this `Uid`", so both mirrors resolve
+//!   their `SendTargets` from it instead of hardcoding `SendTargets::All`.
+//!   Because these mirrors are STILL only ever computed for the ONE
+//!   embedded/local player (this doc comment's scoping note above is otherwise
+//!   unchanged — registering a per-remote-client version of this mirror on the
+//!   dedicated server is EM-8.3's job, not this one's), the embedded player's
+//!   own `Uid` is never actually a key in that map (the embedded player
+//!   authenticates over the legacy loopback transport, never through the
+//!   replicon login handshake that populates it) — so the resolved target
+//!   degrades to `SendTargets::SERVER_ONLY`
+//!   (`SendTargets::Single(ClientId::Server)`), which `bevy_replicon` only ever
+//!   re-emits LOCALLY (the listen-server's own local echo), never to any real
+//!   connected client. This is the exact fix the ledger's "every client would
+//!   see every other player's private group/dialogue state" risk names: a real
+//!   second replicon client connected alongside the embedded/local player can
+//!   no longer receive the embedded player's own private group invite / NPC
+//!   dialogue turn. If a FUTURE caller ever does populate an entry for the
+//!   embedded player's own `Uid` (e.g. once EM-8.3 gives this mirror a real
+//!   per-remote-player identity), the lookup correctly targets that one real
+//!   client instead — the fallback is a safe default, not a hardcoded
+//!   assumption.
 //! - [`apply_local_group_actions`]/[`apply_local_dialogue_response`]: drain the
 //!   client's [`xindeler_protocol::LocalGroupAction`]/
 //!   [`xindeler_protocol::LocalDialogueResponse`] messages and call the new
@@ -36,15 +56,16 @@ use bevy::{
         message::{MessageReader, MessageWriter},
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::ResMut,
+        system::{Res, ResMut},
     },
 };
 use bevy_replicon::prelude::{SendTargets, ToClients};
 use common::{comp, comp::invite::InviteKind, uid::Uid};
 use specs::{Join, WorldExt};
 use xindeler_protocol::{
-    GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue, NetGroupMember,
-    NetGroupState, NetInviteKind, NetPendingInvite, NetPlayerList, NetPlayerListEntry,
+    ActiveReplicaSessions, GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue,
+    NetGroupMember, NetGroupState, NetInviteKind, NetPendingInvite, NetPlayerList,
+    NetPlayerListEntry,
 };
 
 use crate::{
@@ -128,15 +149,34 @@ pub struct GroupStateCache {
     invite_first_seen: HashMap<Uid, std::time::Instant>,
 }
 
+/// Resolves the [`SendTargets`] an EM-5.8 per-recipient mirror
+/// ([`mirror_group_state`]/[`mirror_dialogue`]) should send to, given the
+/// mirror's own subject `Uid` (BL-82 EM-8.2 — see this module's doc comment
+/// for the full rationale). Prefers the REAL correlated client if
+/// [`ActiveReplicaSessions`] has one; falls back to
+/// `SendTargets::SERVER_ONLY` (`SendTargets::Single(ClientId::Server)`) —
+/// NEVER `SendTargets::All` — which `bevy_replicon` only ever re-emits
+/// LOCALLY (the listen-server's own local echo, `server/message.rs::
+/// send_locally`), so a real second connected client can never receive
+/// private state addressed to a DIFFERENT player this way.
+fn resolve_recipient_targets(active: &ActiveReplicaSessions, recipient_uid: Uid) -> SendTargets {
+    active
+        .client_for_uid(recipient_uid.0.get())
+        .map_or(SendTargets::SERVER_ONLY, SendTargets::Single)
+}
+
 /// Reads the embedded local player's group membership/leader/incoming invite
 /// straight off the sim ([`comp::Group`], [`comp::group::GroupManager`],
-/// [`comp::invite::Invite`]) and broadcasts [`NetGroupState`] whenever it
-/// changes. No-ops until BOTH a [`SimServer`] and an in-game [`EmbeddedPlayer`]
-/// exist — this mirror only has a point of view for the ONE player this
-/// process actually hosts a UI for (see this module's doc comment).
+/// [`comp::invite::Invite`]) and sends [`NetGroupState`] whenever it changes.
+/// No-ops until BOTH a [`SimServer`] and an in-game [`EmbeddedPlayer`] exist —
+/// this mirror only has a point of view for the ONE player this process
+/// actually hosts a UI for (see this module's doc comment, including the
+/// BL-82 EM-8.2 note on how `targets` below is resolved and why it degrades
+/// to `SendTargets::SERVER_ONLY` rather than `SendTargets::All`).
 pub fn mirror_group_state(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<NonSendMut<EmbeddedPlayer>>,
+    active: Res<ActiveReplicaSessions>,
     mut cache: ResMut<GroupStateCache>,
     mut writer: MessageWriter<ToClients<NetGroupState>>,
 ) {
@@ -210,23 +250,30 @@ pub fn mirror_group_state(
     if cache.last_sent.as_ref() != Some(&state) {
         cache.last_sent = Some(state.clone());
         writer.write(ToClients {
-            targets: SendTargets::All,
+            targets: resolve_recipient_targets(&active, my_uid),
             message: state,
         });
     }
 }
 
-/// Drains [`EmbeddedPlayer::take_pending_dialogue`] and broadcasts one
-/// [`NetDialogue`] per NPC-initiated dialogue turn. No-ops until both a
-/// [`SimServer`] (to resolve the sender's display name) and an
-/// [`EmbeddedPlayer`] exist.
+/// Drains [`EmbeddedPlayer::take_pending_dialogue`] and sends one
+/// [`NetDialogue`] per NPC-initiated dialogue turn, addressed to the
+/// RECIPIENT player (the embedded/local player this turn is FOR, not the NPC
+/// speaker) — see this module's doc comment for how `targets` is resolved
+/// (BL-82 EM-8.2) and why it degrades to `SendTargets::SERVER_ONLY` rather
+/// than `SendTargets::All`. No-ops until both a [`SimServer`] (to resolve the
+/// sender's display name) and an [`EmbeddedPlayer`] exist.
 pub fn mirror_dialogue(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<NonSendMut<EmbeddedPlayer>>,
+    active: Res<ActiveReplicaSessions>,
     mut writer: MessageWriter<ToClients<NetDialogue>>,
 ) {
     let Some(sim) = sim else { return };
     let Some(mut player) = player else { return };
+    let Some(recipient_uid) = player.uid() else {
+        return;
+    };
 
     let pending = player.take_pending_dialogue();
     if pending.is_empty() {
@@ -235,12 +282,13 @@ pub fn mirror_dialogue(
 
     let ecs = sim.server.state().ecs();
     let stats = ecs.read_storage::<comp::Stats>();
+    let targets = resolve_recipient_targets(&active, recipient_uid);
 
     for (sender_uid, dialogue) in pending {
         let sender_entity = player_sim_entity(&sim, sender_uid);
         let sender_name = flatten_name(sender_entity.and_then(|e| stats.get(e)), "Someone");
         writer.write(ToClients {
-            targets: SendTargets::All,
+            targets,
             message: NetDialogue {
                 sender_uid: sender_uid.0.get(),
                 sender_name,
@@ -332,7 +380,17 @@ impl Plugin for SocialMirrorPlugin {
         // documentation/determinism: apply this frame's player intent
         // first, then project the (necessarily one-tick-stale) sim state
         // back out.
-        app.init_resource::<PlayerListCache>()
+        // BL-82 EM-8.2: `ActiveReplicaSessions` lives in `xindeler-protocol`
+        // and is NOT auto-initialized by `XindelerProtocolPlugin` (see that
+        // type's own doc comment) — `init_resource` is idempotent, so this is
+        // safe alongside `xindeler-server-app`'s own explicit insert and
+        // guarantees `mirror_group_state`/`mirror_dialogue`'s non-`Option`
+        // `Res<ActiveReplicaSessions>` param never panics for want of the
+        // resource existing, on ANY app this plugin is added to (listen
+        // server today; a dedicated server too, once EM-8.3 registers this
+        // plugin there).
+        app.init_resource::<ActiveReplicaSessions>()
+            .init_resource::<PlayerListCache>()
             .init_resource::<GroupStateCache>()
             .add_systems(
                 FixedUpdate,
@@ -380,6 +438,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         register_broadcast_messages(&mut app);
+        app.init_resource::<ActiveReplicaSessions>();
         app.init_resource::<PlayerListCache>();
         app.init_resource::<GroupStateCache>();
         app.insert_non_send(sim);
@@ -483,6 +542,50 @@ mod tests {
         app.world_mut()
             .run_system_once(mirror_group_state)
             .expect("system runs without an EmbeddedPlayer");
+    }
+
+    /// BL-82 EM-8.2 regression guard: with no active replicon session for the
+    /// recipient `Uid` (today's ALWAYS case for the embedded/local player —
+    /// see this module's doc comment), [`resolve_recipient_targets`] must
+    /// resolve to `SendTargets::SERVER_ONLY` — NEVER `SendTargets::All`. This
+    /// is the actual fix for the ledger's Part A2 leak: `SERVER_ONLY` only
+    /// ever re-emits locally, so a real second connected client can never
+    /// receive it.
+    #[test]
+    fn resolve_recipient_targets_defaults_to_server_only_without_a_session() {
+        use bevy_replicon::prelude::ClientId;
+
+        let active = ActiveReplicaSessions::default();
+        let recipient = Uid(std::num::NonZeroU64::new(7).unwrap());
+
+        // `SendTargets` is not `PartialEq` (upstream bevy_replicon type), so
+        // this asserts via pattern match rather than `assert_eq!`.
+        assert!(matches!(
+            resolve_recipient_targets(&active, recipient),
+            SendTargets::Single(ClientId::Server)
+        ));
+    }
+
+    /// BL-82 EM-8.2: once `ActiveReplicaSessions` DOES carry a real session
+    /// for the recipient `Uid` (the forward-compatible case a future
+    /// per-remote-player mirror, EM-8.3, would exercise), the resolved
+    /// targets must be `SendTargets::Single` addressed to THAT exact client —
+    /// never a broadcast, and never silently falling back to `SERVER_ONLY`
+    /// once a real correlation exists.
+    #[test]
+    fn resolve_recipient_targets_prefers_the_correlated_client_when_present() {
+        use bevy::ecs::entity::Entity;
+        use bevy_replicon::prelude::ClientId;
+
+        let mut active = ActiveReplicaSessions::default();
+        let recipient = Uid(std::num::NonZeroU64::new(7).unwrap());
+        let client = ClientId::Client(Entity::from_raw_u32(3).expect("valid entity index"));
+        active.insert(recipient.0.get(), client);
+
+        assert!(matches!(
+            resolve_recipient_targets(&active, recipient),
+            SendTargets::Single(resolved) if resolved == client
+        ));
     }
 
     /// [`InviteKind`] round-trips through [`NetInviteKind`] (a cheap enum

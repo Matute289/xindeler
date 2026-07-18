@@ -140,6 +140,13 @@ common-net = { package = "xindeler-common-net", path = "../../common/net" }
 # `xindeler-sim-bridge`'s own Cargo.toml documents for its identical `specs`
 # dependency.
 specs = { workspace = true }
+# BL-82 EM-8.2 (`login.rs::handle_character_data`): a real, character-
+# position-derived initial `xindeler_protocol::ClientViewpoint` needs a
+# `vek::Vec2<f32>` (that type's own constructor signature) built from the
+# sim's `common::comp::Pos` — the same `vek` version every logic crate already
+# pins, taken directly (this crate does the identical direct-`specs`-storage
+# read this file already does for `Uid`/`Pos` elsewhere).
+vek = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -151,7 +158,6 @@ tempfile = { workspace = true }
 # play against the shell. Dev-only, shell→logic type-library use — the same
 # legal direction `tools/xindeler-smoke-bot` and `xindeler-sim-bridge` use.
 client = { package = "xindeler-client-core", path = "../../client" }
-vek = { workspace = true }
 # Same pick-a-free-loopback-port trick `server::settings::Settings::singleplayer`
 # uses internally (server/src/settings/mod.rs) — the test pre-seeds a
 # `settings.ron` binding `gameserver_protocols` to a free port instead of the

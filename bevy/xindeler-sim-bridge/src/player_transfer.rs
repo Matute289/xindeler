@@ -89,10 +89,13 @@ use crate::{SimEntity, SimEntityDimension, SimMirror};
 /// its [`ClientViewpoint`]) to the sim entity it controls (BL-82 EM-4.9
 /// follow-up). Populated by `xindeler-server-app::login`'s
 /// `handle_character_data`, the moment a login session reaches
-/// `Presence::Character` — the SAME edge that already inserts into that
-/// module's own `ActiveReplicaSessions` map, just expressed as a component so
-/// [`apply_player_dimension_transfers`] (a DIFFERENT crate) can look it up
-/// without a new cross-crate resource dependency in either direction.
+/// `Presence::Character` — the SAME edge that already inserts into
+/// `xindeler_protocol::ActiveReplicaSessions` (BL-82 EM-8.2 — relocated there
+/// from a private map inside `xindeler-server-app::login` so
+/// `xindeler-sim-bridge::social` could read it too), just expressed as a
+/// component so [`apply_player_dimension_transfers`] (a DIFFERENT crate) can
+/// look it up without a new cross-crate resource dependency in either
+/// direction.
 ///
 /// Absent for the listen-server's embedded local player: that path never
 /// adds `bevy_replicon`'s CLIENT role at all (`xindeler-client::listen_server`
