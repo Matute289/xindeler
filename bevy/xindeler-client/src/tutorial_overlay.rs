@@ -98,7 +98,15 @@ impl Plugin for TutorialOverlayPlugin {
             Update,
             (
                 auto_show_tutorial_on_first_spawn,
-                sync_tutorial_overlay_visibility.after(xindeler_ui::hud_state::apply_hud_actions),
+                // bevy-migration-reviewer note: ordered after the auto-show
+                // system too (not just `apply_hud_actions`) — auto-show
+                // mutates `HudState` directly rather than through the
+                // `HudAction` message queue, so without this the overlay
+                // would take an extra frame to become visible the very first
+                // time it auto-opens.
+                sync_tutorial_overlay_visibility
+                    .after(xindeler_ui::hud_state::apply_hud_actions)
+                    .after(auto_show_tutorial_on_first_spawn),
                 mark_tutorial_seen_on_close.after(xindeler_ui::hud_state::apply_hud_actions),
                 refresh_tutorial_tips,
             ),

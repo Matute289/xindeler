@@ -167,13 +167,9 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("MenuRoot", RootKind::TopLevel), // GlobalZIndex(TOAST + 100) — same tier;
     // the main menu is the only thing on screen at that point, but stays
     // consistent with its sibling `ConnectingRoot`.
-    // settings_window.rs
-    ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS) — pre-existing
-    // gap this audit missed (BL-82 EM-5.16a follow-up): registered now with its
-    // own regression test in `settings_window.rs` (`settings_window_root_
-    // carries_the_modal_windows_z_index`), which already pinned the real
-    // GlobalZIndex value — only the registry entry itself was missing.
-    // tutorial_overlay.rs
+    // tutorial_overlay.rs (BL-82 EM-5.16a): the first-run tutorial overlay's
+    // modal backdrop, same shape as `SettingsWindowRoot` below (registered by
+    // the EM-5.10a pass that found ITS pre-existing gap).
     ("TutorialOverlayRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // social_hud.rs
     ("SocialWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS) — participates in
