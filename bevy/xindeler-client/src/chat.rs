@@ -53,12 +53,34 @@
 //!   recall sent-line history; Home/End/arrows/Backspace/Delete move and edit;
 //!   Cmd/Ctrl+A/C/X/V select-all/copy/cut/paste.
 //! - A simple `@mention` highlight (whole-row tint).
+//!
+//! ## Visual model — a faithful port of legacy `xindeler-old`'s chat LOOK
+//! (BL-82 chat visual rebuild — Matías's "quedó rara, quiero que sea tal cual
+//! el viejo" report). The legacy conrod widget (`voxygen/src/hud/chat.rs`) is
+//! NOT an opaque bordered window with a permanent tab-button row and a
+//! Hide/Chat button — that earlier Bevy approximation is what read as "weird".
+//! Legacy is a **translucent black box** (`rgba(0,0,0,0.4)`, its `chat_opacity`
+//! default) in the **bottom-left**, with **no frame/border art at all**. Each
+//! message line carries a **16×16 colored channel icon** in a left gutter and
+//! text **tinted by channel** (World/Say/Region/Group/Faction/Tell each their
+//! own color, from `voxygen/src/hud/mod.rs`'s `*_COLOR` consts). The **input
+//! line only styles up when focused** — a mode icon + a border colored to the
+//! current chat mode over the same translucent black. **Channel tabs reveal on
+//! hover/focus** (legacy fades them in only while the mouse is over the box);
+//! there is **no minimize button** — visibility is purely the F5 keybind
+//! toggle. This module reproduces that as closely as `bevy_ui` allows and
+//! **reuses the legacy chat icon PNGs verbatim**
+//! (`assets/voxygen/element/ui/chat/icons/*_small.png`, the real 16×16 art the
+//! conrod widget referenced — NOT the HUD-D4 orb pack), loaded here via
+//! [`ChatIcons`]. The input pipeline (owned buffer, focus, clipboard) is
+//! unchanged from the PR #152 rewrite; only the LOOK/STRUCTURE changed.
 
 use bevy::{
     color::Alpha as _,
+    image::Image,
     input::keyboard::{Key, KeyboardInput},
     input_focus::{FocusCause, InputFocus},
-    picking::events::{Click, Pointer},
+    picking::events::{Click, Out, Over, Pointer},
     prelude::*,
     window::PrimaryWindow,
 };
@@ -72,6 +94,40 @@ use xindeler_ui::{
 
 use crate::hud_layout;
 
+/// The legacy chat box's translucent-black fill — `rgba(0,0,0,0.4)`, matching
+/// `xindeler-old`'s `ChatSettings::chat_opacity` default (`0.4`). Deliberately
+/// NOT the theme's `panel_bg` (that opaque dark-violet panel fill is what made
+/// the earlier port read as a heavy "window"); legacy chat is a light
+/// see-through overlay.
+///
+/// TODO (post look-parity): legacy `chat_opacity`/`chat_size_x` are
+/// user-configurable `ChatSettings` fields; this pass bakes their defaults as
+/// consts for LOOK parity. True parity (an opacity slider / a resizable box)
+/// will need [`CHAT_BG`]/[`PANEL_WIDTH`] to read from a settings resource/RON
+/// rather than a `const`.
+const CHAT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.4);
+
+/// The per-channel message text colors, copied verbatim from legacy
+/// `voxygen/src/hud/mod.rs`'s `WORLD_COLOR`/`SAY_COLOR`/… `const`s (the source
+/// of truth for how each channel looks in the legacy chat box).
+const WORLD_COLOR: Color = Color::srgba(0.95, 1.0, 0.95, 1.0);
+const SAY_COLOR: Color = Color::srgba(1.0, 0.8, 0.8, 1.0);
+const REGION_COLOR: Color = Color::srgba(0.8, 1.0, 0.8, 1.0);
+const GROUP_COLOR: Color = Color::srgba(0.47, 0.84, 1.0, 1.0);
+const FACTION_COLOR: Color = Color::srgba(0.24, 1.0, 0.48, 1.0);
+const TELL_COLOR: Color = Color::srgba(0.98, 0.71, 1.0, 1.0);
+/// Legacy `INFO_COLOR` — reused for our `System`/`Npc` channels (legacy shows
+/// command-info/meta lines in this teal).
+const INFO_COLOR: Color = Color::srgba(0.28, 0.83, 0.71, 1.0);
+
+/// The channel-icon left-gutter width/height (px) — legacy's
+/// `CHAT_ICON_WIDTH`/`CHAT_ICON_HEIGHT` (both `16.0`).
+const CHAT_ICON_PX: f32 = 16.0;
+
+/// The focused input line's mode-colored border thickness (px) — legacy draws
+/// a 2px line border (`CHAT_MARGIN_THICKNESS`) around the focused input.
+const INPUT_BORDER_PX: f32 = 2.0;
+
 /// Scrollback cap (BL-82 EM-5.4's own "bounded" requirement).
 const MAX_CHAT_HISTORY: usize = 200;
 
@@ -81,7 +137,8 @@ const MAX_CHAT_HISTORY: usize = 200;
 const CHAT_INPUT_HISTORY_MAX: usize = 32;
 
 /// The panel's on-screen width (bottom-left, matching legacy's chat placement).
-const PANEL_WIDTH: f32 = 320.0;
+/// Legacy's `DEFAULT_CHAT_BOX_WIDTH` is `470.0`; matched here.
+const PANEL_WIDTH: f32 = 470.0;
 
 /// The input line's minimum height (px) so the box is always a visible,
 /// clickable rectangle even while its text is empty — without an explicit
@@ -197,14 +254,24 @@ const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
     (Some(NetChatChannel::Tell), "Whisper"),
 ];
 
-/// Minimize button labels — plain ASCII (the HUD body font isn't verified to
-/// carry arrow/box-drawing glyphs).
-///
-/// **Keep in sync:** [`spawn_chat_panel`] spawns the button with
-/// [`CHAT_MINIMIZE_LABEL`] directly, which is only correct because it matches
-/// [`ChatUiState::default`]'s `collapsed: false`.
-const CHAT_MINIMIZE_LABEL: &str = "Hide";
-const CHAT_RESTORE_LABEL: &str = "Chat";
+/// The legacy per-channel text color for a scrollback line / the input line's
+/// current mode — the `*_COLOR` mapping `render_chat_mode`/`render_chat_line`
+/// use in `xindeler-old/voxygen/src/hud/chat.rs`.
+#[must_use]
+fn channel_color(channel: NetChatChannel) -> Color {
+    match channel {
+        NetChatChannel::World => WORLD_COLOR,
+        NetChatChannel::Say => SAY_COLOR,
+        NetChatChannel::Region => REGION_COLOR,
+        NetChatChannel::Group => GROUP_COLOR,
+        NetChatChannel::Faction => FACTION_COLOR,
+        NetChatChannel::Tell => TELL_COLOR,
+        // Legacy filters NPC lines out of the box entirely and shows meta/system
+        // lines in INFO teal; our protocol surfaces both as real channels, so
+        // give them the teal too.
+        NetChatChannel::Npc | NetChatChannel::System => INFO_COLOR,
+    }
+}
 
 /// Slash-command names Tab-completion cycles through.
 const KNOWN_COMMANDS: &[&str] = &["say", "region", "group", "faction", "world", "tell", "w"];
@@ -383,10 +450,6 @@ impl ChatInput {
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatPanelRoot;
-/// The header row hosting the minimize/restore button — see the doc comment
-/// where it's spawned (in [`spawn_chat_panel`]) for why it needs its own tag.
-#[derive(Component, Debug, Clone, Copy, Default)]
-struct ChatHeaderRow;
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatScrollArea;
 /// The on-screen input line. `pub(crate)` because [`text_input_focused`] (a
@@ -395,12 +458,27 @@ struct ChatScrollArea;
 /// see the module doc comment.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct ChatInputBox;
+/// The 16×16 chat-mode icon shown at the left of the input line while focused
+/// — the Bevy analogue of legacy's `chat_input_icon` (`render_chat_mode`).
 #[derive(Component, Debug, Clone, Copy, Default)]
-struct ChatInputPlaceholder;
-/// Tags every element that hides while [`ChatUiState::collapsed`] — the tab
-/// row, the scrollback, and the input row. The minimize/restore BUTTON is
-/// deliberately the only thing NOT tagged, so a collapsed panel still offers a
-/// way back.
+struct ChatInputModeIcon;
+/// The compact channel-tab strip, revealed only while the chat box is hovered
+/// or focused (legacy fades its tabs in on hover). Tagged so
+/// [`reveal_chat_tabs`] can toggle its whole row's `Display`.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatTabRow;
+/// The per-line 16×16 channel-icon [`ImageNode`] (legacy's left-gutter chat
+/// icon).
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatRowIcon;
+/// The per-line message [`Text`] node (the text child of a [`ChatRow`]
+/// container). Tagged so the scrollback text is queryable independently of the
+/// row container + its icon sibling.
+#[derive(Component, Debug, Clone, Copy, Default)]
+struct ChatRowText;
+/// Tags every element that hides while [`ChatUiState::collapsed`] — the
+/// scrollback, the tab strip, and the input row. Collapsing hides the whole
+/// box (legacy's F5 toggle fully hides chat; there is no minimize BUTTON).
 ///
 /// [`sync_chat_collapsed`] toggles these via `Node::display`
 /// (`Display::None`/`Flex`), NOT `Visibility::Hidden`, so a collapsed panel
@@ -408,9 +486,6 @@ struct ChatInputPlaceholder;
 /// this to `Visibility`.
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatCollapsible;
-/// The minimize/restore header button.
-#[derive(Component, Debug, Clone, Copy, Default)]
-struct ChatMinimizeButton;
 /// Tags a spawned chat-line row with its channel, so [`apply_chat_filter`] can
 /// toggle its visibility without re-reading transient [`NetChatMsg`] history.
 #[derive(Component, Debug, Clone, Copy)]
@@ -425,6 +500,89 @@ struct ChatTab(Option<NetChatChannel>);
 #[derive(Resource, Debug, Default)]
 struct ChatHistory(Vec<Entity>);
 
+/// Whether the chat box is currently hovered by the pointer — set by the
+/// [`Pointer<Over>`]/[`Pointer<Out>`] observers on the [`ChatScrollArea`]
+/// message box (NOT the transparent [`ChatPanelRoot`]: hover must track the
+/// opaque box the pointer is actually over, and bubbling keeps it hovered while
+/// the pointer is on any message row inside) and read by [`reveal_chat_tabs`]
+/// to fade the channel-tab strip in on hover (legacy only shows its tabs while
+/// the mouse is over the box). Default `false`.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+struct ChatHovered(bool);
+
+/// The real legacy chat-icon PNGs (`assets/voxygen/element/ui/chat/icons/`),
+/// loaded once at `Startup` — the SAME 16×16 art the conrod widget referenced
+/// (`chat_world_small` = `world_small.png`, etc.), reused verbatim rather than
+/// the HUD-D4 orb pack. One `Handle<Image>` per sendable/viewable channel.
+#[derive(Resource, Debug, Clone)]
+struct ChatIcons {
+    world: Handle<Image>,
+    say: Handle<Image>,
+    region: Handle<Image>,
+    group: Handle<Image>,
+    faction: Handle<Image>,
+    tell: Handle<Image>,
+    /// Legacy `command_info_small` — used for `System`/`Npc` lines.
+    info: Handle<Image>,
+}
+
+impl ChatIcons {
+    /// The legacy chat-icon asset directory (relative to `VELOREN_ASSETS`).
+    const DIR: &'static str = "voxygen/element/ui/chat/icons";
+
+    /// Loads every channel's icon handle via the [`AssetServer`]
+    /// (hot-reloadable in dev, same as every other asset this workspace loads).
+    fn load(asset_server: &AssetServer) -> Self {
+        let load = |name: &str| asset_server.load(format!("{}/{name}", Self::DIR));
+        Self {
+            world: load("world_small.png"),
+            say: load("say_small.png"),
+            region: load("region_small.png"),
+            group: load("group_small.png"),
+            faction: load("faction_small.png"),
+            tell: load("tell_small.png"),
+            info: load("command_info_small.png"),
+        }
+    }
+
+    /// Test-only constructor: every channel maps to a default (invalid but
+    /// real) `Handle<Image>`, so tests that spawn the panel / ingest rows don't
+    /// need a live `AssetServer`.
+    #[cfg(test)]
+    fn dummy() -> Self {
+        Self {
+            world: Handle::default(),
+            say: Handle::default(),
+            region: Handle::default(),
+            group: Handle::default(),
+            faction: Handle::default(),
+            tell: Handle::default(),
+            info: Handle::default(),
+        }
+    }
+
+    /// The icon handle for a channel — mirrors legacy's
+    /// `render_chat_mode`/`render_chat_line` icon mapping.
+    #[must_use]
+    fn for_channel(&self, channel: NetChatChannel) -> Handle<Image> {
+        match channel {
+            NetChatChannel::World => self.world.clone(),
+            NetChatChannel::Say => self.say.clone(),
+            NetChatChannel::Region => self.region.clone(),
+            NetChatChannel::Group => self.group.clone(),
+            NetChatChannel::Faction => self.faction.clone(),
+            NetChatChannel::Tell => self.tell.clone(),
+            NetChatChannel::Npc | NetChatChannel::System => self.info.clone(),
+        }
+    }
+}
+
+/// `Startup` system inserting [`ChatIcons::load`] before [`spawn_chat_panel`]
+/// (which reads it for the input line's mode icon).
+fn init_chat_icons(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(ChatIcons::load(&asset_server));
+}
+
 /// Installs the whole chat panel.
 pub struct ChatViewPlugin;
 
@@ -435,22 +593,28 @@ impl Plugin for ChatViewPlugin {
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
         app.init_resource::<ChatInput>();
+        app.init_resource::<ChatHovered>();
         if !app.is_plugin_added::<xindeler_ui::XindelerUiPlugin>() {
             app.add_plugins(xindeler_ui::XindelerUiPlugin);
         }
         app.add_systems(
             Startup,
             (
-                spawn_chat_panel.after(xindeler_ui::theme::init_theme),
+                init_chat_icons,
+                spawn_chat_panel
+                    .after(xindeler_ui::theme::init_theme)
+                    .after(init_chat_icons),
                 force_collapse_chat_for_smoke_capture,
             ),
         );
         app.add_systems(
             Update,
             (
-                ingest_chat_messages,
+                seed_chat_for_smoke_capture,
+                ingest_chat_messages.after(seed_chat_for_smoke_capture),
                 apply_chat_filter,
                 sync_chat_tabs,
+                reveal_chat_tabs,
                 chat_smoke_verify,
                 sync_chat_scroll_height_to_window,
                 sync_chat_panel_bottom_to_window,
@@ -467,9 +631,11 @@ impl Plugin for ChatViewPlugin {
                 focus_chat_via_hotkey
                     .after(xindeler_input::InputResolveSet)
                     .after(read_chat_input),
-                // Mirror the owned buffer into the on-screen input line + hint.
+                // Mirror the owned buffer into the on-screen input line.
                 render_chat_input.after(read_chat_input),
-                update_input_placeholder.after(read_chat_input),
+                // Legacy-style mode-colored border/icon on the input, only
+                // while focused.
+                sync_chat_input_style.after(read_chat_input),
                 sync_chat_collapsed
                     .after(toggle_chat_via_hotkey)
                     .after(focus_chat_via_hotkey),
@@ -506,7 +672,7 @@ fn chat_smoke_verify(
     mut stage: Local<ChatSmokeStage>,
     mut frames_since_sent: Local<u32>,
     local_player: Query<(), With<xindeler_protocol::NetLocalPlayer>>,
-    rows: Query<&Text, With<ChatRow>>,
+    rows: Query<&Text, With<ChatRowText>>,
     mut send: MessageWriter<ChatSendRequest>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -869,13 +1035,80 @@ fn force_collapse_chat_for_smoke_capture(mut state: ResMut<ChatUiState>) {
     }
 }
 
-/// Spawns the panel root (bottom-left), the header (minimize button), the tab
-/// row, the scrollback, and the input row (a plain [`ChatInputBox`] `Text`
-/// line + an overlaid placeholder hint).
+/// Seeds a representative multi-channel scrollback (and focuses the input line
+/// with a sample `/` command) once, when `XINDELER_SMOKE_CHAT_SEED` is set —
+/// the same env-var-gated, smoke-only debug-override convention `diary.rs`'s
+/// `force_open_diary_for_smoke_capture` uses. `--smoke-screenshot` has no live
+/// server to send real chat, so this lets a visual smoke confirm the rebuilt
+/// look: the per-line colored channel icons + tinted text, and the focused
+/// input line's mode-colored border. Runs exactly once (a `Local` latch) and is
+/// a no-op unless the env var is set — harmless in every normal run.
+#[allow(clippy::too_many_arguments)]
+fn seed_chat_for_smoke_capture(
+    mut done: Local<bool>,
+    mut net_chat: MessageWriter<NetChatMsg>,
+    mut chat: ResMut<ChatInput>,
+    mut focus: ResMut<InputFocus>,
+    mut state: ResMut<ChatUiState>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
+    if *done || !std::env::var("XINDELER_SMOKE_CHAT_SEED").is_ok_and(|v| v != "0") {
+        return;
+    }
+    let Ok(input_entity) = inputs.single() else {
+        return; // wait until the panel has spawned
+    };
+    *done = true;
+
+    let seed: [(NetChatChannel, Option<&str>, &str); 6] = [
+        (
+            NetChatChannel::World,
+            Some("Aldwin"),
+            "anyone near the old mill?",
+        ),
+        (NetChatChannel::Say, Some("Bryn"), "right behind you!"),
+        (
+            NetChatChannel::Region,
+            Some("Cael"),
+            "trader camp just north of here",
+        ),
+        (
+            NetChatChannel::Group,
+            Some("Dara"),
+            "pulling the boss, get ready",
+        ),
+        (
+            NetChatChannel::Faction,
+            Some("Eshe"),
+            "the keep is ours tonight",
+        ),
+        (NetChatChannel::System, None, "Welcome to Xindeler."),
+    ];
+    for (channel, alias, text) in seed {
+        net_chat.write(NetChatMsg {
+            channel,
+            sender_uid: None,
+            sender_alias: alias.map(str::to_owned),
+            text: text.to_owned(),
+        });
+    }
+
+    // Show the focused input line (mode-colored border + mode icon) too.
+    state.send_channel = NetChatChannel::World;
+    chat.set_line("/world well met, travellers".to_owned());
+    focus.set(input_entity, FocusCause::Pressed);
+}
+
+/// Spawns the legacy-styled chat box: a **transparent** bottom-left root (no
+/// frame art — legacy has none) holding, top to bottom, the translucent-black
+/// scrollback (message log), the hover/focus-revealed channel-tab strip, and
+/// the input line (a 16×16 mode icon + the [`ChatInputBox`] `Text`, styled with
+/// a mode-colored border only while focused — [`sync_chat_input_style`]).
 fn spawn_chat_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    icons: Res<ChatIcons>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let window = windows.single().ok();
@@ -888,54 +1121,59 @@ fn spawn_chat_panel(
     let root = commands
         .spawn((
             ChatPanelRoot,
-            // The chat panel MUST carry `GlobalZIndex(zlayer::CHAT)` = 30 so it
+            // The chat box MUST carry `GlobalZIndex(zlayer::CHAT)` = 30 so it
             // sits above the ambient HUD chrome (orbs/action-bar at 20) whose
-            // geometry overlaps the bottom-left panel — otherwise that chrome
-            // silently swallows clicks meant to focus the input box.
+            // geometry overlaps the bottom-left box — otherwise that chrome
+            // silently swallows clicks meant to focus the input line.
             bevy::ui::GlobalZIndex(xindeler_ui::zlayer::CHAT),
-            xindeler_ui::panel::anchored_panel_bundle(
-                &theme,
-                None,
-                Some(PANEL_LEFT_PX),
-                None,
-                Some(chat_panel_bottom(initial_window_width)),
-            ),
+            // A TRANSPARENT root: legacy chat has no frame/border/panel fill —
+            // only the message box itself is a translucent-black rectangle
+            // (below). Absolutely-anchored bottom-left, laid out as a column.
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(PANEL_LEFT_PX),
+                bottom: Val::Px(chat_panel_bottom(initial_window_width)),
+                flex_direction: FlexDirection::Column,
+                width: Val::Px(PANEL_WIDTH),
+                ..Default::default()
+            },
         ))
         .id();
-    // Mutate the EXISTING `Node` in place (a fresh `insert(Node{..})` would
-    // discard the panel's border/radius/background sizing).
-    commands
-        .entity(root)
-        .entry::<Node>()
-        .and_modify(|mut node| node.flex_direction = FlexDirection::Column);
-    commands.entity(root).with_children(|parent| {
-        // Header row: the minimize/restore button — OUTSIDE `ChatCollapsible`
-        // so it stays visible while the panel is collapsed. Tagged
-        // `ChatHeaderRow` so `sync_chat_collapsed` can shrink its `width` to
-        // hug the button while collapsed (see that system's doc comment for
-        // why: at the full `PANEL_WIDTH` the collapsed strip read as a big,
-        // mostly-empty box rather than a slim single-line indicator).
-        parent
-            .spawn((ChatHeaderRow, Node {
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::FlexEnd,
-                width: Val::Px(PANEL_WIDTH),
-                margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
-                ..Default::default()
-            }))
-            .with_children(|header| {
-                header
-                    .spawn(button_bundle(&theme, &fonts, CHAT_MINIMIZE_LABEL))
-                    .insert(ChatMinimizeButton)
-                    .observe(handle_chat_minimize_click);
-            });
 
-        // Tab row.
+    commands.entity(root).with_children(|parent| {
+        // Scrollable message log — the ONE translucent-black rectangle
+        // (`CHAT_BG`, legacy `chat_opacity` 0.4). `scroll_view_bundle` fills it
+        // with the theme's opaque `panel_bg`; override that back to the light
+        // legacy overlay.
+        //
+        // Legacy fades the channel tabs in only while the mouse is over the
+        // MESSAGE BOX specifically (`rect_of(message_box_bg).is_over(mouse)`),
+        // so track hover with an `Over`/`Out` pair on THIS opaque box rather
+        // than the transparent root. Moving onto a message row does fire an
+        // `Out` on the box, but the row's own `Over` bubbles back up to this
+        // observer in the SAME dispatch (Bevy emits `Out` before `Over`), so
+        // the end-of-frame `hovered` state stays `true` across the whole box
+        // interior — no child→child / gap flicker a root-level pair would show.
         parent
-            .spawn((ChatCollapsible, Node {
+            .spawn(scroll_view_bundle(
+                &theme,
+                PANEL_WIDTH,
+                initial_scroll_height,
+            ))
+            .insert((ChatScrollArea, ChatCollapsible, BackgroundColor(CHAT_BG)))
+            .observe(|_: On<Pointer<Over>>, mut hovered: ResMut<ChatHovered>| hovered.0 = true)
+            .observe(|_: On<Pointer<Out>>, mut hovered: ResMut<ChatHovered>| hovered.0 = false);
+
+        // Channel-tab strip — hidden by default; [`reveal_chat_tabs`] shows it
+        // while the box is hovered or focused (legacy hover-fade). NOT tagged
+        // `ChatCollapsible`: its visibility is owned solely by
+        // `reveal_chat_tabs` (which also respects `collapsed`).
+        parent
+            .spawn((ChatTabRow, Node {
+                display: Display::None,
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(theme.spacing.xs),
-                margin: UiRect::bottom(Val::Px(theme.spacing.xs)),
+                margin: UiRect::vertical(Val::Px(theme.spacing.xs)),
                 ..Default::default()
             }))
             .with_children(|tabs| {
@@ -946,27 +1184,37 @@ fn spawn_chat_panel(
                 }
             });
 
-        // Scrollable message log.
-        parent
-            .spawn(scroll_view_bundle(
-                &theme,
-                PANEL_WIDTH,
-                initial_scroll_height,
-            ))
-            .insert((ChatScrollArea, ChatCollapsible));
-
-        // Input row: the `ChatInputBox` text line (bg + border + a min height so
-        // it is always a visible, clickable rectangle even while empty) with an
-        // overlaid placeholder hint on top. The hint is `Pickable::IGNORE` so a
-        // click passes THROUGH it to the box, which focuses chat.
+        // Input line: [mode icon][text box]. The mode icon + the text box's
+        // border/fill only render while focused (legacy shows the input styling
+        // only when it captures the keyboard) — see `sync_chat_input_style`.
         parent
             .spawn((ChatCollapsible, Node {
-                position_type: PositionType::Relative,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(2.0),
                 width: Val::Px(PANEL_WIDTH),
-                margin: UiRect::top(Val::Px(theme.spacing.xs)),
                 ..Default::default()
             }))
             .with_children(|row| {
+                // The 16×16 chat-mode icon (default World). Starts hidden;
+                // `sync_chat_input_style` shows + swaps it while focused.
+                // `Pickable::IGNORE` so it never steals the focus click.
+                row.spawn((
+                    ChatInputModeIcon,
+                    ImageNode::new(icons.for_channel(NetChatChannel::World)),
+                    bevy::picking::Pickable::IGNORE,
+                    Visibility::Hidden,
+                    Node {
+                        width: Val::Px(CHAT_ICON_PX),
+                        height: Val::Px(CHAT_ICON_PX),
+                        ..Default::default()
+                    },
+                ));
+
+                // The input text line — always present (so it stays clickable
+                // to focus even while unfocused/empty, per the PR #152 fix), a
+                // `min_height` floor keeping it a non-zero clickable strip. Its
+                // border/fill are transparent until focused.
                 row.spawn((
                     ChatInputBox,
                     Text(String::new()),
@@ -975,39 +1223,100 @@ fn spawn_chat_panel(
                         font_size: bevy::text::FontSize::Px(16.0),
                         ..Default::default()
                     },
-                    TextColor(theme.palette.text),
+                    TextColor(channel_color(NetChatChannel::World)),
                     Node {
-                        width: Val::Px(PANEL_WIDTH),
+                        flex_grow: 1.0,
                         min_height: Val::Px(INPUT_MIN_HEIGHT_PX),
                         padding: UiRect::all(Val::Px(4.0)),
-                        border: UiRect::all(Val::Px(1.0)),
+                        border: UiRect::all(Val::Px(INPUT_BORDER_PX)),
                         ..Default::default()
                     },
-                    BackgroundColor(theme.palette.panel_bg),
-                    bevy::ui::BorderColor::all(theme.palette.panel_border),
+                    BackgroundColor(Color::NONE),
+                    bevy::ui::BorderColor::all(Color::NONE),
                 ))
                 .observe(focus_chat_on_click);
-
-                row.spawn((
-                    ChatInputPlaceholder,
-                    // Never intercept the click meant to focus the box beneath.
-                    bevy::picking::Pickable::IGNORE,
-                    Text("Type a message… (/ for commands)".to_owned()),
-                    TextFont {
-                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                        font_size: bevy::text::FontSize::Px(16.0),
-                        ..Default::default()
-                    },
-                    TextColor(theme.palette.text_muted),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        top: Val::Px(6.0),
-                        left: Val::Px(8.0),
-                        ..Default::default()
-                    },
-                ));
             });
     });
+}
+
+/// Reveals the channel-tab strip while the box is hovered or the input is
+/// focused (legacy fades its tabs in only while the mouse is over the box),
+/// and hides it entirely while collapsed. A no-op write-guard avoids
+/// re-triggering layout every frame.
+fn reveal_chat_tabs(
+    hovered: Res<ChatHovered>,
+    state: Res<ChatUiState>,
+    focus: Res<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    mut tab_rows: Query<&mut Node, With<ChatTabRow>>,
+) {
+    let focused = inputs
+        .single()
+        .is_ok_and(|entity| focus.get() == Some(entity));
+    let show = !state.collapsed && (hovered.0 || focused);
+    let desired = if show { Display::Flex } else { Display::None };
+    for mut node in &mut tab_rows {
+        if node.display != desired {
+            node.display = desired;
+        }
+    }
+}
+
+/// Styles the input line to match legacy: while focused, the text box shows a
+/// mode-colored 2px border over translucent black and the mode icon appears
+/// (swapped to the current send channel's icon); while unfocused the border and
+/// fill are transparent and the icon is hidden — legacy only draws the input
+/// chrome when it captures the keyboard. The buffer text is always tinted the
+/// current send channel's color (legacy colors the input text by mode).
+fn sync_chat_input_style(
+    focus: Res<InputFocus>,
+    state: Res<ChatUiState>,
+    icons: Res<ChatIcons>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+    mut boxes: Query<
+        (
+            &mut BackgroundColor,
+            &mut bevy::ui::BorderColor,
+            &mut TextColor,
+        ),
+        With<ChatInputBox>,
+    >,
+    mut mode_icons: Query<(&mut Visibility, &mut ImageNode), With<ChatInputModeIcon>>,
+) {
+    let Ok(input_entity) = inputs.single() else {
+        return;
+    };
+    let focused = focus.get() == Some(input_entity);
+    let mode = channel_color(state.send_channel);
+
+    if let Ok((mut bg, mut border, mut text_color)) = boxes.single_mut() {
+        let desired_bg = if focused { CHAT_BG } else { Color::NONE };
+        let desired_border = if focused { mode } else { Color::NONE };
+        if bg.0 != desired_bg {
+            bg.0 = desired_bg;
+        }
+        if border.top != desired_border {
+            *border = bevy::ui::BorderColor::all(desired_border);
+        }
+        if text_color.0 != mode {
+            text_color.0 = mode;
+        }
+    }
+
+    if let Ok((mut visibility, mut image)) = mode_icons.single_mut() {
+        let desired_vis = if focused {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != desired_vis {
+            *visibility = desired_vis;
+        }
+        let desired_icon = icons.for_channel(state.send_channel);
+        if image.image != desired_icon {
+            image.image = desired_icon;
+        }
+    }
 }
 
 /// Keeps the scrollback height tracking [`chat_scroll_height`] as the real
@@ -1049,26 +1358,14 @@ fn sync_chat_panel_bottom_to_window(
     }
 }
 
-/// A short bracketed channel prefix for each scrollback line.
-fn channel_tag(channel: NetChatChannel) -> &'static str {
-    match channel {
-        NetChatChannel::Say => "Say",
-        NetChatChannel::Region => "Region",
-        NetChatChannel::Group => "Group",
-        NetChatChannel::Faction => "Faction",
-        NetChatChannel::World => "World",
-        NetChatChannel::Tell => "Whisper",
-        NetChatChannel::Npc => "NPC",
-        NetChatChannel::System => "System",
-    }
-}
-
-/// Renders one [`NetChatMsg`] to its scrollback line text.
+/// Renders one [`NetChatMsg`] to its scrollback line text. Legacy conveys the
+/// channel via the per-line ICON + text color rather than a bracketed prefix,
+/// so this is just `alias: text` (or bare `text` for a senderless line) — the
+/// icon/color carry the channel.
 fn format_chat_line(msg: &NetChatMsg) -> String {
-    let tag = channel_tag(msg.channel);
     match &msg.sender_alias {
-        Some(alias) => format!("[{tag}] {alias}: {}", msg.text),
-        None => format!("[{tag}] {}", msg.text),
+        Some(alias) => format!("{alias}: {}", msg.text),
+        None => msg.text.clone(),
     }
 }
 
@@ -1079,15 +1376,17 @@ fn contains_mention(text: &str) -> bool {
         .any(|token| token.starts_with('@') && token.len() > 1)
 }
 
-/// Drains arriving [`NetChatMsg`]s, spawning one row each (tinted if it looks
-/// like a mention), applying the current view filter, and evicting the oldest
-/// past [`MAX_CHAT_HISTORY`].
+/// Drains arriving [`NetChatMsg`]s, spawning one legacy-style row each — a flex
+/// row of a 16×16 channel [`ChatRowIcon`] + a channel-tinted [`ChatRowText`]
+/// line (whole-row tint if it looks like a mention) — applying the current view
+/// filter, and evicting the oldest past [`MAX_CHAT_HISTORY`].
 fn ingest_chat_messages(
     mut commands: Commands,
     mut incoming: MessageReader<NetChatMsg>,
     mut history: ResMut<ChatHistory>,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    icons: Res<ChatIcons>,
     filter: Res<ChatUiState>,
     scroll_area: Query<Entity, With<ChatScrollArea>>,
     mut scroll_positions: Query<&mut ScrollPosition, With<ChatScrollArea>>,
@@ -1106,19 +1405,16 @@ fn ingest_chat_messages(
         let row = commands
             .spawn((
                 ChatRow(msg.channel),
-                Text(format_chat_line(msg)),
-                TextFont {
-                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                    font_size: bevy::text::FontSize::Px(14.0),
-                    ..Default::default()
-                },
-                TextColor(theme.palette.text),
                 BackgroundColor(if mentioned {
                     theme.palette.accent.with_alpha(0.25)
                 } else {
                     Color::NONE
                 }),
                 Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(4.0),
+                    padding: UiRect::vertical(Val::Px(1.0)),
                     display: if visible {
                         Display::Flex
                     } else {
@@ -1127,6 +1423,37 @@ fn ingest_chat_messages(
                     ..Default::default()
                 },
             ))
+            .with_children(|row| {
+                // The left-gutter channel icon — the real legacy 16×16 art.
+                row.spawn((
+                    ChatRowIcon,
+                    ImageNode::new(icons.for_channel(msg.channel)),
+                    Node {
+                        width: Val::Px(CHAT_ICON_PX),
+                        height: Val::Px(CHAT_ICON_PX),
+                        flex_shrink: 0.0,
+                        margin: UiRect::top(Val::Px(1.0)),
+                        ..Default::default()
+                    },
+                ));
+                // The channel-tinted message text (word-wraps within the box).
+                row.spawn((
+                    ChatRowText,
+                    Text(format_chat_line(msg)),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(14.0),
+                        ..Default::default()
+                    },
+                    TextColor(channel_color(msg.channel)),
+                    Node {
+                        // Leave room for the icon gutter so a wrapped line stays
+                        // inside the box width.
+                        max_width: Val::Px(PANEL_WIDTH - CHAT_ICON_PX - 12.0),
+                        ..Default::default()
+                    },
+                ));
+            })
             .id();
         commands.entity(scroll_entity).add_child(row);
 
@@ -1312,122 +1639,48 @@ fn focus_chat_on_click(
     focus.set(input_entity, FocusCause::Pressed);
 }
 
-/// The minimize/restore button's click: flips [`ChatUiState::collapsed`].
-fn handle_chat_minimize_click(_activate: On<Activate>, mut state: ResMut<ChatUiState>) {
-    state.collapsed = !state.collapsed;
-}
-
 /// [`GameInput::ToggleChat`] (`F5` by default) flips [`ChatUiState::collapsed`]
-/// — the same effect as clicking the minimize/restore button, from the
-/// keyboard.
+/// — legacy's toggle-chat keybind fully hides/shows the box (there is no
+/// on-screen minimize button).
 fn toggle_chat_via_hotkey(action_state: Res<ActionState>, mut state: ResMut<ChatUiState>) {
     if action_state.just_pressed(GameInput::ToggleChat) {
         state.collapsed = !state.collapsed;
     }
 }
 
-/// Hides every [`ChatCollapsible`] element while collapsed, relabels the
-/// minimize button (`"Hide"` <-> `"Chat"`), and shrinks the panel root's own
-/// padding + the header row's width down to hug just that button.
+/// Hides every [`ChatCollapsible`] element (scrollback + input line) while
+/// collapsed — legacy's F5 toggle fully hides the chat box, so a collapsed
+/// panel leaves nothing on screen (the transparent root itself is invisible).
+/// The tab strip is managed separately by [`reveal_chat_tabs`], which also
+/// respects `collapsed`.
 ///
-/// The padding/width shrink is the actual fix for "the collapsed indicator
-/// looks like it has room for several lines of text" (BL-82
-/// chat-panel-polish pass, Matías's report): with every `ChatCollapsible`
-/// child hidden, the panel's only remaining content IS the header row — but
-/// that row used to stay pinned at the full [`PANEL_WIDTH`] (so it lines up
-/// with the tabs/scrollback/input row while EXPANDED), leaving a wide,
-/// mostly-empty bordered rectangle around the right-aligned button once
-/// collapsed. Auto-sizing the row (and tightening the panel's own outer
-/// padding from `md` to `sm`) while collapsed lets the WHOLE box shrink down
-/// to "one button, reasonably padded" — a true single-line strip — without
-/// touching the expanded layout at all.
+/// Collapsing also force-clears [`ChatHovered`]: hiding the scrollback box
+/// (`Display::None`) suppresses its picking, so its [`Pointer<Out>`] observer
+/// would never fire to lower a `hovered` latched `true` at collapse time —
+/// leaving the resource stuck "hovered" until the next real pointer exit. That
+/// is harmless today ([`reveal_chat_tabs`] gates on `!collapsed`), but keeping
+/// the resource honest avoids a latent surprise for any future reader of it.
 fn sync_chat_collapsed(
     state: Res<ChatUiState>,
-    theme: Res<HudTheme>,
-    mut collapsible: Query<
-        &mut Node,
-        (
-            With<ChatCollapsible>,
-            Without<ChatPanelRoot>,
-            Without<ChatHeaderRow>,
-        ),
-    >,
-    mut panel_root: Query<
-        &mut Node,
-        (
-            With<ChatPanelRoot>,
-            Without<ChatCollapsible>,
-            Without<ChatHeaderRow>,
-        ),
-    >,
-    mut header_row: Query<
-        &mut Node,
-        (
-            With<ChatHeaderRow>,
-            Without<ChatCollapsible>,
-            Without<ChatPanelRoot>,
-        ),
-    >,
-    buttons: Query<&Children, With<ChatMinimizeButton>>,
-    mut texts: Query<&mut Text>,
+    mut hovered: ResMut<ChatHovered>,
+    mut collapsible: Query<&mut Node, With<ChatCollapsible>>,
 ) {
     if !state.is_changed() {
         return;
     }
-    for mut node in &mut collapsible {
-        node.display = if state.collapsed {
-            Display::None
-        } else {
-            Display::Flex
-        };
+    if state.collapsed && hovered.0 {
+        hovered.0 = false;
     }
-    if let Ok(mut root_node) = panel_root.single_mut() {
-        root_node.padding = UiRect::all(Val::Px(if state.collapsed {
-            theme.spacing.sm
-        } else {
-            theme.spacing.md
-        }));
-    }
-    if let Ok(mut header_node) = header_row.single_mut() {
-        header_node.width = if state.collapsed {
-            Val::Auto
-        } else {
-            Val::Px(PANEL_WIDTH)
-        };
-    }
-    let label = if state.collapsed {
-        CHAT_RESTORE_LABEL
+    let desired = if state.collapsed {
+        Display::None
     } else {
-        CHAT_MINIMIZE_LABEL
+        Display::Flex
     };
-    for children in &buttons {
-        for &child in children {
-            if let Ok(mut text) = texts.get_mut(child) {
-                text.0 = label.to_owned();
-            }
+    for mut node in &mut collapsible {
+        if node.display != desired {
+            node.display = desired;
         }
     }
-}
-
-/// Shows the placeholder hint only while the input line is empty AND unfocused
-/// — once focused, the caret ([`render_chat_input`]) shows instead.
-fn update_input_placeholder(
-    focus: Res<InputFocus>,
-    inputs: Query<Entity, With<ChatInputBox>>,
-    chat: Res<ChatInput>,
-    mut placeholders: Query<&mut Visibility, With<ChatInputPlaceholder>>,
-) {
-    let focused = inputs
-        .single()
-        .is_ok_and(|entity| focus.get() == Some(entity));
-    let Ok(mut visibility) = placeholders.single_mut() else {
-        return;
-    };
-    *visibility = if chat.buffer.is_empty() && !focused {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
 }
 
 /// Mirrors the owned [`ChatInput::buffer`] into the on-screen [`ChatInputBox`]
@@ -1656,9 +1909,11 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_resource(ChatIcons::dummy());
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
         app.init_resource::<ChatInput>();
+        app.init_resource::<ChatHovered>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app
     }
@@ -1876,7 +2131,9 @@ mod tests {
             sender_alias: Some("Hero".to_owned()),
             text: "hello".to_owned(),
         };
-        assert_eq!(format_chat_line(&with_sender), "[Say] Hero: hello");
+        // Legacy conveys the channel via the per-line icon + text color, not a
+        // bracketed prefix, so the text is just `alias: text`.
+        assert_eq!(format_chat_line(&with_sender), "Hero: hello");
 
         let without_sender = NetChatMsg {
             channel: NetChatChannel::System,
@@ -1884,7 +2141,7 @@ mod tests {
             sender_alias: None,
             text: "server started".to_owned(),
         };
-        assert_eq!(format_chat_line(&without_sender), "[System] server started");
+        assert_eq!(format_chat_line(&without_sender), "server started");
     }
 
     #[test]
@@ -1923,10 +2180,29 @@ mod tests {
             app.world().get::<ChatRow>(row).map(|r| r.0),
             Some(NetChatChannel::World)
         );
-        assert_eq!(
-            app.world().get::<Text>(row).map(|t| t.0.clone()),
-            Some("[World] Hero: hello world".to_owned())
-        );
+        // The row is now a container of [icon, text]: an `ImageNode` gutter icon
+        // and a `ChatRowText` line (legacy's icon + colored text).
+        let row_children = app
+            .world()
+            .get::<Children>(row)
+            .expect("the row has an icon + text child");
+        let has_icon = row_children
+            .iter()
+            .any(|c| app.world().get::<ChatRowIcon>(c).is_some());
+        assert!(has_icon, "the row must carry a channel icon");
+        let text = row_children
+            .iter()
+            .find_map(|c| app.world().get::<Text>(c).map(|t| t.0.clone()))
+            .expect("the row has a text child");
+        assert_eq!(text, "Hero: hello world");
+    }
+
+    /// Finds the `ChatRowText` line under a `ChatRow` container entity.
+    fn row_text(app: &App, row: Entity) -> Option<String> {
+        app.world()
+            .get::<Children>(row)?
+            .iter()
+            .find_map(|c| app.world().get::<Text>(c).map(|t| t.0.clone()))
     }
 
     #[test]
@@ -1954,10 +2230,7 @@ mod tests {
             "history must never exceed the cap"
         );
         let oldest = *history.0.first().expect("at least one row remains");
-        assert_eq!(
-            app.world().get::<Text>(oldest).map(|t| t.0.clone()),
-            Some("[World] line 5".to_owned())
-        );
+        assert_eq!(row_text(&app, oldest), Some("line 5".to_owned()));
     }
 
     #[test]
@@ -2093,13 +2366,12 @@ mod tests {
         );
     }
 
+    /// Collapsing (F5 / legacy toggle-chat) hides every `ChatCollapsible`
+    /// element (scrollback + input line) — legacy fully hides the box, there is
+    /// no minimize button. Re-expanding restores them.
     #[test]
-    fn sync_chat_collapsed_hides_collapsible_elements_and_relabels_the_button() {
+    fn sync_chat_collapsed_hides_and_restores_collapsible_elements() {
         let mut app = new_app();
-        let tab_row = app
-            .world_mut()
-            .spawn((ChatCollapsible, Node::default()))
-            .id();
         let scroll_area = app
             .world_mut()
             .spawn((ChatCollapsible, ChatScrollArea, Node::default()))
@@ -2108,35 +2380,15 @@ mod tests {
             .world_mut()
             .spawn((ChatCollapsible, Node::default()))
             .id();
-        let panel_root = app
-            .world_mut()
-            .spawn((ChatPanelRoot, Node {
-                padding: UiRect::all(Val::Px(HudTheme::default().spacing.md)),
-                ..Default::default()
-            }))
-            .id();
-        let header_row = app
-            .world_mut()
-            .spawn((ChatHeaderRow, Node {
-                width: Val::Px(PANEL_WIDTH),
-                ..Default::default()
-            }))
-            .id();
-        let label = app
-            .world_mut()
-            .spawn(Text(CHAT_MINIMIZE_LABEL.to_owned()))
-            .id();
-        app.world_mut().spawn(ChatMinimizeButton).add_child(label);
 
+        // Pointer was over the box when it collapsed: collapsing must force the
+        // hover latch back to `false` (the hidden box can no longer emit `Out`).
+        app.world_mut().resource_mut::<ChatHovered>().0 = true;
         app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
         app.world_mut()
             .run_system_once(sync_chat_collapsed)
             .expect("system runs");
 
-        assert_eq!(
-            app.world().get::<Node>(tab_row).unwrap().display,
-            Display::None
-        );
         assert_eq!(
             app.world().get::<Node>(scroll_area).unwrap().display,
             Display::None
@@ -2146,20 +2398,9 @@ mod tests {
             Display::None,
             "the input row must ALSO hide while collapsed"
         );
-        assert_eq!(
-            app.world().get::<Text>(label).unwrap().0,
-            CHAT_RESTORE_LABEL
-        );
-        assert_eq!(
-            app.world().get::<Node>(header_row).unwrap().width,
-            Val::Auto,
-            "collapsed: the header row must shrink to hug the button, not stay pinned at \
-             PANEL_WIDTH — the 'looks like room for several lines' regression guard"
-        );
-        assert_eq!(
-            app.world().get::<Node>(panel_root).unwrap().padding,
-            UiRect::all(Val::Px(HudTheme::default().spacing.sm)),
-            "collapsed: the panel's own outer padding must tighten from `md` to `sm`"
+        assert!(
+            !app.world().resource::<ChatHovered>().0,
+            "collapsing must clear the hover latch so the resource stays honest"
         );
 
         app.world_mut().resource_mut::<ChatUiState>().collapsed = false;
@@ -2168,33 +2409,72 @@ mod tests {
             .expect("system runs again");
 
         assert_eq!(
-            app.world().get::<Node>(tab_row).unwrap().display,
-            Display::Flex
-        );
-        assert_eq!(
             app.world().get::<Node>(scroll_area).unwrap().display,
             Display::Flex
         );
         assert_eq!(
             app.world().get::<Node>(input_row).unwrap().display,
             Display::Flex,
-            "re-expanding must restore the input row to Display::Flex — the 'collapsed box stays \
-             blank on re-expand' symptom guard"
+            "re-expanding must restore the input row to Display::Flex"
         );
+    }
+
+    /// The channel-tab strip reveals only while the box is hovered or the input
+    /// is focused, and stays hidden while collapsed (legacy hover-fade).
+    #[test]
+    fn reveal_chat_tabs_shows_on_hover_or_focus_and_hides_when_collapsed() {
+        use bevy::input_focus::InputFocus;
+
+        let mut app = new_app();
+        app.init_resource::<InputFocus>();
+        let input = app.world_mut().spawn(ChatInputBox).id();
+        let tab_row = app
+            .world_mut()
+            .spawn((ChatTabRow, Node {
+                display: Display::None,
+                ..Default::default()
+            }))
+            .id();
+
+        // Not hovered, not focused → hidden.
+        app.world_mut()
+            .run_system_once(reveal_chat_tabs)
+            .expect("runs");
         assert_eq!(
-            app.world().get::<Text>(label).unwrap().0,
-            CHAT_MINIMIZE_LABEL
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::None
         );
+
+        // Hovered → shown.
+        app.world_mut().resource_mut::<ChatHovered>().0 = true;
+        app.world_mut()
+            .run_system_once(reveal_chat_tabs)
+            .expect("runs");
         assert_eq!(
-            app.world().get::<Node>(header_row).unwrap().width,
-            Val::Px(PANEL_WIDTH),
-            "re-expanding must restore the header row's width so it lines up with the \
-             tabs/scrollback/input row again"
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::Flex
         );
+
+        // Collapsed wins even while hovered → hidden.
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = true;
+        app.world_mut()
+            .run_system_once(reveal_chat_tabs)
+            .expect("runs");
         assert_eq!(
-            app.world().get::<Node>(panel_root).unwrap().padding,
-            UiRect::all(Val::Px(HudTheme::default().spacing.md)),
-            "re-expanding must restore the panel's outer padding to `md`"
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::None
+        );
+
+        // Focused (not hovered, not collapsed) → shown.
+        app.world_mut().resource_mut::<ChatHovered>().0 = false;
+        app.world_mut().resource_mut::<ChatUiState>().collapsed = false;
+        app.insert_resource(InputFocus::from_entity(input));
+        app.world_mut()
+            .run_system_once(reveal_chat_tabs)
+            .expect("runs");
+        assert_eq!(
+            app.world().get::<Node>(tab_row).unwrap().display,
+            Display::Flex
         );
     }
 
@@ -2449,13 +2729,12 @@ mod tests {
         );
     }
 
-    /// A click can only *reach* the input box if the placeholder overlaid on
-    /// top of it does not intercept the pointer. The placeholder must carry
-    /// `Pickable::IGNORE` and the box must stay default-pickable (no `Pickable`
-    /// override) — the component-level guard for the click pass-through the
-    /// live picking backend relies on.
+    /// The input box must stay default-pickable (no `Pickable` override) so the
+    /// picking backend hit-tests it for the click-to-focus path, and the input
+    /// line's mode icon sibling must be `Pickable::IGNORE` so it never steals
+    /// that focus click.
     #[test]
-    fn placeholder_ignores_pointer_so_the_click_reaches_the_box() {
+    fn input_box_is_pickable_and_the_mode_icon_ignores_the_pointer() {
         use bevy::picking::Pickable;
         let mut app = new_app();
         app.world_mut()
@@ -2463,24 +2742,45 @@ mod tests {
             .expect("spawn_chat_panel runs");
 
         let world = app.world_mut();
-        let placeholder = world
-            .query_filtered::<Entity, With<ChatInputPlaceholder>>()
+        let mode_icon = world
+            .query_filtered::<Entity, With<ChatInputModeIcon>>()
             .single(world)
-            .expect("placeholder exists");
+            .expect("mode icon exists");
         let input = world
             .query_filtered::<Entity, With<ChatInputBox>>()
             .single(world)
             .expect("input box exists");
 
         assert_eq!(
-            world.get::<Pickable>(placeholder).copied(),
+            world.get::<Pickable>(mode_icon).copied(),
             Some(Pickable::IGNORE),
-            "the placeholder must be Pickable::IGNORE so a click passes through to the box"
+            "the mode icon must be Pickable::IGNORE so a click reaches the input box"
         );
         assert!(
             world.get::<Pickable>(input).is_none(),
             "the input box must stay default-pickable (no Pickable override) so the picking \
              backend hit-tests it"
+        );
+    }
+
+    /// The scrollback box is the light translucent-black legacy overlay
+    /// (`CHAT_BG`), NOT the theme's opaque `panel_bg` — the fix for the
+    /// "heavy window" look Matías reported.
+    #[test]
+    fn scrollback_uses_the_translucent_legacy_overlay_not_the_opaque_panel_fill() {
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+        let world = app.world_mut();
+        let scroll = world
+            .query_filtered::<Entity, With<ChatScrollArea>>()
+            .single(world)
+            .expect("scroll area exists");
+        assert_eq!(
+            world.get::<BackgroundColor>(scroll).unwrap().0,
+            CHAT_BG,
+            "the message box must use the light legacy overlay, not the opaque panel fill"
         );
     }
 
@@ -2636,20 +2936,17 @@ mod tests {
 
     /// [`chat_panel_needs_lift`]/[`chat_panel_bottom`]: a narrow window (the
     /// orb off-screen-left) and a very wide one (the orb slid clear to the
-    /// right) both get the true corner margin; a common desktop width lands
-    /// in the danger band and gets lifted above the whole cluster instead.
+    /// right) both get the true corner margin; common desktop widths land in
+    /// the danger band and get lifted above the whole cluster instead.
     ///
-    /// **BL-82 HUD redesign round 6 note**: this test was originally written
-    /// (this PR) against round-5's cluster geometry, where 1920px (1080p) sat
-    /// inside the danger band. Round 6 (merged afterward) pulled the whole
-    /// bottom-centre cluster inward toward screen centre (removed the
-    /// action-bar frame art, tightened every gap) — re-measured directly via
-    /// [`hud_layout::health_orb_screen_x`] post-merge: at 1920px the health
-    /// orb's left edge now sits at `x≈426`, past [`PANEL_LEFT_PX`] +
-    /// [`PANEL_WIDTH`] (`336`), so it no longer overlaps the panel's box.
-    /// 1080p is genuinely SAFE now — a real, welcome side effect of round 6's
-    /// tightening, not a bug in either round. Only 1280px (still squarely
-    /// inside the narrower band) remains a danger-band example here.
+    /// **BL-82 chat visual-rebuild note**: widening [`PANEL_WIDTH`] to legacy's
+    /// `470` (from `320`) pushes the box's right edge out to `PANEL_LEFT_PX +
+    /// PANEL_WIDTH = 486`, so at 1920px (1080p) the health orb's left edge
+    /// (`x≈426`, measured via [`hud_layout::health_orb_screen_x`]) now falls
+    /// INSIDE the panel's `x` span again — 1080p is back in the danger band
+    /// with the wider legacy-width box (the lift correctly clears the cluster).
+    /// 1280px stays in the band; the narrow (480px) and very-wide (2560px)
+    /// extremes stay safe for the true corner margin.
     #[test]
     fn chat_panel_bottom_sits_flush_in_the_corner_except_in_the_orb_danger_band() {
         assert!(!chat_panel_needs_lift(480.0), "narrow: orb is off-screen");
@@ -2662,11 +2959,11 @@ mod tests {
         assert_eq!(chat_panel_bottom(1280.0), PANEL_BOTTOM_LIFTED_PX);
 
         assert!(
-            !chat_panel_needs_lift(1920.0),
-            "1920px (1080p): round 6's tighter cluster geometry pulled the orb clear of the \
-             panel's box — safe for the true corner margin now (see this test's own doc comment)"
+            chat_panel_needs_lift(1920.0),
+            "1920px (1080p): the wider legacy-width (470px) box now reaches the orb's x span, so \
+             it needs the cluster-clearing lift (see this test's own doc comment)"
         );
-        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_CORNER_PX);
+        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_LIFTED_PX);
 
         assert!(
             !chat_panel_needs_lift(2560.0),
