@@ -155,7 +155,8 @@ mod player;
 // stay `pub(crate)` in `player.rs` rather than widening the crate's public
 // API surface for a scheduling detail + a pure diagnostic type.
 pub use player::{
-    EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
+    ConnectStage, EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player,
+    boot_embedded_player_reporting, mirror_local_player_prediction,
 };
 
 mod social;

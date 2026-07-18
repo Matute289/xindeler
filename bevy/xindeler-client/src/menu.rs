@@ -44,11 +44,15 @@
 //! host the menu drives); a no-feature build keeps booting straight into the
 //! demo scene.
 
+use std::sync::{Arc, Mutex};
+
 use bevy::{
     input::keyboard::{Key, KeyboardInput},
     prelude::*,
 };
+use serde::Deserialize;
 use xindeler_app::{AppState, XindelerSettings};
+use xindeler_sim_bridge::{ConnectStage, EmbeddedPlayer, SimServer};
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::HudState,
@@ -56,6 +60,11 @@ use xindeler_ui::{
     theme::{HudFonts, HudTheme},
     zlayer,
 };
+
+/// What the offline-world boot thread produces (BL-82 EM-5.9 T56.30):
+/// `Err` = the world couldn't boot; `Ok((sim, Some(player)))` = full boot;
+/// `Ok((sim, None))` = spectator fallback (sim up, no controllable player).
+type BootOutcome = Result<(SimServer, Option<EmbeddedPlayer>), String>;
 
 /// Installs the main-menu / disclaimer / login flow + the connecting-screen
 /// transition. Every system is gated on the relevant [`AppState`], so none of
@@ -66,7 +75,11 @@ impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuScreen>()
             .init_resource::<LoginForm>()
-            .init_resource::<ConnectProgress>()
+            .init_resource::<LoadingTips>()
+            .init_resource::<Credits>()
+            // Load the data-driven tips + credits once at startup (RON under
+            // `assets/xindeler/ui/`); the loading screen reads them each connect.
+            .add_systems(Startup, load_loading_screen_assets)
             .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
             .add_systems(OnExit(AppState::MainMenu), despawn_menu_root)
             .add_systems(OnEnter(AppState::Connecting), enter_connecting)
@@ -82,13 +95,24 @@ impl Plugin for MainMenuPlugin {
                 )
                     .run_if(in_state(AppState::MainMenu)),
             )
-            // The offline world boot runs as an exclusive `&mut World` system
-            // (it inserts the sim/player as non-send resources and blocks for
-            // several seconds). It gets its own `add_systems` call because an
-            // exclusive system can't share a tuple with the parallel ones above.
+            // Live loading-screen paint (stage text, real progress bar, spinner,
+            // MOTD) — a parallel system reading the shared boot-progress cell.
             .add_systems(
                 Update,
-                drive_connecting.run_if(in_state(AppState::Connecting)),
+                render_connecting.run_if(in_state(AppState::Connecting)),
+            )
+            // The boot handoff runs as an exclusive `&mut World` system: it
+            // inserts the booted sim/player as non-send resources and drives the
+            // Connecting → InGame transition. Exclusive systems can't share a
+            // tuple, and it runs AFTER the paint so the freshly-reported stage
+            // is on screen the same frame. The multi-second boot itself now runs
+            // on a background thread (see `enter_connecting`), so this stays
+            // cheap (a poll) and the window keeps rendering throughout.
+            .add_systems(
+                Update,
+                drive_connecting
+                    .run_if(in_state(AppState::Connecting))
+                    .after(render_connecting),
             );
 
         // BL-82 EM-5.9 (T56.29) verification hook: when
@@ -217,14 +241,65 @@ impl LoginForm {
     }
 }
 
-/// Per-connection-attempt progress on the [`AppState::Connecting`] screen.
-/// Reset on `OnEnter(Connecting)`; drives the deferred boot in
-/// [`drive_connecting`].
+/// Data-driven rotating gameplay tips shown on the loading screen, loaded once
+/// from `assets/xindeler/ui/loading_tips.ron` (BL-82 EM-5.9 T56.30). A random
+/// entry is picked each time the connecting screen appears.
 #[derive(Resource, Debug, Default)]
-struct ConnectProgress {
-    frames: u32,
-    done: bool,
+struct LoadingTips(Vec<String>);
+
+/// Data-driven loading-screen credits, loaded once from
+/// `assets/xindeler/ui/credits.ron` (BL-82 EM-5.9 T56.30).
+#[derive(Resource, Debug, Default, Deserialize)]
+struct Credits {
+    /// The engine/community attribution line shown under the credits heading.
+    #[serde(default)]
+    engine_note: String,
+    /// Role → the people credited for it.
+    #[serde(default)]
+    entries: Vec<CreditEntry>,
 }
+
+#[derive(Debug, Deserialize)]
+struct CreditEntry {
+    role: String,
+    names: Vec<String>,
+}
+
+/// The live state of one offline connection attempt (BL-82 EM-5.9 T56.30).
+///
+/// Inserted on `OnEnter(Connecting)` and removed when the attempt resolves.
+/// The multi-second world boot runs on a background thread; `stage` is the
+/// shared cell it reports genuine [`ConnectStage`] transitions into, and
+/// `outcome` is where it drops the finished [`BootOutcome`]. Both are
+/// `Arc<Mutex<…>>` so the resource stays `Send + Sync` (a plain Bevy
+/// `Resource`) even though the booted sim/player themselves are `!Sync`.
+#[derive(Resource)]
+struct ConnectTask {
+    /// The most recent real boot stage, written by the boot thread, polled by
+    /// [`render_connecting`].
+    stage: Arc<Mutex<ConnectStage>>,
+    /// The finished boot result, dropped in by the boot thread exactly once.
+    outcome: Arc<Mutex<Option<BootOutcome>>>,
+    /// The boot thread's handle, joined when the attempt resolves.
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// Frame counter driving the loading-screen spinner glyph (a pure activity
+    /// indicator — NOT progress; the bar is the real progress signal).
+    spinner_frames: u32,
+    /// The server's MOTD, resolved from the connected client once the boot
+    /// completes; shown on the "Entering world" beat before gameplay.
+    motd: Option<String>,
+    /// `Some(n)` once the world has booted and we're holding the loading screen
+    /// for `n` more frames so the MOTD is readable before entering. A short,
+    /// bounded greeting beat (real progress is already complete), so the flow
+    /// can never hang here. `None` while the boot is still in flight.
+    entering_frames: Option<u32>,
+}
+
+/// Frames to hold the "Entering world" screen (showing the MOTD) after the boot
+/// completes, before switching to gameplay. ~1.2 s at 60 fps — long enough to
+/// read a short greeting, short enough not to feel like a stall. This is a
+/// deliberate readable beat AFTER real progress is done, not faked progress.
+const ENTERING_HOLD_FRAMES: u32 = 72;
 
 // ---------------------------------------------------------------------------
 // Components
@@ -251,9 +326,26 @@ struct ModeToggleLabel;
 #[derive(Component)]
 struct StatusLineText;
 
-/// The transitional "Connecting…" screen root.
+/// The connecting / loading screen root.
 #[derive(Component)]
 struct ConnectingRoot;
+
+/// The loading screen's current-stage line (updated from [`ConnectStage`]).
+#[derive(Component)]
+struct ConnectStageText;
+
+/// The loading screen's progress-bar FILL node (its width % tracks the real
+/// [`ConnectStage::progress_fraction`]).
+#[derive(Component)]
+struct ConnectBarFill;
+
+/// The loading screen's activity spinner glyph.
+#[derive(Component)]
+struct ConnectSpinnerText;
+
+/// The loading screen's server MOTD line (empty until the boot resolves).
+#[derive(Component)]
+struct ConnectMotdText;
 
 // ---------------------------------------------------------------------------
 // Enter / exit
@@ -309,29 +401,79 @@ fn despawn_menu_root(mut commands: Commands, roots: Query<Entity, With<MenuRoot>
     }
 }
 
-/// Spawns the "Connecting…" placeholder and resets the boot progress counter.
+/// Kicks off the offline world boot on a BACKGROUND thread and spawns the
+/// loading screen (stage line + real progress bar + spinner + tip + credits +
+/// an empty MOTD line). Running the multi-second boot off the main thread is
+/// what lets the window keep rendering live progress instead of freezing; the
+/// boot reports genuine [`ConnectStage`] transitions into a shared cell that
+/// [`render_connecting`] polls, and drops its finished [`BootOutcome`] into a
+/// second cell that [`drive_connecting`] hands off to the ECS.
 fn enter_connecting(
     mut commands: Commands,
     theme: Option<Res<HudTheme>>,
     fonts: Option<Res<HudFonts>>,
     form: Res<LoginForm>,
-    mut progress: ResMut<ConnectProgress>,
+    tips: Res<LoadingTips>,
+    credits: Res<Credits>,
 ) {
-    *progress = ConnectProgress::default();
+    // Online never actually reaches here (Connect stays on the login screen for
+    // online — see `attempt_connect`); guard so a stray future online path can't
+    // silently boot an embedded world. No ConnectTask is inserted, so
+    // `drive_connecting` bounces straight back to the menu.
+    if form.online {
+        return;
+    }
+
+    // Shared cells the boot thread writes and the main thread polls.
+    let stage = Arc::new(Mutex::new(ConnectStage::Starting));
+    let outcome: Arc<Mutex<Option<BootOutcome>>> = Arc::new(Mutex::new(None));
+    let stage_writer = Arc::clone(&stage);
+    let outcome_writer = Arc::clone(&outcome);
+    let handle = std::thread::Builder::new()
+        .name("offline-world-boot".to_owned())
+        .spawn(move || {
+            let report = move |s: ConnectStage| {
+                if let Ok(mut cell) = stage_writer.lock() {
+                    *cell = s;
+                }
+            };
+            let result = crate::listen_server::boot_offline_world_parts(&report);
+            if let Ok(mut cell) = outcome_writer.lock() {
+                *cell = Some(result);
+            }
+        })
+        .expect("failed to spawn offline-world boot thread");
+
+    commands.insert_resource(ConnectTask {
+        stage,
+        outcome,
+        handle: Some(handle),
+        spinner_frames: 0,
+        motd: None,
+        entering_frames: None,
+    });
+
     let (Some(theme), Some(fonts)) = (theme, fonts) else {
         return;
     };
     let theme: HudTheme = *theme;
-    let msg = if form.online {
-        "Connecting to server…".to_owned()
-    } else {
-        "Generating your world…\nThis can take several seconds on first launch.".to_owned()
-    };
+    let tip = pick_tip(&tips);
+    build_connecting_screen(&mut commands, &theme, &fonts, &tip, &credits);
+}
+
+/// Spawns the loading screen tree (called once on `OnEnter(Connecting)`).
+fn build_connecting_screen(
+    commands: &mut Commands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    tip: &str,
+    credits: &Credits,
+) {
     commands
         .spawn((
             ConnectingRoot,
-            // Above every HUD layer so it fully covers the (empty) gameplay
-            // chrome that spawned behind it.
+            // Above every HUD layer so it fully covers the (still loading)
+            // gameplay chrome that spawns behind it.
             GlobalZIndex(zlayer::TOAST + 100),
             Node {
                 position_type: PositionType::Absolute,
@@ -339,34 +481,163 @@ fn enter_connecting(
                 top: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
+                row_gap: Val::Px(theme.spacing.md),
+                padding: UiRect::all(Val::Px(theme.spacing.lg)),
                 ..Default::default()
             },
             BackgroundColor(MENU_BACKDROP),
         ))
         .with_children(|screen| {
+            // Title.
             screen.spawn((
-                Text(msg),
+                Text("Xindeler".to_owned()),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.title.clone()),
-                    font_size: bevy::text::FontSize::Px(24.0),
+                    font_size: bevy::text::FontSize::Px(40.0),
                     ..Default::default()
                 },
                 TextColor(theme.palette.text),
+            ));
+
+            // Stage line + spinner (row).
+            screen
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(theme.spacing.sm),
+                    align_items: AlignItems::Center,
+                    ..Default::default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        ConnectSpinnerText,
+                        Text(SPINNER_FRAMES[0].to_owned()),
+                        TextFont {
+                            font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                            font_size: bevy::text::FontSize::Px(18.0),
+                            ..Default::default()
+                        },
+                        TextColor(theme.palette.accent),
+                    ));
+                    row.spawn((
+                        ConnectStageText,
+                        Text(stage_label(ConnectStage::Starting).to_owned()),
+                        TextFont {
+                            font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                            font_size: bevy::text::FontSize::Px(18.0),
+                            ..Default::default()
+                        },
+                        TextColor(theme.palette.text),
+                    ));
+                });
+
+            // Progress bar: a fixed-width track with a fill whose width tracks
+            // the REAL stage fraction (updated in `render_connecting`).
+            screen
+                .spawn((
+                    Node {
+                        width: Val::Px(360.0),
+                        height: Val::Px(10.0),
+                        border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+                        ..Default::default()
+                    },
+                    BackgroundColor(theme.palette.xp_bg),
+                ))
+                .with_children(|track| {
+                    let frac = ConnectStage::Starting.progress_fraction();
+                    track.spawn((
+                        ConnectBarFill,
+                        Node {
+                            width: Val::Percent(frac * 100.0),
+                            height: Val::Percent(100.0),
+                            border_radius: BorderRadius::all(Val::Px(theme.radius.sm)),
+                            ..Default::default()
+                        },
+                        BackgroundColor(theme.palette.accent),
+                    ));
+                });
+
+            // MOTD line (empty until the boot resolves).
+            screen.spawn((
+                ConnectMotdText,
+                Text(String::new()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(16.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.accent),
                 Node {
                     max_width: Val::Px(520.0),
                     ..Default::default()
                 },
             ));
+
+            // Rotating gameplay tip.
+            screen.spawn((
+                Text(format!("Tip: {tip}")),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(14.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text_muted),
+                Node {
+                    max_width: Val::Px(520.0),
+                    margin: UiRect::top(Val::Px(theme.spacing.md)),
+                    ..Default::default()
+                },
+            ));
+
+            // Credits footer.
+            if !credits.engine_note.is_empty() || !credits.entries.is_empty() {
+                let mut lines = Vec::new();
+                if !credits.engine_note.is_empty() {
+                    lines.push(credits.engine_note.clone());
+                }
+                for entry in &credits.entries {
+                    lines.push(format!("{}: {}", entry.role, entry.names.join(", ")));
+                }
+                screen.spawn((
+                    Text(lines.join("\n")),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(11.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text_muted),
+                    Node {
+                        max_width: Val::Px(520.0),
+                        margin: UiRect::top(Val::Px(theme.spacing.lg)),
+                        ..Default::default()
+                    },
+                ));
+            }
         });
 }
 
-/// Removes the "Connecting…" placeholder when leaving [`AppState::Connecting`].
-fn despawn_connecting_root(mut commands: Commands, roots: Query<Entity, With<ConnectingRoot>>) {
-    for root in &roots {
-        commands.entity(root).despawn();
+/// Removes the loading screen when leaving [`AppState::Connecting`], and drops
+/// any leftover [`ConnectTask`] (joining its thread) as a safety net — the
+/// normal path removes it in [`drive_connecting`].
+/// An exclusive `&mut World` system (not just `Commands`) SPECIFICALLY so it
+/// can route any leftover [`ConnectTask`] through [`finish_connect_task`] —
+/// reviewer minor (bevy-migration-reviewer): a plain `commands.remove_resource`
+/// would DROP the `JoinHandle` without joining it, silently detaching the
+/// thread. Unreachable in the normal flow (both `drive_connecting` exits
+/// already call `finish_connect_task`, so no task is left by the time this
+/// runs), but symmetric and safe if a future path ever forces `AppState` away
+/// from `Connecting` mid-boot.
+fn despawn_connecting_root(world: &mut World) {
+    let roots: Vec<Entity> = world
+        .query_filtered::<Entity, With<ConnectingRoot>>()
+        .iter(world)
+        .collect();
+    for root in roots {
+        world.despawn(root);
     }
+    finish_connect_task(world);
 }
 
 /// Safety net: on entering gameplay, close any HUD window a stray hotkey might
@@ -378,61 +649,238 @@ fn close_hud_windows_on_enter_game(hud_state: Option<ResMut<HudState>>) {
 }
 
 // ---------------------------------------------------------------------------
-// The connecting flow (deferred offline boot)
+// The connecting flow (background offline boot + live loading screen)
 // ---------------------------------------------------------------------------
 
-/// Drives the offline connection: waits a couple of frames so the "Connecting…"
-/// screen actually paints, then boots the embedded world (the real EM-4.2c
-/// offline handshake) and transitions to gameplay — or back to the login screen
-/// with a real error if the world can't boot.
-///
-/// An exclusive `&mut World` system:
-/// [`crate::listen_server::boot_offline_world`] inserts the sim/player as
-/// non-send resources and blocks for several seconds.
-fn drive_connecting(world: &mut World) {
-    let (frames, done, online) = {
-        let progress = world.resource::<ConnectProgress>();
-        let online = world.resource::<LoginForm>().online;
-        (progress.frames, progress.done, online)
-    };
-    if done {
-        return;
-    }
-    // Online never reaches here (Connect stays on the login screen for online —
-    // see `attempt_connect`); guard anyway so a future online path can't
-    // silently boot an embedded world.
-    if online {
-        world.resource_mut::<ConnectProgress>().done = true;
-        world
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::MainMenu);
-        return;
-    }
-    // Let the "Connecting…" frame render before the multi-second blocking boot.
-    if frames < 2 {
-        world.resource_mut::<ConnectProgress>().frames = frames + 1;
-        return;
-    }
-    world.resource_mut::<ConnectProgress>().done = true;
+/// The spinner's animation frames (a pure activity indicator).
+// Reviewer minor (bevy-migration-reviewer): plain ASCII, not Braille Patterns
+// glyphs — the HUD body font's glyph coverage for that Unicode block isn't
+// guaranteed, so Braille frames risk rendering as tofu/blank. ASCII is
+// guaranteed present in any font this UI already renders text with.
+const SPINNER_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+/// Frames the spinner holds each glyph (so it ticks at a readable rate).
+const SPINNER_HOLD: u32 = 6;
 
-    let booted = crate::listen_server::boot_offline_world(world);
-    if booted {
-        world
-            .resource_mut::<NextState<AppState>>()
-            .set(AppState::InGame);
+/// The human-readable label for a real boot stage.
+fn stage_label(stage: ConnectStage) -> &'static str {
+    match stage {
+        ConnectStage::Starting => "Preparing…",
+        ConnectStage::GeneratingWorld => "Generating your world…",
+        ConnectStage::EstablishingConnection => "Establishing connection…",
+        ConnectStage::CheckingVersion => "Checking server version…",
+        ConnectStage::Authenticating => "Authenticating…",
+        ConnectStage::LoadingWorldData => "Loading world data…",
+        ConnectStage::PreparingClient => "Preparing client…",
+        ConnectStage::EnteringWorld => "Entering world…",
+    }
+}
+
+/// Picks a tip pseudo-randomly (dependency-free: seeded off the wall clock, so
+/// a fresh tip appears each time the loading screen opens).
+fn pick_tip(tips: &LoadingTips) -> String {
+    if tips.0.is_empty() {
+        return String::new();
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    tips.0[seed % tips.0.len()].clone()
+}
+
+/// Paints the live loading screen each frame: stage text + real progress bar +
+/// animated spinner, and the MOTD once known. Reads the shared boot-stage cell
+/// (or the "Entering world" beat once the boot has resolved).
+fn render_connecting(
+    mut task: Option<ResMut<ConnectTask>>,
+    mut stage_text: Query<&mut Text, (With<ConnectStageText>, Without<ConnectMotdText>)>,
+    mut motd_text: Query<&mut Text, (With<ConnectMotdText>, Without<ConnectStageText>)>,
+    mut spinner: Query<
+        &mut Text,
+        (
+            With<ConnectSpinnerText>,
+            Without<ConnectStageText>,
+            Without<ConnectMotdText>,
+        ),
+    >,
+    mut bar: Query<&mut Node, With<ConnectBarFill>>,
+) {
+    let Some(task) = task.as_mut() else { return };
+
+    // During the "Entering world" hold the displayed stage is forced to
+    // `EnteringWorld`; otherwise it's whatever the boot thread last reported.
+    let stage = if task.entering_frames.is_some() {
+        ConnectStage::EnteringWorld
     } else {
-        {
-            let mut form = world.resource_mut::<LoginForm>();
-            form.error = Some(
-                "Could not start a world (missing assets or map data). Check XINDELER_ASSETS / \
-                 the LFS map blobs and try again."
-                    .to_owned(),
-            );
+        task.stage.lock().map(|s| *s).unwrap_or_default()
+    };
+
+    for mut text in &mut stage_text {
+        let label = stage_label(stage);
+        if text.0 != label {
+            text.0 = label.to_owned();
         }
-        *world.resource_mut::<MenuScreen>() = MenuScreen::Login;
+    }
+    for mut node in &mut bar {
+        node.width = Val::Percent(stage.progress_fraction() * 100.0);
+    }
+
+    // Advance the spinner glyph.
+    task.spinner_frames = task.spinner_frames.wrapping_add(1);
+    let glyph =
+        SPINNER_FRAMES[(task.spinner_frames / SPINNER_HOLD) as usize % SPINNER_FRAMES.len()];
+    for mut text in &mut spinner {
+        if text.0 != glyph {
+            text.0 = glyph.to_owned();
+        }
+    }
+
+    // MOTD, once resolved by the boot handoff.
+    if let Some(motd) = &task.motd {
+        for mut text in &mut motd_text {
+            if &text.0 != motd {
+                text.0 = motd.clone();
+            }
+        }
+    }
+}
+
+/// The ECS handoff: once the background boot resolves, insert the booted
+/// sim/player as non-send resources, resolve the MOTD, hold a short readable
+/// "Entering world" beat, then transition to gameplay — or bounce back to the
+/// login screen with a real error if the world couldn't boot.
+///
+/// An exclusive `&mut World` system because `insert_non_send` needs `&mut
+/// World`. It no longer BLOCKS (the boot runs on a thread now); each frame it
+/// just polls the shared outcome cell, so the window stays responsive.
+fn drive_connecting(world: &mut World) {
+    // No task (defensive: the online guard, or a torn-down attempt) → bounce.
+    if !world.contains_resource::<ConnectTask>() {
         world
             .resource_mut::<NextState<AppState>>()
             .set(AppState::MainMenu);
+        return;
+    }
+
+    // Already committed to entering: count down the readable MOTD beat, then go.
+    if let Some(n) = world.resource::<ConnectTask>().entering_frames {
+        if n + 1 >= ENTERING_HOLD_FRAMES {
+            finish_connect_task(world);
+            world
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::InGame);
+        } else {
+            world.resource_mut::<ConnectTask>().entering_frames = Some(n + 1);
+        }
+        return;
+    }
+
+    // Poll for the finished boot (None until the thread drops it in).
+    let outcome = {
+        let task = world.resource::<ConnectTask>();
+        task.outcome.lock().ok().and_then(|mut cell| cell.take())
+    };
+    // Reviewer finding (bevy-migration-reviewer, MAJOR): if the boot thread
+    // PANICS (worldgen assertion, a missing-asset `expect`, ...), it never
+    // reaches the `outcome_writer` store, so the cell above stays `None`
+    // forever — polling `outcome` alone would hang the loading screen with no
+    // error and no way out (worse than the pre-thread code, where a boot
+    // panic surfaced/aborted on the main thread). Detect that case: the
+    // thread has FINISHED (so it can never write anything more) but produced
+    // no outcome — treat it exactly like a boot `Err`, so the flow always
+    // resolves one way or the other and can never silently hang.
+    let thread_died_silently = outcome.is_none()
+        && world
+            .resource::<ConnectTask>()
+            .handle
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished);
+    let Some(outcome) = outcome else {
+        if thread_died_silently {
+            info!("connecting: offline world boot thread ended without a result (likely panicked)");
+            finish_connect_task(world);
+            {
+                let mut form = world.resource_mut::<LoginForm>();
+                form.error = Some(
+                    "Could not start a world (the boot process crashed). Check the logs and try \
+                     again."
+                        .to_owned(),
+                );
+            }
+            *world.resource_mut::<MenuScreen>() = MenuScreen::Login;
+            world
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::MainMenu);
+        }
+        return;
+    };
+
+    match outcome {
+        Ok((sim, player)) => {
+            // Resolve the MOTD from the connected client before we hand the
+            // player off to the ECS as a non-send resource.
+            let motd = player.as_ref().and_then(EmbeddedPlayer::server_motd);
+            world.insert_non_send(sim);
+            if let Some(player) = player {
+                world.insert_non_send(player);
+            }
+            {
+                let mut task = world.resource_mut::<ConnectTask>();
+                task.motd = motd;
+                // Begin the short readable "Entering world" beat. The world is
+                // already booted and ticking behind the (opaque) screen; this
+                // is a greeting beat, not faked progress, and it is bounded so
+                // the flow can never hang.
+                task.entering_frames = Some(0);
+            }
+        },
+        Err(err) => {
+            info!("connecting: offline world boot failed: {err}");
+            finish_connect_task(world);
+            {
+                let mut form = world.resource_mut::<LoginForm>();
+                form.error = Some(
+                    "Could not start a world (missing assets or map data). Check XINDELER_ASSETS \
+                     / the LFS map blobs and try again."
+                        .to_owned(),
+                );
+            }
+            *world.resource_mut::<MenuScreen>() = MenuScreen::Login;
+            world
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::MainMenu);
+        },
+    }
+}
+
+/// Removes the [`ConnectTask`] and joins its (already-finished) boot thread.
+fn finish_connect_task(world: &mut World) {
+    if let Some(mut task) = world.remove_resource::<ConnectTask>()
+        && let Some(handle) = task.handle.take()
+    {
+        let _ = handle.join();
+    }
+}
+
+/// Loads the data-driven loading-screen tips + credits from RON once at startup
+/// (mirrors `diary.rs`'s synchronous manifest-read pattern). Missing/broken
+/// files degrade to empty defaults with a warning — the loading screen still
+/// works, just without tips/credits.
+fn load_loading_screen_assets(mut commands: Commands) {
+    let root = xindeler_ui::i18n::assets_root();
+
+    let tips_path = root.join("xindeler/ui/loading_tips.ron");
+    match std::fs::read_to_string(&tips_path).map(|t| ron::de::from_str::<Vec<String>>(&t)) {
+        Ok(Ok(tips)) => commands.insert_resource(LoadingTips(tips)),
+        Ok(Err(e)) => warn!(?tips_path, error = ?e, "loading: failed to parse loading_tips.ron"),
+        Err(e) => warn!(?tips_path, error = ?e, "loading: failed to read loading_tips.ron"),
+    }
+
+    let credits_path = root.join("xindeler/ui/credits.ron");
+    match std::fs::read_to_string(&credits_path).map(|t| ron::de::from_str::<Credits>(&t)) {
+        Ok(Ok(credits)) => commands.insert_resource(credits),
+        Ok(Err(e)) => warn!(?credits_path, error = ?e, "loading: failed to parse credits.ron"),
+        Err(e) => warn!(?credits_path, error = ?e, "loading: failed to read credits.ron"),
     }
 }
 
