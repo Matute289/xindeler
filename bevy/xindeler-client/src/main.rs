@@ -31,6 +31,8 @@ mod combat_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod controls_screen;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod crafting_ui;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod cursor;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod diary;

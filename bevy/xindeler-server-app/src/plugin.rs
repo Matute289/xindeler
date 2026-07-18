@@ -22,8 +22,8 @@ use xindeler_dimensions::{
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
 use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
 use xindeler_sim_bridge::{
-    CombatHudMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin, PlayerTransferPlugin,
-    SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
     SimTerrainStreamPlugin, TradeMirrorPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
@@ -267,6 +267,13 @@ impl Plugin for SimServerPlugin {
         // applicators — same ordering reasoning as `CombatHudMirrorPlugin`
         // above (reads `SimMirror`, populated by `SimEntityMirrorPlugin`).
         app.add_plugins((InventoryMirrorPlugin, TradeMirrorPlugin));
+        // BL-82 EM-5.15: the crafting mirror (recipe book + salvage/repair/
+        // modular candidate lists) — same ordering reasoning as
+        // `InventoryMirrorPlugin` above (reads `SimMirror`, populated by
+        // `SimEntityMirrorPlugin`). Its client → sim intent reuses the existing
+        // `InventoryActionRequest` applicator (`InventoryMirrorPlugin`), so no
+        // extra applicator is registered here.
+        app.add_plugins(CraftingMirrorPlugin);
 
         // BL-82 EM-5.3: the skillbar/hotbar mirror (resolved ability-pool/
         // slot bindings + per-ability cooldowns) — same reasoning as

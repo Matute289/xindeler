@@ -270,6 +270,12 @@ impl Plugin for ListenServerPlugin {
             xindeler_sim_bridge::InventoryMirrorPlugin,
             xindeler_sim_bridge::TradeMirrorPlugin,
         ));
+        // BL-82 EM-5.15: the crafting mirror (recipe book + salvage/repair/
+        // modular candidate lists) — same ordering reasoning as
+        // `InventoryMirrorPlugin` above (reads `SimMirror`). Its client → sim
+        // intent reuses the existing `InventoryActionRequest` applicator, so no
+        // extra applicator is added here.
+        app.add_plugins(xindeler_sim_bridge::CraftingMirrorPlugin);
         // BL-82 EM-5.7: the character diary / skill-tree mirror
         // (`NetSkillSet`/`NetAbilityPool`) + the SP-spend request applicator
         // — same ordering reasoning as `CombatHudMirrorPlugin`/`HotbarMirrorPlugin`
@@ -351,6 +357,9 @@ impl Plugin for ListenServerPlugin {
         // the generic per-group tree renderer + Abilities tab) reading the
         // `SkillSetMirrorPlugin` mirror above. Pure Bevy.
         app.add_plugins(crate::diary::DiaryUiPlugin);
+        // BL-82 EM-5.15: the crafting screen (recipes/salvage/repair/modular
+        // tabs) reading the `CraftingMirrorPlugin` mirror above. Pure Bevy.
+        app.add_plugins(crate::crafting_ui::CraftingUiPlugin);
         // BL-82 EM-5.17 Phase 5: the boss/target nameplate — panel + bars
         // fully built, reading `NetHealth`/`NetPoise`/`NetXp` off whatever
         // entity `SelectedTarget` resolves to.
