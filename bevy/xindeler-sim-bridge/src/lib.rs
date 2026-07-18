@@ -103,6 +103,9 @@ pub use chat::{ChatBridgePlugin, apply_chat_send_requests, broadcast_embedded_ch
 mod combat_hud;
 pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 
+pub mod crafting;
+pub use crafting::{CraftingMirrorPlugin, mirror_crafting_state};
+
 mod hotbar;
 pub use hotbar::{HotbarMirrorPlugin, apply_hotbar_assignment_requests, mirror_hotbar_state};
 
@@ -155,7 +158,8 @@ mod player;
 // stay `pub(crate)` in `player.rs` rather than widening the crate's public
 // API surface for a scheduling detail + a pure diagnostic type.
 pub use player::{
-    EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player, mirror_local_player_prediction,
+    ConnectStage, EmbeddedPlayer, PlayerBridgePlugin, boot_embedded_player,
+    boot_embedded_player_reporting, mirror_local_player_prediction,
 };
 
 mod social;

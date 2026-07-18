@@ -2970,31 +2970,44 @@ mod tests {
     /// right) both get the true corner margin; common desktop widths land in
     /// the danger band and get lifted above the whole cluster instead.
     ///
-    /// **BL-82 chat visual-rebuild note**: widening [`PANEL_WIDTH`] to legacy's
-    /// `470` (from `320`) pushes the box's right edge out to `PANEL_LEFT_PX +
-    /// PANEL_WIDTH = 486`, so at 1920px (1080p) the health orb's left edge
-    /// (`x≈426`, measured via [`hud_layout::health_orb_screen_x`]) now falls
-    /// INSIDE the panel's `x` span again — 1080p is back in the danger band
-    /// with the wider legacy-width box (the lift correctly clears the cluster).
-    /// 1280px stays in the band; the narrow (480px) and very-wide (2560px)
-    /// extremes stay safe for the true corner margin.
+    /// **BL-82 HUD overhaul note**: the whole bottom-centre cluster shrank this
+    /// pass (`hud_layout::ORB_SIZE_PX` `160 -> 112`, plus the 2×3 slot grid),
+    /// pulling the health orb closer to screen centre — while the chat rebuild
+    /// (#159) widened [`PANEL_WIDTH`] to legacy's `470`, pushing the panel's
+    /// right edge to `PANEL_LEFT_PX + PANEL_WIDTH = 486`. Net, the danger band
+    /// (the window widths at which the orb's box horizontally overlaps the chat
+    /// panel's `[16, 486]` x-range) is now roughly `403..1567px`, re-measured
+    /// directly via [`hud_layout::health_orb_screen_x`]. Below the band the orb
+    /// is off-screen-left; above it the orb has slid clear to the right of the
+    /// wider panel. `1024`/`1280` land in the band (lifted); the narrow `320`
+    /// and the wide `1920`/`2560` stay safe for the true corner margin.
     #[test]
     fn chat_panel_bottom_sits_flush_in_the_corner_except_in_the_orb_danger_band() {
-        assert!(!chat_panel_needs_lift(480.0), "narrow: orb is off-screen");
-        assert_eq!(chat_panel_bottom(480.0), PANEL_BOTTOM_CORNER_PX);
+        assert!(
+            !chat_panel_needs_lift(320.0),
+            "narrow: orb is off-screen-left"
+        );
+        assert_eq!(chat_panel_bottom(320.0), PANEL_BOTTOM_CORNER_PX);
+
+        assert!(
+            chat_panel_needs_lift(1024.0),
+            "1024px lands squarely in the danger band"
+        );
+        assert_eq!(chat_panel_bottom(1024.0), PANEL_BOTTOM_LIFTED_PX);
 
         assert!(
             chat_panel_needs_lift(1280.0),
-            "1280px is a common desktop width squarely in the danger band"
+            "1280px: still inside the band with the wider 470px panel (its right edge 486 reaches \
+             the orb's x span) — lifted to clear the cluster"
         );
         assert_eq!(chat_panel_bottom(1280.0), PANEL_BOTTOM_LIFTED_PX);
 
         assert!(
-            chat_panel_needs_lift(1920.0),
-            "1920px (1080p): the wider legacy-width (470px) box now reaches the orb's x span, so \
-             it needs the cluster-clearing lift (see this test's own doc comment)"
+            !chat_panel_needs_lift(1920.0),
+            "1920px (1080p): with the shrunk cluster (orb 112px), even the wider 470px panel's \
+             right edge (486) sits left of the orb — clear for the true corner margin"
         );
-        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_LIFTED_PX);
+        assert_eq!(chat_panel_bottom(1920.0), PANEL_BOTTOM_CORNER_PX);
 
         assert!(
             !chat_panel_needs_lift(2560.0),

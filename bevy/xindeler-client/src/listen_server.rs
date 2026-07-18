@@ -37,10 +37,10 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    ChatBridgePlugin, CombatHudMirrorPlugin, HotbarMirrorPlugin, LodAltStreamPlugin,
-    LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin, PlayerTransferPlugin,
-    SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin,
-    SocialMirrorPlugin, boot_embedded_player, boot_test_server,
+    ChatBridgePlugin, CombatHudMirrorPlugin, ConnectStage, EmbeddedPlayer, HotbarMirrorPlugin,
+    LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin,
+    PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimServer,
+    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting, boot_test_server,
 };
 
 use crate::{
@@ -83,7 +83,31 @@ use crate::{
 /// when the player is absent or fails to connect (spectator mode). Trade-off:
 /// the listen server hosts the sim AND a loopback Client, heavier than the
 /// passive persister, which is why the two halves were split.
-pub struct ListenServerPlugin;
+///
+/// ## BL-82 EM-5.9 (T56.29): eager boot vs. menu-deferred boot
+/// The whole plugin stack (every server-bridge + client-view plugin) is
+/// registered in [`Plugin::build`] regardless of [`boot_eagerly`], but the
+/// actual *world boot* (the multi-second [`boot_test_server`] +
+/// [`boot_embedded_player`]) is split out into [`boot_offline_world`]:
+/// - `boot_eagerly: true` — the `--listen-server` dev/smoke bypass: boot the
+///   world here in `build` exactly as before (so every existing smoke path is
+///   byte-for-byte unchanged).
+/// - `boot_eagerly: false` — the main-menu path: register the stack but leave
+///   the world unbooted; the menu's "Play / Connect (offline)" flow calls
+///   [`boot_offline_world`] on `OnEnter(AppState::Connecting)`. This is safe
+///   because EVERY bridge system reads the sim/player through
+///   `Option<NonSend<…>>` (no-op until it exists) and every one-shot broadcast
+///   latches only AFTER it has run with the player present — so the stack idles
+///   cleanly with no world, then wakes up the instant one is booted.
+///
+/// [`boot_eagerly`]: ListenServerPlugin::boot_eagerly
+pub struct ListenServerPlugin {
+    /// Boot the embedded world eagerly in [`Plugin::build`] (the
+    /// `--listen-server` dev/smoke bypass). When `false`, the stack's systems
+    /// are registered but the world boot is deferred to [`boot_offline_world`]
+    /// (the menu-driven offline connect path).
+    pub boot_eagerly: bool,
+}
 
 impl Plugin for ListenServerPlugin {
     fn build(&self, app: &mut App) {
@@ -246,6 +270,12 @@ impl Plugin for ListenServerPlugin {
             xindeler_sim_bridge::InventoryMirrorPlugin,
             xindeler_sim_bridge::TradeMirrorPlugin,
         ));
+        // BL-82 EM-5.15: the crafting mirror (recipe book + salvage/repair/
+        // modular candidate lists) — same ordering reasoning as
+        // `InventoryMirrorPlugin` above (reads `SimMirror`). Its client → sim
+        // intent reuses the existing `InventoryActionRequest` applicator, so no
+        // extra applicator is added here.
+        app.add_plugins(xindeler_sim_bridge::CraftingMirrorPlugin);
         // BL-82 EM-5.7: the character diary / skill-tree mirror
         // (`NetSkillSet`/`NetAbilityPool`) + the SP-spend request applicator
         // — same ordering reasoning as `CombatHudMirrorPlugin`/`HotbarMirrorPlugin`
@@ -333,6 +363,9 @@ impl Plugin for ListenServerPlugin {
         // the generic per-group tree renderer + Abilities tab) reading the
         // `SkillSetMirrorPlugin` mirror above. Pure Bevy.
         app.add_plugins(crate::diary::DiaryUiPlugin);
+        // BL-82 EM-5.15: the crafting screen (recipes/salvage/repair/modular
+        // tabs) reading the `CraftingMirrorPlugin` mirror above. Pure Bevy.
+        app.add_plugins(crate::crafting_ui::CraftingUiPlugin);
         // BL-82 EM-5.17 Phase 5: the boss/target nameplate — panel + bars
         // fully built, reading `NetHealth`/`NetPoise`/`NetXp` off whatever
         // entity `SelectedTarget` resolves to.
@@ -347,51 +380,98 @@ impl Plugin for ListenServerPlugin {
         // smoke override.
         app.add_plugins(crate::targeting::TargetSelectionPlugin);
 
-        // Boot the embedded world now and hand it to the bridge.
-        let data_dir = userdata_dir().join("listen-server");
-        if let Err(err) = std::fs::create_dir_all(&data_dir) {
-            error!(
-                "listen-server: cannot create data dir {} ({err}); running without a world",
-                data_dir.display()
-            );
-            return;
+        // Boot the embedded world now (the `--listen-server` bypass) or leave
+        // it to the menu's offline-connect flow (see [`boot_offline_world`]).
+        if self.boot_eagerly {
+            boot_offline_world(app.world_mut());
         }
-        info!(
-            "listen-server: booting embedded world at {} (this takes several seconds)…",
-            data_dir.display()
-        );
-        match boot_test_server(&data_dir) {
-            Ok(mut sim) => {
-                // EM-3.7b: boot the embedded local-player Client over TCP
-                // loopback to the sim we just booted (its listener is already
-                // live). This blocks on the handshake (~hundreds of ms) but runs
-                // once, right after the multi-second world boot. On failure we
-                // still insert the sim and run — the terrain-anchor persister
-                // fallback covers streaming, just without a controllable player.
-                match boot_embedded_player(&mut sim) {
-                    Ok(player) => {
-                        app.insert_non_send(sim);
-                        app.insert_non_send(player);
-                        info!(
-                            "listen-server: embedded world + local player booted; player is \
-                             controllable once spawned"
-                        );
-                    },
-                    Err(err) => {
-                        app.insert_non_send(sim);
-                        warn!(
-                            "listen-server: embedded player failed to connect ({err}); running as \
-                             spectator (terrain persister fallback, no controllable player)"
-                        );
-                    },
-                }
-            },
-            Err(err) => {
-                error!(
-                    "listen-server: failed to boot embedded world ({err}); running without a \
-                     world (missing XINDELER_ASSETS / LFS map blobs?)"
+    }
+}
+
+/// Boots the embedded world + local player and inserts them as non-send
+/// resources into `world`. Returns `true` if a world was booted (with OR
+/// without a controllable player — the spectator/persister fallback still
+/// counts as "a world is up"), `false` if the world itself could not boot
+/// (missing assets / LFS blobs) and the caller should surface a connect error.
+///
+/// This is the SAME boot sequence [`ListenServerPlugin`] used to run inline in
+/// `build`; it is extracted so the main menu (BL-82 EM-5.9 T56.29) can trigger
+/// it at runtime on `OnEnter(AppState::Connecting)` rather than eagerly at
+/// startup. It blocks for several seconds (world gen + the loopback handshake),
+/// so callers run it from an exclusive `&mut World` system on the connecting
+/// screen, having already rendered a "Connecting…" frame first.
+pub fn boot_offline_world(world: &mut World) -> bool {
+    match boot_offline_world_parts(&|_| {}) {
+        Ok((sim, player)) => {
+            world.insert_non_send(sim);
+            if let Some(player) = player {
+                world.insert_non_send(player);
+                info!(
+                    "listen-server: embedded world + local player booted; player is controllable \
+                     once spawned"
                 );
-            },
-        }
+            } else {
+                warn!(
+                    "listen-server: running as spectator (terrain persister fallback, no \
+                     controllable player)"
+                );
+            }
+            true
+        },
+        Err(err) => {
+            error!(
+                "listen-server: failed to boot embedded world ({err}); running without a world \
+                 (missing XINDELER_ASSETS / LFS map blobs?)"
+            );
+            false
+        },
+    }
+}
+
+/// The pure (World-free) half of [`boot_offline_world`]: boots the embedded
+/// world + local player and RETURNS them instead of inserting them, reporting
+/// each real boot stage through `progress` (BL-82 EM-5.9 T56.30).
+///
+/// This is what makes a genuine staged loading screen possible: the connecting
+/// screen runs this on a background thread (both objects are `Send`), passing a
+/// `progress` closure that writes into a cell the Bevy main thread polls, so
+/// the window keeps rendering live progress instead of freezing through the
+/// multi-second boot. The eager `--listen-server` path calls the thin
+/// [`boot_offline_world`] wrapper above with a no-op `progress`, so its
+/// behaviour is byte-for-byte unchanged.
+///
+/// Returns:
+/// - `Err` — the world itself could not boot (missing assets / LFS blobs); the
+///   caller surfaces a connect error.
+/// - `Ok((sim, Some(player)))` — full boot with a controllable local player.
+/// - `Ok((sim, None))` — the sim booted but the embedded player failed to
+///   connect; the caller runs as a spectator (terrain-anchor persister
+///   fallback), exactly as [`boot_offline_world`] always has.
+pub fn boot_offline_world_parts(
+    progress: &(dyn Fn(ConnectStage) + Send + Sync),
+) -> Result<(SimServer, Option<EmbeddedPlayer>), String> {
+    let data_dir = userdata_dir().join("listen-server");
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|err| format!("cannot create data dir {}: {err}", data_dir.display()))?;
+    info!(
+        "listen-server: booting embedded world at {} (this takes several seconds)…",
+        data_dir.display()
+    );
+    progress(ConnectStage::GeneratingWorld);
+    let mut sim = boot_test_server(&data_dir).map_err(|err| format!("{err:?}"))?;
+
+    // EM-3.7b: boot the embedded local-player Client over TCP loopback to the
+    // sim we just booted (its listener is already live). This blocks on the
+    // real handshake (~hundreds of ms, staged through `progress`) but runs
+    // once, right after the multi-second world boot. On failure we still return
+    // the sim so the terrain-anchor persister fallback can cover streaming, just
+    // without a controllable player.
+    progress(ConnectStage::EstablishingConnection);
+    match boot_embedded_player_reporting(&mut sim, progress) {
+        Ok(player) => Ok((sim, Some(player))),
+        Err(err) => {
+            warn!("listen-server: embedded player failed to connect ({err}); spectator fallback");
+            Ok((sim, None))
+        },
     }
 }

@@ -194,6 +194,10 @@ impl Plugin for NetClientPlugin {
         // path). Split into its own call — the tuple above is already at the
         // plugin-tuple arity ceiling `bevy_app`'s `Plugins` impls support.
         app.add_plugins(crate::diary::DiaryUiPlugin);
+        // BL-82 EM-5.15: the crafting screen (4 tabs) — verbatim reuse, same
+        // as the inventory/diary consumers above (degrades clean with no
+        // `NetCrafting` mirrored yet on this spectator-only path).
+        app.add_plugins(crate::crafting_ui::CraftingUiPlugin);
         // BL-82 EM-5.17 Phase 5: the boss/target nameplate.
         app.add_plugins(crate::boss_nameplate::BossNameplateViewPlugin);
         // BL-82 EM-5.18 Phase 1: the soft-target scan. This mode has no

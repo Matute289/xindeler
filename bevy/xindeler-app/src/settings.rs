@@ -73,6 +73,13 @@ pub struct XindelerSettings {
     /// selectable but currently only `"en"` resolves — see the settings
     /// window's Language tab note.
     pub language: String,
+    /// BL-82 EM-5.9 (T56.29) — the main-menu / login section: the first-run
+    /// pre-alpha disclaimer gate + the remembered login fields the login
+    /// screen pre-fills. `#[serde(default)]` on this struct + [`Default`]
+    /// keeps every older `settings.ron` (written before this key existed)
+    /// loading unchanged, exactly the backward-compat guarantee `ui_scale`/
+    /// `controls` already established.
+    pub menu: MenuSettings,
 }
 
 impl Default for XindelerSettings {
@@ -85,6 +92,7 @@ impl Default for XindelerSettings {
             interface: InterfaceSettings::default(),
             chat: ChatSettings::default(),
             language: default_language(),
+            menu: MenuSettings::default(),
         }
     }
 }
@@ -123,6 +131,53 @@ pub struct ChatSettings {
 
 impl Default for ChatSettings {
     fn default() -> Self { Self { opacity: 0.4 } }
+}
+
+/// BL-82 EM-5.9 (T56.29) — persisted main-menu / login state: the first-run
+/// disclaimer acknowledgement + the last-used login fields the login screen
+/// pre-fills, mirroring legacy `voxygen`'s `NetworkingSettings`
+/// (`username`/`default_server`) + `show_disclaimer` gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MenuSettings {
+    /// Whether the player has accepted the one-time pre-alpha disclaimer.
+    /// `false` (the derived default) shows the disclaimer once, before the main
+    /// menu; accepting it flips this to `true` and persists so it never shows
+    /// again.
+    pub disclaimer_accepted: bool,
+    /// Last username typed on the login screen (pre-filled next launch).
+    pub username: String,
+    /// Last server address typed on the login screen (pre-filled next launch).
+    /// Empty = the legacy default host is offered.
+    pub server_address: String,
+    /// Whether the login screen's Online/Offline toggle last sat on Online.
+    /// `false` (the derived default) = Offline (singleplayer embedded world).
+    pub online: bool,
+    /// BL-82 EM-5.9 (T56.31) — the player's saved multiplayer servers, shown
+    /// (and live-queried for ping/version/player-count) in the in-game server
+    /// browser. Mirrors legacy `voxygen`'s `NetworkingSettings::servers`
+    /// (`Vec<String>`), one level richer: each entry also carries an optional
+    /// nickname. `#[serde(default)]` on this struct keeps every older
+    /// `settings.ron` (written before this key existed) loading unchanged —
+    /// the same backward-compat guarantee the rest of `MenuSettings` gives.
+    pub servers: Vec<SavedServer>,
+}
+
+/// BL-82 EM-5.9 (T56.31) — one saved multiplayer server in the browser's
+/// persisted list: a dialable address plus an optional human-friendly
+/// nickname. Kept deliberately small (just the persisted identity) — the live
+/// ping/version/player-count/MOTD fields the browser paints are queried fresh
+/// each session and never persisted (they'd be stale on next launch), so they
+/// live only in the in-memory browser state, not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedServer {
+    /// The dialable address, `host` or `host:port` (an omitted port defaults
+    /// to the game port when queried/connected).
+    pub address: String,
+    /// An optional display name; empty = fall back to showing [`Self::address`]
+    /// itself in the list.
+    pub nickname: String,
 }
 
 /// Camera-rig tunables a player expects to control (mouse sensitivity, debug
@@ -556,5 +611,40 @@ mod tests {
         assert!(!round_tripped.interface.show_crosshair);
         assert_eq!(round_tripped.chat.opacity, 0.75);
         assert_eq!(round_tripped.language, "es");
+    }
+
+    /// BL-82 EM-5.9 (T56.31): a settings.ron predating the server-browser
+    /// `servers` list still loads and gets an empty list (not a parse error) —
+    /// same backward-compat guarantee every other `MenuSettings` field gives.
+    #[test]
+    fn old_settings_files_default_to_no_saved_servers() {
+        let text = "(graphics: (taa: false), menu: (username: \"mati\"))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.menu.username, "mati");
+        assert!(settings.menu.servers.is_empty());
+    }
+
+    /// The server-browser saved list round-trips through save/load intact
+    /// (address + optional nickname): the persistence path the browser needs
+    /// (add a server → restart → it's still there).
+    #[test]
+    fn saved_servers_round_trip_through_ron() {
+        let mut settings = XindelerSettings::default();
+        settings.menu.servers = vec![
+            SavedServer {
+                address: "play.example.com:14004".to_owned(),
+                nickname: "Example".to_owned(),
+            },
+            SavedServer {
+                address: "127.0.0.1:14004".to_owned(),
+                nickname: String::new(),
+            },
+        ];
+        let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
+            .expect("settings serialize");
+        let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
+        assert_eq!(round_tripped.menu.servers, settings.menu.servers);
+        assert_eq!(round_tripped.menu.servers[0].nickname, "Example");
+        assert_eq!(round_tripped.menu.servers[1].address, "127.0.0.1:14004");
     }
 }

@@ -338,13 +338,32 @@ fn spawn_combat_hud(
     ));
 
     // Buff/debuff strip: an empty horizontal row `sync_buff_strip` fills.
-    commands.spawn((BuffStripRoot, Node {
-        position_type: PositionType::Absolute,
-        top: Val::Px(90.0),
-        left: Val::Px(16.0),
-        column_gap: Val::Px(theme.spacing.xs),
-        ..Default::default()
-    }));
+    //
+    // BL-82 holistic-review z-index fix (caught by the crate-level `*Root`
+    // audit added in the same pass, `zlayer_audit.rs`): unlike every sibling
+    // spawned in this same function (the three orb bars + `xp_cluster_root`,
+    // all `GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)`), `BuffStripRoot` had
+    // NO `GlobalZIndex` at all (default z-partition 0) — the exact same bug
+    // class already fixed independently for `EscMenuRoot`/
+    // `InventoryWindowRoot`/`FullMapRoot`/`InviteRoot`/`TradeWindowRoot`/
+    // `SocialWindowRoot`/`InviteBannerRoot`/`DialoguePanelRoot`. Positioned
+    // at `top:90,left:16`, it sits close enough to `social_hud.rs`'s
+    // `GroupPanelRoot` (`top:100,left:20`) that an active buff strip and an
+    // open party frame can visually overlap — left unindexed, `bevy_ui`
+    // picking (highest z-partition first) would route clicks/paint order to
+    // the ambient chrome in front instead of the buff icons underneath.
+    // Same ambient tier as its orb/action-bar/party-frame siblings.
+    commands.spawn((
+        BuffStripRoot,
+        GlobalZIndex(zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(90.0),
+            left: Val::Px(16.0),
+            column_gap: Val::Px(theme.spacing.xs),
+            ..Default::default()
+        },
+    ));
 
     // Crosshair: a small centred dot.
     commands.spawn((
@@ -1399,5 +1418,35 @@ mod tests {
             .expect("the icon carries a Tooltip");
         assert!(tooltip.text.contains("Regeneration"));
         assert!(tooltip.text.contains("9s") || tooltip.text.contains("10s"));
+    }
+
+    /// BL-82 holistic-review z-index fix regression: [`BuffStripRoot`] is a
+    /// top-level, absolutely-positioned ambient panel exactly like its
+    /// siblings spawned in the same function (the three orb bars +
+    /// `xp_cluster_root`), all of which carry `GlobalZIndex(
+    /// ORBS_ACTION_BAR_PARTY_MINIMAP)` — but `BuffStripRoot` itself had NO
+    /// `GlobalZIndex` at all (default z-partition 0) until this fix, caught
+    /// by the crate-level `*Root` audit added in the same pass
+    /// (`zlayer_audit.rs`). Pins that it now carries the same ambient tier
+    /// as its siblings.
+    #[test]
+    fn buff_strip_root_carries_the_ambient_chrome_z_index() {
+        let mut app = new_app_with_images();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+
+        app.world_mut()
+            .run_system_once(spawn_combat_hud)
+            .expect("spawn_combat_hud runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<BuffStripRoot>>()
+            .single(world)
+            .expect("BuffStripRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
     }
 }
