@@ -227,6 +227,28 @@ pub struct EmbeddedPlayer {
     stage: PlayerStage,
     /// The character id we created/selected, once known.
     character_id: Option<i64>,
+    /// BL-82 EM-5.14: when `true`, the life-cycle machine does NOT auto-create/
+    /// auto-select a character at [`PlayerStage::LoadingCharacterList`] — it
+    /// parks at [`PlayerStage::AwaitingSelection`] and waits for the player's
+    /// UI to drive [`Self::select_character`]/[`Self::submit_create_character`]
+    /// (the char-select screen path). `false` (the default) preserves the
+    /// original "auto-load the first character / create a default and spawn
+    /// straight in" listen-server boot — nothing changes for a launch that
+    /// never opts into the select screen. Set once, before the first tick, via
+    /// [`Self::set_manual_selection`].
+    manual_selection: bool,
+    /// BL-82 EM-5.14 (bevy-migration-reviewer follow-up): the roster's
+    /// character ids at the moment [`Self::submit_create_character`] was
+    /// called, so [`advance_stage`]'s [`PlayerStage::CreatingCharacter`] arm
+    /// can fall back to "whichever id is NEW" instead of "whichever id is
+    /// FIRST" if the `CharacterCreated` event is ever missed. Without this,
+    /// the original auto-boot's `first_character_id` fallback (correct there:
+    /// the roster was empty pre-create, so first == new) would silently spawn
+    /// the ACCOUNT'S FIRST character instead of the one just created whenever
+    /// manual creation happens on top of an already non-empty roster (the
+    /// char-select screen's whole reason to exist). `None` outside a pending
+    /// create; cleared once the stage resolves.
+    pending_create_pre_ids: Option<Vec<i64>>,
     /// The player entity's server `Uid`, resolved once in game. Stable across
     /// the session; the mirror uses it to tag the player's replicated entity.
     uid: Option<Uid>,
@@ -328,7 +350,15 @@ impl ConnectStage {
 enum PlayerStage {
     /// Waiting for the character list to finish loading.
     LoadingCharacterList,
-    /// A `create_character` request is in flight (roster was empty).
+    /// BL-82 EM-5.14: the roster finished loading and `manual_selection` is on
+    /// — parked here until the player's char-select UI drives
+    /// [`EmbeddedPlayer::select_character`] (→ [`Self::Spawning`]) or
+    /// [`EmbeddedPlayer::submit_create_character`] (→
+    /// [`Self::CreatingCharacter`]). A `delete_character` request keeps us
+    /// here (the roster simply refreshes).
+    AwaitingSelection,
+    /// A `create_character` request is in flight (roster was empty, or the
+    /// player submitted the creation wizard).
     CreatingCharacter,
     /// `request_character` sent; waiting for the in-game spawn (first `Pos`).
     Spawning,
@@ -578,6 +608,92 @@ impl EmbeddedPlayer {
             self.client.unlock_skill(skill);
         }
     }
+
+    /// BL-82 EM-5.14: opt into player-driven character selection (the
+    /// char-select UI path). MUST be called before the first [`tick_player`]
+    /// dispatch (the listen-server shell does this right after
+    /// [`boot_embedded_player`], in `build()`, before any frame runs) — once
+    /// the machine has left [`PlayerStage::LoadingCharacterList`], the roster
+    /// has already been auto-picked and flipping this has no effect. See
+    /// [`Self::manual_selection`]'s doc for what it changes.
+    pub fn set_manual_selection(&mut self, manual: bool) { self.manual_selection = manual; }
+
+    /// BL-82 EM-5.14: whether the machine is parked waiting for the player's UI
+    /// to pick/create a character (the char-select screen is showing the
+    /// roster). Only ever `true` in manual mode.
+    pub fn is_awaiting_selection(&self) -> bool { self.stage == PlayerStage::AwaitingSelection }
+
+    /// BL-82 EM-5.14: the embedded Client's current character roster, verbatim
+    /// (`client::Client::character_list`) — source for the
+    /// [`xindeler_protocol::NetCharList`] mirror the char-select screen reads.
+    /// Available as soon as an [`EmbeddedPlayer`] exists (the roster load is
+    /// kicked off in [`boot_embedded_player`]); `characters` is empty and
+    /// `loading` is `true` until the sim answers.
+    pub fn character_list(&self) -> &client::CharacterList { self.client.character_list() }
+
+    /// BL-82 EM-5.14: forward a player-submitted character-creation request to
+    /// the embedded Client's real `create_character` network send (a genuine
+    /// client→server round trip over the loopback socket — the SAME path
+    /// [`create_default_character`] uses, never a direct sim write). Only acts
+    /// while [`PlayerStage::AwaitingSelection`] (the roster screen); the server
+    /// re-validates every field (alias, the class↔weapon whitelist, ethos
+    /// clamping). On success the created id surfaces via `CharacterCreated`/the
+    /// refreshed roster and the machine spawns straight into the world with it
+    /// (see [`advance_stage`]'s `CreatingCharacter` arm).
+    pub fn submit_create_character(&mut self, params: &xindeler_protocol::CharCreateParams) {
+        if self.stage != PlayerStage::AwaitingSelection {
+            return;
+        }
+        // Snapshot the pre-create roster so the `CreatingCharacter` fallback
+        // (if `CharacterCreated` is ever missed) can pick the NEW id, not
+        // just the first one — see `pending_create_pre_ids`'s own doc.
+        self.pending_create_pre_ids = Some(
+            self.client
+                .character_list()
+                .characters
+                .iter()
+                .filter_map(|c| c.character.id.map(|id| id.0))
+                .collect(),
+        );
+        self.client.create_character(
+            params.alias.clone(),
+            params.mainhand.clone(),
+            params.offhand.clone(),
+            params.body,
+            params.hardcore,
+            None,
+            params.class,
+            params.ethos,
+            params.background,
+        );
+        self.stage = PlayerStage::CreatingCharacter;
+        tracing::info!(alias = %params.alias, class = ?params.class, "char-select: creating character");
+    }
+
+    /// BL-82 EM-5.14: select an existing character and enter the world with it
+    /// (`client::Client::request_character`, the same call
+    /// [`request_spawn`] makes). Only acts while
+    /// [`PlayerStage::AwaitingSelection`].
+    pub fn select_character(&mut self, id: common::character::CharacterId) {
+        if self.stage != PlayerStage::AwaitingSelection {
+            return;
+        }
+        self.character_id = Some(id.0);
+        request_spawn(self, id.0);
+    }
+
+    /// BL-82 EM-5.14: delete a character (`client::Client::delete_character` —
+    /// the roster refreshes asynchronously). Stays in
+    /// [`PlayerStage::AwaitingSelection`]; the change-deduped
+    /// [`xindeler_protocol::NetCharList`] mirror picks up the shorter roster on
+    /// the next broadcast. Only acts while awaiting selection.
+    pub fn delete_character(&mut self, id: common::character::CharacterId) {
+        if self.stage != PlayerStage::AwaitingSelection {
+            return;
+        }
+        self.client.delete_character(id);
+        tracing::info!(character_id = id.0, "char-select: deleting character");
+    }
 }
 
 /// Pure decision logic for [`EmbeddedPlayer::send_chat_request`] (BL-82
@@ -799,6 +915,11 @@ pub fn boot_embedded_player_reporting(
         clock: Clock::new(Duration::ZERO),
         stage: PlayerStage::LoadingCharacterList,
         character_id: None,
+        // Default: preserve the original auto-load-and-spawn boot. The
+        // listen-server shell flips this on (before the first tick) only when
+        // launched into the char-select screen (BL-82 EM-5.14).
+        manual_selection: false,
+        pending_create_pre_ids: None,
         uid: None,
         jumping: false,
         last_tick_wall: None,
@@ -1106,6 +1227,13 @@ fn advance_stage(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
             if player.client.character_list().loading {
                 return;
             }
+            // BL-82 EM-5.14: in manual (char-select UI) mode, never auto-pick —
+            // park and let the player's UI drive selection/creation. The roster
+            // is already loaded, so the select screen can render it immediately.
+            if player.manual_selection {
+                player.stage = PlayerStage::AwaitingSelection;
+                return;
+            }
             match first_character_id(&player.client) {
                 Some(id) => {
                     player.character_id = Some(id);
@@ -1117,20 +1245,35 @@ fn advance_stage(player: &mut EmbeddedPlayer, events: &[ClientEvent]) {
                 },
             }
         },
+        // BL-82 EM-5.14: idle until the player's UI acts (see the stage's doc).
+        PlayerStage::AwaitingSelection => {},
         PlayerStage::CreatingCharacter => {
             // The created id surfaces either as a CharacterCreated event or via
-            // the refreshed roster (same fallback the smoke bot uses).
+            // the refreshed roster (same fallback the smoke bot uses). BL-82
+            // EM-5.14 (bevy-migration-reviewer follow-up): the roster fallback
+            // must pick the NEW id, not just the first one — a manual-mode
+            // create can land on top of an already non-empty roster, where
+            // `first_character_id` would silently resolve to some OTHER
+            // pre-existing character instead of the one just created (see
+            // `pending_create_pre_ids`'s own doc). `None` pre-ids (the
+            // original auto-boot path, roster was empty) falls back to
+            // `first_character_id` unchanged — value-preserving there.
             let created = events.iter().find_map(|e| match e {
                 ClientEvent::CharacterCreated(id) => Some(id.0),
                 _ => None,
             });
             let id = created.or_else(|| {
-                (!player.client.character_list().loading)
-                    .then(|| first_character_id(&player.client))
-                    .flatten()
+                if player.client.character_list().loading {
+                    return None;
+                }
+                match &player.pending_create_pre_ids {
+                    Some(pre_ids) => new_character_id(&player.client, pre_ids),
+                    None => first_character_id(&player.client),
+                }
             });
             if let Some(id) = id {
                 player.character_id = Some(id);
+                player.pending_create_pre_ids = None;
                 request_spawn(player, id);
             }
         },
@@ -1224,6 +1367,22 @@ fn first_character_id(client: &Client) -> Option<i64> {
         .first()
         .and_then(|c| c.character.id)
         .map(|id| id.0)
+}
+
+/// BL-82 EM-5.14 (bevy-migration-reviewer follow-up): the first character in
+/// the CURRENT roster whose id is NOT in `pre_ids` — i.e. the one that just
+/// got created. Falls back to [`None`] (never a wrong-character guess) if the
+/// refreshed roster somehow contains no id absent from `pre_ids` (e.g. the
+/// create actually failed silently); the state machine simply waits another
+/// tick rather than ever spawning the wrong character. Pure over the roster
+/// snapshot, so it's unit-testable without a live `Client`.
+fn new_character_id(client: &Client, pre_ids: &[i64]) -> Option<i64> {
+    client
+        .character_list()
+        .characters
+        .iter()
+        .filter_map(|c| c.character.id.map(|id| id.0))
+        .find(|id| !pre_ids.contains(id))
 }
 
 /// Builds the sim's [`comp::ControllerInputs`] from the shared Bevy input

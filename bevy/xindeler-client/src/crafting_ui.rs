@@ -1367,4 +1367,43 @@ mod tests {
         };
         assert_eq!(recipe_category(&weapon), "weapons");
     }
+
+    /// BL-82 EM-5.15 follow-up (zlayer audit): [`CraftingWindowRoot`] is a
+    /// full-screen modal window (spec's `zlayer::MODAL_WINDOWS` z-band this
+    /// file's own module doc comment names) — mirrors `trade_ui.rs`'s
+    /// `invite_and_trade_window_roots_carry_the_modal_windows_z_index`
+    /// pattern, pinning that `spawn_crafting_window` actually attaches the
+    /// `GlobalZIndex`, not just that the doc comment claims it. The four tab
+    /// roots + their nested lists are plain `with_children` descendants of
+    /// this same root (see `ROOT_REGISTRY` in `zlayer_audit.rs`), so they
+    /// need no `GlobalZIndex` of their own — this test only needs to prove
+    /// the one root that actually carries it.
+    #[test]
+    fn crafting_window_root_carries_the_modal_windows_z_index() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+
+        app.world_mut()
+            .run_system_once(spawn_crafting_window)
+            .expect("spawn_crafting_window runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<CraftingWindowRoot>>()
+            .single(world)
+            .expect("CraftingWindowRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
 }

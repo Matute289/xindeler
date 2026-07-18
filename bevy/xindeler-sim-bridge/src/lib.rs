@@ -100,6 +100,14 @@
 mod chat;
 pub use chat::{ChatBridgePlugin, apply_chat_send_requests, broadcast_embedded_chat};
 
+// BL-82 EM-5.14: the character-list mirror + create/delete/select applicator
+// (T56.32). Revolves around the embedded player's Client roster (like `chat`),
+// not the per-entity `SimMirror` — see `charlist`'s own module doc comment.
+mod charlist;
+pub use charlist::{
+    CharListMirrorCache, CharListMirrorPlugin, apply_char_requests, broadcast_char_list,
+};
+
 mod combat_hud;
 pub use combat_hud::{CombatHudMirrorPlugin, mirror_combat_hud_state};
 

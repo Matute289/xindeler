@@ -16,6 +16,7 @@
 
 pub mod ai_mode;
 pub mod aurora_overlay;
+pub mod charlist;
 pub mod chat;
 pub mod crafting;
 pub mod dimension_id;
@@ -46,6 +47,10 @@ use serde::{Deserialize, Serialize};
 pub use crate::{
     ai_mode::AiExecutionMode,
     aurora_overlay::{AuroraNpcState, AuroraOverlay, EmotionalState, IntentKind, MoodKind},
+    charlist::{
+        CharCreateParams, CharCreateRequest, CharDeleteRequest, CharSelectRequest, LocalCharCreate,
+        LocalCharDelete, LocalCharSelect, NetCharList, NetCharListEntry,
+    },
     chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
     crafting::{
         NetCrafting, NetModularComponentSlot, NetRecipe, NetRecipeInput, NetRepairableSlot,
@@ -945,6 +950,11 @@ impl Plugin for XindelerProtocolPlugin {
         // LocalDialogueResponse in-process handoff) — see `social`'s own
         // module doc comment for the full rationale.
         social::register(app);
+        // BL-82 EM-5.14: the character-list/creation wire contract
+        // (NetCharList broadcast server message, CharCreate/Delete/Select
+        // client requests + their Local* in-process twins) — see `charlist`'s
+        // own module doc comment for the full rationale.
+        charlist::register(app);
         // BL-82 EM-5.6: per-owner scoping for `NetInventory`/`NetTrade`/
         // `NetIncomingTradeInvite` — see `owner_visibility`'s module doc
         // comment. Independent of (and additive alongside) the RegionKey
@@ -1567,6 +1577,119 @@ mod tests {
         assert_eq!(received.len(), 2, "server should receive both requests");
         assert_eq!(received[0].message, channel_req);
         assert_eq!(received[1].message, command_req);
+    }
+
+    /// A fixed humanoid body for the EM-5.14 char-list wire tests (avoids an
+    /// `rng` dependency; the exact appearance is irrelevant — only that a full
+    /// `common::comp::Body` survives the serde/replication round trip).
+    #[cfg(test)]
+    fn test_body() -> common::comp::Body {
+        common::comp::Body::Humanoid(common::comp::humanoid::Body {
+            species: common::comp::humanoid::Species::Human,
+            body_type: common::comp::humanoid::BodyType::Female,
+            hair_style: 1,
+            beard: 0,
+            eyes: 0,
+            accessory: 0,
+            hair_color: 2,
+            skin: 3,
+            eye_color: 1,
+        })
+    }
+
+    /// BL-82 EM-5.14 (T56.32): `NetCharList` replicates server → client over
+    /// the real loopback exactly like `NetChatMsg`/`NetPlayerList` (a plain
+    /// broadcast message, no entity references) — the full roster, body payload
+    /// and all, arrives intact.
+    #[test]
+    fn net_char_list_replicates() {
+        use bevy_replicon::prelude::{SendTargets, ToClients};
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let payload = NetCharList {
+            characters: vec![NetCharListEntry {
+                id: common::character::CharacterId(42),
+                alias: "Aria".to_owned(),
+                body: test_body(),
+                hardcore: true,
+                location: Some("Highreach".to_owned()),
+            }],
+            loading: false,
+        };
+        server_app.world_mut().write_message(ToClients {
+            targets: SendTargets::All,
+            message: payload.clone(),
+        });
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let received: Vec<_> = client_app
+            .world_mut()
+            .resource_mut::<Messages<NetCharList>>()
+            .drain()
+            .collect();
+        assert_eq!(received, vec![payload]);
+    }
+
+    /// BL-82 EM-5.14 (T56.32): the three character-creation client requests
+    /// (create/delete/select) replicate client → server on the `Events` lane,
+    /// exactly like `ChatSendRequest`/`GroupActionRequest`.
+    #[test]
+    fn char_requests_replicate() {
+        use bevy_replicon::prelude::FromClient;
+
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let create = CharCreateRequest(CharCreateParams {
+            alias: "Aria".to_owned(),
+            mainhand: Some("common.items.weapons.sword.starter".to_owned()),
+            offhand: None,
+            body: test_body(),
+            hardcore: false,
+            class: common::comp::ClassKind::Warrior,
+            ethos: common::comp::Ethos::default(),
+            background: common::comp::Background::default(),
+        });
+        let delete = CharDeleteRequest(common::character::CharacterId(7));
+        let select = CharSelectRequest(common::character::CharacterId(7));
+
+        client_app.world_mut().write_message(create.clone());
+        client_app.world_mut().write_message(delete);
+        client_app.world_mut().write_message(select);
+
+        client_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        server_app.update();
+
+        let created: Vec<_> = server_app
+            .world_mut()
+            .resource_mut::<Messages<FromClient<CharCreateRequest>>>()
+            .drain()
+            .collect();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].message, create);
+
+        let deleted: Vec<_> = server_app
+            .world_mut()
+            .resource_mut::<Messages<FromClient<CharDeleteRequest>>>()
+            .drain()
+            .collect();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].message, delete);
+
+        let selected: Vec<_> = server_app
+            .world_mut()
+            .resource_mut::<Messages<FromClient<CharSelectRequest>>>()
+            .drain()
+            .collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].message, select);
     }
 
     /// BL-82 EM-5.15: the crafting mirror (`NetCrafting`) round-trips server →

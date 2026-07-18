@@ -37,19 +37,21 @@ use xindeler_app::settings::userdata_dir;
 use xindeler_oracle_host::AtmosphereSyncMessagePlugin;
 use xindeler_protocol::XindelerProtocolPlugin;
 use xindeler_sim_bridge::{
-    ChatBridgePlugin, CombatHudMirrorPlugin, ConnectStage, EmbeddedPlayer, HotbarMirrorPlugin,
-    LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin, PlayerBridgePlugin,
-    PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin, SimServer,
-    SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting, boot_test_server,
+    CharListMirrorPlugin, ChatBridgePlugin, CombatHudMirrorPlugin, ConnectStage, EmbeddedPlayer,
+    HotbarMirrorPlugin, LodAltStreamPlugin, LodZoneStreamPlugin, MapDataStreamPlugin,
+    PlayerBridgePlugin, PlayerTransferPlugin, SIM_TICK_HZ, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimServer, SimTerrainStreamPlugin, SocialMirrorPlugin, boot_embedded_player_reporting,
+    boot_test_server,
 };
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
-    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
-    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
-    hud_toast::HudToastViewPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
-    map_view::MapViewPlugin, player_input::PlayerInputPlugin, social_hud::SocialHudViewPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    atmosphere::AtmosphereSyncViewPlugin, char_select::CharSelectViewPlugin, chat::ChatViewPlugin,
+    combat_hud::CombatHudViewPlugin, controls_screen::ControlsScreenPlugin,
+    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
+    hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin, lod::LodCullingPlugin,
+    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, player_input::PlayerInputPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -107,6 +109,14 @@ pub struct ListenServerPlugin {
     /// are registered but the world boot is deferred to [`boot_offline_world`]
     /// (the menu-driven offline connect path).
     pub boot_eagerly: bool,
+    /// BL-82 EM-5.14: when `true` (the `--char-select` launch flag), boot into
+    /// the character-select screen ([`AppState::CharSelect`]) with a manual-
+    /// selection embedded player instead of the default "auto-load the first
+    /// character and spawn straight in" behaviour. `false` preserves the
+    /// original boot exactly. The actual `AppState` choice is centralized in
+    /// `main.rs` (matching the EM-5.9 main-menu path's own pattern), not set
+    /// here.
+    pub char_select: bool,
 }
 
 impl Plugin for ListenServerPlugin {
@@ -380,10 +390,58 @@ impl Plugin for ListenServerPlugin {
         // smoke override.
         app.add_plugins(crate::targeting::TargetSelectionPlugin);
 
+        // BL-82 EM-5.14: the character-select screen + its char-list mirror,
+        // added ONLY when launched with `--char-select` so the default boot
+        // (auto-load + spawn straight in) is completely unaffected. `CharList
+        // MirrorPlugin` (bridge) broadcasts the embedded player's roster;
+        // `CharSelectViewPlugin` (client) is the screen + 3D preview. Both are
+        // dormant unless `AppState::CharSelect` is active (that choice is
+        // centralized in `main.rs`, matching the EM-5.9 main-menu path).
+        if self.char_select {
+            app.add_plugins((CharListMirrorPlugin, CharSelectViewPlugin));
+        }
+
         // Boot the embedded world now (the `--listen-server` bypass) or leave
         // it to the menu's offline-connect flow (see [`boot_offline_world`]).
         if self.boot_eagerly {
-            boot_offline_world(app.world_mut());
+            if self.char_select {
+                // BL-82 EM-5.14: char-select mode must NOT auto-pick a
+                // character — park the embedded player awaiting the UI's
+                // selection. `set_manual_selection` must run BEFORE the first
+                // tick (we are still in `build`, no frame has run), so this
+                // calls the pure `boot_offline_world_parts` directly instead of
+                // the `boot_offline_world` wrapper (which inserts immediately,
+                // with no hook to flip the flag first).
+                match boot_offline_world_parts(&|_| {}) {
+                    Ok((sim, mut player)) => {
+                        if let Some(player) = player.as_mut() {
+                            player.set_manual_selection(true);
+                        }
+                        let has_player = player.is_some();
+                        app.insert_non_send(sim);
+                        if let Some(player) = player {
+                            app.insert_non_send(player);
+                        }
+                        if has_player {
+                            info!(
+                                "listen-server: embedded world + local player booted; awaiting \
+                                 character selection"
+                            );
+                        } else {
+                            warn!(
+                                "listen-server: running as spectator (terrain persister fallback, \
+                                 no controllable player)"
+                            );
+                        }
+                    },
+                    Err(err) => error!(
+                        "listen-server: failed to boot embedded world ({err}); running without a \
+                         world (missing XINDELER_ASSETS / LFS map blobs?)"
+                    ),
+                }
+            } else {
+                boot_offline_world(app.world_mut());
+            }
         }
     }
 }

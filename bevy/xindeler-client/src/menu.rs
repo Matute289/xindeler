@@ -2483,4 +2483,77 @@ mod tests {
         browser.cycle_add_focus();
         assert_eq!(browser.add_focused, Some(AddField::Address));
     }
+
+    // -----------------------------------------------------------------------
+    // zlayer audit (BL-82 EM-5.14 follow-up)
+    // -----------------------------------------------------------------------
+
+    /// [`MenuRoot`] is a full-screen, independently-positioned window (the
+    /// main-menu screen owns the ENTIRE display while it's up — there is
+    /// nothing else on screen underneath it to sit below, but it still must
+    /// stay above whatever gameplay chrome may already exist from a prior
+    /// session, hence the same `TOAST + 100` tier `ConnectingRoot` uses).
+    /// Mirrors `trade_ui.rs`'s `invite_and_trade_window_roots_carry_the_
+    /// modal_windows_z_index` pattern: pins that `build_menu` actually
+    /// attaches the `GlobalZIndex`, not just that the doc comment claims it.
+    #[test]
+    fn menu_root_carries_a_z_index_above_every_hud_layer() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(MenuScreen::default());
+        app.insert_resource(LoginForm::default());
+
+        app.world_mut()
+            .run_system_once(build_menu)
+            .expect("build_menu runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<MenuRoot>>()
+            .single(world)
+            .expect("MenuRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::TOAST + 100);
+    }
+
+    /// [`ConnectingRoot`] (the offline-boot loading screen) must fully cover
+    /// whatever gameplay chrome is already spawned behind it while the world
+    /// boots — see [`build_connecting_screen`]'s own spawn-site comment.
+    /// Calls [`build_connecting_screen`] directly (not the `enter_connecting`
+    /// system) so the test never kicks off a real background world-boot
+    /// thread — only the UI-spawn half is under test here.
+    #[test]
+    fn connecting_root_carries_a_z_index_above_every_hud_layer() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let theme = HudTheme::default();
+        let fonts = HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        };
+        let credits = Credits::default();
+
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                build_connecting_screen(&mut commands, &theme, &fonts, "", &credits);
+            })
+            .expect("build_connecting_screen runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<ConnectingRoot>>()
+            .single(world)
+            .expect("ConnectingRoot exists")
+            .0;
+        assert_eq!(z_index, zlayer::TOAST + 100);
+    }
 }

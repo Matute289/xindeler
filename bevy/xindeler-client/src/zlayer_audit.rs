@@ -72,6 +72,23 @@ enum RootKind {
 const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     // boss_nameplate.rs
     ("NameplateRoot", RootKind::TopLevel), // GlobalZIndex(BOSS_NAMEPLATE)
+    // char_preview.rs
+    ("PreviewFigureRoot", RootKind::NestedChild {
+        parent: "N/A — not a UI node",
+    }), // BL-82 EM-5.14 follow-up: this "Root" is a plain 3D `Transform`
+    // entity (no `Node`/`GlobalZIndex` at all) — the char-select 3D preview
+    // figure, rendered by its OWN dedicated offscreen `Camera3d` into a
+    // render-to-texture `Image` (shown elsewhere via an `ImageNode` that
+    // lives in `CharSelectRoot`'s own UI subtree, already covered by ITS
+    // z-index). It never enters the main window's `bevy_ui` stacking
+    // context, so it categorically cannot cause the click-routing/occlusion
+    // bug this audit exists to catch; the "Root" suffix here only narrows
+    // `spin_preview_figure`'s query to a single entity (see
+    // `char_preview.rs`'s own doc comment on the struct). Registered instead
+    // of silently exempting it so a future auditor sees the reasoning rather
+    // than re-litigating it.
+    // char_select.rs
+    ("CharSelectRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     // chat.rs
     ("ChatPanelRoot", RootKind::TopLevel), // GlobalZIndex(CHAT)
     // combat_hud.rs
@@ -79,6 +96,41 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("BuffStripRoot", RootKind::TopLevel),   // GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)
     // controls_screen.rs
     ("ControlsScreenRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
+    // crafting_ui.rs
+    ("CraftingWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
+    ("CategoryBarRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("ModularPrimaryListRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("ModularSecondaryListRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("ModularTabRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("RecipeDetailRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("RecipeListRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("RecipesTabRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("RepairListRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("RepairTabRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("SalvageListRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
+    ("SalvageTabRoot", RootKind::NestedChild {
+        parent: "CraftingWindowRoot",
+    }),
     // diary.rs
     ("DiaryWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
     ("StatsPanelRoot", RootKind::NestedChild {
@@ -108,6 +160,13 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     ("MinimapPanelRoot", RootKind::TopLevel), // GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)
     ("ObjectivesRoot", RootKind::TopLevel),   // GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP)
     ("FullMapRoot", RootKind::TopLevel),      // GlobalZIndex(MODAL_WINDOWS)
+    // menu.rs
+    ("ConnectingRoot", RootKind::TopLevel), // GlobalZIndex(TOAST + 100) — above every
+    // HUD layer so it fully covers the (still loading) gameplay chrome that
+    // spawns behind it.
+    ("MenuRoot", RootKind::TopLevel), // GlobalZIndex(TOAST + 100) — same tier;
+    // the main menu is the only thing on screen at that point, but stays
+    // consistent with its sibling `ConnectingRoot`.
     // social_hud.rs
     ("SocialWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS) — participates in
     // HudState's mutually-exclusive window slot + cursor-free rule, same as

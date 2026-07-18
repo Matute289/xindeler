@@ -24,6 +24,11 @@ mod atmosphere;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod boss_nameplate;
 mod camera;
+// BL-82 EM-5.14: char-select screen + 3D preview (listen-server only — the
+// char-list mirror lives in the embedded-player bridge).
+#[cfg(feature = "listen-server")]
+mod char_preview;
+#[cfg(feature = "listen-server")] mod char_select;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod chat;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
@@ -313,9 +318,22 @@ fn main() -> AppExit {
 
     let initial_state: AppState;
     if listen_server {
+        // BL-82 EM-5.14: `--char-select` opens the character-select screen +
+        // creation wizard instead of auto-loading the first character. Not
+        // feature-gated: reading argv has no `listen-server` dependency, and
+        // `initial_state` below must be set unconditionally (matching the
+        // pre-existing, non-feature-gated placement of that assignment).
+        let char_select = std::env::args().any(|a| a == "--char-select");
         #[cfg(feature = "listen-server")]
-        app.add_plugins(listen_server::ListenServerPlugin { boot_eagerly: true });
-        initial_state = AppState::InGame;
+        app.add_plugins(listen_server::ListenServerPlugin {
+            boot_eagerly: true,
+            char_select,
+        });
+        initial_state = if char_select {
+            AppState::CharSelect
+        } else {
+            AppState::InGame
+        };
     } else if let Some(addr) = connect_addr.as_deref() {
         #[cfg(feature = "net-client")]
         {
@@ -363,6 +381,7 @@ fn main() -> AppExit {
             if smoke_mode.is_none() || smoke_menu || smoke_connecting || world_boots {
                 app.add_plugins(listen_server::ListenServerPlugin {
                     boot_eagerly: false,
+                    char_select: false,
                 });
                 app.add_plugins(menu::MainMenuPlugin);
                 initial_state = if smoke_connecting {
