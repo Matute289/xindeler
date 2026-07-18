@@ -80,6 +80,14 @@ pub struct XindelerSettings {
     /// loading unchanged, exactly the backward-compat guarantee `ui_scale`/
     /// `controls` already established.
     pub menu: MenuSettings,
+    /// BL-82 EM-5.16 (T56.43) — the settings window's Accessibility tab:
+    /// reduced-flashing + high-contrast-UI toggles. Same backward-compat
+    /// guarantee every field above establishes for itself.
+    pub accessibility: AccessibilitySettings,
+    /// BL-82 EM-5.16 (T56.43) — the first-run tutorial overlay's persisted
+    /// "seen" flag (`xindeler-client::tutorial_overlay`). Same backward-
+    /// compat guarantee every field above establishes for itself.
+    pub tutorial: TutorialSettings,
 }
 
 impl Default for XindelerSettings {
@@ -93,6 +101,8 @@ impl Default for XindelerSettings {
             chat: ChatSettings::default(),
             language: default_language(),
             menu: MenuSettings::default(),
+            accessibility: AccessibilitySettings::default(),
+            tutorial: TutorialSettings::default(),
         }
     }
 }
@@ -131,6 +141,51 @@ pub struct ChatSettings {
 
 impl Default for ChatSettings {
     fn default() -> Self { Self { opacity: 0.4 } }
+}
+
+/// BL-82 EM-5.16 (T56.43) — accessibility toggles (the settings window's
+/// Accessibility tab). `#[derive(Default)]` is correct here (unlike
+/// [`InterfaceSettings`]/[`ChatSettings`]): both fields' honest defaults ARE
+/// their `bool`/derived zero value — "full flashing" (`reduce_flashing:
+/// false`) and "the normal dark-fantasy palette" (`high_contrast_ui: false`)
+/// are what a fresh install should ship with, so no hand-written [`Default`]
+/// impl is needed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessibilitySettings {
+    /// Dampens the low-health damage vignette (`combat_hud`'s
+    /// `DamageVignette`, the only screen-covering flash effect this client
+    /// currently has) down to fully transparent, regardless of health.
+    /// `false` (full effect) by default. The death screen itself (a static,
+    /// non-flashing full-stop) is unaffected — it always shows at 0 health.
+    pub reduce_flashing: bool,
+    /// Brightens HUD secondary/muted text to full-contrast and makes panel
+    /// backgrounds fully opaque, for players who find the default dark-
+    /// fantasy palette's translucency/soft-contrast hard to read. Takes full
+    /// effect on next launch: the live [`xindeler_ui::theme::HudTheme`]
+    /// resource IS reconciled immediately (see `settings_window::
+    /// apply_accessibility_theme`), but most widgets already on screen bake
+    /// their colour from it ONCE at spawn time, so an already-open window
+    /// only picks up the new palette the next time it's (re)opened —
+    /// honestly documented the same way the Video tab's shadow-cascade
+    /// count already is ("applies on next launch").
+    pub high_contrast_ui: bool,
+}
+
+/// BL-82 EM-5.16 (T56.43) — the first-run tutorial overlay's persisted state
+/// (`xindeler-client::tutorial_overlay`). `#[derive(Default)]` is correct:
+/// `seen: false` IS the honest fresh-install default (show it once).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TutorialSettings {
+    /// Whether the player has dismissed the tutorial overlay at least once
+    /// (by any dismissal path — the "Got it" button or Escape). `false` (the
+    /// derived default) shows it automatically the first time a real local
+    /// player exists; dismissing it flips this to `true` and persists so it
+    /// never shows automatically again. It stays re-openable at any time
+    /// afterwards via the Accessibility tab's "Show tutorial again" button,
+    /// independent of this flag.
+    pub seen: bool,
 }
 
 /// BL-82 EM-5.9 (T56.29) — persisted main-menu / login state: the first-run
@@ -611,6 +666,44 @@ mod tests {
         assert!(!round_tripped.interface.show_crosshair);
         assert_eq!(round_tripped.chat.opacity, 0.75);
         assert_eq!(round_tripped.language, "es");
+    }
+
+    /// BL-82 EM-5.16 (T56.43): a settings.ron predating the `accessibility`/
+    /// `tutorial` sections (every file written before this epic) still loads
+    /// and gets their defaults — same backward-compat guarantee every field
+    /// above already established for itself.
+    #[test]
+    fn old_settings_files_default_the_em516a_sections() {
+        let text = "(graphics: (taa: false, shadow_cascades: 2))";
+        let settings: XindelerSettings = ron::from_str(text).expect("old file parses");
+        assert_eq!(settings.accessibility, AccessibilitySettings::default());
+        assert!(
+            !settings.accessibility.reduce_flashing,
+            "full flashing by default"
+        );
+        assert!(
+            !settings.accessibility.high_contrast_ui,
+            "the normal palette by default"
+        );
+        assert_eq!(settings.tutorial, TutorialSettings::default());
+        assert!(!settings.tutorial.seen, "unseen on a fresh install");
+    }
+
+    /// The new EM-5.16a sub-structs round-trip through save/load intact (the
+    /// persistence path the settings window / tutorial overlay rely on:
+    /// change → restart → survives).
+    #[test]
+    fn em516a_settings_round_trip_through_ron() {
+        let mut settings = XindelerSettings::default();
+        settings.accessibility.reduce_flashing = true;
+        settings.accessibility.high_contrast_ui = true;
+        settings.tutorial.seen = true;
+        let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
+            .expect("settings serialize");
+        let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
+        assert!(round_tripped.accessibility.reduce_flashing);
+        assert!(round_tripped.accessibility.high_contrast_ui);
+        assert!(round_tripped.tutorial.seen);
     }
 
     /// BL-82 EM-5.9 (T56.31): a settings.ron predating the server-browser

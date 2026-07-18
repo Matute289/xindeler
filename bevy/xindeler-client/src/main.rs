@@ -94,6 +94,9 @@ mod targeting;
 mod terrain_stream;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod trade_ui;
+// BL-82 EM-5.16 (T56.43): the first-run tutorial overlay.
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod tutorial_overlay;
 mod voxel_demo;
 // BL-82 holistic-review prevention measure — a hand-maintained audit test
 // enumerating every `*Root` HUD marker component (see the module doc
