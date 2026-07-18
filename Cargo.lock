@@ -12345,6 +12345,8 @@ dependencies = [
  "bevy",
  "bevy_ui_widgets",
  "fluent",
+ "ron",
+ "serde",
  "tempfile",
  "unic-langid",
 ]

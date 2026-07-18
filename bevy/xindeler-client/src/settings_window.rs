@@ -72,15 +72,18 @@ use xindeler_ui::{
 
 use crate::{camera::MainCamera, chat::text_input_focused, combat_hud::Crosshair};
 
-/// The v1 selectable UI locales: `(BCP-47 tag, the locale's OWN native
-/// display name)`. A locale's own name is conventionally shown in itself
-/// (e.g. "Español" stays "Español" no matter the active UI locale), so this
-/// is a plain lookup table, not a `.ftl` catalog. Extend this list — nothing
-/// else changes — as more locales get real translations;
-/// `Localization`'s `en`-fallback (see `xindeler_ui::i18n`'s doc) means an
-/// entry here with only PARTIAL `.ftl` coverage still degrades cleanly
-/// rather than looking broken.
-const AVAILABLE_LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("es", "Español")];
+/// The v1 selectable UI locale TAGS — a curated product decision (which
+/// locales this screen offers), not a duplication of translated content: each
+/// locale's own DISPLAY NAME is read live from its shipped `_manifest.ron`
+/// (`xindeler_ui::i18n::language_name`, `metadata.language_name` — the same
+/// field the legacy `client/i18n` crate's `LanguageMetadata` already sources
+/// this from) rather than hand-copied here (a game-architecture-reviewer
+/// finding on an earlier revision: the copy had already drifted from the
+/// real manifest text). Extend this list — nothing else changes — as more
+/// locales get real translations; `Localization`'s `en`-fallback (see
+/// `xindeler_ui::i18n`'s doc) means an entry here with only PARTIAL `.ftl`
+/// coverage still degrades cleanly rather than looking broken.
+const AVAILABLE_LANGUAGES: &[&str] = &["en", "es"];
 
 // Numeric-control step / clamp bounds (px-free, per setting).
 const UI_SCALE_STEP: f32 = 0.1;
@@ -124,7 +127,20 @@ impl Plugin for SettingsWindowPlugin {
                     sync_settings_window_visibility
                         .after(xindeler_ui::hud_state::apply_hud_actions),
                     sync_tab_panes,
-                    refresh_setting_labels,
+                    // BL-82 EM-5.16 (T56.44, bevy-migration-reviewer finding):
+                    // reads `NonSend<Localization>`, which
+                    // `xindeler_ui::i18n::reload_localization_on_locale_change`
+                    // (inside `LocaleSyncSet`) rebuilds on a locale change —
+                    // Bevy gives NO ordering guarantee between two systems
+                    // with a conflicting `NonSend`/`NonSendMut` access absent
+                    // an explicit edge, so without this the On/Off and
+                    // quality-tier VALUE labels could observe the stale
+                    // bundle the exact frame the user switches languages
+                    // (verified empirically: `.chain()`/`.after(..)` is
+                    // required, declaration order in the tuple alone is not
+                    // enough). Same edge `button::spawn_button_labels`
+                    // already has for the identical hazard.
+                    refresh_setting_labels.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_crosshair_visibility,
                     apply_graphics_settings.run_if(resource_changed::<XindelerSettings>),
                 ),
@@ -901,14 +917,13 @@ fn tier_label_key(tier: GraphicsTier) -> &'static str {
     }
 }
 
-/// A locale's own native display name (see [`AVAILABLE_LANGUAGES`]'s doc for
-/// why this is a plain lookup, not a `.ftl` message) — an unrecognised tag
-/// falls back to showing the raw tag itself rather than panicking.
+/// A locale's own native display name, read straight from its shipped
+/// `_manifest.ron` (see [`AVAILABLE_LANGUAGES`]'s doc for why this reads the
+/// manifest instead of a hand-copied table) — an unrecognised/manifest-less
+/// tag falls back to showing the raw tag itself rather than panicking (see
+/// [`xindeler_ui::i18n::language_name`]'s own doc).
 fn language_display_name(tag: &str) -> String {
-    AVAILABLE_LANGUAGES
-        .iter()
-        .find(|(t, _)| *t == tag)
-        .map_or_else(|| tag.to_owned(), |(_, name)| (*name).to_owned())
+    xindeler_ui::i18n::language_name(&xindeler_ui::i18n::parse_locale(tag))
 }
 
 /// The current value of a control, formatted for display (locale-aware for
@@ -1041,11 +1056,9 @@ fn next_tier(tier: GraphicsTier) -> GraphicsTier {
 fn next_language(current: &str) -> String {
     let idx = AVAILABLE_LANGUAGES
         .iter()
-        .position(|(tag, _)| *tag == current)
+        .position(|&tag| tag == current)
         .unwrap_or(0);
-    AVAILABLE_LANGUAGES[(idx + 1) % AVAILABLE_LANGUAGES.len()]
-        .0
-        .to_owned()
+    AVAILABLE_LANGUAGES[(idx + 1) % AVAILABLE_LANGUAGES.len()].to_owned()
 }
 
 /// Reconciles the live CAMERA render components (SSAO/TAA) to match
@@ -1255,12 +1268,18 @@ mod tests {
         );
     }
 
-    /// `language_display_name` shows a locale's OWN native name, and degrades
-    /// to the raw tag (never panics) for one outside `AVAILABLE_LANGUAGES`.
+    /// `language_display_name` reads the REAL repo `_manifest.ron` for each
+    /// locale (via `VELOREN_ASSETS`/`XINDELER_ASSETS`) rather than a
+    /// hand-copied table, and degrades to the raw tag (never panics) for a
+    /// tag with no manifest at all.
     #[test]
-    fn language_display_name_uses_native_names_and_degrades_for_unknown_tags() {
+    fn language_display_name_reads_the_real_manifest_and_degrades_for_unknown_tags() {
         assert_eq!(language_display_name("en"), "English");
-        assert_eq!(language_display_name("es"), "Español");
+        assert_eq!(
+            language_display_name("es"),
+            "Español de España (Spanish - Spain)",
+            "must read the manifest's own declared name, not a shortened guess"
+        );
         assert_eq!(language_display_name("xx"), "xx");
     }
 
@@ -1435,6 +1454,114 @@ mod tests {
             after_text, before_text,
             "sanity: this assertion is only meaningful if the resolved text actually changed \
              between locales"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44, bevy-migration-reviewer finding): drives the
+    /// REAL `Update` schedule (not hand-ordered `run_system_once` calls, the
+    /// gap the reviewer flagged in the two tests above) with
+    /// `refresh_setting_labels` registered EXACTLY as `SettingsWindowPlugin`
+    /// wires it — `.after(xindeler_ui::i18n::LocaleSyncSet)` — alongside the
+    /// real reload/relocalize chain, and asserts a VALUE label (the
+    /// crosshair toggle's `On`/`Off` button, driven by `value_label`/
+    /// `on_off`, not a bare `LocalizedText`) re-localizes in the SAME
+    /// `app.update()` the locale actually changes. Before the ordering fix,
+    /// `refresh_setting_labels` had no edge against `LocaleSyncSet` and could
+    /// observe the stale `Localization` bundle the exact frame a locale
+    /// switch fires (Bevy gives no ordering guarantee between systems with a
+    /// conflicting `NonSend` access absent an explicit edge). Verified
+    /// non-tautological: dropping this test's own `.after(LocaleSyncSet)`
+    /// edges on `refresh_setting_labels`/`spawn_button_labels` (the SAME
+    /// edges `SettingsWindowPlugin::build`/`XindelerUiPlugin::build`
+    /// register in the real app) reliably reproduces the stale-value
+    /// failure (5/5 runs), confirming this test genuinely exercises the
+    /// hazard rather than passing by construction.
+    #[test]
+    fn switching_locale_relocalizes_a_settings_value_through_the_real_schedule() {
+        use bevy::ecs::schedule::common_conditions::resource_changed;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(XindelerSettings::default());
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<CurrentLocale>();
+
+        // The REAL reactive chain `XindelerUiPlugin` wires (same
+        // `.chain().in_set(..).run_if(..)` shape), plus `spawn_button_labels`
+        // and `refresh_setting_labels` with the SAME `.after(LocaleSyncSet)`
+        // edges `XindelerUiPlugin`/`SettingsWindowPlugin` register them with
+        // in the real app — this is the exact schedule shape under test, not
+        // a simplified stand-in for it.
+        app.add_systems(
+            Update,
+            (
+                xindeler_ui::i18n::reload_localization_on_locale_change,
+                xindeler_ui::i18n::relocalize_text,
+                xindeler_ui::i18n::relocalize_button_labels,
+            )
+                .chain()
+                .in_set(xindeler_ui::i18n::LocaleSyncSet)
+                .run_if(resource_changed::<CurrentLocale>),
+        );
+        app.add_systems(
+            Update,
+            (
+                xindeler_ui::button::spawn_button_labels.after(xindeler_ui::i18n::LocaleSyncSet),
+                refresh_setting_labels.after(xindeler_ui::i18n::LocaleSyncSet),
+            ),
+        );
+
+        app.world_mut()
+            .run_system_once(spawn_settings_window)
+            .expect("spawn runs");
+        app.update(); // materialize button label children
+
+        fn crosshair_toggle_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let (button, children) = world
+                .query::<(Entity, &SettingValueLabel, Option<&Children>)>()
+                .iter(world)
+                .find(|(_, label, _)| label.0 == SettingControl::ShowCrosshair)
+                .map(|(entity, _, children)| (entity, children.map(|c| c[0])))
+                .expect("the crosshair value control was spawned and tagged");
+            if let Some(child) = children {
+                world
+                    .get::<Text>(child)
+                    .expect("label child exists")
+                    .0
+                    .clone()
+            } else {
+                world
+                    .get::<Text>(button)
+                    .expect("label on the entity itself")
+                    .0
+                    .clone()
+            }
+        }
+
+        assert_eq!(
+            crosshair_toggle_text(&mut app),
+            "On",
+            "the crosshair toggle must show the real en catalog value at spawn time"
+        );
+
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.update();
+
+        assert_eq!(
+            crosshair_toggle_text(&mut app),
+            "Activado",
+            "must re-localize to the real es catalog's common-on value in the SAME frame the \
+             locale changed — this is what `refresh_setting_labels.after(LocaleSyncSet)` \
+             guarantees"
         );
     }
 }

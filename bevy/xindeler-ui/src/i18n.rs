@@ -76,6 +76,48 @@ pub fn parse_locale(tag: &str) -> LanguageIdentifier {
     tag.parse().unwrap_or_else(|_| fallback_locale())
 }
 
+/// The one field of a locale's `_manifest.ron` this crate reads — its own
+/// declared display name (e.g. `assets/voxygen/i18n/es/_manifest.ron`'s
+/// `metadata.language_name = "Español de España (Spanish - Spain)"`). A
+/// nested struct (not a flat one) because that's the manifest's real shape;
+/// every other field (`language_identifier`, `fonts`) is intentionally
+/// un-deserialized (`serde` ignores unknown-to-it siblings by default, but
+/// here it's the reverse: we only declare the ONE field we read, so adding a
+/// new manifest field upstream never breaks this parse).
+#[derive(serde::Deserialize)]
+struct LocaleManifest {
+    metadata: LocaleManifestMetadata,
+}
+
+#[derive(serde::Deserialize)]
+struct LocaleManifestMetadata {
+    language_name: String,
+}
+
+/// Reads `lang`'s own declared display name straight from its shipped
+/// `_manifest.ron` (`assets/voxygen/i18n/<lang>/_manifest.ron`) — the SAME
+/// file the legacy `client/i18n` crate's `LanguageMetadata` already sources
+/// this from, rather than hand-copying it into a Rust const (which had
+/// already drifted: a hardcoded `"Español"` vs. the manifest's real
+/// `"Español de España (Spanish - Spain)"`, a game-architecture-reviewer
+/// finding on an earlier revision of this module). Falls back to the bare
+/// BCP-47 tag if the manifest is missing/unparseable — never panics, the
+/// same degrade-clean posture as everything else in this module.
+#[must_use]
+pub fn language_name(lang: &LanguageIdentifier) -> String {
+    let path = assets_root()
+        .join("voxygen/i18n")
+        .join(lang.to_string())
+        .join("_manifest.ron");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return lang.to_string();
+    };
+    ron::from_str::<LocaleManifest>(&text).map_or_else(
+        |_| lang.to_string(),
+        |manifest| manifest.metadata.language_name,
+    )
+}
+
 /// A loaded `.ftl` catalog for one locale, with an `en` fallback bundle for
 /// whatever that locale doesn't cover (see the module doc for the resolve
 /// order).
@@ -282,7 +324,7 @@ pub struct LocaleSyncSet;
 /// read the bundle it just rebuilt, in the same frame.
 pub fn reload_localization_on_locale_change(
     current_locale: Res<CurrentLocale>,
-    mut localization: bevy::ecs::change_detection::NonSendMut<Localization>,
+    mut localization: NonSendMut<Localization>,
 ) {
     let lang = parse_locale(&current_locale.0);
     if *localization.lang() == lang {
@@ -294,7 +336,7 @@ pub fn reload_localization_on_locale_change(
 /// Re-resolves every [`LocalizedText`]-tagged `Text` node from the
 /// just-reloaded [`Localization`] bundle.
 pub fn relocalize_text(
-    localization: bevy::ecs::change_detection::NonSend<Localization>,
+    localization: NonSend<Localization>,
     mut texts: Query<(&LocalizedText, &mut Text)>,
 ) {
     for (tag, mut text) in &mut texts {
@@ -309,7 +351,7 @@ pub fn relocalize_text(
 /// [`crate::button::HudButtonLabel`] from the just-reloaded [`Localization`]
 /// bundle.
 pub fn relocalize_button_labels(
-    localization: bevy::ecs::change_detection::NonSend<Localization>,
+    localization: NonSend<Localization>,
     mut labels: Query<(&LocalizedLabel, &mut crate::button::HudButtonLabel)>,
 ) {
     for (tag, mut label) in &mut labels {
@@ -400,6 +442,32 @@ mod tests {
             es.tr("totally-unknown-key"),
             "totally-unknown-key",
             "a key NEITHER catalog has must still fall back to the bare key, never panic"
+        );
+
+        // -- `language_name` reads the locale's OWN `_manifest.ron`, never a
+        // hand-copied Rust const (the game-architecture-reviewer finding this
+        // closes) --
+        std::fs::write(
+            en_dir.join("_manifest.ron"),
+            "(metadata: (language_name: \"English\", language_identifier: \"en\"), fonts: {})",
+        )
+        .expect("write en manifest fixture");
+        std::fs::write(
+            es_dir.join("_manifest.ron"),
+            "(metadata: (language_name: \"Español de España (Spanish - Spain)\", \
+             language_identifier: \"es\"), fonts: {})",
+        )
+        .expect("write es manifest fixture");
+        assert_eq!(language_name(&langid!("en")), "English");
+        assert_eq!(
+            language_name(&langid!("es")),
+            "Español de España (Spanish - Spain)",
+            "must read the manifest's REAL declared name, not a shortened guess"
+        );
+        assert_eq!(
+            language_name(&langid!("xx")),
+            "xx",
+            "a locale with no _manifest.ron at all falls back to the bare tag, never panics"
         );
 
         // SAFETY: see the function doc comment above; leave the environment
