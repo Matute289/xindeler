@@ -18,6 +18,7 @@ pub mod ai_mode;
 pub mod aurora_overlay;
 pub mod charlist;
 pub mod chat;
+pub mod client_session;
 pub mod crafting;
 pub mod dimension_id;
 pub mod hotbar;
@@ -57,6 +58,7 @@ pub use crate::{
         LocalCharDelete, LocalCharSelect, NetCharList, NetCharListEntry,
     },
     chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
+    client_session::ActiveReplicaSessions,
     crafting::{
         NetCrafting, NetModularComponentSlot, NetRecipe, NetRecipeInput, NetRepairableSlot,
     },

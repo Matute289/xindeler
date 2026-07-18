@@ -337,6 +337,157 @@ mod tests {
         assert_eq!(received, vec![state]);
     }
 
+    /// BL-82 EM-8.2 regression guard: `NetGroupState` sent as
+    /// `SendTargets::Single` reaches ONLY the named client — never every
+    /// connected one. This is the message-level analogue of
+    /// `owner_visibility::skillset_is_owner_scoped_across_two_real_clients`'s
+    /// real two-client `VisibilityFilter::Scope` guard: `NetGroupState`/
+    /// `NetDialogue` are MESSAGES (not components), so `SendTargets::Single`
+    /// — resolved by `xindeler_sim_bridge::social`'s mirrors via
+    /// `xindeler_protocol::ActiveReplicaSessions` — is the correct per-owner
+    /// mechanism here, not a `VisibilityFilter`. Proves the real bug this
+    /// fixes: before EM-8.2, these mirrors hardcoded `SendTargets::All`, so a
+    /// non-owning client would have received another player's private group
+    /// state too.
+    #[test]
+    fn net_group_state_targets_only_the_owning_client() {
+        use bevy_replicon::{
+            prelude::{ClientId, ConnectedClient, SendTargets, ToClients},
+            test_app::TestClientEntity,
+        };
+
+        fn server_connection_entity(server_app: &mut App, client_app: &App) -> Entity {
+            let target = **client_app.world().resource::<TestClientEntity>();
+            server_app
+                .world_mut()
+                .query::<(Entity, &ConnectedClient)>()
+                .iter(server_app.world())
+                .map(|(e, _)| e)
+                .find(|&e| e == target)
+                .expect("the client's own connection entity exists server-side")
+        }
+
+        let mut server_app = new_app();
+        let mut owner_client = new_app();
+        let mut other_client = new_app();
+
+        server_app.connect_client(&mut owner_client);
+        let owner_entity = server_connection_entity(&mut server_app, &owner_client);
+        server_app.connect_client(&mut other_client);
+
+        let state = NetGroupState {
+            group_name: Some("Adventurers".to_owned()),
+            leader: Some(1),
+            members: Vec::new(),
+            pending_invite: None,
+        };
+        server_app.world_mut().write_message(ToClients {
+            targets: SendTargets::Single(ClientId::Client(owner_entity)),
+            message: state.clone(),
+        });
+
+        server_app.update();
+        server_app.exchange_with_client(&mut owner_client);
+        owner_client.update();
+        server_app.exchange_with_client(&mut other_client);
+        other_client.update();
+
+        let owner_received: Vec<_> = owner_client
+            .world_mut()
+            .resource_mut::<Messages<NetGroupState>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            owner_received,
+            vec![state],
+            "the owning client must receive its own NetGroupState"
+        );
+
+        let other_received: Vec<_> = other_client
+            .world_mut()
+            .resource_mut::<Messages<NetGroupState>>()
+            .drain()
+            .collect();
+        assert!(
+            other_received.is_empty(),
+            "a non-owning client must NEVER receive another player's NetGroupState — this is \
+             exactly the SendTargets::All leak BL-82 EM-8.2 closes"
+        );
+    }
+
+    /// The `NetDialogue` analogue of
+    /// `net_group_state_targets_only_the_owning_client` above — an NPC
+    /// dialogue turn addressed to one player must never reach a different
+    /// connected client.
+    #[test]
+    fn net_dialogue_targets_only_the_owning_client() {
+        use bevy_replicon::{
+            prelude::{ClientId, ConnectedClient, SendTargets, ToClients},
+            test_app::TestClientEntity,
+        };
+        use common::rtsim::{Dialogue, DialogueId, DialogueKind};
+
+        fn server_connection_entity(server_app: &mut App, client_app: &App) -> Entity {
+            let target = **client_app.world().resource::<TestClientEntity>();
+            server_app
+                .world_mut()
+                .query::<(Entity, &ConnectedClient)>()
+                .iter(server_app.world())
+                .map(|(e, _)| e)
+                .find(|&e| e == target)
+                .expect("the client's own connection entity exists server-side")
+        }
+
+        let mut server_app = new_app();
+        let mut owner_client = new_app();
+        let mut other_client = new_app();
+
+        server_app.connect_client(&mut owner_client);
+        let owner_entity = server_connection_entity(&mut server_app, &owner_client);
+        server_app.connect_client(&mut other_client);
+
+        let dialogue = NetDialogue {
+            sender_uid: 5,
+            sender_name: "Village Elder".to_owned(),
+            dialogue: Dialogue {
+                id: DialogueId(1),
+                kind: DialogueKind::Ack { tag: 0 },
+            },
+        };
+        server_app.world_mut().write_message(ToClients {
+            targets: SendTargets::Single(ClientId::Client(owner_entity)),
+            message: dialogue.clone(),
+        });
+
+        server_app.update();
+        server_app.exchange_with_client(&mut owner_client);
+        owner_client.update();
+        server_app.exchange_with_client(&mut other_client);
+        other_client.update();
+
+        let owner_received: Vec<_> = owner_client
+            .world_mut()
+            .resource_mut::<Messages<NetDialogue>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            owner_received,
+            vec![dialogue],
+            "the owning client must receive its own NetDialogue turn"
+        );
+
+        let other_received: Vec<_> = other_client
+            .world_mut()
+            .resource_mut::<Messages<NetDialogue>>()
+            .drain()
+            .collect();
+        assert!(
+            other_received.is_empty(),
+            "a non-owning client must NEVER receive another player's NetDialogue — this is \
+             exactly the SendTargets::All leak BL-82 EM-8.2 closes"
+        );
+    }
+
     /// [`GroupActionRequest`] travels client → server and surfaces as
     /// `FromClient<_>` — the wire-shape half (a future remote client's path),
     /// exactly like `crate::tests::player_input_reaches_server`.

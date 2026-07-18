@@ -20,7 +20,9 @@ use xindeler_dimensions::{
     DimensionsPlugin, PredictiveGcConfigPlugin, teardown_completed_dimensions,
 };
 use xindeler_oracle_host::{AiGatewayPlugin, ServerAtmosphereSyncPlugin};
-use xindeler_protocol::{ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin};
+use xindeler_protocol::{
+    ActiveReplicaSessions, ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin,
+};
 use xindeler_sim_bridge::{
     CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin,
     PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SfxLocomotionMirrorPlugin,
@@ -30,7 +32,7 @@ use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
 use crate::{
     dimensions,
-    login::{self, ActiveReplicaSessions, PendingLogins},
+    login::{self, PendingLogins},
     metrics,
     shutdown::{self, ShutdownState},
     sim::{self, SimServerConfig},
@@ -220,16 +222,20 @@ impl Plugin for SimServerPlugin {
             // BL-82 EM-4.2d: per-client interest management, scoping each
             // connected client's replicated-entity visibility to the regions
             // its own `ClientViewpoint` covers (see
-            // `xindeler_protocol::interest`'s module doc comment). Integration
-            // note (EM-4.2c merge): `login.rs`'s handshake does NOT yet set a
-            // real, character-position-derived `ClientViewpoint` — every
-            // client, logged-in or not, still gets
-            // `xindeler-sim-bridge`'s `apply_default_viewpoint_for_new_clients`
-            // stopgap (spectator-style, centred on the world/anchor). Wiring a
-            // real login-derived viewpoint is a follow-up, not attempted here.
-            // Runs in `FixedUpdate`, alongside `SimEntityMirrorPlugin`'s own
-            // `RegionKey` writes, so both settle before `RepliconPlugins`'
-            // `FixedPostUpdate` replication pass.
+            // `xindeler_protocol::interest`'s module doc comment).
+            // Integration note (EM-4.2c merge, UPDATED by EM-8.2): a logged-in
+            // client's `login.rs` handshake now DOES set a real, character-
+            // position-derived `ClientViewpoint` (`handle_character_data`'s
+            // `commands.entity(client_entity).insert(ClientViewpoint::new(..))`
+            // call) — `xindeler-sim-bridge`'s `apply_default_viewpoint_for_new_
+            // clients` stopgap (spectator-style, centred on the world/anchor)
+            // now only ever covers a client that HASN'T logged in yet (or
+            // never will, e.g. a bare test connection with no `LoginRequest`
+            // at all); it never overwrites an already-set `ClientViewpoint`
+            // (see that function's own doc comment). Runs in `FixedUpdate`,
+            // alongside `SimEntityMirrorPlugin`'s own `RegionKey` writes, so
+            // both settle before `RepliconPlugins`' `FixedPostUpdate`
+            // replication pass.
             ClientInterestPlugin,
             // BL-82 EM-4.8: the `on_enter_message -> HudToast` narrative
             // hook (`xindeler_protocol::narrative`). Was a permanent no-op

@@ -37,18 +37,21 @@
 //! ## ⚠️ Known gap: not wired into `xindeler-server-app` yet (disclosed, not
 //! silently narrowed — ecs-design-reviewer finding, BL-82 EM-5.4)
 //! [`ChatBridgePlugin`] is added ONLY by `xindeler-client::listen_server`
-//! today. `xindeler-server-app` (the real dedicated multiplayer server, with
-//! its own per-client `ActiveReplicaSessions` map) has NO chat wiring at all.
-//! This module's design — one [`EmbeddedPlayer`]'s inbox, broadcast via
-//! `SendTargets::All` — is safe ONLY because a listen-server has exactly ONE
-//! real chat participant; the sim's own `Server::send_chat`
-//! (`server/src/state_ext.rs`) already does correct per-client recipient
-//! narrowing (Say/Region by distance, Tell by uid, …), so copying this
-//! exact shape onto `xindeler-server-app`'s multi-client topology would leak
-//! one player's private/proximity-scoped lines to every other connected
-//! client. A real fix needs a NEW bridge reading each active replica
-//! session's own chat inbox and targeting `SendTargets::Single` per
-//! recipient — not a copy-paste of this module. Tracked in
+//! today. `xindeler-server-app` (the real dedicated multiplayer server) has
+//! NO chat wiring at all. This module's design — one [`EmbeddedPlayer`]'s
+//! inbox, broadcast via `SendTargets::All` — is safe ONLY because a
+//! listen-server has exactly ONE real chat participant; the sim's own
+//! `Server::send_chat` (`server/src/state_ext.rs`) already does correct
+//! per-client recipient narrowing (Say/Region by distance, Tell by uid, …),
+//! so copying this exact shape onto `xindeler-server-app`'s multi-client
+//! topology would leak one player's private/proximity-scoped lines to every
+//! other connected client. A real fix needs a NEW bridge reading each active
+//! replica session's own chat inbox and targeting `SendTargets::Single` per
+//! recipient — not a copy-paste of this module — resolving each recipient's
+//! `ClientId` via `xindeler_protocol::ActiveReplicaSessions` (BL-82 EM-8.2:
+//! the SAME correlation resource `crate::social`'s `NetGroupState`/
+//! `NetDialogue` mirrors now use for the identical problem, so this future
+//! chat fix no longer needs to invent its own). Tracked in
 //! `docs/backlog/engine-migration.md`'s EM-5.4 row as a required follow-up
 //! before the EM-5.13 cutover (§Q7=A locks "full parity" — multi-player chat
 //! on the real server is core, not optional).
