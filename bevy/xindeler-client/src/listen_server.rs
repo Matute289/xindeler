@@ -48,9 +48,10 @@ use crate::{
     atmosphere::AtmosphereSyncViewPlugin, char_select::CharSelectViewPlugin, chat::ChatViewPlugin,
     combat_hud::CombatHudViewPlugin, controls_screen::ControlsScreenPlugin,
     entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin, lod::LodCullingPlugin,
-    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, player_input::PlayerInputPlugin,
-    sfx::SfxViewPlugin, social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
+    hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin,
+    localization::ClientLocalizationPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
+    map_view::MapViewPlugin, player_input::PlayerInputPlugin, sfx::SfxViewPlugin,
+    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
     terrain_stream::TerrainStreamPlugin,
 };
 
@@ -325,6 +326,11 @@ impl Plugin for ListenServerPlugin {
         // globes, buff strip, crosshair, death/respawn, overhead health
         // bars) reading the mirror above. Pure Bevy.
         app.add_plugins(CombatHudViewPlugin);
+        // BL-82 EM-5.16 (T56.44): the settings-bridge half of the reactive
+        // i18n pipeline — needs `xindeler_ui::i18n`'s `CurrentLocale`
+        // resource, which `CombatHudViewPlugin`'s own `XindelerUiPlugin`
+        // (just added above) inserts.
+        app.add_plugins(ClientLocalizationPlugin);
         // BL-82 EM-5.8: the social/group/dialogue HUD (player list, group/
         // party frames, invite banner, v1-minimal NPC dialogue) reading the
         // `SocialMirrorPlugin` mirror above. Pure Bevy.
@@ -358,6 +364,11 @@ impl Plugin for ListenServerPlugin {
         // changes to the camera. Reuses the widget kit `CombatHudViewPlugin`
         // already added (`XindelerUiPlugin`). Pure Bevy.
         app.add_plugins(crate::settings_window::SettingsWindowPlugin);
+        // BL-82 EM-5.16 (T56.43): the first-run tutorial overlay — auto-shows
+        // once a real local player exists (unless already dismissed),
+        // re-openable from the Accessibility tab above. Reuses the widget kit
+        // `CombatHudViewPlugin` already added (`XindelerUiPlugin`). Pure Bevy.
+        app.add_plugins(crate::tutorial_overlay::TutorialOverlayPlugin);
         // BL-82 EM-5.3: the skillbar/hotbar screen (drag-to-assign, keybind
         // labels, cooldown sweeps) reading the mirror above. Reuses the
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)

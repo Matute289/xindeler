@@ -71,6 +71,11 @@ mod lod;
 // keeps booting straight into the demo scene.
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod lod_objects;
+// BL-82 EM-5.16 (T56.44): the settings-bridge half of the reactive i18n
+// pipeline (`xindeler_ui::i18n` owns the generic machinery) — reads
+// `XindelerSettings::language` and writes `CurrentLocale`.
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod localization;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod map_view;
 #[cfg(feature = "listen-server")] mod menu;
@@ -96,6 +101,9 @@ mod targeting;
 mod terrain_stream;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod trade_ui;
+// BL-82 EM-5.16 (T56.43): the first-run tutorial overlay.
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod tutorial_overlay;
 mod voxel_demo;
 // BL-82 holistic-review prevention measure — a hand-maintained audit test
 // enumerating every `*Root` HUD marker component (see the module doc

@@ -18,14 +18,32 @@
 //! reconcile (`apply_graphics_settings`) moved there with them. This module is
 //! now pure menu — it owns no settings state.
 //!
+//! ## BL-82 EM-5.16 (T56.44) — full i18n
+//! Every button label and the "Game Menu" heading now resolve through
+//! `xindeler_ui::i18n::Localization` and are tagged
+//! [`xindeler_ui::i18n::LocalizedLabel`]/[`xindeler_ui::i18n::LocalizedText`],
+//! so this screen re-localizes live the moment the settings window's Language
+//! tab changes — see that module's own doc comment for the full reactive
+//! chain. Resume/Settings/Controls reuse the SAME `common-*` keys the
+//! settings window's own tab bar already resolves; Quit reuses the pre-
+//! existing `esc_menu-quit_game` key (unmodified, isolation law).
+//! Servers/Logout stay honest STUBS (see [`spawn_esc_menu`]'s doc), so their
+//! "(soon)" qualifier lives in two NEW keys (`esc_menu-servers_soon`/
+//! `esc_menu-logout_soon`) added to `esc_menu.ftl` rather than English text
+//! bolted onto a real key.
+//!
 //! Compiled only under `listen-server`/`net-client`, matching every other
 //! `xindeler_ui`-consuming screen module in this crate.
 
-use bevy::{ecs::schedule::common_conditions::not, prelude::*};
+use bevy::{
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
+    prelude::*,
+};
 use xindeler_input::{ActionState, GameInput};
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{Localization, LocalizedLabel, LocalizedText},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -148,7 +166,12 @@ fn sync_esc_menu_visibility(
 /// and carries `GlobalZIndex(zlayer::MODAL_WINDOWS)` so `bevy_ui` picking
 /// (highest z-partition first) routes clicks to the pause panel rather than the
 /// always-on ambient HUD chrome (hotbar/orbs) it overlaps.
-fn spawn_esc_menu(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+fn spawn_esc_menu(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
+) {
     let theme: HudTheme = *theme;
     commands
         .spawn((
@@ -177,48 +200,66 @@ fn spawn_esc_menu(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
                 node.align_items = AlignItems::Stretch;
             });
             panel_entity.with_children(|panel| {
-                heading(panel, &fonts, &theme, "Game Menu", 28.0);
+                heading(panel, &fonts, &theme, &localization, "esc_menu-title", 28.0);
 
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Resume"))
+                labeled_button(panel, &theme, &fonts, &localization, "common-resume")
                     .observe(handle_resume_click);
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Settings"))
+                labeled_button(panel, &theme, &fonts, &localization, "common-settings")
                     .observe(handle_settings_click);
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Controls"))
+                labeled_button(panel, &theme, &fonts, &localization, "common-controls")
                     .observe(handle_controls_click);
                 // Stub until the EM-5.9 server browser (T56.31) lands — it is
                 // in a separate, not-yet-merged PR chain (#166→#168), and
                 // wiring it here would create exactly the cross-PR dependency
                 // this task deliberately avoids. TODO(EM-5.9 merge): open the
                 // real server browser here.
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Servers (soon)"))
-                    .observe(handle_servers_click);
+                labeled_button(
+                    panel,
+                    &theme,
+                    &fonts,
+                    &localization,
+                    "esc_menu-servers_soon",
+                )
+                .observe(handle_servers_click);
                 // Stub: there is no character-select / main-menu flow to return
                 // to on this embedded-server path yet (EM-5.9/5.14). TODO: route
                 // to the main menu once that state machine merges.
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Logout (soon)"))
+                labeled_button(panel, &theme, &fonts, &localization, "esc_menu-logout_soon")
                     .observe(handle_logout_click);
-                panel
-                    .spawn(button_bundle(&theme, &fonts, "Quit"))
+                labeled_button(panel, &theme, &fonts, &localization, "esc_menu-quit_game")
                     .observe(handle_quit_click);
             });
         });
 }
 
-/// A section/title heading line inside the panel.
+/// Spawns a themed button whose label is a resolved `.ftl` message value,
+/// tagged [`LocalizedLabel`] so it re-resolves live on a locale change (the
+/// same small helper `settings_window.rs` uses).
+fn labeled_button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) -> EntityCommands<'a> {
+    let mut button = parent.spawn(button_bundle(theme, fonts, &localization.tr(key)));
+    button.insert(LocalizedLabel(key));
+    button
+}
+
+/// A section/title heading line inside the panel — resolved from `key` and
+/// tagged [`LocalizedText`] so it re-resolves live on a locale change.
 fn heading(
     panel: &mut ChildSpawnerCommands,
     fonts: &HudFonts,
     theme: &HudTheme,
-    text: &str,
+    localization: &Localization,
+    key: &'static str,
     size: f32,
 ) {
     panel.spawn((
-        Text(text.to_owned()),
+        LocalizedText(key),
+        Text(localization.tr(key)),
         TextFont {
             font: bevy::text::FontSource::Handle(fonts.title.clone()),
             font_size: bevy::text::FontSize::Px(size),
@@ -264,6 +305,16 @@ fn handle_quit_click(_activate: On<Activate>, mut exit: MessageWriter<AppExit>) 
     exit.write(AppExit::Success);
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all the structural tests below need (they never assert specific
+/// translated text — see `switching_locale_relocalizes_the_quit_button_live`
+/// for the one test that DOES, which loads the real catalog instead).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -292,6 +343,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_esc_menu)
@@ -432,6 +484,78 @@ mod tests {
             actions.is_empty(),
             "Escape while a hard lock is active must not emit any HudAction — no pause-menu \
              open/close on the same press"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44): switching the active locale re-localizes the
+    /// already-spawned Quit button live, using the REAL repo `.ftl` catalogs
+    /// (not a synthetic fixture) via `VELOREN_ASSETS`/`XINDELER_ASSETS` — the
+    /// same real-catalog proof `settings_window.rs`'s own hot-swap test uses,
+    /// exercised here against a `LocalizedLabel`-tagged BUTTON (not a bare
+    /// `LocalizedText` node), covering the other half of the T56.44 reactive
+    /// chain (`relocalize_button_labels` + `button::spawn_button_labels`'s
+    /// `Changed<HudButtonLabel>` propagation).
+    #[test]
+    fn switching_locale_relocalizes_the_quit_button_live() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        // `button::spawn_button_labels` is what turns `HudButtonLabel` into a
+        // real `Text` child — needed for BOTH the initial spawn and the
+        // post-hot-swap relabel this test drives.
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_esc_menu)
+            .expect("spawn_esc_menu runs");
+        app.update(); // let spawn_button_labels give the Quit button its child
+
+        fn quit_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "esc_menu-quit_game")
+                .map(|(_, children)| children[0])
+                .expect("the Quit button was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            quit_button_text(&mut app),
+            "Quit Game",
+            "the Quit button must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        let after = quit_button_text(&mut app);
+        assert_eq!(
+            after, "Salir del juego",
+            "must resolve to the REAL es catalog's own esc_menu-quit_game value, not the en \
+             fallback"
         );
     }
 }

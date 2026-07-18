@@ -150,16 +150,54 @@ pub(crate) fn update_image_button_visuals(
 /// in caller code before `Commands` flush, so the label child is added on a
 /// short delay via a marker rather than requiring callers to also manage
 /// `with_children` themselves).
+///
+/// BL-82 EM-5.16 (T56.44): also the live hot-swap seam for a button's label —
+/// `spawn_button_labels` reacts to ANY change to this field, not just its
+/// initial `Added` insertion, so `crate::i18n::relocalize_button_labels`
+/// mutating `.0` on a locale change propagates onto the real `Text` child
+/// in-place (see that system's doc comment). `pub` (not `pub(crate)`) only
+/// because `spawn_button_labels`/`relocalize_button_labels` are themselves
+/// `pub` (screen-crate tests drive the real reactive chain directly, e.g.
+/// `xindeler-client::esc_menu`'s hot-swap regression test) — Rust's
+/// private-interfaces lint requires a public function's query types to be at
+/// least as visible as the function; this is still an internal
+/// implementation detail in spirit (constructible only via
+/// [`button_bundle`]/[`image_button_bundle`]).
 #[derive(Component, Debug, Clone)]
-pub(crate) struct HudButtonLabel(pub String, pub bevy::asset::Handle<bevy::text::Font>);
+pub struct HudButtonLabel(pub String, pub bevy::asset::Handle<bevy::text::Font>);
 
-/// Spawns the text child for any [`HudButton`] that doesn't have one yet.
-pub(crate) fn spawn_button_labels(
+/// Spawns the text child for a [`HudButton`] the first time its
+/// [`HudButtonLabel`] appears, and updates that SAME child in place on every
+/// later change (the T56.44 hot-swap seam — see [`HudButtonLabel`]'s own doc
+/// comment) rather than spawning a second, duplicate child.
+pub fn spawn_button_labels(
     mut commands: bevy::ecs::system::Commands,
     theme: bevy::ecs::system::Res<HudTheme>,
-    buttons: Query<(Entity, &HudButtonLabel), bevy::ecs::query::Added<HudButtonLabel>>,
+    buttons: Query<
+        (
+            Entity,
+            &HudButtonLabel,
+            Option<&bevy::ecs::hierarchy::Children>,
+        ),
+        bevy::ecs::query::Changed<HudButtonLabel>,
+    >,
+    mut texts: Query<&mut Text>,
 ) {
-    for (entity, label) in &buttons {
+    for (entity, label, children) in &buttons {
+        if let Some(children) = children {
+            let existing = children
+                .iter()
+                .copied()
+                .find(|&child| texts.contains(child));
+            if let Some(child) = existing {
+                if let Ok(mut text) = texts.get_mut(child)
+                    && text.0 != label.0
+                {
+                    text.0 = label.0.clone();
+                }
+                continue;
+            }
+        }
         commands.entity(entity).with_children(|parent| {
             parent.spawn((
                 Text(label.0.clone()),
@@ -254,6 +292,49 @@ mod tests {
             .find_map(|c| app.world().get::<Text>(c))
             .expect("a Text child exists");
         assert_eq!(text.0, "Respawn");
+    }
+
+    /// BL-82 EM-5.16 (T56.44): a LATER change to `HudButtonLabel` (e.g. a
+    /// locale hot-swap re-resolving the label) updates the EXISTING text
+    /// child in place — it must not spawn a second, duplicate child.
+    #[test]
+    fn relabeling_a_button_updates_its_existing_child_in_place() {
+        let mut app = new_app();
+        let theme = HudTheme::default();
+        let fonts = crate::theme::HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        };
+
+        let button = app
+            .world_mut()
+            .spawn(button_bundle(&theme, &fonts, "Settings"))
+            .id();
+        app.update();
+        let child_before = *app
+            .world()
+            .get::<bevy::ecs::hierarchy::Children>(button)
+            .expect("label child was spawned")
+            .first()
+            .expect("exactly one child");
+
+        app.world_mut()
+            .get_mut::<HudButtonLabel>(button)
+            .expect("HudButtonLabel present")
+            .0 = "Opciones".to_owned();
+        app.update();
+
+        let children = app
+            .world()
+            .get::<bevy::ecs::hierarchy::Children>(button)
+            .expect("still has children");
+        assert_eq!(children.len(), 1, "relabeling must not add a second child");
+        assert_eq!(children[0], child_before, "the SAME child entity is reused");
+        let text = app
+            .world()
+            .get::<Text>(child_before)
+            .expect("text child still exists");
+        assert_eq!(text.0, "Opciones");
     }
 
     /// Hovering a button restyles its background to the theme's border/

@@ -47,6 +47,14 @@ pub enum HudWindow {
     /// `voxygen/src/hud/esc_menu.rs`) — those remain future scope; this variant
     /// is the Resume + Video-settings slice.
     EscMenu,
+    /// BL-82 EM-5.16 (T56.43) — the first-run tutorial overlay
+    /// (`xindeler-client::tutorial_overlay`): a dismissible panel listing
+    /// basic-controls tips, shown automatically once (`XindelerSettings::
+    /// tutorial.seen`) and re-openable any time afterwards (e.g. the
+    /// Accessibility settings tab's "Show tutorial again" button).
+    /// Participates in the mutually-exclusive window slot + cursor-free rule
+    /// exactly like every other real window above.
+    Tutorial,
 }
 
 /// The current HUD window state. `Resource`, not per-entity — there is
