@@ -1,3 +1,13 @@
+## BL-82 EM-5.16 (T56.44): new keys added for the Bevy `char_select.rs` port —
+## no existing key (here or in `common.ftl`) already covered these concepts;
+## see that file's own doc comment for the full key-mapping rationale.
+char_selection-select_character = Select Character
+char_selection-no_characters_yet = No characters yet.
+char_selection-delete = Delete
+char_selection-body_female = Female
+char_selection-body_male = Male
+char_selection-weapon_for_class = Weapon
+
 char_selection-loading_characters = Loading characters...
 char_selection-delete_permanently = Permanently delete this character?
 char_selection-enter_world = Enter World

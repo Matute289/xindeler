@@ -1,6 +1,13 @@
 hud-bag-tab_items = Items
 hud-bag-tab_stats = Stats
 hud-bag-inventory = { $playername }'s Inventory
+# BL-82 EM-5.16 (T56.44 follow-up) — Bevy client legacy-inventory rebuild's
+# title bar: a non-interpolated static form of `hud-bag-inventory` above
+# (`Localization::tr` has no Fluent-argument support, and the player's own
+# character name isn't mirrored to the client yet anyway).
+hud-bag-title = Inventory
+# The equip-picker modal's "Unequip" row (BL-82 EM-5.18 T58.12).
+hud-bag-unequip = Unequip
 hud-bag-stats_title = { $playername }'s Stats
 hud-bag-armor = Armor
 hud-bag-stats = Stats

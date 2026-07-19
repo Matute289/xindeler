@@ -11,6 +11,16 @@ hud-skill_tree-mining = Mining
 hud-skill_tree-class = Class
 hud-skill_tree-class-title = Class Skills
 hud-skill_tree-class-empty = No class skills available yet
+hud-skill_tree-feats = Feats
+
+## BL-82 EM-5.16 (T56.44 follow-up) — the Bevy diary's generic skill-node
+## tooltip status phrasing (the node's OWN name stays an untranslated `Skill`
+## debug identifier — see `diary.rs`'s own doc comment for why)
+hud-skill_tree-node_passive = (passive)
+hud-skill_tree-node_maxed = Maxed
+hud-skill_tree-node_level = Level
+hud-skill_tree-node_cost = Cost
+hud-skill_tree-node_locked = Locked (prerequisites not met)
 
 ## BL-06 P3a — Warrior class skill strings
 

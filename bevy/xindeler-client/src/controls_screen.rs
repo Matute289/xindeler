@@ -25,6 +25,21 @@
 //! [`xindeler_ui::XindelerUiPlugin`] today via [`crate::combat_hud::
 //! CombatHudViewPlugin`] — same posture as every other screen module in this
 //! crate).
+//!
+//! ## BL-82 EM-5.16 (T56.44 follow-up) — full i18n
+//! The heading and every [`CURATED_ACTIONS`] row label now resolve through
+//! [`Localization`] and are tagged [`LocalizedText`], so this screen
+//! re-localizes live on a locale change — see `settings_window.rs`'s own doc
+//! comment for the full reactive chain. Row labels use
+//! [`GameInput::ftl_key`], resolving the SAME `gameinput-*` keys
+//! `gameinput.ftl` already carries for every variant (ported verbatim from
+//! legacy `voxygen`) — replacing the old `display_name()` camelCase-splitting
+//! heuristic this module used to fall back on. The "awaiting key"/"unbound"
+//! button states reuse the pre-existing `hud-settings-awaitingkey`/
+//! `hud-settings-unbound` keys (legacy `hud/settings.ftl` — not currently
+//! resolved by `settings_window.rs` itself, this screen is their one real
+//! consumer today); the per-row conflict warning uses a new
+//! `hud-controls-conflicts_with` key (`hud/controls.ftl`).
 
 use std::collections::HashMap;
 
@@ -37,7 +52,7 @@ use xindeler_input::{
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
-    i18n::{Localization, LocalizedText},
+    i18n::{CurrentLocale, Localization, LocalizedText},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -102,7 +117,14 @@ impl Plugin for ControlsScreenPlugin {
                     // gather_input`, which both explicitly depend on it).
                     toggle_controls_screen.after(xindeler_input::InputResolveSet),
                     sync_window_visibility,
-                    refresh_binding_labels,
+                    // BL-82 EM-5.16 (T56.44 follow-up): reads `NonSend<
+                    // Localization>`, rebuilt by `reload_localization_on_
+                    // locale_change` inside `LocaleSyncSet` — same explicit
+                    // ordering edge `settings_window.rs`'s own
+                    // `refresh_setting_labels` documents needing (Bevy gives
+                    // no ordering guarantee between two systems with
+                    // conflicting `NonSend`/`NonSendMut` access absent one).
+                    refresh_binding_labels.after(xindeler_ui::i18n::LocaleSyncSet),
                     persist_and_track_conflicts,
                 ),
             );
@@ -240,10 +262,7 @@ fn spawn_controls_screen(
                 // and tagged `LocalizedText` so it re-localizes live; reuses
                 // `common-controls` (the same key the settings window's own
                 // Controls tab button and the esc menu's Controls button
-                // resolve), not a new one. The per-action row labels below
-                // (`display_name`) still hardcode English — porting those
-                // needs a real `.ftl` key per `GameInput` variant, a larger
-                // follow-up tracked in the PR description, not done here.
+                // resolve), not a new one.
                 panel.spawn((
                     LocalizedText("common-controls"),
                     Text(localization.tr("common-controls")),
@@ -255,7 +274,7 @@ fn spawn_controls_screen(
                     TextColor(theme.palette.text),
                 ));
                 for &input in CURATED_ACTIONS {
-                    spawn_row(panel, &theme, &fonts, &keymap, input);
+                    spawn_row(panel, &theme, &fonts, &keymap, &localization, input);
                 }
             });
         });
@@ -266,6 +285,7 @@ fn spawn_row(
     theme: &HudTheme,
     fonts: &HudFonts,
     keymap: &KeyMap,
+    localization: &Localization,
     input: GameInput,
 ) {
     panel
@@ -276,8 +296,15 @@ fn spawn_row(
             ..Default::default()
         })
         .with_children(|row| {
+            // BL-82 EM-5.16 (T56.44 follow-up): resolves the REAL per-action
+            // `gameinput-*` key (`GameInput::ftl_key`) — `gameinput.ftl`
+            // already carries one for every variant, ported verbatim from
+            // legacy `voxygen`. Tagged `LocalizedText` so it re-localizes
+            // live, replacing the old `display_name()` camelCase-splitting
+            // heuristic.
             row.spawn((
-                Text(display_name(input)),
+                LocalizedText(input.ftl_key()),
+                Text(localization.tr(input.ftl_key())),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
                     font_size: bevy::text::FontSize::Px(16.0),
@@ -293,7 +320,7 @@ fn spawn_row(
             let keyboard_label = keymap
                 .keyboard
                 .get_binding(input)
-                .map_or_else(|| "Unbound".to_owned(), key_label);
+                .map_or_else(|| localization.tr("hud-settings-unbound"), key_label);
             row.spawn(button_bundle(theme, fonts, &keyboard_label))
                 .insert(BindingButton {
                     input,
@@ -305,10 +332,10 @@ fn spawn_row(
                     },
                 );
 
-            let gamepad_label = keymap
-                .gamepad
-                .get_button_binding(input)
-                .map_or_else(|| "Unbound".to_owned(), gamepad_binding_label);
+            let gamepad_label = keymap.gamepad.get_button_binding(input).map_or_else(
+                || localization.tr("hud-settings-unbound"),
+                gamepad_binding_label,
+            );
             row.spawn(button_bundle(theme, fonts, &gamepad_label))
                 .insert(BindingButton {
                     input,
@@ -333,16 +360,28 @@ fn spawn_row(
         });
 }
 
-/// Every frame: recomputes each rebind button's label from the CURRENT
-/// [`KeyMap`] (showing "Press a key…" while its own request is the pending
-/// one) and each row's conflict warning from [`RebindConflicts`]. Cheap at
-/// this screen's row count (`CURATED_ACTIONS.len()` × 2 buttons); a
-/// `Res::is_changed()` gate is deliberately skipped in v1 — see this
-/// function's own note if row count ever grows enough to matter.
+/// Recomputes each rebind button's label from the CURRENT [`KeyMap`] (showing
+/// the locale's "awaiting key" text while its own request is the pending one)
+/// and each row's conflict warning from [`RebindConflicts`]. Gated on
+/// `is_changed()` across every resource it reads (including [`CurrentLocale`]
+/// — see below) rather than the unconditional every-frame walk this function
+/// used pre-T56.44; cheap either way at this screen's row count
+/// (`CURATED_ACTIONS.len()` × 2 buttons), but the locale-change requirement
+/// below needed a real change source to react to.
+///
+/// BL-82 EM-5.16 (T56.44 follow-up): also reruns on a locale change (ordered
+/// `.after(LocaleSyncSet)`, see the plugin registration) so the "awaiting
+/// key"/"unbound"/"conflicts with" text re-resolves live, not just on the next
+/// keymap edit — it reuses the pre-existing `hud-settings-awaitingkey`/
+/// `hud-settings-unbound` keys (legacy `hud/settings.ftl`; this screen is
+/// their one real consumer today — see the module doc comment) rather than
+/// inventing near-duplicates.
 fn refresh_binding_labels(
     keymap: Res<KeyMap>,
     request: Res<RebindRequest>,
     conflicts: Res<RebindConflicts>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     buttons: Query<(&BindingButton, &Children)>,
     mut conflict_labels: Query<(&ConflictLabel, &mut Text), Without<BindingButton>>,
     // Disjoint from `conflict_labels` via `Without<ConflictLabel>` — both
@@ -350,6 +389,13 @@ fn refresh_binding_labels(
     // panic at schedule build time.
     mut texts: Query<&mut Text, Without<ConflictLabel>>,
 ) {
+    if !keymap.is_changed()
+        && !request.is_changed()
+        && !conflicts.is_changed()
+        && !current_locale.is_changed()
+    {
+        return;
+    }
     for (binding, children) in &buttons {
         let pending = matches!(
             (request.0, binding.device),
@@ -359,17 +405,20 @@ fn refresh_binding_labels(
             (Some(RebindTarget::Gamepad(i)), Device::Gamepad) if i == binding.input
         );
         let label = if pending {
-            "Press a key…".to_owned()
+            localization.tr("hud-settings-awaitingkey")
         } else {
             match binding.device {
                 Device::Keyboard => keymap
                     .keyboard
                     .get_binding(binding.input)
-                    .map_or_else(|| "Unbound".to_owned(), key_label),
+                    .map_or_else(|| localization.tr("hud-settings-unbound"), key_label),
                 Device::Gamepad => keymap
                     .gamepad
                     .get_button_binding(binding.input)
-                    .map_or_else(|| "Unbound".to_owned(), gamepad_binding_label),
+                    .map_or_else(
+                        || localization.tr("hud-settings-unbound"),
+                        gamepad_binding_label,
+                    ),
             }
         };
         for child in children.iter() {
@@ -388,9 +437,10 @@ fn refresh_binding_labels(
             .filter(|c| !c.is_empty())
             .map_or_else(String::new, |c| {
                 format!(
-                    "Conflicts with: {}",
+                    "{}: {}",
+                    localization.tr("hud-controls-conflicts_with"),
                     c.iter()
-                        .map(|i| display_name(*i))
+                        .map(|i| localization.tr(i.ftl_key()))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -427,22 +477,6 @@ fn persist_and_track_conflicts(
             error!("controls screen: failed to persist settings.ron after a rebind: {err}");
         }
     }
-}
-
-/// A readable label for a curated [`GameInput`] (no i18n lookup yet — full
-/// Fluent coverage is EM-5.16's job; this is a plain prettifier of the enum
-/// name, same "not wired yet, not a regression" posture EM-5.1/5.2 already
-/// documented for their own v1 strings).
-fn display_name(input: GameInput) -> String {
-    let debug = format!("{input:?}");
-    let mut out = String::with_capacity(debug.len() + 4);
-    for (i, ch) in debug.chars().enumerate() {
-        if i > 0 && ch.is_uppercase() {
-            out.push(' ');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// A short, readable label for a keyboard/mouse binding (`KeyW` → `W`,
@@ -524,12 +558,6 @@ mod tests {
             .expect("ControlsScreenRoot exists")
             .0;
         assert_eq!(z_index, zlayer::MODAL_WINDOWS);
-    }
-
-    #[test]
-    fn display_name_spaces_camel_case() {
-        assert_eq!(display_name(GameInput::MoveForward), "Move Forward");
-        assert_eq!(display_name(GameInput::Jump), "Jump");
     }
 
     #[test]
@@ -689,6 +717,63 @@ mod tests {
             app.world().resource::<HudState>().is_open(HudWindow::Diary),
             "a single ToggleWindow(Diary) message must leave the Diary window open — a second \
              consumer double-applying the same message would toggle it back off"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): a row's action label resolves the
+    /// REAL `gameinput-*` key from the repo's own catalog at spawn time, and
+    /// switching the active locale re-localizes it live — the same real-
+    /// catalog hot-swap proof `settings_window.rs`/`esc_menu.rs` use, applied
+    /// to the `GameInput::ftl_key()` row labels this follow-up added.
+    #[test]
+    fn switching_locale_relocalizes_a_curated_action_row_label_live() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(KeyMap::default());
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<CurrentLocale>();
+
+        app.world_mut()
+            .run_system_once(spawn_controls_screen)
+            .expect("spawn_controls_screen runs");
+
+        fn move_forward_label(app: &mut App) -> String {
+            let world = app.world_mut();
+            world
+                .query::<(&LocalizedText, &Text)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == GameInput::MoveForward.ftl_key())
+                .map(|(_, text)| text.0.clone())
+                .expect("the Move Forward row label was spawned and tagged")
+        }
+
+        assert_eq!(
+            move_forward_label(&mut app),
+            "Move Forward",
+            "must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_text)
+            .expect("relocalize runs");
+
+        assert_eq!(
+            move_forward_label(&mut app),
+            "Avanzar",
+            "must resolve to the REAL es catalog's own gameinput-moveforward value, not the en \
+             fallback"
         );
     }
 }

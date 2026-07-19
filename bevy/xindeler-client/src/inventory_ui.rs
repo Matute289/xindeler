@@ -73,7 +73,7 @@
 //! `map_view.rs`'s own independent `Escape` consumers.
 
 use bevy::{
-    ecs::schedule::common_conditions::not,
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
     picking::events::{Click, Pointer},
     prelude::*,
 };
@@ -89,6 +89,7 @@ use xindeler_protocol::{
 use xindeler_ui::{
     button::{Activate, HudButtonImages, button_bundle, image_button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     images::{HudImageKey, HudImages},
     panel::image_panel_bundle,
     scroll::scroll_view_bundle,
@@ -324,7 +325,12 @@ impl Plugin for InventoryUiPlugin {
                     push_loot_pickup_notifications,
                     // BL-82 EM-5.18 Phase 2 — the equip-picker modal.
                     sync_equip_picker_visibility,
-                    rebuild_equip_picker_contents,
+                    // BL-82 EM-5.16 (T56.44 follow-up): now also gates its
+                    // rebuild on a locale change (see the function's own
+                    // updated doc comment) — needs the same `.after(
+                    // LocaleSyncSet)` edge `settings_window.rs`'s `refresh_
+                    // setting_labels` documents as load-bearing.
+                    rebuild_equip_picker_contents.after(xindeler_ui::i18n::LocaleSyncSet),
                     close_equip_picker_on_escape,
                     // BL-82 EM-5.17/5.18 legacy-inventory rebuild — the
                     // left stat column + footer readouts.
@@ -418,6 +424,7 @@ fn spawn_inventory_window(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
+    localization: NonSend<Localization>,
 ) {
     commands
         .spawn((
@@ -505,11 +512,21 @@ fn spawn_inventory_window(
                         ));
                         // Centre: title (centred within the remaining space).
                         title_row.spawn((
-                            // TODO(BL-82 follow-up): the local player's
-                            // character name needs a protocol mirror field
-                            // to render "Inventario de <name>" — this stays
-                            // the plain legacy title until that exists.
-                            Text("Inventario".to_owned()),
+                            // BL-82 EM-5.16 (T56.44 follow-up): this used to
+                            // hardcode the Spanish word "Inventario" directly
+                            // in the English-titled code path (a real bug,
+                            // not a stylistic choice) — now a real, reactively
+                            // localized key. `hud-bag-inventory` already
+                            // exists but interpolates `{ $playername }`
+                            // (`Localization::tr` has no Fluent-argument
+                            // support), and the player's real character name
+                            // isn't mirrored to the client yet anyway (the
+                            // gap the removed TODO flagged) — so this is its
+                            // own new, non-interpolated static key until that
+                            // mirror field exists and the title can grow a
+                            // genuinely dynamic name suffix.
+                            LocalizedText("hud-bag-title"),
+                            Text(localization.tr("hud-bag-title")),
                             TextFont {
                                 font: bevy::text::FontSource::Handle(fonts.title.clone()),
                                 font_size: bevy::text::FontSize::Px(22.0),
@@ -720,6 +737,22 @@ fn spawn_close_button(
         node.padding = UiRect::all(Val::Px(0.0));
     });
     button.observe(on_close_button_click());
+}
+
+/// Spawns a themed button whose label is a resolved `.ftl` message value,
+/// tagged [`LocalizedLabel`] so it re-resolves live on a locale change (the
+/// same small helper `settings_window.rs`/`esc_menu.rs`/`trade_ui.rs` all
+/// already use).
+fn labeled_button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) -> EntityCommands<'a> {
+    let mut button = parent.spawn(button_bundle(theme, fonts, &localization.tr(key)));
+    button.insert(LocalizedLabel(key));
+    button
 }
 
 /// BL-82 EM-5.18 legacy-inventory round 2 — the close button's [`Activate`]
@@ -1415,6 +1448,8 @@ fn rebuild_equip_picker_contents(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
+    localization: NonSend<Localization>,
+    current_locale: Res<CurrentLocale>,
     picker: Res<EquipPickerState>,
     player: Query<Ref<NetInventory>, With<NetLocalPlayer>>,
     content_root: Query<Entity, With<EquipPickerContentRoot>>,
@@ -1426,12 +1461,21 @@ fn rebuild_equip_picker_contents(
     // can add or remove a compatible item, or free/occupy the `free_bag_slot`
     // the Unequip row targets. Gating solely on `picker.is_changed()` left the
     // candidate list (and the cached free-slot) stale — flagged by both the
-    // bevy-migration and ecs-design reviewers of this PR.
+    // bevy-migration and ecs-design reviewers of this PR. BL-82 EM-5.16
+    // (T56.44 follow-up, bevy-migration-reviewer finding): ALSO rebuild on a
+    // locale change while open — the "Unequip" row's label is resolved via
+    // `Localization::tr` (`spawn_unequip_row`) but this gate previously had
+    // no locale term at all, so a language switch left it stale until an
+    // unrelated inventory/picker change happened to force a rebuild.
     let inventory_changed = inventory
         .as_ref()
         .map(|inv| inv.is_changed())
         .unwrap_or(false);
-    if !picker.is_changed() && !(picker.open_slot.is_some() && inventory_changed) {
+    let picker_open = picker.open_slot.is_some();
+    if !picker.is_changed()
+        && !(picker_open && inventory_changed)
+        && !(picker_open && current_locale.is_changed())
+    {
         return;
     }
     let Ok(root_entity) = content_root.single() else {
@@ -1470,7 +1514,14 @@ fn rebuild_equip_picker_contents(
 
     rebuild_children(&mut commands, root_entity, &children_query, |parent| {
         if occupied {
-            spawn_unequip_row(parent, &theme, &fonts, open_slot, free_bag_slot);
+            spawn_unequip_row(
+                parent,
+                &theme,
+                &fonts,
+                &localization,
+                open_slot,
+                free_bag_slot,
+            );
         }
         for (bag_slot, item) in candidates {
             spawn_candidate_row(parent, &theme, &fonts, &images, bag_slot, item, open_slot);
@@ -1491,13 +1542,12 @@ fn spawn_unequip_row(
     parent: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    localization: &Localization,
     open_slot: EquipSlot,
     free_bag_slot: Option<InvSlotId>,
 ) {
-    let mut row = parent.spawn((
-        button_bundle(theme, fonts, "Unequip"),
-        EquipPickerUnequipRow,
-    ));
+    let mut row = labeled_button(parent, theme, fonts, localization, "hud-bag-unequip");
+    row.insert(EquipPickerUnequipRow);
     match free_bag_slot {
         Some(free_bag_slot) => {
             row.observe(on_unequip_row_click(open_slot, free_bag_slot));
@@ -1632,6 +1682,15 @@ fn close_equip_picker_on_escape(
     }
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all these structural tests need (mirrors `settings_window.rs`/
+/// `esc_menu.rs`/`trade_ui.rs`'s own identically-named test helper).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -1702,6 +1761,7 @@ mod tests {
         app.init_asset::<bevy::image::Image>();
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_inventory_window)
@@ -1948,6 +2008,7 @@ mod tests {
         app.init_asset::<bevy::image::Image>();
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_inventory_window)
@@ -2003,6 +2064,7 @@ mod tests {
         let portrait_handle = images.get(HudImageKey::CharacterPortrait);
         let chrome_handle = images.get(HudImageKey::InventoryChrome);
         app.insert_resource(images);
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_inventory_window)
@@ -2078,6 +2140,7 @@ mod tests {
         app.init_asset::<bevy::image::Image>();
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_inventory_window)
@@ -2232,6 +2295,10 @@ mod tests {
         });
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(test_localization());
+        // BL-82 EM-5.16 (T56.44 follow-up): `rebuild_equip_picker_contents`
+        // now reads `Res<CurrentLocale>` as part of its rebuild gate.
+        app.init_resource::<CurrentLocale>();
         app.insert_resource(EquipPickerState::default());
         app.add_message::<InventoryActionRequest>();
         app
@@ -2446,6 +2513,129 @@ mod tests {
             app.world().resource::<EquipPickerState>().open_slot,
             None,
             "picking an item must close the picker"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes the already-spawned title-bar heading AND the equip
+    /// picker's "Unequip" button live, using the REAL repo `.ftl` catalogs
+    /// (not a synthetic fixture) via `VELOREN_ASSETS`/`XINDELER_ASSETS` — the
+    /// same idiom `esc_menu.rs`'s `switching_locale_relocalizes_the_quit_
+    /// button_live` test uses, covering both halves of the reactive chain
+    /// (a bare `LocalizedText` node via `relocalize_text`, and a
+    /// `LocalizedLabel`-tagged button via `relocalize_button_labels` +
+    /// `button::spawn_button_labels`) for this screen.
+    #[test]
+    fn switching_locale_relocalizes_the_inventory_title_and_unequip_button_live() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+        app.insert_resource(EquipPickerState::default());
+        app.add_message::<InventoryActionRequest>();
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/bag.ftl"],
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_inventory_window)
+            .expect("spawn_inventory_window runs");
+        // `EquipPickerContentRoot` is spawned by `spawn_equip_picker_root`
+        // (a SEPARATE top-level system — see its own doc comment: the picker
+        // is a sibling root, not nested under `InventoryWindowRoot`), not by
+        // `spawn_inventory_window` — without this, `rebuild_equip_picker_
+        // contents`'s `content_root.single()` silently finds nothing and the
+        // whole rebuild below is a no-op (caught by this test itself).
+        app.world_mut()
+            .run_system_once(spawn_equip_picker_root)
+            .expect("spawn_equip_picker_root runs");
+
+        let open_slot = EquipSlot::Armor(ArmorSlot::Feet);
+        app.world_mut().spawn((NetLocalPlayer, NetInventory {
+            slots: Vec::new(),
+            equipped: vec![NetEquippedSlot {
+                slot: open_slot,
+                item: Some(one_handed_weapon_stack()),
+            }],
+            capacity: 0,
+        }));
+        *app.world_mut().resource_mut::<EquipPickerState>() = EquipPickerState {
+            open_slot: Some(open_slot),
+        };
+        app.world_mut()
+            .run_system_once(rebuild_equip_picker_contents)
+            .expect("system runs");
+        app.update(); // let spawn_button_labels give the Unequip button its child
+
+        fn title_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            world
+                .query::<(&LocalizedText, &Text)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-bag-title")
+                .map(|(_, text)| text.0.clone())
+                .expect("the title bar heading was spawned and tagged")
+        }
+
+        fn unequip_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-bag-unequip")
+                .map(|(_, children)| children[0])
+                .expect("the Unequip button was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            title_text(&mut app),
+            "Inventory",
+            "the title bar must show the real en catalog text at spawn time"
+        );
+        assert_eq!(
+            unequip_button_text(&mut app),
+            "Unequip",
+            "the Unequip button must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_text)
+            .expect("relocalize_text runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize_button_labels runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change
+
+        assert_eq!(
+            title_text(&mut app),
+            "Inventario",
+            "must resolve to the REAL es catalog's own hud-bag-title value, not the en fallback"
+        );
+        assert_eq!(
+            unequip_button_text(&mut app),
+            "Desequipar",
+            "must resolve to the REAL es catalog's own hud-bag-unequip value, not the en fallback"
         );
     }
 }

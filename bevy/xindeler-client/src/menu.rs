@@ -60,8 +60,10 @@ use serde::Deserialize;
 use xindeler_app::{AppState, SavedServer, XindelerSettings};
 use xindeler_sim_bridge::{ConnectStage, EmbeddedPlayer, SimServer};
 use xindeler_ui::{
+    XindelerUiPlugin,
     button::{Activate, HudButtonImages, button_bundle, image_button_bundle},
     hud_state::HudState,
+    i18n::{CurrentLocale, Localization},
     panel::panel_bundle,
     scroll::scroll_view_bundle,
     theme::{HudFonts, HudTheme},
@@ -80,6 +82,19 @@ pub struct MainMenuPlugin;
 
 impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
+        // BL-82 EM-5.16 (T56.44): the same idempotent guard every other
+        // `xindeler_ui`-consuming view plugin in this crate uses (see
+        // `combat_hud.rs`'s own comment on why — several plugins each want
+        // `Localization`/`CurrentLocale`/the theme resources, and Bevy panics
+        // on a duplicate non-unique plugin add). The main menu is the one
+        // screen guaranteed to run before any gameplay plugin's `Startup`
+        // logic has had a chance to matter, but the PLUGIN itself (and thus
+        // `Localization`/`CurrentLocale`) only needs to be present in the
+        // `App`, regardless of `AppState` — this guard makes that true even
+        // if `MainMenuPlugin` is ever the first (or only) UI plugin added.
+        if !app.is_plugin_added::<XindelerUiPlugin>() {
+            app.add_plugins(XindelerUiPlugin);
+        }
         app.init_resource::<MenuScreen>()
             .init_resource::<LoginForm>()
             .init_resource::<ServerBrowser>()
@@ -101,7 +116,19 @@ impl Plugin for MainMenuPlugin {
             .add_systems(
                 Update,
                 (
-                    build_menu,
+                    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer
+                    // finding): `build_menu` folds the active locale into its
+                    // own `Local` rebuild-cache key, so — like `settings_
+                    // window.rs`'s `refresh_setting_labels` documents as
+                    // load-bearing — it must run `.after(LocaleSyncSet)`:
+                    // Bevy gives no ordering guarantee between two systems
+                    // with conflicting `NonSend`/`NonSendMut` `Localization`
+                    // access absent an explicit edge, and without one a
+                    // locale switch could read the stale bundle once and then
+                    // never rebuild again (the cache-key gate is now
+                    // satisfied). Every system below chained `.after(build_
+                    // menu)` transitively inherits this ordering too.
+                    build_menu.after(xindeler_ui::i18n::LocaleSyncSet),
                     read_login_input,
                     read_browser_input,
                     render_login_fields.after(build_menu),
@@ -160,6 +187,7 @@ fn smoke_autoconnect(
     mut form: ResMut<LoginForm>,
     mut settings: ResMut<XindelerSettings>,
     mut next: ResMut<NextState<AppState>>,
+    localization: NonSend<Localization>,
     mut frames: Local<u32>,
 ) {
     *frames += 1;
@@ -168,7 +196,7 @@ fn smoke_autoconnect(
         return;
     }
     form.online = false;
-    attempt_connect(&mut form, &mut settings, &mut next);
+    attempt_connect(&mut form, &mut settings, &mut next, &localization);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,15 +574,22 @@ fn probe_server(address: String) -> ProbeResult {
 }
 
 /// A one-line human summary of a row's query state (painted into its status
-/// text each frame by [`render_server_rows`]).
-fn status_summary(state: &QueryState) -> String {
+/// text each frame by [`render_server_rows`]). `reason` (a raw OS/network
+/// error string) and the numeric ping/version/player-count VALUES are
+/// genuinely dynamic data, never translatable; only the surrounding static
+/// words ("querying…"/"unreachable"/"v:"/"players:") resolve through the
+/// active locale.
+fn status_summary(state: &QueryState, localization: &Localization) -> String {
     match state {
         QueryState::Idle => "…".to_owned(),
-        QueryState::Querying => "querying…".to_owned(),
+        QueryState::Querying => localization.tr("main-server_browser-querying"),
         QueryState::Done(Err(err)) => {
             let mut reason = err.clone();
             reason.truncate(40);
-            format!("unreachable ({reason})")
+            format!(
+                "{} ({reason})",
+                localization.tr("main-server_browser-unreachable")
+            )
         },
         QueryState::Done(Ok(status)) => {
             let ping = status
@@ -564,7 +599,11 @@ fn status_summary(state: &QueryState) -> String {
             let players = status
                 .players
                 .map_or_else(|| "—".to_owned(), |(n, cap)| format!("{n}/{cap}"));
-            format!("{ping}   v: {version}   players: {players}")
+            format!(
+                "{ping}   {} {version}   {} {players}",
+                localization.tr("main-server_browser-version_label"),
+                localization.tr("main-server_browser-players_label")
+            )
         },
     }
 }
@@ -814,6 +853,7 @@ fn enter_connecting(
     form: Res<LoginForm>,
     tips: Res<LoadingTips>,
     credits: Res<Credits>,
+    localization: NonSend<Localization>,
 ) {
     // Online never actually reaches here (Connect stays on the login screen for
     // online — see `attempt_connect`); guard so a stray future online path can't
@@ -864,6 +904,7 @@ fn enter_connecting(
         images.as_deref(),
         &tip,
         &credits,
+        &localization,
     );
 }
 
@@ -875,6 +916,7 @@ fn build_connecting_screen(
     images: Option<&MenuImages>,
     tip: &str,
     credits: &Credits,
+    localization: &Localization,
 ) {
     let mut root = commands.spawn((
         ConnectingRoot,
@@ -942,7 +984,7 @@ fn build_connecting_screen(
                 ));
                 row.spawn((
                     ConnectStageText,
-                    Text(stage_label(ConnectStage::Starting).to_owned()),
+                    Text(stage_label(ConnectStage::Starting, localization)),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
                         font_size: bevy::text::FontSize::Px(18.0),
@@ -994,9 +1036,13 @@ fn build_connecting_screen(
             },
         ));
 
-        // Rotating gameplay tip.
+        // Rotating gameplay tip. `main-tip` is the exact key the legacy
+        // `voxygen/src/menu/main/ui/connecting.rs` resolves for this same
+        // "Tip: " prefix (`format!("{} {}", i18n.get_msg("main-tip"), tip)`)
+        // — the tip TEXT itself comes from data-driven `loading_tips.ron`
+        // (see `pick_tip`), not a literal here, so it stays as-is.
         screen.spawn((
-            Text(format!("Tip: {tip}")),
+            Text(format!("{} {tip}", localization.tr("main-tip"))),
             TextFont {
                 font: bevy::text::FontSource::Handle(fonts.body.clone()),
                 font_size: bevy::text::FontSize::Px(14.0),
@@ -1080,18 +1126,30 @@ const SPINNER_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
 /// Frames the spinner holds each glyph (so it ticks at a readable rate).
 const SPINNER_HOLD: u32 = 6;
 
-/// The human-readable label for a real boot stage.
-fn stage_label(stage: ConnectStage) -> &'static str {
+/// The `.ftl` key for a real boot stage's human-readable label. This
+/// `ConnectStage` set is a simpler, Xindeler-specific offline-boot state
+/// machine (see `xindeler_sim_bridge::ConnectStage`) — it does not line up
+/// 1:1 with the legacy client's much finer-grained, server/client-bracketed
+/// `hud-init-stage-*` set (`hud/misc.ftl`, e.g. `[Server]: Applying database
+/// migrations...`), so new dedicated keys are used here rather than forcing a
+/// mismatched reuse.
+fn stage_label_key(stage: ConnectStage) -> &'static str {
     match stage {
-        ConnectStage::Starting => "Preparing…",
-        ConnectStage::GeneratingWorld => "Generating your world…",
-        ConnectStage::EstablishingConnection => "Establishing connection…",
-        ConnectStage::CheckingVersion => "Checking server version…",
-        ConnectStage::Authenticating => "Authenticating…",
-        ConnectStage::LoadingWorldData => "Loading world data…",
-        ConnectStage::PreparingClient => "Preparing client…",
-        ConnectStage::EnteringWorld => "Entering world…",
+        ConnectStage::Starting => "main-connect_stage-starting",
+        ConnectStage::GeneratingWorld => "main-connect_stage-generating_world",
+        ConnectStage::EstablishingConnection => "main-connect_stage-establishing_connection",
+        ConnectStage::CheckingVersion => "main-connect_stage-checking_version",
+        ConnectStage::Authenticating => "main-connect_stage-authenticating",
+        ConnectStage::LoadingWorldData => "main-connect_stage-loading_world_data",
+        ConnectStage::PreparingClient => "main-connect_stage-preparing_client",
+        ConnectStage::EnteringWorld => "main-connect_stage-entering_world",
     }
+}
+
+/// The human-readable label for a real boot stage, resolved through the
+/// active locale.
+fn stage_label(stage: ConnectStage, localization: &Localization) -> String {
+    localization.tr(stage_label_key(stage))
 }
 
 /// Picks a tip pseudo-randomly (dependency-free: seeded off the wall clock, so
@@ -1112,6 +1170,7 @@ fn pick_tip(tips: &LoadingTips) -> String {
 /// (or the "Entering world" beat once the boot has resolved).
 fn render_connecting(
     mut task: Option<ResMut<ConnectTask>>,
+    localization: NonSend<Localization>,
     mut stage_text: Query<&mut Text, (With<ConnectStageText>, Without<ConnectMotdText>)>,
     mut motd_text: Query<&mut Text, (With<ConnectMotdText>, Without<ConnectStageText>)>,
     mut spinner: Query<
@@ -1134,10 +1193,13 @@ fn render_connecting(
         task.stage.lock().map(|s| *s).unwrap_or_default()
     };
 
+    // Runs every frame regardless of any rebuild cache, so re-resolving
+    // through `localization` here already picks up a live locale change with
+    // no extra plumbing (same reasoning as `render_login_fields` et al.).
     for mut text in &mut stage_text {
-        let label = stage_label(stage);
+        let label = stage_label(stage, &localization);
         if text.0 != label {
-            text.0 = label.to_owned();
+            text.0 = label;
         }
     }
     for mut node in &mut bar {
@@ -1218,13 +1280,10 @@ fn drive_connecting(world: &mut World) {
         if thread_died_silently {
             info!("connecting: offline world boot thread ended without a result (likely panicked)");
             finish_connect_task(world);
+            let crashed_msg = world.non_send::<Localization>().tr("main-boot_crashed");
             {
                 let mut form = world.resource_mut::<LoginForm>();
-                form.error = Some(
-                    "Could not start a world (the boot process crashed). Check the logs and try \
-                     again."
-                        .to_owned(),
-                );
+                form.error = Some(crashed_msg);
             }
             *world.resource_mut::<MenuScreen>() = MenuScreen::Login;
             world
@@ -1256,13 +1315,10 @@ fn drive_connecting(world: &mut World) {
         Err(err) => {
             info!("connecting: offline world boot failed: {err}");
             finish_connect_task(world);
+            let failed_msg = world.non_send::<Localization>().tr("main-boot_failed");
             {
                 let mut form = world.resource_mut::<LoginForm>();
-                form.error = Some(
-                    "Could not start a world (missing assets or map data). Check XINDELER_ASSETS \
-                     / the LFS map blobs and try again."
-                        .to_owned(),
-                );
+                form.error = Some(failed_msg);
             }
             *world.resource_mut::<MenuScreen>() = MenuScreen::Login;
             world
@@ -1412,6 +1468,16 @@ const MENU_BACKDROP: Color = Color::srgb(0.04, 0.05, 0.08);
 /// (Re)builds the menu tree whenever the current [`MenuScreen`] changes (or the
 /// root is missing, e.g. on first entry or after a return to the menu). Keeps a
 /// `Local` of the last-built screen so it doesn't rebuild every frame.
+///
+/// BL-82 EM-5.16 (T56.44): the rebuild key now also carries the CURRENT
+/// locale tag. Every static label inside the per-screen `spawn_*` builders is
+/// resolved via `Localization::tr` at build time (never tagged `LocalizedText`/
+/// `LocalizedLabel` — this whole tree is torn down and respawned from scratch
+/// on any key change, exactly the same "resolve once at rebuild time, bust the
+/// cache on a locale change" posture `char_select.rs`'s `rebuild_content`
+/// uses), so folding the locale into the key is what makes a language switch
+/// actually re-resolve every menu string live.
+#[allow(clippy::too_many_arguments)]
 fn build_menu(
     mut commands: Commands,
     theme: Option<Res<HudTheme>>,
@@ -1419,11 +1485,14 @@ fn build_menu(
     images: Option<Res<MenuImages>>,
     screen: Res<MenuScreen>,
     form: Res<LoginForm>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     roots: Query<Entity, With<MenuRoot>>,
-    mut last_built: Local<Option<MenuScreen>>,
+    mut last_built: Local<Option<(MenuScreen, String)>>,
 ) {
     let root_exists = !roots.is_empty();
-    if root_exists && *last_built == Some(*screen) {
+    let key = (*screen, current_locale.0.clone());
+    if root_exists && last_built.as_ref() == Some(&key) {
         return;
     }
     let (Some(theme), Some(fonts)) = (theme, fonts) else {
@@ -1500,15 +1569,21 @@ fn build_menu(
                 spawn_logo(panel, images);
             }
             match *screen {
-                MenuScreen::Disclaimer => spawn_disclaimer(panel, &theme, &fonts, images),
-                MenuScreen::Main => spawn_main(panel, &theme, &fonts, images),
-                MenuScreen::Login => spawn_login(panel, &theme, &fonts, images, &form),
-                MenuScreen::ServerBrowser => spawn_server_browser(panel, &theme, &fonts, images),
+                MenuScreen::Disclaimer => {
+                    spawn_disclaimer(panel, &theme, &fonts, images, &localization)
+                },
+                MenuScreen::Main => spawn_main(panel, &theme, &fonts, images, &localization),
+                MenuScreen::Login => {
+                    spawn_login(panel, &theme, &fonts, images, &form, &localization)
+                },
+                MenuScreen::ServerBrowser => {
+                    spawn_server_browser(panel, &theme, &fonts, images, &localization)
+                },
             }
         });
     });
 
-    *last_built = Some(*screen);
+    *last_built = Some(key);
 }
 
 /// Spawns a menu button — image-backed with the legacy carved-button chrome
@@ -1599,26 +1674,43 @@ fn body_text(
     ));
 }
 
-/// The first-run pre-alpha disclaimer.
+/// The first-run pre-alpha disclaimer. The heading reuses `common-disclaimer`
+/// (the exact key legacy's own `voxygen/src/menu/main/ui/disclaimer.rs`
+/// resolves for this exact concept); the body copy + Accept button wording are
+/// Xindeler-specific rewrites of legacy's own upstream Veloren `main-notice` —
+/// not the same content, so new dedicated keys carry this port's actual copy
+/// rather than silently swapping in the legacy boilerplate text (see
+/// `main.ftl`'s own new-keys section comment).
 fn spawn_disclaimer(
     panel: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
     images: Option<&MenuImages>,
+    localization: &Localization,
 ) {
-    heading(panel, fonts, theme, "Disclaimer", 22.0);
+    heading(
+        panel,
+        fonts,
+        theme,
+        &localization.tr("common-disclaimer"),
+        22.0,
+    );
     body_text(
         panel,
         fonts,
         theme.palette.text,
-        "Xindeler is early, pre-alpha software built on the Veloren engine. Expect bugs, missing \
-         features, placeholder art, and changes that can wipe characters and worlds between \
-         builds. Nothing here is final.\n\nBy continuing you acknowledge this is an unfinished \
-         work in progress.",
+        &localization.tr("main-xindeler_disclaimer_body"),
         15.0,
     );
-    menu_button(panel, theme, fonts, images, "I understand — continue").observe(accept_disclaimer);
-    menu_button(panel, theme, fonts, images, "Quit").observe(quit_game);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-xindeler_disclaimer_accept"),
+    )
+    .observe(accept_disclaimer);
+    menu_button(panel, theme, fonts, images, &localization.tr("common-quit")).observe(quit_game);
 }
 
 /// The main menu: Play / Options / Quit.
@@ -1627,18 +1719,50 @@ fn spawn_main(
     theme: &HudTheme,
     fonts: &HudFonts,
     images: Option<&MenuImages>,
+    localization: &Localization,
 ) {
+    // The tagline embeds an internal epic/task code ("BL-82") in player-facing
+    // copy — a pre-existing dev-placeholder smell this i18n pass preserves
+    // verbatim (only translating it, not rewriting the copy) rather than
+    // silently editing it; flagged for Matías to reconsider separately.
     body_text(
         panel,
         fonts,
         theme.palette.text_muted,
-        "A voxel RPG — BL-82 Bevy client",
+        &localization.tr("main-xindeler_tagline"),
         14.0,
     );
-    menu_button(panel, theme, fonts, images, "Play").observe(go_to_login);
-    menu_button(panel, theme, fonts, images, "Multiplayer").observe(open_server_browser);
-    menu_button(panel, theme, fonts, images, "Options").observe(options_notice);
-    menu_button(panel, theme, fonts, images, "Quit").observe(quit_game);
+    // "Play" reuses `main-singleplayer-play` — the legacy world-selector's own
+    // "confirm and play" button key; there is no dedicated top-level "Play"
+    // key upstream since legacy's main menu splits straight into Singleplayer/
+    // Multiplayer buttons instead of this port's unified Play → Login flow.
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-singleplayer-play"),
+    )
+    .observe(go_to_login);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("common-multiplayer"),
+    )
+    .observe(open_server_browser);
+    // Reuses `common-settings` — legacy's own (commented-out) Options button
+    // in `voxygen/src/menu/main/ui/login.rs` resolves this same key.
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("common-settings"),
+    )
+    .observe(options_notice);
+    menu_button(panel, theme, fonts, images, &localization.tr("common-quit")).observe(quit_game);
     status_line(panel, fonts, theme);
 }
 
@@ -1649,21 +1773,38 @@ fn spawn_login(
     fonts: &HudFonts,
     images: Option<&MenuImages>,
     form: &LoginForm,
+    localization: &Localization,
 ) {
-    heading(panel, fonts, theme, "Play", 30.0);
+    heading(
+        panel,
+        fonts,
+        theme,
+        &localization.tr("main-singleplayer-play"),
+        30.0,
+    );
 
     // Offline/Online mode toggle.
-    menu_button(panel, theme, fonts, images, mode_label(form.online))
-        .insert(ModeToggleLabel)
-        .observe(toggle_mode);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &mode_label(form.online, localization),
+    )
+    .insert(ModeToggleLabel)
+    .observe(toggle_mode);
 
+    // Username/Password/Server reuse `main-username`/`main-password`/
+    // `main-server` — the exact keys legacy's own
+    // `voxygen/src/menu/main/ui/login.rs` resolves for these same three
+    // fields.
     login_field(
         panel,
         theme,
         fonts,
         images,
         LoginField::Username,
-        "Username",
+        &localization.tr("main-username"),
     );
     login_field(
         panel,
@@ -1671,7 +1812,7 @@ fn spawn_login(
         fonts,
         images,
         LoginField::Password,
-        "Password",
+        &localization.tr("main-password"),
     );
     login_field(
         panel,
@@ -1679,21 +1820,37 @@ fn spawn_login(
         fonts,
         images,
         LoginField::Server,
-        "Server address",
+        &localization.tr("main-server"),
     );
 
     body_text(
         panel,
         fonts,
         theme.palette.text_muted,
-        "Offline hosts a private singleplayer world. Online multiplayer connects via the in-game \
-         server browser (coming soon).",
+        &localization.tr("main-xindeler_login_body"),
         12.0,
     );
 
-    menu_button(panel, theme, fonts, images, "Connect").observe(connect_clicked);
-    menu_button(panel, theme, fonts, images, "Server browser").observe(open_server_browser);
-    menu_button(panel, theme, fonts, images, "Back").observe(back_to_main);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-connect"),
+    )
+    .observe(connect_clicked);
+    // "Server browser" reuses `common-servers` — legacy's own
+    // `voxygen/src/menu/main/ui/login.rs` resolves this exact key for the
+    // button that opens the same server-browser screen.
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("common-servers"),
+    )
+    .observe(open_server_browser);
+    menu_button(panel, theme, fonts, images, &localization.tr("common-back")).observe(back_to_main);
     status_line(panel, fonts, theme);
 }
 
@@ -1765,12 +1922,16 @@ fn status_line(panel: &mut ChildSpawnerCommands, fonts: &HudFonts, theme: &HudTh
     ));
 }
 
-fn mode_label(online: bool) -> &'static str {
-    if online {
-        "Mode: Online (multiplayer)"
+/// The mode toggle's label, resolved through the active locale (both
+/// variants are one fully static string each — `main-mode_online`/
+/// `main-mode_offline` — rather than composing fragments, since there are
+/// only ever these two possible values).
+fn mode_label(online: bool, localization: &Localization) -> String {
+    localization.tr(if online {
+        "main-mode_online"
     } else {
-        "Mode: Offline (singleplayer)"
-    }
+        "main-mode_offline"
+    })
 }
 
 /// The server browser: a scrollable saved-server list (live ping/version/
@@ -1783,15 +1944,24 @@ fn spawn_server_browser(
     theme: &HudTheme,
     fonts: &HudFonts,
     images: Option<&MenuImages>,
+    localization: &Localization,
 ) {
-    heading(panel, fonts, theme, "Server Browser", 30.0);
+    // Reuses `main-servers-select_server` — legacy's own
+    // `voxygen/src/menu/main/ui/servers.rs` title for this exact same
+    // saved-server-list screen (wording differs — "Select a server" vs
+    // "Server Browser" — but it is the identical concept/screen).
+    heading(
+        panel,
+        fonts,
+        theme,
+        &localization.tr("main-servers-select_server"),
+        30.0,
+    );
     body_text(
         panel,
         fonts,
         theme.palette.text_muted,
-        "Saved multiplayer servers. Ping / version / players are queried live and concurrently; \
-         pick a server and Connect. (Remote play is still being brought online — see the notes on \
-         Connect.)",
+        &localization.tr("main-xindeler_server_browser_body"),
         12.0,
     );
 
@@ -1802,14 +1972,20 @@ fn spawn_server_browser(
         .insert(ServerListContainer);
 
     // Add-server form.
-    body_text(panel, fonts, theme.palette.text_muted, "Add a server", 13.0);
+    body_text(
+        panel,
+        fonts,
+        theme.palette.text_muted,
+        &localization.tr("main-server_browser-add_server_heading"),
+        13.0,
+    );
     add_field(
         panel,
         theme,
         fonts,
         images,
         AddField::Address,
-        "Address (host or host:port)",
+        &localization.tr("main-server_browser-address_label"),
     );
     add_field(
         panel,
@@ -1817,16 +1993,40 @@ fn spawn_server_browser(
         fonts,
         images,
         AddField::Nickname,
-        "Nickname (optional)",
+        &localization.tr("main-server_browser-nickname_label"),
     );
-    menu_button(panel, theme, fonts, images, "Add to list").observe(add_server_clicked);
+    // Reuses `common-add` — legacy's own `voxygen/src/menu/main/ui/
+    // connecting.rs` resolves this exact key for its analogous "add a
+    // server" button.
+    menu_button(panel, theme, fonts, images, &localization.tr("common-add"))
+        .observe(add_server_clicked);
 
     // Action buttons.
-    menu_button(panel, theme, fonts, images, "Refresh").observe(refresh_clicked);
-    menu_button(panel, theme, fonts, images, "Connect to selected")
-        .observe(connect_selected_clicked);
-    menu_button(panel, theme, fonts, images, "Delete selected").observe(delete_selected_clicked);
-    menu_button(panel, theme, fonts, images, "Back").observe(browser_back);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-server_browser-refresh"),
+    )
+    .observe(refresh_clicked);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-server_browser-connect_selected"),
+    )
+    .observe(connect_selected_clicked);
+    menu_button(
+        panel,
+        theme,
+        fonts,
+        images,
+        &localization.tr("main-server_browser-delete_selected"),
+    )
+    .observe(delete_selected_clicked);
+    menu_button(panel, theme, fonts, images, &localization.tr("common-back")).observe(browser_back);
 
     // The browser's own status/notice line.
     panel.spawn((
@@ -1906,6 +2106,7 @@ fn add_field(
 fn render_login_fields(
     form: Res<LoginForm>,
     theme: Option<Res<HudTheme>>,
+    localization: NonSend<Localization>,
     mut fields: Query<(&FieldText, &mut Text), Without<ModeToggleLabel>>,
     mut boxes: Query<(&FieldBox, &mut bevy::ui::BorderColor)>,
     toggles: Query<&Children, With<ModeToggleLabel>>,
@@ -1920,7 +2121,7 @@ fn render_login_fields(
             LoginField::Server => form.server.clone(),
         };
         let new = if display.is_empty() && !focused {
-            placeholder(field.0).to_owned()
+            placeholder(field.0, &localization)
         } else if focused {
             format!("{display}_")
         } else {
@@ -1938,10 +2139,12 @@ fn render_login_fields(
         };
         *border = bevy::ui::BorderColor::all(colour);
     }
+    // Runs every frame regardless of any rebuild cache, so re-resolving here
+    // already picks up a live locale change with no extra plumbing.
     for children in &toggles {
         for &child in children {
             if let Ok(mut text) = toggle_texts.get_mut(child) {
-                let label = mode_label(form.online).to_owned();
+                let label = mode_label(form.online, &localization);
                 if text.0 != label {
                     text.0 = label;
                 }
@@ -1950,12 +2153,12 @@ fn render_login_fields(
     }
 }
 
-fn placeholder(field: LoginField) -> &'static str {
-    match field {
-        LoginField::Username => "(click to type a username)",
-        LoginField::Password => "(optional — for authenticated servers)",
-        LoginField::Server => "(offline: not needed)",
-    }
+fn placeholder(field: LoginField, localization: &Localization) -> String {
+    localization.tr(match field {
+        LoginField::Username => "main-login-username_placeholder",
+        LoginField::Password => "main-login-password_placeholder",
+        LoginField::Server => "main-login-server_placeholder",
+    })
 }
 
 /// Mirrors [`LoginForm::error`] into the status line.
@@ -1969,11 +2172,11 @@ fn render_status_line(form: Res<LoginForm>, mut lines: Query<&mut Text, With<Sta
 }
 
 /// Placeholder text for an empty, unfocused add-server field.
-fn add_placeholder(field: AddField) -> &'static str {
-    match field {
-        AddField::Address => "(e.g. play.example.com:14004)",
-        AddField::Nickname => "(optional display name)",
-    }
+fn add_placeholder(field: AddField, localization: &Localization) -> String {
+    localization.tr(match field {
+        AddField::Address => "main-server_browser-address_placeholder",
+        AddField::Nickname => "main-server_browser-nickname_placeholder",
+    })
 }
 
 /// Mirrors the browser's add-form buffers into their field text (focused field
@@ -1983,6 +2186,7 @@ fn add_placeholder(field: AddField) -> &'static str {
 fn render_browser_fields(
     browser: Res<ServerBrowser>,
     theme: Option<Res<HudTheme>>,
+    localization: NonSend<Localization>,
     mut fields: Query<(&AddFieldText, &mut Text), Without<BrowserStatusText>>,
     mut boxes: Query<(&AddFieldBox, &mut bevy::ui::BorderColor)>,
     mut status: Query<&mut Text, (With<BrowserStatusText>, Without<AddFieldText>)>,
@@ -1995,7 +2199,7 @@ fn render_browser_fields(
             AddField::Nickname => browser.add_nickname.clone(),
         };
         let new = if value.is_empty() && !focused {
-            add_placeholder(field.0).to_owned()
+            add_placeholder(field.0, &localization)
         } else if focused {
             format!("{value}_")
         } else {
@@ -2034,6 +2238,8 @@ fn rebuild_server_list(
     browser: Res<ServerBrowser>,
     theme: Option<Res<HudTheme>>,
     fonts: Option<Res<HudFonts>>,
+    localization: NonSend<Localization>,
+    current_locale: Res<CurrentLocale>,
     containers: Query<(Entity, Option<&Children>), With<ServerListContainer>>,
     mut last_revision: Local<Option<u64>>,
 ) {
@@ -2047,8 +2253,15 @@ fn rebuild_server_list(
         return;
     };
     let container_empty = children.is_none_or(|c| c.is_empty());
+    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer finding): ALSO
+    // rebuild on a locale change when there's a real (non-empty) list up —
+    // the `"main-server_browser-no_saved_servers"` placeholder is resolved
+    // via `Localization::tr`, but this gate previously had no locale term,
+    // so a language switch left it stale until an unrelated browser-list
+    // change happened to force a rebuild.
     let needs_rebuild = *last_revision != Some(browser.list_revision)
-        || (container_empty && !browser.rows.is_empty());
+        || (container_empty && !browser.rows.is_empty())
+        || (!container_empty && current_locale.is_changed());
     if !needs_rebuild {
         return;
     }
@@ -2066,7 +2279,7 @@ fn rebuild_server_list(
     commands.entity(container).with_children(|list| {
         if browser.rows.is_empty() {
             list.spawn((
-                Text("No saved servers yet — add one below.".to_owned()),
+                Text(localization.tr("main-server_browser-no_saved_servers")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
                     font_size: bevy::text::FontSize::Px(14.0),
@@ -2117,7 +2330,7 @@ fn rebuild_server_list(
                 ));
                 r.spawn((
                     ServerRowStatus(i),
-                    Text(status_summary(&row.state)),
+                    Text(status_summary(&row.state, &localization)),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
                         font_size: bevy::text::FontSize::Px(12.0),
@@ -2138,6 +2351,7 @@ fn render_server_rows(
     screen: Res<MenuScreen>,
     browser: Res<ServerBrowser>,
     theme: Option<Res<HudTheme>>,
+    localization: NonSend<Localization>,
     mut status_texts: Query<(&ServerRowStatus, &mut Text)>,
     mut row_borders: Query<(&ServerRowUi, &mut bevy::ui::BorderColor)>,
 ) {
@@ -2149,7 +2363,7 @@ fn render_server_rows(
         let new = browser
             .rows
             .get(tag.0)
-            .map_or_else(String::new, |row| status_summary(&row.state));
+            .map_or_else(String::new, |row| status_summary(&row.state, &localization));
         if text.0 != new {
             text.0 = new;
         }
@@ -2211,6 +2425,7 @@ fn read_login_input(
     mut form: ResMut<LoginForm>,
     mut settings: ResMut<XindelerSettings>,
     mut next: ResMut<NextState<AppState>>,
+    localization: NonSend<Localization>,
 ) {
     if *screen != MenuScreen::Login {
         keyboard.read().for_each(drop);
@@ -2222,7 +2437,7 @@ fn read_login_input(
         }
         match &ev.logical_key {
             Key::Tab => form.cycle_focus(),
-            Key::Enter => attempt_connect(&mut form, &mut settings, &mut next),
+            Key::Enter => attempt_connect(&mut form, &mut settings, &mut next, &localization),
             Key::Escape => {
                 form.error = None;
                 form.focused = None;
@@ -2271,9 +2486,12 @@ fn back_to_main(
     *screen = MenuScreen::Main;
 }
 
-fn options_notice(_activate: On<Activate>, mut form: ResMut<LoginForm>) {
-    form.error =
-        Some("Settings are available from the in-game Esc menu once you're playing.".to_owned());
+fn options_notice(
+    _activate: On<Activate>,
+    mut form: ResMut<LoginForm>,
+    localization: NonSend<Localization>,
+) {
+    form.error = Some(localization.tr("main-options_notice"));
 }
 
 fn toggle_mode(_activate: On<Activate>, mut form: ResMut<LoginForm>) {
@@ -2290,8 +2508,9 @@ fn connect_clicked(
     mut form: ResMut<LoginForm>,
     mut settings: ResMut<XindelerSettings>,
     mut next: ResMut<NextState<AppState>>,
+    localization: NonSend<Localization>,
 ) {
-    attempt_connect(&mut form, &mut settings, &mut next);
+    attempt_connect(&mut form, &mut settings, &mut next, &localization);
 }
 
 // ---------------------------------------------------------------------------
@@ -2317,14 +2536,18 @@ fn add_server_clicked(
     _activate: On<Activate>,
     mut browser: ResMut<ServerBrowser>,
     mut settings: ResMut<XindelerSettings>,
+    localization: NonSend<Localization>,
 ) {
     let address = browser.add_address.trim().to_owned();
     if address.is_empty() {
-        browser.status = Some("Enter an address to add a server.".to_owned());
+        browser.status = Some(localization.tr("main-server_browser-enter_address"));
         return;
     }
     if settings.menu.servers.iter().any(|s| s.address == address) {
-        browser.status = Some(format!("'{address}' is already in the list."));
+        browser.status = Some(format!(
+            "'{address}' {}",
+            localization.tr("main-server_browser-already_in_list")
+        ));
         return;
     }
     let nickname = browser.add_nickname.trim().to_owned();
@@ -2341,13 +2564,20 @@ fn add_server_clicked(
     browser.load_from(&settings.menu.servers);
     // Select the freshly-added server (it's the last row) for a quick Connect.
     browser.selected = browser.rows.len().checked_sub(1);
-    browser.status = Some(format!("Added '{address}'."));
+    browser.status = Some(format!(
+        "{} '{address}'.",
+        localization.tr("main-server_browser-added")
+    ));
 }
 
 /// Re-fires the concurrent ping/version query for every saved server.
-fn refresh_clicked(_activate: On<Activate>, mut browser: ResMut<ServerBrowser>) {
+fn refresh_clicked(
+    _activate: On<Activate>,
+    mut browser: ResMut<ServerBrowser>,
+    localization: NonSend<Localization>,
+) {
     browser.needs_refresh = true;
-    browser.status = Some("Refreshing…".to_owned());
+    browser.status = Some(localization.tr("main-server_browser-refreshing"));
 }
 
 /// Connects to the selected server by driving the SAME login connect path (sets
@@ -2364,21 +2594,24 @@ fn connect_selected_clicked(
     mut form: ResMut<LoginForm>,
     mut settings: ResMut<XindelerSettings>,
     mut next: ResMut<NextState<AppState>>,
+    localization: NonSend<Localization>,
 ) {
     let Some(row) = browser.selected.and_then(|i| browser.rows.get(i)) else {
-        browser.status = Some("Select a server first.".to_owned());
+        browser.status = Some(localization.tr("main-server_browser-select_server_first"));
         return;
     };
     let address = row.address.clone();
     form.server = address.clone();
     form.online = true;
-    attempt_connect(&mut form, &mut settings, &mut next);
+    attempt_connect(&mut form, &mut settings, &mut next, &localization);
     // Mirror whatever `attempt_connect` decided onto the browser's status line
     // (the deferred-online notice today; a real "Connecting…" once remote lands).
-    browser.status = form
-        .error
-        .clone()
-        .or_else(|| Some(format!("Connecting to {address}…")));
+    browser.status = form.error.clone().or_else(|| {
+        Some(format!(
+            "{} {address}…",
+            localization.tr("main-server_browser-connecting_to")
+        ))
+    });
 }
 
 /// Removes the selected server from the persisted list, then reloads.
@@ -2386,12 +2619,13 @@ fn delete_selected_clicked(
     _activate: On<Activate>,
     mut browser: ResMut<ServerBrowser>,
     mut settings: ResMut<XindelerSettings>,
+    localization: NonSend<Localization>,
 ) {
     let Some(idx) = browser
         .selected
         .filter(|i| *i < settings.menu.servers.len())
     else {
-        browser.status = Some("Select a server to delete.".to_owned());
+        browser.status = Some(localization.tr("main-server_browser-select_to_delete"));
         return;
     };
     let removed = settings.menu.servers.remove(idx);
@@ -2399,7 +2633,11 @@ fn delete_selected_clicked(
         error!("server browser: failed to persist saved servers: {err}");
     }
     browser.load_from(&settings.menu.servers);
-    browser.status = Some(format!("Removed '{}'.", removed.address));
+    browser.status = Some(format!(
+        "{} '{}'.",
+        localization.tr("main-server_browser-removed"),
+        removed.address
+    ));
 }
 
 /// Leaves the server browser back to the main menu.
@@ -2421,6 +2659,7 @@ fn attempt_connect(
     form: &mut LoginForm,
     settings: &mut XindelerSettings,
     next: &mut NextState<AppState>,
+    localization: &Localization,
 ) {
     settings.menu.username = form.username.clone();
     settings.menu.server_address = form.server.clone();
@@ -2436,19 +2675,26 @@ fn attempt_connect(
         // also dial a remote server here. Surface an honest notice rather than
         // a fake connection (see the module doc comment).
         if form.server.trim().is_empty() {
-            form.error = Some("Enter a server address (or switch to Offline).".to_owned());
+            form.error = Some(localization.tr("main-online_missing_server"));
         } else {
-            form.error = Some(
-                "Online multiplayer connects via the in-game server browser (EM-5.9 T56.31). This \
-                 build hosts a singleplayer world — switch to Offline to play now."
-                    .to_owned(),
-            );
+            form.error = Some(localization.tr("main-online_deferred_notice"));
         }
         return;
     }
 
     form.error = None;
     next.set(AppState::Connecting);
+}
+
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), matching
+/// `settings_window.rs`/`esc_menu.rs`/`char_select.rs`'s own
+/// `test_localization` helper. See
+/// `switching_locale_relocalizes_the_stage_label_live` for the one
+/// test that exercises the real repo `.ftl` catalogs instead.
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
 }
 
 #[cfg(test)]
@@ -2495,8 +2741,9 @@ mod tests {
         };
         let mut settings = XindelerSettings::default();
         let mut next = NextState::<AppState>::default();
+        let localization = test_localization();
 
-        attempt_connect(&mut form, &mut settings, &mut next);
+        attempt_connect(&mut form, &mut settings, &mut next, &localization);
 
         assert!(
             matches!(next, NextState::Pending(AppState::Connecting)),
@@ -2519,8 +2766,9 @@ mod tests {
         };
         let mut settings = XindelerSettings::default();
         let mut next = NextState::<AppState>::default();
+        let localization = test_localization();
 
-        attempt_connect(&mut form, &mut settings, &mut next);
+        attempt_connect(&mut form, &mut settings, &mut next, &localization);
 
         assert!(
             matches!(next, NextState::Unchanged),
@@ -2543,8 +2791,12 @@ mod tests {
         };
         let mut settings = XindelerSettings::default();
         let mut next = NextState::<AppState>::default();
+        // Uses the REAL `main.ftl` catalog (not the empty-catalog
+        // `test_localization`) so this assertion still checks actual English
+        // copy, not a bare `.ftl` key fallback string.
+        let localization = Localization::load(&xindeler_ui::i18n::fallback_locale(), &["main.ftl"]);
 
-        attempt_connect(&mut form, &mut settings, &mut next);
+        attempt_connect(&mut form, &mut settings, &mut next, &localization);
         assert!(
             form.error
                 .as_deref()
@@ -2609,19 +2861,26 @@ mod tests {
 
     #[test]
     fn status_summary_reflects_each_query_state() {
-        assert_eq!(status_summary(&QueryState::Querying), "querying…");
+        // Uses the REAL `main.ftl` catalog (not the empty-catalog
+        // `test_localization`) so these assertions check actual English
+        // copy, not a bare `.ftl` key fallback string.
+        let localization = Localization::load(&xindeler_ui::i18n::fallback_locale(), &["main.ftl"]);
+        assert_eq!(
+            status_summary(&QueryState::Querying, &localization),
+            "querying…"
+        );
         let ok = QueryState::Done(Ok(ServerStatus {
             ping_ms: Some(12),
             version: Some("0.1.0".to_owned()),
             players: Some((3, 20)),
             motd: None,
         }));
-        let summary = status_summary(&ok);
+        let summary = status_summary(&ok, &localization);
         assert!(summary.contains("12 ms"));
         assert!(summary.contains("0.1.0"));
         assert!(summary.contains("3/20"));
         let err = QueryState::Done(Err("connection refused".to_owned()));
-        assert!(status_summary(&err).starts_with("unreachable"));
+        assert!(status_summary(&err, &localization).starts_with("unreachable"));
     }
 
     /// The heart of T56.31: three servers probed CONCURRENTLY, each row filled
@@ -2751,6 +3010,8 @@ mod tests {
         });
         app.insert_resource(MenuScreen::default());
         app.insert_resource(LoginForm::default());
+        app.insert_resource(xindeler_ui::i18n::CurrentLocale::default());
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(build_menu)
@@ -2783,11 +3044,27 @@ mod tests {
             body: Handle::default(),
         };
         let credits = Credits::default();
+        // `Localization` is captured by REFERENCE (`NonSend<Localization>`
+        // system param), not moved into the closure — its inner
+        // `FluentBundle` is not `Send`/`Sync`, so a `move` capture would fail
+        // `run_system_once`'s `IntoSystem` bound the same way any other
+        // non-`Send` value would.
+        app.insert_non_send(test_localization());
 
         app.world_mut()
-            .run_system_once(move |mut commands: Commands| {
-                build_connecting_screen(&mut commands, &theme, &fonts, None, "", &credits);
-            })
+            .run_system_once(
+                move |mut commands: Commands, localization: NonSend<Localization>| {
+                    build_connecting_screen(
+                        &mut commands,
+                        &theme,
+                        &fonts,
+                        None,
+                        "",
+                        &credits,
+                        &localization,
+                    );
+                },
+            )
             .expect("build_connecting_screen runs");
 
         let world = app.world_mut();
@@ -2797,5 +3074,87 @@ mod tests {
             .expect("ConnectingRoot exists")
             .0;
         assert_eq!(z_index, zlayer::TOAST + 100);
+    }
+
+    /// BL-82 EM-5.16 (T56.44): switching the active locale re-localizes the
+    /// main-menu screen live, using the REAL repo `.ftl` catalogs
+    /// (`main.ftl` and `common.ftl`) via `VELOREN_ASSETS`/`XINDELER_ASSETS`
+    /// — the same real-catalog proof `esc_menu.rs`/`char_select.rs`'s own
+    /// hot-swap tests
+    /// use. Unlike those two screens, `menu.rs`'s buttons are NOT tagged
+    /// `LocalizedLabel` (see `build_menu`'s own doc comment): the whole tree
+    /// is torn down and respawned by `build_menu` itself whenever its
+    /// locale-inclusive rebuild key changes, so this test drives THAT
+    /// mechanism directly (re-running `build_menu`, not `relocalize_button_
+    /// labels`) — proving the cache-busting key extension actually re-
+    /// resolves every button's text at rebuild time, not just that the
+    /// screen no-ops on a locale change.
+    #[test]
+    fn switching_locale_rebuilds_the_main_menu_with_translated_text() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(MenuScreen::Main);
+        app.insert_resource(LoginForm::default());
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["main.ftl", "common.ftl"],
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        // `button::spawn_button_labels` is what turns each button's
+        // `HudButtonLabel` into a real `Text` child.
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(build_menu)
+            .expect("build_menu runs (en)");
+        app.update(); // let spawn_button_labels give every button its child
+
+        fn all_button_labels(app: &mut App) -> Vec<String> {
+            let world = app.world_mut();
+            world
+                .query::<&xindeler_ui::button::HudButtonLabel>()
+                .iter(world)
+                .map(|label| label.0.clone())
+                .collect()
+        }
+
+        let before = all_button_labels(&mut app);
+        assert!(
+            before.iter().any(|l| l == "Quit"),
+            "the Quit button must show the real en catalog text at spawn time: {before:?}"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        // Re-running `build_menu` is the mechanism this screen actually uses
+        // (its `Update`-scheduled real registration means this happens
+        // automatically every frame in the live app) — its locale-inclusive
+        // rebuild key now differs from `last_built`, so it tears down and
+        // respawns the whole tree with the newly-active locale.
+        app.world_mut()
+            .run_system_once(build_menu)
+            .expect("build_menu runs (es)");
+        app.update();
+
+        let after = all_button_labels(&mut app);
+        assert!(
+            !after.iter().any(|l| l == "Quit"),
+            "the stale en Quit label must not survive the locale-triggered rebuild: {after:?}"
+        );
+        assert!(
+            after.iter().any(|l| l == "Salir"),
+            "must resolve to the REAL es catalog's own common-quit value: {after:?}"
+        );
     }
 }

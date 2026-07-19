@@ -170,6 +170,14 @@ hud-skill_tree-hammer = Martillo
 hud-skill_tree-staff = Bastón de fuego
 hud-skill_tree-sceptre = Cetro
 hud-skill_tree-mining = Minería
+hud-skill_tree-feats = Dotes
+
+## BL-82 EM-5.16 (T56.44 follow-up)
+hud-skill_tree-node_passive = (pasiva)
+hud-skill_tree-node_maxed = Máximo
+hud-skill_tree-node_level = Nivel
+hud-skill_tree-node_cost = Coste
+hud-skill_tree-node_locked = Bloqueado (no se cumplen los requisitos)
 hud-skill-sword_stance_heavy = Robusta
 hud-skill-persistence-skills_unlock_failed = No se pudieron obtener tus habilidades en el mismo orden en que las adquiriste. Puede que los prerequisitos o los costos hayan cambiado.
 hud-skill-persistence-common_message = Algunos de tus puntos de habilidad han sido restablecidos. Necesitarás reasignarlos.

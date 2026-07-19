@@ -36,3 +36,11 @@ hud-trade-invite-accepted = { $target } aceptó tu solicitud de comercio.
 hud-trade-invite-declined = { $target } declinó tu solicitud de comercio.
 hud-trade-invite-timed_out = Se agotó el tiempo para la oferta de comercio a { $target }.
 hud-trade-player_who = Jugador { $player_who }
+
+# BL-82 EM-5.16 (T56.44 follow-up) — ver el .ftl en para el porqué de este
+# recorte (Localization::tr no interpola argumentos de Fluent).
+hud-trade-invite_from_player = Solicitud de comercio del jugador
+hud-trade-trading_with_player = Comerciando con el jugador
+hud-trade-phase_mutate = Negociando
+hud-trade-phase_review = Revisión
+hud-trade-phase_complete = Completado

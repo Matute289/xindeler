@@ -272,6 +272,36 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     "esc_menu.ftl",
     "hud/settings.ftl",
     "main.ftl",
+    // BL-82 EM-5.16 (T56.44 follow-up, full i18n screen coverage):
+    // `gameinput.ftl` already carries a `gameinput-*` key for every
+    // `GameInput` variant (ported from legacy `voxygen` 1:1) — `controls_
+    // screen.rs` now resolves real per-action row labels from it instead of
+    // its old `display_name()` camelCase-splitting heuristic.
+    "gameinput.ftl",
+    "hud/controls.ftl",
+    // The remaining screens converted this same pass, each reusing (and, where
+    // needed, extending) the legacy per-domain catalog already frozen under
+    // `assets/voxygen/i18n/**` rather than inventing a parallel one:
+    // `inventory_ui.rs` (bag/equipment slots), `diary.rs` (stats tab +
+    // skill-tree tooltips — `hud/skills.ftl`'s 236 legacy lines were never
+    // actually wired to this screen before this pass), `hud/char_window.rs`'s
+    // catalog (diary stats-row labels), `chat.rs` (channel tabs),
+    // `crafting_ui.rs`, `hud/map.ftl` + `hud/quest.ftl` (map_view.rs),
+    // `hud/social.ftl` + `hud/group.ftl` (social_hud.rs), `trade_ui.rs`, and
+    // `char_select.rs` (the character-creation wizard, top-level — not under
+    // `hud/`, matching the legacy layout).
+    "hud/bag.ftl",
+    "hud/char_window.ftl",
+    "hud/chat.ftl",
+    "hud/crafting.ftl",
+    "hud/map.ftl",
+    "hud/quest.ftl",
+    "hud/skills.ftl",
+    "hud/social.ftl",
+    "hud/group.ftl",
+    "hud/trade.ftl",
+    "hud/combat_hud.ftl",
+    "char_selection.ftl",
 ];
 
 /// Tracks which BCP-47 tag the currently-loaded [`Localization`] catalog is

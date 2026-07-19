@@ -87,7 +87,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     color::ColorToPacked,
-    ecs::schedule::common_conditions::not,
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
     math::Rect,
@@ -100,6 +100,7 @@ use xindeler_protocol::{
 };
 use xindeler_ui::{
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{Localization, LocalizedText},
     minimap_material::MinimapFadeMaterial,
     theme::{HudFonts, HudTheme},
     tooltip::Tooltip,
@@ -532,6 +533,7 @@ fn spawn_map_screens(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
     mut minimap_materials: ResMut<Assets<MinimapFadeMaterial>>,
 ) {
     // The material starts pointing at no texture (a default/placeholder
@@ -632,7 +634,8 @@ fn spawn_map_screens(
         ))
         .with_children(|root| {
             root.spawn((
-                Text("OBJECTIVES".to_owned()),
+                LocalizedText("hud-map-objectives"),
+                Text(localization.tr("hud-map-objectives")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.title.clone()),
                     font_size: bevy::text::FontSize::Px(14.0),
@@ -687,7 +690,8 @@ fn spawn_map_screens(
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text("World Map (M / Esc to close, wheel to zoom, drag to pan)".to_owned()),
+                LocalizedText("hud-map-full_map_instructions"),
+                Text(localization.tr("hud-map-full_map_instructions")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
                     font_size: bevy::text::FontSize::Px(14.0),
@@ -1192,6 +1196,15 @@ fn sync_marker_dot_positions(
     }
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all the structural tests below need (they never assert the specific
+/// translated text of the objectives-header/full-map-instructions labels).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use std::f32::consts::{FRAC_PI_2, PI};
@@ -1382,6 +1395,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
         app
     }
 

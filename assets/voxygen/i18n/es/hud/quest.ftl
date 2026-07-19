@@ -7,3 +7,4 @@ hud-quest-accept = Aceptar
 hud-quest-decline = Rechazar
 hud-dialogue = Diálogo
 hud-dialogue-ack = Presiona [{ $key }] para aceptar
+hud-dialogue-continue = Continuar

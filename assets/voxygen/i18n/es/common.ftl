@@ -50,6 +50,25 @@ common-species-dwarf = Enano
 common-species-elf = Elfo
 common-species-draugr = Dhampiro
 common-species-danari = Gnomo
+## BL-82 EM-5.16 (T56.44 follow-up, full i18n screen coverage): `char_select.rs`
+## (character-creation wizard) and `diary.rs` (Class-skills tab) both resolve
+## these — previously `en`-only, so every non-proof-slice class name rendered
+## in English under `es`.
+common-class-warrior = Guerrero
+common-class-mage = Mago
+common-class-cleric = Clérigo
+common-class-rogue = Pícaro
+common-class-adventurer = Aventurero
+common-class-barbarian = Bárbaro
+common-class-sorcerer = Hechicero
+common-class-warlock = Brujo
+common-class-bard = Bardo
+common-class-paladin = Paladín
+common-class-druid = Druida
+common-class-ranger = Explorador
+common-class-monk = Monje
+common-class-artificer = Artífice
+common-class-blood_slayer = Segador de Sangre
 common-weapons-axe = Hacha
 common-weapons-dagger = Daga
 common-weapons-greatsword = Espadón

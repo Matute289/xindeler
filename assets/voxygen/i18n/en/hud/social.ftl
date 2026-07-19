@@ -1,5 +1,9 @@
 hud-social = Players
 hud-social-online = Online:
+## BL-82 EM-5.16 (T56.44): the Social window's own heading (`social_hud.rs`) —
+## a combined "Online Players" title distinct from the bare `hud-social-online`
+## label prefix above.
+hud-social-online_players = Online Players
 hud-social-friends = Friends
 hud-social-not_yet_available = Not yet available
 hud-social-faction = Faction

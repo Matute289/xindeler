@@ -37,3 +37,15 @@ hud-trade-amount_input = Select an item
 hud-confirm-trade-for-nothing = Really give away these items in exchange for nothing?
 # $player_gender available
 hud-trade-player_who = Player { $player_who }
+
+# BL-82 EM-5.16 (T56.44 follow-up) — Bevy client trade window: `Localization::
+# tr` has no Fluent-argument interpolation, so the counterparty's raw UID (no
+# player-name mirror exists yet) is a separate, untranslated sibling value —
+# these two keys are only the static prefix.
+hud-trade-invite_from_player = Trade request from player
+hud-trade-trading_with_player = Trading with player
+# Short header-label form of the trade phase (distinct from the longer
+# phase1_description/phase2_description/phase3_description paragraphs above).
+hud-trade-phase_mutate = Negotiating
+hud-trade-phase_review = Review
+hud-trade-phase_complete = Complete

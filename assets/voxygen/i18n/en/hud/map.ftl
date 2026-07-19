@@ -54,3 +54,8 @@ hud-map-myrmidon = Myrmidon Dungeon
 hud-map-terracotta = Terracotta Ruins
 hud-map-vampire_castle = Vampire Castle
 hud-map-placed_by = Placed by { $name }
+## BL-82 EM-5.16 (T56.44): `map_view.rs`'s minimap objectives-column header
+## and full-map screen's static instruction line (M/Esc/wheel/drag are literal
+## key/control names, not player-facing variables — no interpolation needed).
+hud-map-objectives = OBJECTIVES
+hud-map-full_map_instructions = World Map (M / Esc to close, wheel to zoom, drag to pan)
