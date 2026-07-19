@@ -8,11 +8,35 @@
 
 use bevy::prelude::*;
 use kira::{
-    AudioManager, AudioManagerSettings,
+    AudioManager, AudioManagerSettings, Tween,
     backend::cpal::CpalBackend,
+    effect::filter::{FilterBuilder, FilterHandle},
     track::{TrackBuilder, TrackHandle},
 };
 use tracing::warn;
+
+/// The sfx-track low-pass cutoff (Hz) in the normal, un-muffled case — high
+/// enough (≈ the top of human hearing) that the filter is effectively
+/// transparent. Dropped to [`SFX_FILTER_MUFFLED_HZ`] when the listener is
+/// underwater. Ported verbatim from the old client's own
+/// `set_sfx_master_filter` values (`voxygen::audio::sfx`).
+pub const SFX_FILTER_OPEN_HZ: f64 = 20_000.0;
+/// The sfx-track low-pass cutoff (Hz) applied while the listener is underwater
+/// — a heavy muffle that removes the high end, the SAME 888 Hz the old client
+/// used.
+pub const SFX_FILTER_MUFFLED_HZ: f64 = 888.0;
+
+/// The sfx low-pass cutoff (Hz) for a given underwater state — muffled when
+/// underwater, transparent otherwise. Split out as a pure function so the
+/// mapping is unit-testable without a real audio device.
+#[must_use]
+pub fn sfx_filter_cutoff(underwater: bool) -> f64 {
+    if underwater {
+        SFX_FILTER_MUFFLED_HZ
+    } else {
+        SFX_FILTER_OPEN_HZ
+    }
+}
 
 /// The 4 named mixer sub-tracks routed under Kira's main (master) track.
 ///
@@ -25,6 +49,11 @@ pub struct AudioTracks {
     pub ui: TrackHandle,
     pub sfx: TrackHandle,
     pub ambience: TrackHandle,
+    /// The low-pass filter effect on the `sfx` track (BL-82 EM-5.10d) — its
+    /// cutoff is driven between [`SFX_FILTER_OPEN_HZ`] and
+    /// [`SFX_FILTER_MUFFLED_HZ`] by [`AudioBackend::set_sfx_muffle`] to muffle
+    /// every positional sound when the listener is underwater.
+    pub sfx_filter: FilterHandle,
 }
 
 /// The audio backend: either a live Kira [`AudioManager`] + its tracks, or
@@ -69,6 +98,21 @@ impl AudioBackend {
             Self::Unavailable => None,
         }
     }
+
+    /// BL-82 EM-5.10d: muffle (or un-muffle) every positional sound by driving
+    /// the `sfx` track's low-pass filter between [`SFX_FILTER_MUFFLED_HZ`]
+    /// (underwater) and [`SFX_FILTER_OPEN_HZ`] (transparent). A cheap no-op
+    /// when audio is [`Unavailable`](Self::Unavailable). The `0.1 s` tween
+    /// smooths the transition so surfacing/diving does not click.
+    pub fn set_sfx_muffle(&mut self, underwater: bool) {
+        if let Self::Ready { tracks, .. } = self {
+            let cutoff = sfx_filter_cutoff(underwater);
+            tracks.sfx_filter.set_cutoff(cutoff, Tween {
+                duration: std::time::Duration::from_secs_f32(0.1),
+                ..Default::default()
+            });
+        }
+    }
 }
 
 /// Initializes the Kira [`AudioManager`] on the default `cpal` output device
@@ -110,12 +154,43 @@ pub(crate) fn insert_audio_backend(app: &mut App) {
 fn build_tracks(manager: &mut AudioManager<CpalBackend>) -> Option<AudioTracks> {
     let music = manager.add_sub_track(TrackBuilder::new()).ok()?;
     let ui = manager.add_sub_track(TrackBuilder::new()).ok()?;
-    let sfx = manager.add_sub_track(TrackBuilder::new()).ok()?;
+    // BL-82 EM-5.10d: the sfx track carries a low-pass filter (transparent by
+    // default) so the underwater muffle can be toggled on it via
+    // `set_sfx_muffle`, exactly as the old client filtered its whole sfx track
+    // (`voxygen::audio::mod::Effects::sfx`).
+    let mut sfx_builder = TrackBuilder::new();
+    let sfx_filter = sfx_builder.add_effect(FilterBuilder::new().cutoff(SFX_FILTER_OPEN_HZ));
+    let sfx = manager.add_sub_track(sfx_builder).ok()?;
     let ambience = manager.add_sub_track(TrackBuilder::new()).ok()?;
     Some(AudioTracks {
         music,
         ui,
         sfx,
         ambience,
+        sfx_filter,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn underwater_muffles_and_surfacing_reopens_the_sfx_filter() {
+        assert_eq!(sfx_filter_cutoff(true), SFX_FILTER_MUFFLED_HZ);
+        assert_eq!(sfx_filter_cutoff(false), SFX_FILTER_OPEN_HZ);
+        // The muffled cutoff must actually cut (well below the transparent one),
+        // or "underwater" would be inaudible as a change.
+        const {
+            assert!(SFX_FILTER_MUFFLED_HZ < SFX_FILTER_OPEN_HZ);
+        }
+    }
+
+    #[test]
+    fn set_sfx_muffle_is_a_silent_no_op_when_audio_is_unavailable() {
+        // The resilient path: no device → the method must not panic.
+        let mut backend = AudioBackend::Unavailable;
+        backend.set_sfx_muffle(true);
+        backend.set_sfx_muffle(false);
+    }
 }
