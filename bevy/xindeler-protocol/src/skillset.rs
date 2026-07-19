@@ -31,21 +31,37 @@
 //! `xindeler-client::hotbar`'s existing drop handler is the target, both over
 //! `xindeler_ui::slot::SlotDropped`).
 //!
-//! ## The write half: real SP-spend, the listen-server posture
-//! [`UnlockSkillRequest`] is the real replicon client message (wire shape for
-//! a FUTURE genuinely-remote client, registered like every other Phase-5 wire
-//! message) — dormant today, same posture as `AssignHotbarSlot`.
-//! [`LocalUnlockSkillRequest`] is what actually drives gameplay: a plain
-//! in-process Bevy message the diary UI writes directly, drained by
-//! `xindeler-sim-bridge::skillset::apply_local_skill_unlock_requests`, which
-//! calls the embedded player's real `client::Client::unlock_skill` — a
-//! genuine client->server network send over the loopback socket (that method
-//! already existed on `client::Client`, sending the SAME `ClientGeneral::
-//! UnlockSkill` the legacy diary's `Event::UnlockSkill` handler sends —
-//! `server/src/sys/msg/in_game.rs` already processes it, no server-side
-//! change needed), never a direct ECS write (isolation-law rule 4) — exactly
-//! EM-5.3's `LocalAssignHotbarSlot`/`apply_local_hotbar_assignment`
-//! precedent.
+//! ## The write half: real SP-spend, the unified `FromClient` posture
+//! (BL-82 EM-8.3)
+//! [`UnlockSkillRequest`] is the real `bevy_replicon` client message that
+//! drives SP-spend on BOTH shells — the SAME unified path
+//! `InventoryActionRequest` already uses (see
+//! `xindeler-sim-bridge::inventory::resolve_client_entity`'s doc comment). The
+//! diary UI writes it directly (`xindeler-client::diary`), and it surfaces
+//! server-side as `FromClient<UnlockSkillRequest>`: for a genuinely-remote
+//! dedicated-server client with the sender's real `ClientId`, and for the
+//! listen-server's own local write echoed back as `FromClient` with
+//! `ClientId::Server` (bevy_replicon's
+//! `ClientMessageAppExt::add_client_message` local-loopback). The bridge's
+//! `apply_skill_unlock_requests` resolves the acting sim entity per message
+//! (real connection first via `PlayerDimensionSession`, embedded local player
+//! as the `ClientId::Server` fallback) and applies the unlock to that entity's
+//! own `comp::SkillSet` — mirroring `server/src/sys/msg/in_game.rs`'s
+//! `ClientGeneral::UnlockSkill` handler exactly. `comp::SkillSet` is
+//! `DerefFlaggedStorage`-backed, so the applicator deliberately reads a clone
+//! off `read_storage` and validates the unlock on that OWNED clone FIRST,
+//! only writing back through `write_storage` on genuine success — the same
+//! "never touch the flagged handle speculatively" discipline the legacy
+//! handler's `Cow`-based `unlock_skill_cow(_, _, to_mut)` establishes (see
+//! `apply_skill_unlock_requests`'s own doc comment in `xindeler-sim-bridge`
+//! for the full three-phase breakdown and why a naive `get_mut` first would
+//! spuriously flag every REJECTED spend attempt as Modified, not just
+//! successful ones).
+//!
+//! Before EM-8.3 this went through a listen-server-only
+//! `LocalUnlockSkillRequest` + `EmbeddedPlayer::unlock_skill` shortcut that had
+//! no `EmbeddedPlayer` (and therefore did nothing) on the real dedicated
+//! server — the exact `A1` parity gap in the technical-debt ledger.
 
 use bevy::ecs::{component::Component, message::Message};
 use common::comp::skillset::{SkillGroupKind, skills::Skill};
@@ -86,16 +102,11 @@ pub struct NetSkillSet {
 pub struct NetAbilityPool(pub Vec<NetHotbarSlot>);
 
 /// Client -> server: spend a skill point unlocking `0` (BL-82 EM-5.7 SP-spend
-/// action). The real replicon wire shape for a FUTURE genuinely-remote
-/// client — see this module's own doc comment for why the listen-server path
-/// does not read this today ([`LocalUnlockSkillRequest`] does).
+/// action, unified onto the `FromClient` write path in EM-8.3). The real
+/// `bevy_replicon` client message that drives SP-spend on BOTH shells — see
+/// this module's own doc comment for the full unified-write rationale.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnlockSkillRequest(pub Skill);
-
-/// The in-process listen-server counterpart of [`UnlockSkillRequest`] — see
-/// this module's own doc comment.
-#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocalUnlockSkillRequest(pub Skill);
 
 #[cfg(test)]
 mod tests {

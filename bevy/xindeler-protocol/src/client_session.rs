@@ -103,6 +103,19 @@ impl ActiveReplicaSessions {
     /// player whose login hasn't completed yet).
     #[must_use]
     pub fn client_for_uid(&self, uid: u64) -> Option<ClientId> { self.0.get(&uid).copied() }
+
+    /// Every fully-logged-in `(uid, ClientId)` session (BL-82 EM-8.3). A
+    /// per-player mirror on the dedicated server (e.g.
+    /// `xindeler-sim-bridge::social::mirror_group_state`) iterates this to
+    /// compute + target each connected player's own private state, exactly the
+    /// N-client generalization of the listen-server's single-embedded-player
+    /// loop. Always empty on the listen server (the embedded player never logs
+    /// in through the replicon handshake — see this type's own doc comment), so
+    /// a consumer that must also cover the embedded player unions it in
+    /// separately.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, ClientId)> + '_ {
+        self.0.iter().map(|(&uid, &client)| (uid, client))
+    }
 }
 
 #[cfg(test)]

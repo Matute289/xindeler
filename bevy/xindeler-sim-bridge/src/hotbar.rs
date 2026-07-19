@@ -16,8 +16,9 @@
 //! BL-82 EM-5.3 follow-up (bevy-migration-reviewer + ecs-design-reviewer):
 //! this replaces a previous `apply_local_hotbar_assignment`, which drained a
 //! separate `LocalAssignHotbarSlot` plain-Bevy-message (modeled after
-//! EM-5.8's `LocalGroupAction`) and resolved the acting client PURELY via
-//! the embedded-player shortcut, ignoring which real client actually sent
+//! EM-5.8's original `LocalGroupAction`, itself later removed in BL-82 EM-8.3's
+//! unification) and resolved the acting client PURELY via the embedded-player
+//! shortcut, ignoring which real client actually sent
 //! the request — the exact anti-pattern EM-5.6 was blocked on by two
 //! independent reviewers and fixed (see `crate::inventory::
 //! resolve_client_entity`'s own doc comment). Harmless while

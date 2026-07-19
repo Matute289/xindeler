@@ -123,8 +123,7 @@ pub use hotbar::{HotbarMirrorPlugin, apply_hotbar_assignment_requests, mirror_ho
 // `inventory`/`trade` above costs nothing.
 mod skillset;
 pub use skillset::{
-    SkillSetMirrorCache, SkillSetMirrorPlugin, apply_local_skill_unlock_requests,
-    mirror_skillset_state,
+    SkillSetMirrorCache, SkillSetMirrorPlugin, apply_skill_unlock_requests, mirror_skillset_state,
 };
 
 mod entity_factory;
@@ -172,8 +171,8 @@ pub use player::{
 
 mod social;
 pub use social::{
-    GroupStateCache, PlayerListCache, SocialMirrorPlugin, apply_local_dialogue_response,
-    apply_local_group_actions, mirror_dialogue, mirror_group_state, mirror_player_list,
+    GroupStateCache, PlayerListCache, SocialMirrorPlugin, apply_dialogue_response_requests,
+    apply_group_action_requests, mirror_dialogue, mirror_group_state, mirror_player_list,
 };
 
 mod sfx;

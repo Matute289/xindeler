@@ -234,13 +234,17 @@ impl Plugin for ListenServerPlugin {
         // support (same reason `AtmosphereSyncMessagePlugin` below is
         // already split out).
         app.add_plugins(CombatHudMirrorPlugin);
-        // BL-82 EM-5.8: the social/group/dialogue server-side mirror
-        // (NetPlayerList/NetGroupState/NetDialogue projection + LocalGroupAction/
-        // LocalDialogueResponse action application) — reads/writes
-        // `EmbeddedPlayer`, so it must be added after `PlayerBridgePlugin`
-        // above (registration order doesn't matter for the `.after(tick_sim)`
-        // ordering itself, just for this doc convention). Split into its own
-        // call — the tuple above is already at the 15-plugin ceiling.
+        // BL-82 EM-5.8 (+ EM-8.3): the social/group/dialogue server-side mirror
+        // (NetPlayerList/NetGroupState/NetDialogue projection +
+        // GroupActionRequest/DialogueResponseRequest action application via the
+        // unified `FromClient` write path — the SAME plugin the dedicated
+        // server now registers too). `mirror_group_state` mirrors every
+        // connected player; here that resolves to the single embedded local
+        // player (`SendTargets::SERVER_ONLY` local echo). Added after
+        // `PlayerBridgePlugin` above (the group/dialogue mirrors still read
+        // `EmbeddedPlayer` for the listen-server's own recipient + NPC-dialogue
+        // capture). Split into its own call — the tuple above is already at the
+        // 15-plugin ceiling.
         app.add_plugins(SocialMirrorPlugin);
         // BL-82 EM-5.5: the one-shot map-data broadcast (background image +
         // site/POI markers) — reads `EmbeddedPlayer`, so it's added after

@@ -26,7 +26,8 @@ use xindeler_protocol::{
 use xindeler_sim_bridge::{
     CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin,
     PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SfxLocomotionMirrorPlugin,
-    SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, TradeMirrorPlugin, tick_sim,
+    SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, SkillSetMirrorPlugin,
+    SocialMirrorPlugin, TradeMirrorPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -301,6 +302,37 @@ impl Plugin for SimServerPlugin {
         // fallback path simply never fires here, but the real-connection
         // path (the one that matters on THIS shell) does.
         app.add_plugins(HotbarMirrorPlugin);
+
+        // BL-82 EM-8.3: the diary/skill-tree mirror + SP-spend applicator, and
+        // the social/party roster + group-state mirror + group/dialogue-request
+        // applicators — the dedicated-server-parity half of the technical-debt
+        // ledger's A1 finding. Both were listen-server-only before this task
+        // because their write/mirror paths were coupled to the single embedded
+        // player; they now resolve every real remote client's identity via
+        // `PlayerDimensionSession`/`ActiveReplicaSessions` (the SAME pattern
+        // `InventoryMirrorPlugin`/`TradeMirrorPlugin` above already use), so
+        // they mirror + apply correctly for N genuinely-connected clients here.
+        // Same ordering reasoning as the mirrors above (each reads `SimMirror`,
+        // populated this same tick by `SimEntityMirrorPlugin`).
+        //
+        // NOTE (honest scope, EM-8.3): the two REMAINING listen-server-only
+        // plugins — `ChatBridgePlugin` (chat broadcast) and
+        // `SfxOutcomeBridgePlugin` (outcome→SFX broadcast) — are deliberately
+        // NOT registered here, and neither is `SocialMirrorPlugin::
+        // mirror_dialogue`'s NPC→player capture (which no-ops without an
+        // `EmbeddedPlayer`). All three depend on OBSERVING the sim's own
+        // per-recipient outgoing message stream (chat routed by
+        // `StateExt::send_chat`, outcomes drained inside `Server::tick` by
+        // `entity_sync`, NPC dialogue turns delivered via a `comp::Client`).
+        // Every one of those paths targets the sim's legacy `comp::Client` send
+        // queues — which a replicon-login player entity never has — and is
+        // consumed INSIDE `Server::tick`, so the bridge cannot tap it
+        // post-tick. Delivering those to `comp::Client`-less replicon players
+        // needs a NEW sim-side per-player outgoing-message capture hook, a
+        // distinct follow-up (ledger A1, tracked as EM-8.3b in
+        // `docs/backlog/engine-migration.md`) — not a copy of the
+        // embedded-player shape onto this shell.
+        app.add_plugins((SkillSetMirrorPlugin, SocialMirrorPlugin));
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,

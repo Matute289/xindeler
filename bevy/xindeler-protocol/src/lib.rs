@@ -77,13 +77,10 @@ pub use crate::{
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     owner_visibility::{ClientOwnedUid, NetOwnerOnly},
     sfx::{NetCombatMove, NetGroundBlock, NetLocomotion, NetMoveState, NetOutcome},
-    skillset::{
-        LocalUnlockSkillRequest, NetAbilityPool, NetSkillGroup, NetSkillSet, UnlockSkillRequest,
-    },
+    skillset::{NetAbilityPool, NetSkillGroup, NetSkillSet, UnlockSkillRequest},
     social::{
-        DialogueResponseRequest, GroupAction, GroupActionRequest, LocalDialogueResponse,
-        LocalGroupAction, NetDialogue, NetGroupMember, NetGroupState, NetInviteKind,
-        NetPendingInvite, NetPlayerList, NetPlayerListEntry,
+        DialogueResponseRequest, GroupAction, GroupActionRequest, NetDialogue, NetGroupMember,
+        NetGroupState, NetInviteKind, NetPendingInvite, NetPlayerList, NetPlayerListEntry,
     },
     trade::{
         NetIncomingTradeInvite, NetTrade, NetTradeOfferEntry, TradeActionRequest,
@@ -974,9 +971,6 @@ impl Plugin for XindelerProtocolPlugin {
         // gameplay-intent request, same Events-lane class as the requests
         // just above.
         app.add_client_message::<skillset::UnlockSkillRequest>(XindelerChannel::Events.delivery());
-        // The listen-server in-process counterpart (see `skillset`'s own doc
-        // comment) — never crosses a socket.
-        app.add_message::<skillset::LocalUnlockSkillRequest>();
 
         // Server → client messages (EM-3.6 terrain stream). The server writes
         // `ToClients<CompressedChunk>` etc.; replicon fans them out to clients
@@ -1061,11 +1055,11 @@ impl Plugin for XindelerProtocolPlugin {
         // here (rather than only server-side) is safe.
         app.add_visibility_filter::<visibility::RegionKey>();
 
-        // BL-82 EM-5.8: social/group/dialogue wire contract (NetPlayerList/
-        // NetGroupState/NetDialogue server messages, GroupActionRequest/
-        // DialogueResponseRequest client messages, LocalGroupAction/
-        // LocalDialogueResponse in-process handoff) — see `social`'s own
-        // module doc comment for the full rationale.
+        // BL-82 EM-5.8 (+ EM-8.3): social/group/dialogue wire contract
+        // (NetPlayerList/NetGroupState/NetDialogue server messages,
+        // GroupActionRequest/DialogueResponseRequest client messages, the
+        // real `FromClient` requests driving group/dialogue on BOTH shells)
+        // — see `social`'s own module doc comment for the full rationale.
         social::register(app);
         // BL-82 EM-5.14: the character-list/creation wire contract
         // (NetCharList broadcast server message, CharCreate/Delete/Select
