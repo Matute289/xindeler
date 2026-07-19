@@ -215,7 +215,6 @@ fn volume_for_body(body: &Body) -> f32 {
 /// camera position (module doc: EM-5.10d's job is real spatial attenuation,
 /// this phase only hard-culls + plays flat).
 fn movement_sfx_mapper(
-    local_player: Query<&Transform, With<NetLocalPlayer>>,
     entities: Query<(Entity, &Transform, &NetVel, &NetBody, &NetLocomotion), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
@@ -232,10 +231,11 @@ fn movement_sfx_mapper(
     let Some(manifest) = manifests.get(&manifest_handle.0) else {
         return;
     };
-    let Ok(player) = local_player.single() else {
-        return;
-    };
-    let listener_pos = player.translation;
+    // Cull against the SAME point we attenuate/pan from (the listener/camera),
+    // for a single source of truth (bevy-migration-reviewer EM-5.10d) — a sound
+    // can no longer pass a player-anchored cull and then attenuate to silence at
+    // the camera, or vice-versa.
+    let listener_pos = audio_listener.pos;
 
     for (entity, transform, vel, body, locomotion) in &entities {
         if transform.translation.distance_squared(listener_pos) >= SFX_DIST_LIMIT_SQR {
@@ -336,7 +336,6 @@ fn should_emit_combat(history: &CombatHistory, mapped_event: &SfxEvent, threshol
 /// entity carrying [`NetCombatMove`] + an equipped [`NetLoadout::active_tool`]
 /// within [`SFX_DIST_LIMIT_SQR`] of the local player.
 fn combat_sfx_mapper(
-    local_player: Query<&Transform, With<NetLocalPlayer>>,
     entities: Query<(Entity, &Transform, &NetCombatMove, &NetLoadout), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
@@ -353,10 +352,8 @@ fn combat_sfx_mapper(
     let Some(manifest) = manifests.get(&manifest_handle.0) else {
         return;
     };
-    let Ok(player) = local_player.single() else {
-        return;
-    };
-    let listener_pos = player.translation;
+    // Cull from the listener/camera — the same point we attenuate/pan from.
+    let listener_pos = audio_listener.pos;
 
     for (entity, transform, combat_move, loadout) in &entities {
         if transform.translation.distance_squared(listener_pos) >= SFX_DIST_LIMIT_SQR {
@@ -413,7 +410,6 @@ const CAMPFIRE_VOLUME: f32 = 0.8;
 /// ported from the old client's own `CampfireEventMapper`, using ONLY the
 /// already-mirrored [`NetBody`]/`Transform` (no new mirror needed at all).
 fn campfire_sfx_mapper(
-    local_player: Query<&Transform, With<NetLocalPlayer>>,
     entities: Query<(Entity, &Transform, &NetBody), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
@@ -433,10 +429,8 @@ fn campfire_sfx_mapper(
     let Some(item) = manifest.get(&SfxEvent::Campfire) else {
         return;
     };
-    let Ok(player) = local_player.single() else {
-        return;
-    };
-    let listener_pos = player.translation;
+    // Cull from the listener/camera — the same point we attenuate/pan from.
+    let listener_pos = audio_listener.pos;
 
     for (entity, transform, body) in &entities {
         if !matches!(body.0, Body::Object(comp::body::object::Body::CampfireLit)) {
@@ -549,7 +543,8 @@ fn handle_outcome_sfx(
 /// position and right-ear axis come from the `MainCamera` transform (so every
 /// positional sound attenuates + pans relative to where the player is actually
 /// looking from), and the underwater flag comes from the local player's
-/// mirrored [`NetLocomotion::in_liquid`] (which drives the sfx low-pass muffle).
+/// mirrored [`NetLocomotion::in_liquid`] (which drives the sfx low-pass
+/// muffle).
 ///
 /// Ported from the old client's own `SfxMgr::maintain` head, which set the
 /// listener to the camera position/direction and toggled the sfx master filter

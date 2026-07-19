@@ -121,11 +121,18 @@ pub fn trigger_sfx(
     }
     let pan = stereo_pan(listener.pos, listener.right, emitter_pos);
     let path = dotted_key_to_ogg_path(dotted);
-    let handle = cache
-        .0
-        .entry(path.clone())
-        .or_insert_with(|| asset_server.load(path))
-        .clone();
+    // Borrow-first so the common (cache-HIT) path — a frequent trigger like
+    // footsteps re-requesting the same `.ogg` — clones only the cheap `Handle`,
+    // not the key `String` (rust-perf-reviewer EM-5.10d): `HashMap::entry` would
+    // demand an owned key on every call, including hits.
+    let handle = match cache.0.get(&path) {
+        Some(handle) => handle.clone(),
+        None => {
+            let handle = asset_server.load(path.clone());
+            cache.0.insert(path, handle.clone());
+            handle
+        },
+    };
     let Some(asset) = audio_assets.get(&handle) else {
         return false;
     };
