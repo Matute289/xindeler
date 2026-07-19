@@ -63,9 +63,11 @@
 //!   `Cargo.toml`'s dependency comment and [`asset`]'s doc comment for the
 //!   empirical check.
 
+pub mod ambience;
 mod asset;
 mod diagnostics;
 mod manager;
+pub mod music;
 pub mod sfx;
 mod volume;
 
@@ -117,6 +119,14 @@ impl Plugin for XindelerAudioPlugin {
         // event-mapper systems are ALSO added (a separate plugin, since they
         // need `xindeler-protocol` types this crate does not depend on).
         app.add_plugins(sfx::SfxManifestPlugin);
+        // BL-82 EM-5.10c (T56.36): the soundtrack.ron/music_transition_
+        // manifest.ron + ambience.ron manifests + their playback state, same
+        // "folded into THIS plugin" reasoning as sfx above — the actual
+        // per-frame state machine/orchestrator (reading real mirrored
+        // hostile/weather/day-period state) is
+        // `xindeler-client::music`/`xindeler-client::ambience`, added
+        // separately.
+        app.add_plugins((music::MusicManifestPlugin, ambience::AmbienceManifestPlugin));
     }
 }
 
