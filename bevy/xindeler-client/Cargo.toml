@@ -92,6 +92,15 @@ vek = { workspace = true }
 # manifest file.
 serde = { workspace = true }
 tracing = { workspace = true }
+# BL-82 EM-5.10c (T56.36): `ambience.rs` iterates every
+# `xindeler_audio::ambience::AmbienceChannelTag` each frame
+# (`AmbienceChannelTag::iter()`), same as the old client's own
+# `AmbienceMgr::maintain`.
+strum = { workspace = true }
+# BL-82 EM-5.10c (T56.36): `music.rs` seeds `MusicMachine::advance`'s rng
+# argument with a fresh per-frame `rand::rng()`, same convention
+# `xindeler-audio::sfx::playback::trigger_sfx`'s own callers use.
+rand = { workspace = true }
 # EM-3.8: parse the `.vox` bytes the client loads via `AssetServer` into the
 # `DotVoxData` the figure loader consumes (SAME "5.x" line `common` pins).
 dot_vox = "5.1"

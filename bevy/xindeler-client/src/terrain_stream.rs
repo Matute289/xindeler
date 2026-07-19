@@ -304,6 +304,49 @@ impl SharedTerrain {
     pub(crate) fn get_chunk(&self, key: [i32; 2]) -> Option<Arc<TerrainChunk>> {
         self.0.read().ok()?.chunks.get(&key).cloned()
     }
+
+    /// BL-82 EM-5.10c (T56.36): real per-block "is there a roof over me"
+    /// check for `ambience::is_indoors`, ported from the old client's own
+    /// `voxygen::audio::ambience::is_indoors` heuristic (a solid block within
+    /// `INDOOR_CHECK_DISTANCE` in EVERY one of 5 directions — both
+    /// horizontal axes plus straight up). Unlike the old code's
+    /// `state.terrain().ray(..).until(Block::is_solid).cast()` (a convenience
+    /// this crate's terrain store doesn't have), this steps one block at a
+    /// time through the ALREADY-STREAMED chunk data directly — the same
+    /// `VolGrid2d::chunk_key`/`chunk_offs` arithmetic
+    /// [`ChunkStoreView::get`] uses, reused here as free associated
+    /// functions so it can't drift from that lookup. An unstreamed chunk
+    /// along the ray is treated as "no solid block found there" (matching
+    /// the old ray's own `.ignore_error()` "run out without matching" — a
+    /// gap in the streamed data must never read as a false "indoors").
+    pub(crate) fn is_indoors(&self, pos: VVec3<f32>) -> bool {
+        const INDOOR_CHECK_DISTANCE: i32 = 50;
+        let directions: [VVec3<i32>; 5] = [
+            -VVec3::unit_x(),
+            VVec3::unit_x(),
+            -VVec3::unit_y(),
+            VVec3::unit_y(),
+            VVec3::unit_z(),
+        ];
+        let origin = pos.map(|e| e.floor() as i32);
+        let Ok(store) = self.0.read() else {
+            // Poisoned lock: fail open (not indoors) rather than panic or
+            // silently claim shelter that may not exist.
+            return false;
+        };
+
+        directions.iter().all(|dir| {
+            (1..=INDOOR_CHECK_DISTANCE).any(|step| {
+                let sample = origin + *dir * step;
+                let key = VolGrid2d::<TerrainChunk>::chunk_key(VVec2::new(sample.x, sample.y));
+                let Some(chunk) = store.chunks.get(&[key.x, key.y]) else {
+                    return false;
+                };
+                let offs = VolGrid2d::<TerrainChunk>::chunk_offs(sample);
+                chunk.get(offs).map(|b| b.is_solid()).unwrap_or(false)
+            })
+        })
+    }
 }
 
 /// Where the spectator camera should look — the anchor world position, mapped
