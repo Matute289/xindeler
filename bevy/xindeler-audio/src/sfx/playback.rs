@@ -8,10 +8,15 @@ use std::collections::HashMap;
 use bevy::{
     asset::{AssetServer, Assets, Handle},
     ecs::resource::Resource,
+    math::Vec3,
 };
 use rand::seq::IndexedRandom;
 
-use super::{event::SfxEvent, manifest::SfxManifest};
+use super::{
+    event::SfxEvent,
+    manifest::SfxManifest,
+    spatial::{AudioListener, distance_attenuation, stereo_pan},
+};
 use crate::{AudioBackend, XindelerAudioAsset, to_decibels};
 
 /// Converts an `sfx.ron` dotted asset key (no extension, e.g.
@@ -56,19 +61,32 @@ impl SfxAssetCache {
 }
 
 /// Looks up `event` in `manifest`, resolves + (lazily loads) the chosen
-/// audio asset, and plays it through the `sfx` track at `volume_scale` (a
-/// linear amplitude multiplier — the SAME "extra volume" the old client's
-/// `AudioFrontend::emit_sfx(trigger, pos, Some(volume))` took, e.g. `1.5`/
-/// `2.0` for a louder one-off; `1.0` for "no adjustment"). Track-level/master
-/// volume (`AudioVolumes`) is NOT re-applied here — it already lives on the
-/// `sfx` `TrackHandle` itself via [`crate::volume::apply_audio_volumes`], so
+/// audio asset, and plays it POSITIONALLY through the `sfx` track (BL-82
+/// EM-5.10d).
+///
+/// `volume_scale` is the caller's linear amplitude multiplier — the SAME
+/// "extra volume" the old client's `AudioFrontend::emit_sfx(trigger, pos,
+/// Some(volume))` took, e.g. `1.5`/`2.0` for a louder one-off; `1.0` for "no
+/// adjustment". On top of it, the sound is baked with:
+/// - **distance attenuation** ([`distance_attenuation`]) from `listener.pos` to
+///   `emitter_pos`, so a far-but-still-in-range source is quiet instead of
+///   full-blast (the reported constant-loud-campfire fix), and
+/// - **stereo panning** ([`stereo_pan`]) from the listener's right axis, so a
+///   source off to one side is heard on that side.
+///
+/// The underwater low-pass muffle is applied separately, on the whole `sfx`
+/// track (`crate::sfx::apply_sfx_muffle`). Track-level/master volume
+/// (`AudioVolumes`) is NOT re-applied here — it already lives on the `sfx`
+/// `TrackHandle` itself via [`crate::volume::apply_audio_volumes`], so
 /// double-applying it here would double-attenuate.
 ///
 /// Returns `true` iff a sound actually started playing — the caller uses
 /// this to update its own per-entity "last played" bookkeeping (mirrors the
 /// old client's own `should_emit` → `emit_sfx` → `internal_state.time =
 /// Instant::now()` sequencing: only a REAL play resets the cooldown clock).
-/// Returns `false`, harmlessly, when: the manifest has no entry for `event`
+/// Returns `false`, harmlessly, when: the emitter is fully out of earshot
+/// (attenuation `0.0` — matches, and slightly tightens, the caller's own
+/// [`super::SFX_DIST_LIMIT_SQR`] cull); the manifest has no entry for `event`
 /// (a normal "no sound authored for this yet" case, not an error); the
 /// trigger item's `files` list is empty; the audio backend is
 /// [`AudioBackend::Unavailable`] (no `cpal` device); or the chosen asset
@@ -80,6 +98,8 @@ pub fn trigger_sfx(
     manifest: &SfxManifest,
     event: &SfxEvent,
     volume_scale: f32,
+    emitter_pos: Vec3,
+    listener: &AudioListener,
     asset_server: &AssetServer,
     audio_assets: &Assets<XindelerAudioAsset>,
     cache: &mut SfxAssetCache,
@@ -91,6 +111,15 @@ pub fn trigger_sfx(
     let Some(dotted) = item.files.choose(&mut rand::rng()) else {
         return false;
     };
+    // Bake spatialization before touching the (fallible) asset/backend paths:
+    // a sound with zero effective volume is inaudible, so skip it entirely
+    // rather than spend a `play` on it (also self-consistent with the caller's
+    // distance cull, and cheap — no asset resolve for out-of-range emitters).
+    let attenuation = distance_attenuation(listener.pos.distance(emitter_pos));
+    if attenuation <= 0.0 {
+        return false;
+    }
+    let pan = stereo_pan(listener.pos, listener.right, emitter_pos);
     let path = dotted_key_to_ogg_path(dotted);
     let handle = cache
         .0
@@ -103,7 +132,11 @@ pub fn trigger_sfx(
     let Some(tracks) = backend.tracks_mut() else {
         return false;
     };
-    let sound = asset.0.clone().volume(to_decibels(volume_scale.max(0.0)));
+    let sound = asset
+        .0
+        .clone()
+        .volume(to_decibels((volume_scale * attenuation).max(0.0)))
+        .panning(pan);
     tracks.sfx.play(sound).is_ok()
 }
 

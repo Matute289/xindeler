@@ -46,7 +46,8 @@ use common::comp::{self, Body};
 use xindeler_audio::{
     AudioBackend, XindelerAudioAsset,
     sfx::{
-        SFX_DIST_LIMIT_SQR, SfxAssetCache, SfxEvent, SfxManifest, SfxManifestHandle, trigger_sfx,
+        AudioListener, SFX_DIST_LIMIT_SQR, SfxAssetCache, SfxEvent, SfxManifest, SfxManifestHandle,
+        trigger_sfx,
     },
 };
 use xindeler_protocol::{
@@ -218,6 +219,7 @@ fn movement_sfx_mapper(
     entities: Query<(Entity, &Transform, &NetVel, &NetBody, &NetLocomotion), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
+    audio_listener: Res<AudioListener>,
     asset_server: Res<AssetServer>,
     audio_assets: Res<Assets<XindelerAudioAsset>>,
     mut cache: ResMut<SfxAssetCache>,
@@ -230,10 +232,10 @@ fn movement_sfx_mapper(
     let Some(manifest) = manifests.get(&manifest_handle.0) else {
         return;
     };
-    let Ok(listener) = local_player.single() else {
+    let Ok(player) = local_player.single() else {
         return;
     };
-    let listener_pos = listener.translation;
+    let listener_pos = player.translation;
 
     for (entity, transform, vel, body, locomotion) in &entities {
         if transform.translation.distance_squared(listener_pos) >= SFX_DIST_LIMIT_SQR {
@@ -249,6 +251,8 @@ fn movement_sfx_mapper(
                 manifest,
                 &mapped_event,
                 volume_for_body(&body.0),
+                transform.translation,
+                &audio_listener,
                 &asset_server,
                 &audio_assets,
                 &mut cache,
@@ -336,6 +340,7 @@ fn combat_sfx_mapper(
     entities: Query<(Entity, &Transform, &NetCombatMove, &NetLoadout), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
+    audio_listener: Res<AudioListener>,
     asset_server: Res<AssetServer>,
     audio_assets: Res<Assets<XindelerAudioAsset>>,
     mut cache: ResMut<SfxAssetCache>,
@@ -348,10 +353,10 @@ fn combat_sfx_mapper(
     let Some(manifest) = manifests.get(&manifest_handle.0) else {
         return;
     };
-    let Ok(listener) = local_player.single() else {
+    let Ok(player) = local_player.single() else {
         return;
     };
-    let listener_pos = listener.translation;
+    let listener_pos = player.translation;
 
     for (entity, transform, combat_move, loadout) in &entities {
         if transform.translation.distance_squared(listener_pos) >= SFX_DIST_LIMIT_SQR {
@@ -367,6 +372,8 @@ fn combat_sfx_mapper(
                 manifest,
                 &mapped_event,
                 1.0,
+                transform.translation,
+                &audio_listener,
                 &asset_server,
                 &audio_assets,
                 &mut cache,
@@ -410,6 +417,7 @@ fn campfire_sfx_mapper(
     entities: Query<(Entity, &Transform, &NetBody), With<NetUid>>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
+    audio_listener: Res<AudioListener>,
     asset_server: Res<AssetServer>,
     audio_assets: Res<Assets<XindelerAudioAsset>>,
     mut cache: ResMut<SfxAssetCache>,
@@ -425,10 +433,10 @@ fn campfire_sfx_mapper(
     let Some(item) = manifest.get(&SfxEvent::Campfire) else {
         return;
     };
-    let Ok(listener) = local_player.single() else {
+    let Ok(player) = local_player.single() else {
         return;
     };
-    let listener_pos = listener.translation;
+    let listener_pos = player.translation;
 
     for (entity, transform, body) in &entities {
         if !matches!(body.0, Body::Object(comp::body::object::Body::CampfireLit)) {
@@ -443,6 +451,8 @@ fn campfire_sfx_mapper(
                 manifest,
                 &SfxEvent::Campfire,
                 CAMPFIRE_VOLUME,
+                transform.translation,
+                &audio_listener,
                 &asset_server,
                 &audio_assets,
                 &mut cache,
@@ -479,6 +489,19 @@ fn outcome_sfx(outcome: &NetOutcome) -> (SfxEvent, f32) {
     }
 }
 
+/// The world position each covered [`NetOutcome`] happened at — every variant
+/// carries a `pos` (EM-5.10d: outcomes are positional too, so an explosion off
+/// in the distance attenuates + pans just like a footstep).
+fn outcome_pos(outcome: &NetOutcome) -> Vec3 {
+    match outcome {
+        NetOutcome::Explosion { pos, .. }
+        | NetOutcome::Damage { pos }
+        | NetOutcome::Death { pos }
+        | NetOutcome::Block { pos, .. }
+        | NetOutcome::PoiseChange { pos, .. } => *pos,
+    }
+}
+
 /// The `handle_outcome` port: fires the matching SFX trigger for every
 /// [`NetOutcome`] this frame delivered. No distance culling needed here (the
 /// sim already scoped the underlying `Outcome` stream to what this client's
@@ -488,6 +511,7 @@ fn handle_outcome_sfx(
     mut outcomes: MessageReader<NetOutcome>,
     manifest_handle: Option<Res<SfxManifestHandle>>,
     manifests: Res<Assets<SfxManifest>>,
+    audio_listener: Res<AudioListener>,
     asset_server: Res<AssetServer>,
     audio_assets: Res<Assets<XindelerAudioAsset>>,
     mut cache: ResMut<SfxAssetCache>,
@@ -507,12 +531,45 @@ fn handle_outcome_sfx(
             manifest,
             &event,
             volume,
+            outcome_pos(outcome),
+            &audio_listener,
             &asset_server,
             &audio_assets,
             &mut cache,
             &mut backend,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Listener wiring (EM-5.10d) — the Kira-side "ears" follow the player camera.
+// ---------------------------------------------------------------------------
+
+/// Keeps [`AudioListener`] in step with the player's view each frame: the
+/// position and right-ear axis come from the `MainCamera` transform (so every
+/// positional sound attenuates + pans relative to where the player is actually
+/// looking from), and the underwater flag comes from the local player's
+/// mirrored [`NetLocomotion::in_liquid`] (which drives the sfx low-pass muffle).
+///
+/// Ported from the old client's own `SfxMgr::maintain` head, which set the
+/// listener to the camera position/direction and toggled the sfx master filter
+/// on an underwater check. We use the local player's `in_liquid` as the
+/// "underwater" signal — the real, already-mirrored, both-feature-available
+/// client-side state — rather than resampling the terrain block at the camera
+/// (the old client's approach), which would need a new point-block terrain
+/// query this Bevy port does not expose yet; camera-position water sampling is
+/// a possible future refinement, noted for EM-5.10d follow-up.
+fn update_audio_listener(
+    camera: Query<&Transform, With<crate::camera::MainCamera>>,
+    local_player: Query<&NetLocomotion, With<NetLocalPlayer>>,
+    mut listener: ResMut<AudioListener>,
+) {
+    let Ok(camera) = camera.single() else {
+        return; // no main camera yet — keep the last (or default) listener
+    };
+    listener.pos = camera.translation;
+    listener.right = *camera.right();
+    listener.underwater = local_player.single().map(|l| l.in_liquid).unwrap_or(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,14 +587,19 @@ pub struct SfxViewPlugin;
 
 impl Plugin for SfxViewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        // EM-5.10d: refresh the listener BEFORE the mappers so this frame's
+        // attenuation/panning read an up-to-date camera pose (a one-frame-stale
+        // listener would be harmless — the camera barely moves per frame — but
+        // the explicit edge keeps it exact and un-ambiguous).
+        app.add_systems(Update, update_audio_listener).add_systems(
             Update,
             (
                 movement_sfx_mapper,
                 combat_sfx_mapper,
                 campfire_sfx_mapper,
                 handle_outcome_sfx,
-            ),
+            )
+                .after(update_audio_listener),
         );
     }
 }
@@ -857,6 +919,163 @@ mod tests {
             count_after_transition >= 1,
             "the footstep + attack state transition must have started at least one real sound, \
              got {count_after_transition}"
+        );
+    }
+
+    /// Calls the real [`trigger_sfx`] against the app's live Kira backend for a
+    /// given emitter/listener geometry, returning `(did_it_play,
+    /// sfx_sound_count)`. Two nested `resource_scope`s take the two `&mut`
+    /// resources (`SfxAssetCache`, `AudioBackend`) out of the world so the
+    /// remaining (immutable) manifest/asset resources can be borrowed
+    /// alongside them.
+    fn run_trigger(
+        app: &mut App,
+        event: &SfxEvent,
+        emitter: Vec3,
+        listener: AudioListener,
+    ) -> (bool, usize) {
+        let manifest_handle = app.world().resource::<SfxManifestHandle>().0.clone();
+        app.world_mut()
+            .resource_scope(|world, mut cache: Mut<SfxAssetCache>| {
+                world.resource_scope(|world, mut backend: Mut<AudioBackend>| {
+                    let manifests = world.resource::<Assets<SfxManifest>>();
+                    let manifest = manifests.get(&manifest_handle).expect("manifest loaded");
+                    let asset_server = world.resource::<AssetServer>();
+                    let audio_assets = world.resource::<Assets<XindelerAudioAsset>>();
+                    let played = trigger_sfx(
+                        manifest,
+                        event,
+                        1.0,
+                        emitter,
+                        &listener,
+                        asset_server,
+                        audio_assets,
+                        &mut cache,
+                        &mut backend,
+                    );
+                    let count = backend
+                        .tracks_mut()
+                        .map(|tracks| tracks.sfx.num_sounds())
+                        .unwrap_or(0);
+                    (played, count)
+                })
+            })
+    }
+
+    /// EM-5.10d — the reported campfire bug, exercised through the REAL spatial
+    /// trigger on the live Kira backend. [`trigger_sfx`] is exactly what the
+    /// campfire mapper calls once its (≈22 s) threshold elapses; we call it
+    /// directly so the test needn't sleep out that cadence. A campfire close to
+    /// the listener plays; one beyond [`SFX_DIST_LIMIT`] is fully attenuated
+    /// and starts nothing. The volume *taper* in between (a
+    /// far-but-in-range fire is much quieter than a near one — the precise
+    /// "constant loud campfire" regression) is asserted deterministically
+    /// by `xindeler_audio::sfx::spatial`'s own unit tests, since Kira
+    /// exposes no public way to read a playing sound's effective volume
+    /// back.
+    #[test]
+    fn campfire_trigger_is_spatially_gated_by_distance() {
+        let mut app = boot_app();
+        poll_until(&mut app, 400, |app| {
+            let ready = app.world().resource::<AudioBackend>().is_available();
+            let handle = app
+                .world()
+                .get_resource::<SfxManifestHandle>()
+                .map(|h| h.0.clone());
+            let manifest_loaded = match handle {
+                Some(h) => app
+                    .world()
+                    .resource::<Assets<SfxManifest>>()
+                    .get(&h)
+                    .is_some(),
+                None => false,
+            };
+            ready && manifest_loaded
+        });
+
+        if !app.world().resource::<AudioBackend>().is_available() {
+            eprintln!(
+                "skipping real-playback assertions: no cpal output device in this environment"
+            );
+            return;
+        }
+
+        preload_event_assets(&mut app, &SfxEvent::Campfire);
+        let listener = AudioListener {
+            pos: Vec3::ZERO,
+            right: Vec3::X,
+            underwater: false,
+        };
+
+        // Right next to the fire: within earshot -> a real sound starts.
+        let (played_near, count_near) = run_trigger(
+            &mut app,
+            &SfxEvent::Campfire,
+            Vec3::new(2.0, 0.0, 0.0),
+            listener,
+        );
+        assert!(played_near, "a campfire 2 m away must play");
+        assert!(
+            count_near >= 1,
+            "a near campfire must have started a real sound, got {count_near}"
+        );
+
+        // Far beyond the cull radius (SFX_DIST_LIMIT = 256 m): fully attenuated
+        // -> nothing plays. Pre-fix this either played at full blast (if the
+        // mapper's binary cull let it through) — the exact "still loud no matter
+        // how far I walk" symptom.
+        let (played_far, _) = run_trigger(
+            &mut app,
+            &SfxEvent::Campfire,
+            Vec3::new(400.0, 0.0, 0.0),
+            listener,
+        );
+        assert!(
+            !played_far,
+            "a campfire 400 m away (past SFX_DIST_LIMIT) must be silent"
+        );
+    }
+
+    /// EM-5.10d — the listener "ears" track the player camera + underwater
+    /// state: [`update_audio_listener`] copies the `MainCamera` position/right
+    /// axis and the local player's `in_liquid` flag into [`AudioListener`]
+    /// (which the muffle system + `trigger_sfx` then read). No audio device
+    /// needed — this is pure ECS wiring.
+    #[test]
+    fn audio_listener_follows_camera_and_underwater_state() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<AudioListener>();
+        app.add_systems(Update, update_audio_listener);
+
+        app.world_mut().spawn((
+            Transform::from_xyz(5.0, 6.0, 7.0),
+            crate::camera::MainCamera,
+        ));
+        app.world_mut()
+            .spawn((NetLocalPlayer, NetUid(1), NetLocomotion {
+                on_ground: true,
+                in_liquid: true,
+                ground_block: NetGroundBlock::Grass,
+                move_state: NetMoveState::Idle,
+            }));
+
+        app.update();
+
+        let listener = app.world().resource::<AudioListener>();
+        assert_eq!(
+            listener.pos,
+            Vec3::new(5.0, 6.0, 7.0),
+            "listener must sit at the camera position"
+        );
+        assert!(
+            (listener.right - Vec3::X).length() < 1e-5,
+            "an un-rotated camera's right axis is +X, got {:?}",
+            listener.right
+        );
+        assert!(
+            listener.underwater,
+            "the local player being in liquid must mark the listener underwater"
         );
     }
 }
