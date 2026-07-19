@@ -45,14 +45,14 @@ use xindeler_sim_bridge::{
 };
 
 use crate::{
-    atmosphere::AtmosphereSyncViewPlugin, char_select::CharSelectViewPlugin, chat::ChatViewPlugin,
-    combat_hud::CombatHudViewPlugin, controls_screen::ControlsScreenPlugin,
-    entity_view::EntityViewPlugin, far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin,
-    hotbar::HotbarViewPlugin, hud_toast::HudToastViewPlugin,
-    localization::ClientLocalizationPlugin, lod::LodCullingPlugin, lod_objects::LodObjectsPlugin,
-    map_view::MapViewPlugin, player_input::PlayerInputPlugin, sfx::SfxViewPlugin,
-    social_hud::SocialHudViewPlugin, sprite_view::SpriteViewPlugin,
-    terrain_stream::TerrainStreamPlugin,
+    ambience::AmbienceViewPlugin, atmosphere::AtmosphereSyncViewPlugin,
+    char_select::CharSelectViewPlugin, chat::ChatViewPlugin, combat_hud::CombatHudViewPlugin,
+    controls_screen::ControlsScreenPlugin, entity_view::EntityViewPlugin,
+    far_terrain::FarTerrainPlugin, figure_view::FigureViewPlugin, hotbar::HotbarViewPlugin,
+    hud_toast::HudToastViewPlugin, localization::ClientLocalizationPlugin, lod::LodCullingPlugin,
+    lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, music::MusicViewPlugin,
+    player_input::PlayerInputPlugin, sfx::SfxViewPlugin, social_hud::SocialHudViewPlugin,
+    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -234,13 +234,17 @@ impl Plugin for ListenServerPlugin {
         // support (same reason `AtmosphereSyncMessagePlugin` below is
         // already split out).
         app.add_plugins(CombatHudMirrorPlugin);
-        // BL-82 EM-5.8: the social/group/dialogue server-side mirror
-        // (NetPlayerList/NetGroupState/NetDialogue projection + LocalGroupAction/
-        // LocalDialogueResponse action application) — reads/writes
-        // `EmbeddedPlayer`, so it must be added after `PlayerBridgePlugin`
-        // above (registration order doesn't matter for the `.after(tick_sim)`
-        // ordering itself, just for this doc convention). Split into its own
-        // call — the tuple above is already at the 15-plugin ceiling.
+        // BL-82 EM-5.8 (+ EM-8.3): the social/group/dialogue server-side mirror
+        // (NetPlayerList/NetGroupState/NetDialogue projection +
+        // GroupActionRequest/DialogueResponseRequest action application via the
+        // unified `FromClient` write path — the SAME plugin the dedicated
+        // server now registers too). `mirror_group_state` mirrors every
+        // connected player; here that resolves to the single embedded local
+        // player (`SendTargets::SERVER_ONLY` local echo). Added after
+        // `PlayerBridgePlugin` above (the group/dialogue mirrors still read
+        // `EmbeddedPlayer` for the listen-server's own recipient + NPC-dialogue
+        // capture). Split into its own call — the tuple above is already at the
+        // 15-plugin ceiling.
         app.add_plugins(SocialMirrorPlugin);
         // BL-82 EM-5.5: the one-shot map-data broadcast (background image +
         // site/POI markers) — reads `EmbeddedPlayer`, so it's added after
@@ -424,6 +428,20 @@ impl Plugin for ListenServerPlugin {
             SfxOutcomeBridgePlugin,
             SfxViewPlugin,
         ));
+
+        // BL-82 EM-5.10c (T56.36): music state machine (explore/combat via
+        // real nearby-hostile detection off the ALREADY-mirrored
+        // `NetAlignment`/`NetHealth` + weighted track selection + crossfade,
+        // reading ORACLE's mirrored `AtmosphereController` for weather and
+        // this crate's own client-local `SunCycle` for day/night) + ambience
+        // loops (real per-block indoor detection against the streamed
+        // terrain + weather-driven Rain/ThunderRumbling). No NEW protocol
+        // mirrors needed — both read state the codebase already replicates
+        // (see `music.rs`/`ambience.rs`'s own module doc comments for the
+        // honest site-kind/biome/tree-density/wind/river gaps neither has a
+        // mirror for yet). Split into its own call — the tuple near the top
+        // of this function is already at the 15-plugin ceiling.
+        app.add_plugins((MusicViewPlugin, AmbienceViewPlugin));
 
         // BL-82 EM-5.14: the character-select screen + its char-list mirror,
         // added ONLY when launched with `--char-select` so the default boot

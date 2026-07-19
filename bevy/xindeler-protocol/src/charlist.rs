@@ -19,8 +19,11 @@
 //! [`LocalCharDelete`]/[`LocalCharSelect`] twin that actually drives the
 //! listen server's own char-select UI today (the listen server runs replicon's
 //! SERVER role only — no client role — so its UI hands intents to the bridge
-//! as plain in-App messages, mirroring [`crate::LocalPlayerInput`] and
-//! [`crate::social::LocalGroupAction`]). The bridge
+//! as plain in-App messages, mirroring [`crate::LocalPlayerInput`]; unlike
+//! `crate::social`'s group/dialogue actions (unified onto the real
+//! `FromClient` write path in BL-82 EM-8.3), character creation stays on this
+//! Local*+`EmbeddedPlayer` shape — see this module's own scope-boundary note
+//! below for why). The bridge
 //! (`xindeler_sim_bridge::charlist`) translates each 1:1 into the embedded
 //! player's real `client::Client::{create_character,delete_character,
 //! request_character}` calls — a genuine client→server round trip over the
@@ -97,7 +100,8 @@ pub struct CharDeleteRequest(pub CharacterId);
 pub struct CharSelectRequest(pub CharacterId);
 
 /// In-process create intent that actually drives the listen server's char
-/// creation today (mirrors [`crate::social::LocalGroupAction`]).
+/// creation today (see this module's own doc comment for why char creation
+/// keeps this shape rather than the unified `FromClient` write path).
 #[derive(Message, Clone, Debug, PartialEq)]
 pub struct LocalCharCreate(pub CharCreateParams);
 

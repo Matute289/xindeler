@@ -39,12 +39,15 @@
 //! are unit-testable without a running `App` — the same "pure fn, test it
 //! directly" posture the rest of this crate uses.
 
+use std::collections::HashMap;
+
 use bevy::{
     ecs::{
         message::{MessageReader, MessageWriter},
         schedule::IntoScheduleConfigs,
     },
     prelude::*,
+    ui::{Overflow, OverflowAxis},
 };
 use common::comp::{
     Background, Body, ClassKind, Ethos, Moral, Order,
@@ -59,6 +62,7 @@ use xindeler_protocol::{
 use xindeler_ui::{
     button::{Activate, button_bundle},
     i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
+    scroll::ScrollArea,
     theme::{HudFonts, HudTheme},
 };
 
@@ -573,6 +577,73 @@ struct NextButton;
 #[derive(Component)]
 struct CreateButton;
 
+// ---------------------------------------------------------------------------
+// Char-select chrome art (real legacy `char_select`/`generic` assets)
+// ---------------------------------------------------------------------------
+
+/// The real legacy 2D chrome the screen reuses — the SAME PNGs the frozen
+/// `voxygen/src/menu/char_selection/ui.rs` reference drew (verified on disk):
+/// the roster **slot frame** (`generic/frames/selection.png`, tinted by a
+/// runtime `BackgroundColor` in this port rather than a per-state PNG swap)
+/// and the per-species **portraits** (`char_select/portraits/<species>_<m|f>.
+/// png`) shown in the Body step's species picker. Loaded straight off the
+/// [`AssetServer`] (the same direct-load posture `char_preview.rs`/
+/// `figure_view.rs` already use for their own assets) into a resource, not
+/// wired through `xindeler-ui::HudImages` — that curated `hud_d4`/`bag`
+/// registry is the in-game HUD's asset set, whereas these are the legacy
+/// char-select-only art, so keeping them self-contained here avoids widening
+/// the shared registry (and its exhaustive path/filename tests) for a single
+/// screen.
+#[derive(Resource)]
+struct CharSelectImages {
+    /// `generic/frames/selection.png` — the ornate slot frame every roster
+    /// entry (and the "Create New" slot) sits inside, legacy's `char_selection`
+    /// image.
+    slot_frame: Handle<Image>,
+    /// Per-species/body-type portrait, keyed by the resolved asset path (so no
+    /// `Hash`/`Eq` requirement on the `common` enums) — legacy's race-picker
+    /// portrait art.
+    portraits: HashMap<String, Handle<Image>>,
+}
+
+/// The on-disk portrait asset path for a species/body-type — mirrors legacy's
+/// `char_select.portraits.<race>_<m|f>` ids (note Draugr's file is `ud_*`,
+/// exactly as the frozen reference names it).
+fn portrait_path(species: Species, body_type: BodyType) -> String {
+    let race = match species {
+        Species::Human => "human",
+        Species::Orc => "orc",
+        Species::Dwarf => "dwarf",
+        Species::Elf => "elf",
+        Species::Danari => "danari",
+        Species::Draugr => "ud",
+    };
+    let sex = match body_type {
+        BodyType::Male => "m",
+        BodyType::Female => "f",
+    };
+    format!("voxygen/element/ui/char_select/portraits/{race}_{sex}.png")
+}
+
+/// Loads the real legacy char-select chrome art into [`CharSelectImages`].
+/// Runs on `OnEnter(AppState::CharSelect)` — `AssetServer` exists from
+/// plugin-build time, so (unlike the `Startup`-seeded theme) this is safe even
+/// on the initial-state `--char-select` launch path.
+fn load_char_select_images(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let mut portraits = HashMap::new();
+    for species in humanoid::ALL_SPECIES {
+        for body_type in [BodyType::Female, BodyType::Male] {
+            let path = portrait_path(species, body_type);
+            let handle = asset_server.load(&path);
+            portraits.insert(path, handle);
+        }
+    }
+    commands.insert_resource(CharSelectImages {
+        slot_frame: asset_server.load("voxygen/element/ui/generic/frames/selection.png"),
+        portraits,
+    });
+}
+
 /// The char-select screen plugin. Add in whichever shell hosts the screen
 /// (the listen-server client, when launched into char-select). Registering it
 /// is cheap on any App that never enters [`AppState::CharSelect`].
@@ -588,7 +659,15 @@ impl Plugin for CharSelectViewPlugin {
             .init_resource::<WizardState>()
             .init_resource::<CharSelectScreen>()
             .add_message::<CharAction>()
-            .add_systems(OnEnter(AppState::CharSelect), reset_state)
+            // `load_char_select_images` reads `Res<AssetServer>` (present from
+            // plugin-build time, unlike the `Startup`-seeded `HudTheme`) so it
+            // is safe even when `CharSelect` is the process's INITIAL state
+            // (the `--char-select` launch path, whose `OnEnter` runs before
+            // `Startup` — see `spawn_screen`'s own registration comment).
+            .add_systems(
+                OnEnter(AppState::CharSelect),
+                (reset_state, load_char_select_images),
+            )
             .add_systems(OnExit(AppState::CharSelect), despawn_screen)
             .add_systems(
                 Update,
@@ -722,140 +801,211 @@ fn spawn_screen(
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(theme.spacing.lg),
                 ..Default::default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.96)),
+            // FULLY OPAQUE (BL-82 char-select overhaul, Matías live report): the
+            // screen boots the real gameplay world + combat HUD eagerly behind
+            // it (see `main.rs`'s `--char-select` path → `boot_eagerly: true`),
+            // and those HUD panels sit at `zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP`
+            // (20) < this root's `MODAL_WINDOWS` (100) — so an opaque root is
+            // what stops the in-world HUD / streamed terrain bleeding through as
+            // a ghost background. The previous `0.96` alpha left a 4% window the
+            // bright orbs/action-bar and lit terrain showed through.
+            BackgroundColor(Color::srgb(0.03, 0.03, 0.05)),
         ))
         .with_children(|root| {
-            // NOT tagged `LocalizedText`: unlike a fixed heading, this text's
-            // resolved value depends on BOTH the locale AND which screen/step
-            // is showing (`sync_step_title` recomputes both — the same
-            // "state-dependent value, not a plain tag" posture
-            // `settings_window.rs`'s `SettingValueLabel`/`refresh_setting_
-            // labels` uses instead of `LocalizedLabel` for its cycle-row
-            // values). `sync_step_title` seeds/updates it every frame either
-            // one changes.
+            // A single framed "window" that OWNS its own bounded size, so its
+            // children (a possibly-long roster / species list) can never
+            // overflow past the name+nav rows the way the old free-growing
+            // centred column did (the "everything overlapping" report). The
+            // themed border/fill/corner-radius chrome mirrors
+            // `xindeler-ui::panel`'s look every other window in this crate uses
+            // (inlined here rather than via `panel_bundle`, which already owns a
+            // `Node` this spawn needs to fully control).
             root.spawn((
-                StepTitleText,
-                text_bundle(
-                    &fonts,
-                    &theme,
-                    30.0,
-                    localization.tr("char_selection-select_character"),
-                ),
-            ));
-
-            // Middle row: content column + 3D preview.
-            root.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(theme.spacing.lg),
-                align_items: AlignItems::FlexStart,
-                ..Default::default()
-            })
-            .with_children(|row| {
-                row.spawn((ContentColumn, Node {
+                Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(theme.spacing.sm),
-                    min_width: Val::Px(320.0),
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(theme.spacing.lg),
+                    padding: UiRect::all(Val::Px(theme.spacing.lg)),
+                    max_width: Val::Px(920.0),
+                    max_height: Val::Percent(92.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(theme.radius.md)),
                     ..Default::default()
-                }));
-                // Preview image (handle wired by `sync_preview_image`).
-                row.spawn((PreviewImage, ImageNode::default(), Node {
-                    width: Val::Px(220.0),
-                    height: Val::Px(300.0),
-                    ..Default::default()
-                }));
-            });
-
-            // Name row (wizard only).
-            root.spawn((NameRow, Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(theme.spacing.sm),
-                align_items: AlignItems::Center,
-                display: Display::None,
-                ..Default::default()
-            }))
-            .with_children(|nr| {
-                // No colon: `LocalizedText`'s `relocalize_text` sets `Text.0`
-                // straight from the resolved `.ftl` VALUE with no room for
-                // Rust-side wrapping/punctuation (see that component's doc
-                // comment) — matches `settings_window.rs`'s `row_label`
-                // convention (a bare label, gapped from its value by layout,
-                // never a baked-in colon).
-                nr.spawn((
-                    LocalizedText("char_selection-summary_label_name"),
+                },
+                BackgroundColor(theme.palette.panel_bg),
+                BorderColor::all(theme.palette.panel_border),
+            ))
+            .with_children(|window| {
+                // NOT tagged `LocalizedText`: unlike a fixed heading, this text's
+                // resolved value depends on BOTH the locale AND which screen/step
+                // is showing (`sync_step_title` recomputes both — the same
+                // "state-dependent value, not a plain tag" posture
+                // `settings_window.rs`'s `SettingValueLabel`/`refresh_setting_
+                // labels` uses instead of `LocalizedLabel` for its cycle-row
+                // values). `sync_step_title` seeds/updates it every frame either
+                // one changes.
+                window.spawn((
+                    StepTitleText,
                     text_bundle(
                         &fonts,
                         &theme,
-                        20.0,
-                        localization.tr("char_selection-summary_label_name"),
+                        30.0,
+                        localization.tr("char_selection-select_character"),
                     ),
                 ));
-                nr.spawn((NameValueText, text_bundle(&fonts, &theme, 20.0, "")));
-            });
 
-            // Nav row (wizard only): Back | Cancel | Next/Create. Every
-            // button here is PERSISTENT (spawned once, never despawned while
-            // the screen is up), so each is tagged `LocalizedLabel` +
-            // resolved via `localization.tr` at spawn — the global
-            // `relocalize_button_labels`/`spawn_button_labels` chain
-            // (registered by `XindelerUiPlugin`, already added above) then
-            // keeps them live on a locale change with no extra wiring here.
-            // The legacy `<`/`>` chrome arrows this button pair used to carry
-            // are dropped: `Localization::tr` cannot interpolate a Rust-side
-            // wrapper around its resolved value, and the legacy client's own
-            // `char_selection-wizard_back`/`wizard_next` buttons show the
-            // bare word ("Back"/"Next") with no arrow either — see
-            // `voxygen/src/menu/char_selection/ui.rs`.
-            root.spawn((NavRow, Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(theme.spacing.md),
-                display: Display::None,
-                ..Default::default()
-            }))
-            .with_children(|nav| {
-                nav.spawn(button_bundle(
-                    &theme,
-                    &fonts,
-                    &localization.tr("char_selection-wizard_back"),
-                ))
-                .insert(LocalizedLabel("char_selection-wizard_back"))
-                .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
-                    w.write(CharAction::Back);
-                });
-                nav.spawn(button_bundle(
-                    &theme,
-                    &fonts,
-                    &localization.tr("common-cancel"),
-                ))
-                .insert(LocalizedLabel("common-cancel"))
-                .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
-                    w.write(CharAction::CancelWizard);
-                });
-                // Next and Create are separate buttons toggled by `Display`
-                // (a persistent `button_bundle` owns its own label, so we
-                // never mutate one button's text — `sync_nav_visibility` shows
-                // exactly one of these per step). Create exists ONLY on the
-                // last step (spec §Navigation).
-                nav.spawn(button_bundle(
-                    &theme,
-                    &fonts,
-                    &localization.tr("char_selection-wizard_next"),
-                ))
-                .insert((NextButton, LocalizedLabel("char_selection-wizard_next")))
-                .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
-                    w.write(CharAction::Next);
-                });
-                nav.spawn(button_bundle(
-                    &theme,
-                    &fonts,
-                    &localization.tr("common-create"),
-                ))
-                .insert((CreateButton, LocalizedLabel("common-create")))
-                .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
-                    w.write(CharAction::Create);
-                });
+                // Middle row: scrollable content column + framed 3D preview.
+                window
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(theme.spacing.lg),
+                        align_items: AlignItems::FlexStart,
+                        ..Default::default()
+                    })
+                    .with_children(|row| {
+                        // Real scrolling (mouse-wheel/trackpad): `ScrollArea`
+                        // + a BOUNDED height with `overflow-y: Scroll` — the
+                        // roster or the species/class lists can exceed the
+                        // viewport, so they clip-and-scroll here instead of
+                        // spilling over the rest of the screen. This is the
+                        // `xindeler-ui::scroll` primitive the chat rebuild
+                        // already uses.
+                        row.spawn((ContentColumn, ScrollArea, Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(theme.spacing.sm),
+                            width: Val::Px(380.0),
+                            height: Val::Px(440.0),
+                            overflow: Overflow {
+                                x: OverflowAxis::Clip,
+                                y: OverflowAxis::Scroll,
+                            },
+                            ..Default::default()
+                        }));
+                        // Framed 3D preview panel (handle wired by
+                        // `sync_preview_image`). The themed frame reads as a
+                        // portrait window even before the offscreen figure
+                        // render lands.
+                        row.spawn((
+                            Node {
+                                padding: UiRect::all(Val::Px(theme.spacing.sm)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                border_radius: BorderRadius::all(Val::Px(theme.radius.md)),
+                                ..Default::default()
+                            },
+                            BackgroundColor(theme.palette.panel_bg),
+                            BorderColor::all(theme.palette.panel_border),
+                        ))
+                        .with_children(|panel| {
+                            panel.spawn((PreviewImage, ImageNode::default(), Node {
+                                width: Val::Px(240.0),
+                                height: Val::Px(320.0),
+                                ..Default::default()
+                            }));
+                        });
+                    });
+
+                // Name row (wizard only).
+                window
+                    .spawn((NameRow, Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(theme.spacing.sm),
+                        align_items: AlignItems::Center,
+                        display: Display::None,
+                        ..Default::default()
+                    }))
+                    .with_children(|nr| {
+                        // No colon: `LocalizedText`'s `relocalize_text` sets `Text.0`
+                        // straight from the resolved `.ftl` VALUE with no room for
+                        // Rust-side wrapping/punctuation (see that component's doc
+                        // comment) — matches `settings_window.rs`'s `row_label`
+                        // convention (a bare label, gapped from its value by layout,
+                        // never a baked-in colon).
+                        nr.spawn((
+                            LocalizedText("char_selection-summary_label_name"),
+                            text_bundle(
+                                &fonts,
+                                &theme,
+                                20.0,
+                                localization.tr("char_selection-summary_label_name"),
+                            ),
+                        ));
+                        nr.spawn((NameValueText, text_bundle(&fonts, &theme, 20.0, "")));
+                    });
+
+                // Nav row (wizard only): Back | Cancel | Next/Create. Every
+                // button here is PERSISTENT (spawned once, never despawned while
+                // the screen is up), so each is tagged `LocalizedLabel` +
+                // resolved via `localization.tr` at spawn — the global
+                // `relocalize_button_labels`/`spawn_button_labels` chain
+                // (registered by `XindelerUiPlugin`, already added above) then
+                // keeps them live on a locale change with no extra wiring here.
+                // The legacy `<`/`>` chrome arrows this button pair used to carry
+                // are dropped: `Localization::tr` cannot interpolate a Rust-side
+                // wrapper around its resolved value, and the legacy client's own
+                // `char_selection-wizard_back`/`wizard_next` buttons show the
+                // bare word ("Back"/"Next") with no arrow either — see
+                // `voxygen/src/menu/char_selection/ui.rs`.
+                window
+                    .spawn((NavRow, Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(theme.spacing.md),
+                        display: Display::None,
+                        ..Default::default()
+                    }))
+                    .with_children(|nav| {
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("char_selection-wizard_back"),
+                        ))
+                        .insert(LocalizedLabel("char_selection-wizard_back"))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::Back);
+                            },
+                        );
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("common-cancel"),
+                        ))
+                        .insert(LocalizedLabel("common-cancel"))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::CancelWizard);
+                            },
+                        );
+                        // Next and Create are separate buttons toggled by
+                        // `Display` (a persistent `button_bundle` owns its own
+                        // label, so we never mutate one button's text —
+                        // `sync_nav_visibility` shows exactly one of these per
+                        // step). Create exists ONLY on the last step (spec
+                        // §Navigation).
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("char_selection-wizard_next"),
+                        ))
+                        .insert((NextButton, LocalizedLabel("char_selection-wizard_next")))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::Next);
+                            },
+                        );
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("common-create"),
+                        ))
+                        .insert((CreateButton, LocalizedLabel("common-create")))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::Create);
+                            },
+                        );
+                    });
             });
         });
 }
@@ -1027,6 +1177,7 @@ fn rebuild_content(
     list: Res<CharListData>,
     current_locale: Res<CurrentLocale>,
     localization: NonSend<Localization>,
+    images: Option<Res<CharSelectImages>>,
     column: Query<Entity, With<ContentColumn>>,
     children_query: Query<&Children>,
     // BL-82 EM-5.16 (T56.44): the cache key now also carries the CURRENT
@@ -1058,10 +1209,13 @@ fn rebuild_content(
         }
     }
 
+    let images = images.as_deref();
     commands.entity(root).with_children(|parent| match *screen {
-        CharSelectScreen::Roster => build_roster(parent, &theme, &fonts, &list, &localization),
+        CharSelectScreen::Roster => {
+            build_roster(parent, &theme, &fonts, images, &list, &localization)
+        },
         CharSelectScreen::Wizard => {
-            build_wizard_step(parent, &theme, &fonts, &state, &localization)
+            build_wizard_step(parent, &theme, &fonts, images, &state, &localization)
         },
     });
 }
@@ -1070,6 +1224,7 @@ fn build_roster(
     parent: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&CharSelectImages>,
     list: &CharListData,
     localization: &Localization,
 ) {
@@ -1113,50 +1268,91 @@ fn build_roster(
                     .map(|l| format!("  @ {l}"))
                     .unwrap_or_default()
             );
-            parent
-                .spawn(Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(theme.spacing.sm),
-                    align_items: AlignItems::Center,
+            spawn_roster_slot(parent, theme, images, Color::WHITE, |row| {
+                row.spawn((text_bundle(fonts, theme, 20.0, label), Node {
+                    flex_grow: 1.0,
                     ..Default::default()
-                })
-                .with_children(|row| {
-                    row.spawn(text_bundle(fonts, theme, 20.0, label));
-                    spawn_action_button(
-                        row,
-                        theme,
-                        fonts,
-                        &localization.tr("char_selection-enter_world"),
-                        CharAction::SelectCharacter(*id),
-                    );
-                    spawn_action_button(
-                        row,
-                        theme,
-                        fonts,
-                        &localization.tr("char_selection-delete"),
-                        CharAction::DeleteCharacter(*id),
-                    );
-                });
+                }));
+                spawn_action_button(
+                    row,
+                    theme,
+                    fonts,
+                    &localization.tr("char_selection-enter_world"),
+                    CharAction::SelectCharacter(*id),
+                );
+                spawn_action_button(
+                    row,
+                    theme,
+                    fonts,
+                    &localization.tr("char_selection-delete"),
+                    CharAction::DeleteCharacter(*id),
+                );
+            });
         }
     }
-    // Legacy's own button for this exact action shows the bare phrase with no
-    // "+" prefix (`voxygen/src/menu/char_selection/ui.rs`'s
+    // The "Create New" slot uses the SAME frame art, tinted green — matching
+    // legacy `ui.rs`'s green-tinted create slot. Legacy's own button for this
+    // exact action shows the bare phrase with no "+" prefix
+    // (`voxygen/src/menu/char_selection/ui.rs`'s
     // `char_selection-create_new_character` use) — dropped here for the same
     // reason the wizard nav's `<`/`>` arrows were dropped (see
     // `spawn_screen`'s doc comment on the Nav row).
-    spawn_action_button(
-        parent,
-        theme,
-        fonts,
-        &localization.tr("char_selection-create_new_character"),
-        CharAction::OpenWizard,
-    );
+    spawn_roster_slot(parent, theme, images, Color::srgb(0.55, 1.0, 0.5), |row| {
+        spawn_action_button(
+            row,
+            theme,
+            fonts,
+            &localization.tr("char_selection-create_new_character"),
+            CharAction::OpenWizard,
+        );
+    });
+}
+
+/// Spawns one roster slot: the real legacy `selection.png` frame
+/// ([`CharSelectImages::slot_frame`], stretched to the slot box, tinted by
+/// `tint`) as a background, with `contents` laid out on top of it. Falls back
+/// to a plain themed row when the art hasn't loaded yet (or a build without a
+/// real `AssetServer`, e.g. a unit test), so the roster is never blank.
+fn spawn_roster_slot(
+    parent: &mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    images: Option<&CharSelectImages>,
+    tint: Color,
+    contents: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    let node = Node {
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(theme.spacing.sm),
+        align_items: AlignItems::Center,
+        width: Val::Percent(100.0),
+        min_height: Val::Px(52.0),
+        padding: UiRect::axes(Val::Px(theme.spacing.md), Val::Px(theme.spacing.sm)),
+        ..Default::default()
+    };
+    match images {
+        Some(images) => {
+            parent
+                .spawn((node, ImageNode {
+                    image: images.slot_frame.clone(),
+                    image_mode: bevy::ui::widget::NodeImageMode::Stretch,
+                    color: tint,
+                    ..Default::default()
+                }))
+                .with_children(contents);
+        },
+        None => {
+            parent
+                .spawn((node, BackgroundColor(theme.palette.panel_bg)))
+                .with_children(contents);
+        },
+    }
 }
 
 fn build_wizard_step(
     parent: &mut ChildSpawnerCommands,
     theme: &HudTheme,
     fonts: &HudFonts,
+    images: Option<&CharSelectImages>,
     state: &WizardState,
     localization: &Localization,
 ) {
@@ -1191,14 +1387,37 @@ fn build_wizard_step(
                 18.0,
                 localization.tr("char_selection-step_body"),
             ));
+            // Real per-species portrait art (legacy `char_select.portraits.*`)
+            // for the currently-chosen body type sits beside each species
+            // button — a genuine image reuse, not a text-only list.
             for species in humanoid::ALL_SPECIES {
-                spawn_action_button(
-                    parent,
-                    theme,
-                    fonts,
-                    &localization.tr(species_label_key(species)),
-                    CharAction::SetSpecies(species),
-                );
+                parent
+                    .spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(theme.spacing.sm),
+                        align_items: AlignItems::Center,
+                        ..Default::default()
+                    })
+                    .with_children(|row| {
+                        if let Some(images) = images
+                            && let Some(portrait) = images
+                                .portraits
+                                .get(&portrait_path(species, state.body_type))
+                        {
+                            row.spawn((ImageNode::new(portrait.clone()), Node {
+                                width: Val::Px(48.0),
+                                height: Val::Px(48.0),
+                                ..Default::default()
+                            }));
+                        }
+                        spawn_action_button(
+                            row,
+                            theme,
+                            fonts,
+                            &localization.tr(species_label_key(species)),
+                            CharAction::SetSpecies(species),
+                        );
+                    });
             }
         },
         WizardStep::Appearance => {
@@ -1859,6 +2078,43 @@ mod tests {
             .expect("CharSelectRoot exists")
             .0;
         assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
+
+    /// BL-82 char-select visual overhaul (Matías live report: "the game's
+    /// in-world HUD visibly showing through as background"). The screen boots
+    /// the real gameplay world + combat HUD eagerly behind it, so the root's
+    /// backdrop must be FULLY OPAQUE (alpha == 1.0) — the previous `0.96` left
+    /// a 4% window the bright HUD/terrain ghosted through. Pins that the
+    /// backdrop can never silently drift back to a translucent value.
+    #[test]
+    fn char_select_root_background_is_fully_opaque() {
+        use bevy::{color::Alpha as _, ecs::system::RunSystemOnce};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(test_localization());
+
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs");
+
+        let world = app.world_mut();
+        let bg = world
+            .query_filtered::<&BackgroundColor, With<CharSelectRoot>>()
+            .single(world)
+            .expect("CharSelectRoot exists")
+            .0;
+        assert_eq!(
+            bg.alpha(),
+            1.0,
+            "the char-select backdrop must be fully opaque so the eagerly-booted in-game HUD / \
+             streamed world never bleeds through behind it"
+        );
     }
 
     /// Regression test for the real startup panic (Matías, live-testing

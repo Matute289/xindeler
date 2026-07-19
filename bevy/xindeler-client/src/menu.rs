@@ -250,9 +250,15 @@ struct LoginForm {
     online: bool,
     /// Which field the typed characters go into (`None` = nothing focused).
     focused: Option<LoginField>,
-    /// The status/error line shown under the form (also used for the Options
-    /// stub notice on the Main screen).
+    /// The status/error line shown under the form — a real validation
+    /// problem (e.g. "Enter a server address"). Rendered in the theme's
+    /// danger colour. Takes precedence over `notice` if both are set.
     error: Option<String>,
+    /// A neutral informational line shown under the form (e.g. the Options
+    /// button's "settings live in the Esc menu" notice) — same status-line
+    /// slot as `error`, but rendered in a non-alarming colour since it isn't
+    /// reporting a problem.
+    notice: Option<String>,
 }
 
 impl LoginForm {
@@ -810,6 +816,7 @@ fn enter_main_menu(
     form.online = settings.menu.online;
     form.focused = None;
     form.error = None;
+    form.notice = None;
     *screen = if settings.menu.disclaimer_accepted {
         MenuScreen::Main
     } else {
@@ -1430,9 +1437,10 @@ fn load_menu_images(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(MenuImages::load(&asset_server));
 }
 
-/// The logo's native aspect ratio (346×111 `v_logo.png`) — used so the panel
-/// header image keeps its proportions at a fixed display width.
-const LOGO_ASPECT: f32 = 346.0 / 111.0;
+/// The logo's native aspect ratio (655×191 `v_logo.png`, Xindeler wordmark) —
+/// used so the panel header image keeps its proportions at a fixed display
+/// width.
+const LOGO_ASPECT: f32 = 655.0 / 191.0;
 
 /// Spawns the wordmark logo at the top of the menu panel (image-backed,
 /// aspect-preserved). Shown on every sub-screen so the branding is constant,
@@ -2161,12 +2169,27 @@ fn placeholder(field: LoginField, localization: &Localization) -> String {
     })
 }
 
-/// Mirrors [`LoginForm::error`] into the status line.
-fn render_status_line(form: Res<LoginForm>, mut lines: Query<&mut Text, With<StatusLineText>>) {
-    let msg = form.error.clone().unwrap_or_default();
-    for mut text in &mut lines {
+/// Mirrors [`LoginForm::error`]/[`LoginForm::notice`] into the status line —
+/// `error` takes precedence (a real problem always outranks an informational
+/// notice), text colour follows which one is actually showing.
+fn render_status_line(
+    form: Res<LoginForm>,
+    theme: Res<HudTheme>,
+    mut lines: Query<(&mut Text, &mut TextColor), With<StatusLineText>>,
+) {
+    let (msg, color) = if let Some(error) = &form.error {
+        (error.clone(), theme.palette.danger)
+    } else if let Some(notice) = &form.notice {
+        (notice.clone(), theme.palette.text)
+    } else {
+        (String::new(), theme.palette.danger)
+    };
+    for (mut text, mut text_color) in &mut lines {
         if text.0 != msg {
             text.0 = msg.clone();
+        }
+        if text_color.0 != color {
+            text_color.0 = color;
         }
     }
 }
@@ -2440,6 +2463,7 @@ fn read_login_input(
             Key::Enter => attempt_connect(&mut form, &mut settings, &mut next, &localization),
             Key::Escape => {
                 form.error = None;
+                form.notice = None;
                 form.focused = None;
                 *screen = MenuScreen::Main;
             },
@@ -2473,6 +2497,7 @@ fn go_to_login(
     mut form: ResMut<LoginForm>,
 ) {
     form.error = None;
+    form.notice = None;
     *screen = MenuScreen::Login;
 }
 
@@ -2482,6 +2507,7 @@ fn back_to_main(
     mut form: ResMut<LoginForm>,
 ) {
     form.error = None;
+    form.notice = None;
     form.focused = None;
     *screen = MenuScreen::Main;
 }
@@ -2491,12 +2517,13 @@ fn options_notice(
     mut form: ResMut<LoginForm>,
     localization: NonSend<Localization>,
 ) {
-    form.error = Some(localization.tr("main-options_notice"));
+    form.notice = Some(localization.tr("main-options_notice"));
 }
 
 fn toggle_mode(_activate: On<Activate>, mut form: ResMut<LoginForm>) {
     form.online = !form.online;
     form.error = None;
+    form.notice = None;
 }
 
 fn quit_game(_activate: On<Activate>, mut commands: Commands) {
@@ -2683,6 +2710,7 @@ fn attempt_connect(
     }
 
     form.error = None;
+    form.notice = None;
     next.set(AppState::Connecting);
 }
 

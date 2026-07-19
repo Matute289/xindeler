@@ -10,66 +10,69 @@
 //! Three READ mirrors + two ACTION-applying systems:
 //! - [`mirror_player_list`]: reads every `comp::Player`-tagged sim entity
 //!   directly off [`SimServer`] (no [`EmbeddedPlayer`] needed — this works for
-//!   any shell hosting the sim, not just the listen server).
-//! - [`mirror_group_state`]/[`mirror_dialogue`]: read the SIM too, but scoped
-//!   to the ONE player this process actually has a UI for — the embedded local
-//!   player ([`EmbeddedPlayer::uid`]). A genuinely multi-remote-client
-//!   dedicated server would need a connected-client↔sim-player-identity
-//!   correlation to scope these per-recipient instead of broadcasting — BL-82
-//!   EM-8.2 closes that gap (technical-debt ledger Part A2):
-//!   [`xindeler_protocol::ActiveReplicaSessions`] now answers "which `ClientId`
-//!   controls the sim player identified by this `Uid`", so both mirrors resolve
-//!   their `SendTargets` from it instead of hardcoding `SendTargets::All`.
-//!   Because these mirrors are STILL only ever computed for the ONE
-//!   embedded/local player (this doc comment's scoping note above is otherwise
-//!   unchanged — registering a per-remote-client version of this mirror on the
-//!   dedicated server is EM-8.3's job, not this one's), the embedded player's
-//!   own `Uid` is never actually a key in that map (the embedded player
-//!   authenticates over the legacy loopback transport, never through the
-//!   replicon login handshake that populates it) — so the resolved target
-//!   degrades to `SendTargets::SERVER_ONLY`
-//!   (`SendTargets::Single(ClientId::Server)`), which `bevy_replicon` only ever
-//!   re-emits LOCALLY (the listen-server's own local echo), never to any real
-//!   connected client. This is the exact fix the ledger's "every client would
-//!   see every other player's private group/dialogue state" risk names: a real
-//!   second replicon client connected alongside the embedded/local player can
-//!   no longer receive the embedded player's own private group invite / NPC
-//!   dialogue turn. If a FUTURE caller ever does populate an entry for the
-//!   embedded player's own `Uid` (e.g. once EM-8.3 gives this mirror a real
-//!   per-remote-player identity), the lookup correctly targets that one real
-//!   client instead — the fallback is a safe default, not a hardcoded
-//!   assumption.
-//! - [`apply_local_group_actions`]/[`apply_local_dialogue_response`]: drain the
-//!   client's [`xindeler_protocol::LocalGroupAction`]/
-//!   [`xindeler_protocol::LocalDialogueResponse`] messages and call the new
-//!   [`EmbeddedPlayer`] pass-through methods — a genuine client→server network
-//!   round-trip over the embedded `Client`'s loopback socket (the isolation
-//!   law's "writes go through the sim's public event/intent API" rule), never a
-//!   direct sim-state write.
+//!   any shell hosting the sim, not just the listen server). Broadcast to all
+//!   (a roster is public), unchanged.
+//! - [`mirror_group_state`]: BL-82 EM-8.3 GENERALIZED to EVERY connected player
+//!   — it iterates every fully-logged-in replicon session
+//!   ([`xindeler_protocol::ActiveReplicaSessions::iter`]) UNIONED with the
+//!   listen-server's single in-game embedded local player, computes each one's
+//!   own group state off the sim, and sends it TARGETED to just that recipient.
+//!   BL-82 EM-8.2 supplied the correlation ([`ActiveReplicaSessions`] answers
+//!   "which `ClientId` controls the sim player with this `Uid`"); EM-8.3 uses
+//!   it here to scope the per-recipient send via [`resolve_recipient_targets`]:
+//!   a real client's own `SendTargets::Single`, or `SendTargets::SERVER_ONLY`
+//!   (local echo) for the embedded player — NEVER `SendTargets::All`, so one
+//!   player's private group/invite state can never leak to another connected
+//!   client (the ledger's Part A2 leak, now closed for the true N-client case).
+//! - [`mirror_dialogue`]: the NPC→player READ direction stays
+//!   LISTEN-SERVER-ONLY (see that system's own doc comment) — an NPC dialogue
+//!   turn only surfaces via the embedded `client::Client`, and the sim delivers
+//!   dialogue through a `comp::Client` a replicon-login player never has;
+//!   capturing it for a real dedicated-server client needs a new sim-side
+//!   per-player outgoing-message hook (EM-8.3b, same as chat/outcome
+//!   broadcast). It simply no-ops on the dedicated server.
+//! - [`apply_group_action_requests`]/[`apply_dialogue_response_requests`]:
+//!   BL-82 EM-8.3 UNIFIED onto the `FromClient` write path — they drain the
+//!   real `bevy_replicon` [`xindeler_protocol::GroupActionRequest`]/
+//!   [`xindeler_protocol::DialogueResponseRequest`] client messages (a
+//!   genuinely-remote client's real send, OR the listen-server's own local
+//!   write echoed back with `ClientId::Server`), resolve the acting sim entity
+//!   per message via [`crate::inventory::resolve_client_entity`], and emit the
+//!   EXACT sim events the legacy handlers do (`InitiateInviteEvent`/
+//!   `InviteResponseEvent`/`GroupManipEvent`/`DialogueEvent`) — the isolation
+//!   law's "writes go through the sim's public event/intent API" rule, never a
+//!   direct sim-state write, and no longer coupled to `EmbeddedPlayer` (which a
+//!   dedicated server lacks — the ledger's A1 parity gap).
 
 use std::collections::HashMap;
 
 use bevy::{
     app::{App, FixedUpdate, Plugin},
     ecs::{
-        change_detection::NonSendMut,
+        change_detection::{NonSend, NonSendMut},
         message::{MessageReader, MessageWriter},
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Res, ResMut},
+        system::{Query, Res, ResMut},
     },
 };
-use bevy_replicon::prelude::{SendTargets, ToClients};
-use common::{comp, comp::invite::InviteKind, uid::Uid};
+use bevy_replicon::prelude::{FromClient, SendTargets, ToClients};
+use common::{
+    comp,
+    comp::invite::{InviteKind, InviteResponse},
+    event::{DialogueEvent, GroupManipEvent, InitiateInviteEvent, InviteResponseEvent},
+    uid::{IdMaps, Uid},
+};
 use specs::{Join, WorldExt};
 use xindeler_protocol::{
-    ActiveReplicaSessions, GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue,
+    ActiveReplicaSessions, DialogueResponseRequest, GroupAction, GroupActionRequest, NetDialogue,
     NetGroupMember, NetGroupState, NetInviteKind, NetPendingInvite, NetPlayerList,
     NetPlayerListEntry,
 };
 
 use crate::{
-    SimServer,
+    PlayerDimensionSession, SimServer,
+    inventory::resolve_client_entity,
     player::{EmbeddedPlayer, player_sim_entity},
     tick_sim,
 };
@@ -145,7 +148,11 @@ pub fn mirror_player_list(
 /// tracks last-mirrored values, scoped to this module).
 #[derive(Resource, Default, Debug)]
 pub struct GroupStateCache {
-    last_sent: Option<NetGroupState>,
+    /// Last-sent [`NetGroupState`] PER recipient `Uid` (BL-82 EM-8.3 — was a
+    /// single `Option` when this mirror only ever computed the ONE embedded
+    /// player's group; now keyed by uid so each of N connected dedicated-server
+    /// players dedups independently).
+    last_sent: HashMap<Uid, NetGroupState>,
     invite_first_seen: HashMap<Uid, std::time::Instant>,
 }
 
@@ -165,32 +172,62 @@ fn resolve_recipient_targets(active: &ActiveReplicaSessions, recipient_uid: Uid)
         .map_or(SendTargets::SERVER_ONLY, SendTargets::Single)
 }
 
-/// Reads the embedded local player's group membership/leader/incoming invite
+/// Reads EVERY connected player's own group membership/leader/incoming invite
 /// straight off the sim ([`comp::Group`], [`comp::group::GroupManager`],
-/// [`comp::invite::Invite`]) and sends [`NetGroupState`] whenever it changes.
-/// No-ops until BOTH a [`SimServer`] and an in-game [`EmbeddedPlayer`] exist —
-/// this mirror only has a point of view for the ONE player this process
-/// actually hosts a UI for (see this module's doc comment, including the
-/// BL-82 EM-8.2 note on how `targets` below is resolved and why it degrades
-/// to `SendTargets::SERVER_ONLY` rather than `SendTargets::All`).
+/// [`comp::invite::Invite`]) and sends each one its OWN [`NetGroupState`]
+/// (targeted, never broadcast) whenever it changes (BL-82 EM-8.3). No-ops until
+/// a [`SimServer`] exists.
+///
+/// ## The recipient set (dedicated server + listen server, unified)
+/// The players this shell has a UI recipient for are: every fully-logged-in
+/// replicon client ([`ActiveReplicaSessions::iter`] — the dedicated server's N
+/// real clients), UNIONED with the listen-server's single in-game embedded
+/// local player (which never appears in that map — it authenticates over the
+/// legacy loopback, not the replicon handshake, see
+/// [`ActiveReplicaSessions`]'s own doc comment). Each recipient's `Uid` maps to
+/// a [`SendTargets`] resolved via [`resolve_recipient_targets`]: a real
+/// client's own `ClientId::Single`, or `SendTargets::SERVER_ONLY` (local echo)
+/// for the embedded player — NEVER `SendTargets::All`, so one player's private
+/// group/invite state can never leak to a different connected client (the
+/// ledger's Part A2 leak this closes for the multi-client case).
 pub fn mirror_group_state(
     sim: Option<NonSendMut<SimServer>>,
-    player: Option<NonSendMut<EmbeddedPlayer>>,
+    player: Option<NonSend<EmbeddedPlayer>>,
     active: Res<ActiveReplicaSessions>,
     mut cache: ResMut<GroupStateCache>,
     mut writer: MessageWriter<ToClients<NetGroupState>>,
 ) {
     let Some(sim) = sim else { return };
-    let Some(player) = player else { return };
-    if !player.is_in_game() {
-        return;
+
+    // Build the recipient set: every real replicon client, plus the embedded
+    // local player (listen server) if it's in game. A `HashMap` dedups the
+    // (impossible-today) case an embedded player's uid is ALSO a real session.
+    let mut recipients: HashMap<Uid, SendTargets> = HashMap::new();
+    for (uid, client_id) in active.iter() {
+        if let Some(uid) = uid_from_u64(uid) {
+            recipients.insert(uid, SendTargets::Single(client_id));
+        }
     }
-    let Some(my_uid) = player.uid() else { return };
-    let Some(my_entity) = player_sim_entity(&sim, my_uid) else {
-        return;
-    };
+    if let Some(player) = player.as_deref()
+        && player.is_in_game()
+        && let Some(my_uid) = player.uid()
+    {
+        recipients
+            .entry(my_uid)
+            .or_insert_with(|| resolve_recipient_targets(&active, my_uid));
+    }
+
+    // Prune per-recipient dedup/timeout caches for identities that are gone
+    // (a disconnected client, or the embedded player leaving game).
+    cache
+        .last_sent
+        .retain(|uid, _| recipients.contains_key(uid));
+    cache
+        .invite_first_seen
+        .retain(|uid, _| recipients.contains_key(uid));
 
     let ecs = sim.server.state().ecs();
+    let id_maps = ecs.read_resource::<IdMaps>();
     let groups = ecs.read_storage::<comp::Group>();
     let group_manager = ecs.read_resource::<comp::group::GroupManager>();
     let alignments = ecs.read_storage::<comp::Alignment>();
@@ -199,60 +236,68 @@ pub fn mirror_group_state(
     let stats = ecs.read_storage::<comp::Stats>();
     let invites = ecs.read_storage::<comp::invite::Invite>();
 
-    let (group_name, leader, members) = match groups.get(my_entity).copied() {
-        Some(group) => {
-            let info = group_manager.group_info(group);
-            let leader_uid = info
-                .and_then(|info| uids.get(info.leader))
-                .map(|u| u.0.get());
-            let members: Vec<NetGroupMember> =
-                comp::group::members(group, &groups, &entities, &alignments, &uids)
-                    .filter(|(_, role)| matches!(role, comp::group::Role::Member))
-                    .filter_map(|(entity, _)| {
-                        uids.get(entity).map(|uid| NetGroupMember {
-                            uid: uid.0.get(),
-                            name: flatten_name(stats.get(entity), "Unknown"),
+    for (my_uid, targets) in recipients {
+        let Some(my_entity) = id_maps.uid_entity(my_uid) else {
+            // This session's uid doesn't currently resolve to a live entity
+            // (mid-login, or just disconnected) — skip it, keep the rest.
+            continue;
+        };
+
+        let (group_name, leader, members) = match groups.get(my_entity).copied() {
+            Some(group) => {
+                let info = group_manager.group_info(group);
+                let leader_uid = info
+                    .and_then(|info| uids.get(info.leader))
+                    .map(|u| u.0.get());
+                let members: Vec<NetGroupMember> =
+                    comp::group::members(group, &groups, &entities, &alignments, &uids)
+                        .filter(|(_, role)| matches!(role, comp::group::Role::Member))
+                        .filter_map(|(entity, _)| {
+                            uids.get(entity).map(|uid| NetGroupMember {
+                                uid: uid.0.get(),
+                                name: flatten_name(stats.get(entity), "Unknown"),
+                            })
                         })
-                    })
-                    .collect();
-            (info.map(|i| i.name.clone()), leader_uid, members)
-        },
-        None => (None, None, Vec::new()),
-    };
-
-    let pending_invite = invites.get(my_entity).map(|invite| {
-        let now = std::time::Instant::now();
-        let first_seen = *cache.invite_first_seen.entry(my_uid).or_insert(now);
-        let elapsed = now.saturating_duration_since(first_seen).as_secs_f32();
-        let remaining_secs = (PRESENTED_INVITE_TIMEOUT_SECS - elapsed).max(0.0);
-        let inviter_uid = uids.get(invite.inviter).map_or(0, |u| u.0.get());
-        NetPendingInvite {
-            inviter_uid,
-            inviter_name: flatten_name(stats.get(invite.inviter), "Someone"),
-            kind: match invite.kind {
-                InviteKind::Group => NetInviteKind::Group,
-                InviteKind::Trade => NetInviteKind::Trade,
+                        .collect();
+                (info.map(|i| i.name.clone()), leader_uid, members)
             },
-            remaining_secs,
-        }
-    });
-    if pending_invite.is_none() {
-        cache.invite_first_seen.remove(&my_uid);
-    }
+            None => (None, None, Vec::new()),
+        };
 
-    let state = NetGroupState {
-        group_name,
-        leader,
-        members,
-        pending_invite,
-    };
-
-    if cache.last_sent.as_ref() != Some(&state) {
-        cache.last_sent = Some(state.clone());
-        writer.write(ToClients {
-            targets: resolve_recipient_targets(&active, my_uid),
-            message: state,
+        let pending_invite = invites.get(my_entity).map(|invite| {
+            let now = std::time::Instant::now();
+            let first_seen = *cache.invite_first_seen.entry(my_uid).or_insert(now);
+            let elapsed = now.saturating_duration_since(first_seen).as_secs_f32();
+            let remaining_secs = (PRESENTED_INVITE_TIMEOUT_SECS - elapsed).max(0.0);
+            let inviter_uid = uids.get(invite.inviter).map_or(0, |u| u.0.get());
+            NetPendingInvite {
+                inviter_uid,
+                inviter_name: flatten_name(stats.get(invite.inviter), "Someone"),
+                kind: match invite.kind {
+                    InviteKind::Group => NetInviteKind::Group,
+                    InviteKind::Trade => NetInviteKind::Trade,
+                },
+                remaining_secs,
+            }
         });
+        if pending_invite.is_none() {
+            cache.invite_first_seen.remove(&my_uid);
+        }
+
+        let state = NetGroupState {
+            group_name,
+            leader,
+            members,
+            pending_invite,
+        };
+
+        if cache.last_sent.get(&my_uid) != Some(&state) {
+            cache.last_sent.insert(my_uid, state.clone());
+            writer.write(ToClients {
+                targets,
+                message: state,
+            });
+        }
     }
 }
 
@@ -263,6 +308,22 @@ pub fn mirror_group_state(
 /// (BL-82 EM-8.2) and why it degrades to `SendTargets::SERVER_ONLY` rather
 /// than `SendTargets::All`. No-ops until both a [`SimServer`] (to resolve the
 /// sender's display name) and an [`EmbeddedPlayer`] exist.
+///
+/// ## ⚠️ Still listen-server-only (BL-82 EM-8.3, disclosed not narrowed)
+/// The NPC→player READ direction stays scoped to the embedded local player: an
+/// NPC-initiated dialogue turn surfaces only via the embedded
+/// `client::Client`'s `ClientEvent::Dialogue` (captured in
+/// `crate::player::capture_social_events`). The sim delivers dialogue to a
+/// player through its legacy `comp::Client` (`server::events::interaction`'s
+/// `DialogueEvent` handler → `notify_client`), which a `comp::Client`-less
+/// replicon-login player entity never has — so a real dedicated-server client's
+/// incoming dialogue turns cannot be captured here at all, and this system
+/// simply no-ops there. Closing that (like chat/outcome broadcast) needs a NEW
+/// sim-side per-player outgoing-message capture hook — the same EM-8.3b
+/// follow-up disclosed in `chat.rs`/`sfx.rs` and `xindeler-server-app`'s plugin
+/// registration. The player→NPC WRITE direction
+/// ([`apply_dialogue_response_requests`]) IS fully generalized to real remote
+/// clients below.
 pub fn mirror_dialogue(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<NonSendMut<EmbeddedPlayer>>,
@@ -304,57 +365,100 @@ pub fn mirror_dialogue(
 /// every other "malformed input degrades clean" posture in this crate.
 fn uid_from_u64(value: u64) -> Option<Uid> { std::num::NonZeroU64::new(value).map(Uid::from) }
 
-/// Drains [`LocalGroupAction`] (the listen-server's in-process client→bridge
-/// handoff — see `xindeler_protocol::social`'s module doc comment) and calls
-/// the matching [`EmbeddedPlayer`] pass-through method. A no-op (messages are
-/// simply dropped, matching every other "degrade clean, no panic" mirror
-/// system in this crate) until an [`EmbeddedPlayer`] exists.
-pub fn apply_local_group_actions(
-    player: Option<NonSendMut<EmbeddedPlayer>>,
-    mut actions: MessageReader<LocalGroupAction>,
+/// Drains [`GroupActionRequest`]s and re-emits each as the matching sim group
+/// event (BL-82 EM-8.3 — the unified `FromClient` write path, replacing the
+/// old `LocalGroupAction` + `EmbeddedPlayer` pass-through that silently did
+/// nothing on the real dedicated server). Resolves the acting entity PER
+/// MESSAGE via [`resolve_client_entity`] (real connection first via
+/// [`PlayerDimensionSession`], embedded local player as the `ClientId::Server`
+/// fallback — the SAME pattern [`crate::trade`]'s own invite applicators use),
+/// then emits the EXACT event the sim's own message handlers emit:
+/// `InitiateInviteEvent`/`InviteResponseEvent`/`GroupManipEvent`
+/// (`server::events::invite`/`group_manip` — range/permission/leader checks
+/// all stay server-side, so a non-leader's kick etc. is rejected sim-side,
+/// never trusted here).
+pub fn apply_group_action_requests(
+    sim: Option<NonSendMut<SimServer>>,
+    player: Option<NonSend<EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
+    mut requests: MessageReader<FromClient<GroupActionRequest>>,
 ) {
-    let Some(mut player) = player else {
-        actions.clear();
+    let Some(sim) = sim else {
+        requests.clear();
         return;
     };
-    for LocalGroupAction(action) in actions.read() {
-        match *action {
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            continue;
+        };
+        let state = sim.server.state();
+        match message.0 {
             GroupAction::Invite(uid) => {
                 if let Some(uid) = uid_from_u64(uid) {
-                    player.send_group_invite(uid, InviteKind::Group);
+                    state.emit_event_now(InitiateInviteEvent(entity, uid, InviteKind::Group));
                 }
             },
-            GroupAction::AcceptInvite => player.accept_invite(),
-            GroupAction::DeclineInvite => player.decline_invite(),
-            GroupAction::Leave => player.leave_group(),
+            GroupAction::AcceptInvite => {
+                state.emit_event_now(InviteResponseEvent(entity, InviteResponse::Accept));
+            },
+            GroupAction::DeclineInvite => {
+                state.emit_event_now(InviteResponseEvent(entity, InviteResponse::Decline));
+            },
+            GroupAction::Leave => {
+                state.emit_event_now(GroupManipEvent(entity, comp::GroupManip::Leave));
+            },
             GroupAction::Kick(uid) => {
                 if let Some(uid) = uid_from_u64(uid) {
-                    player.kick_from_group(uid);
+                    state.emit_event_now(GroupManipEvent(entity, comp::GroupManip::Kick(uid)));
                 }
             },
             GroupAction::AssignLeader(uid) => {
                 if let Some(uid) = uid_from_u64(uid) {
-                    player.assign_group_leader(uid);
+                    state.emit_event_now(GroupManipEvent(
+                        entity,
+                        comp::GroupManip::AssignLeader(uid),
+                    ));
                 }
             },
         }
     }
 }
 
-/// Drains [`LocalDialogueResponse`] and forwards it to
-/// [`EmbeddedPlayer::perform_dialogue`].
-pub fn apply_local_dialogue_response(
-    player: Option<NonSendMut<EmbeddedPlayer>>,
-    mut responses: MessageReader<LocalDialogueResponse>,
+/// Drains [`DialogueResponseRequest`]s (the player→NPC reply) and re-emits each
+/// as `common::event::DialogueEvent(sender, target, dialogue)` — the SAME event
+/// `client::Client::perform_dialogue` ultimately drives on the sim
+/// (`server::events::interaction`'s `DialogueEvent` handler validates it). The
+/// unified `FromClient` write path (BL-82 EM-8.3), resolving the acting entity
+/// PER MESSAGE like [`apply_group_action_requests`] above, and the NPC target
+/// via the sim's own `IdMaps` (a stale/despawned target simply skips, never
+/// panics).
+pub fn apply_dialogue_response_requests(
+    sim: Option<NonSendMut<SimServer>>,
+    player: Option<NonSend<EmbeddedPlayer>>,
+    sessions: Query<&PlayerDimensionSession>,
+    mut requests: MessageReader<FromClient<DialogueResponseRequest>>,
 ) {
-    let Some(mut player) = player else {
-        responses.clear();
+    let Some(sim) = sim else {
+        requests.clear();
         return;
     };
-    for response in responses.read() {
-        if let Some(uid) = uid_from_u64(response.target_uid) {
-            player.perform_dialogue(uid, response.dialogue.clone());
-        }
+    for FromClient { client_id, message } in requests.read() {
+        let Some(entity) = resolve_client_entity(*client_id, &sim, player.as_deref(), &sessions)
+        else {
+            continue;
+        };
+        let Some(target_uid) = uid_from_u64(message.target_uid) else {
+            continue;
+        };
+        let Some(target_entity) = player_sim_entity(&sim, target_uid) else {
+            continue;
+        };
+        sim.server.state().emit_event_now(DialogueEvent(
+            entity,
+            target_entity,
+            message.dialogue.clone(),
+        ));
     }
 }
 
@@ -367,36 +471,31 @@ pub struct SocialMirrorPlugin;
 
 impl Plugin for SocialMirrorPlugin {
     fn build(&self, app: &mut App) {
-        // `.chain()` (ecs-design-reviewer follow-up): four of these five
-        // systems take `Option<NonSendMut<EmbeddedPlayer>>` — an undeclared
-        // ambiguity is harmless here (an action applied this tick can't
-        // affect the sim before a LATER tick anyway, since
-        // `apply_local_group_actions`/`apply_local_dialogue_response` only
-        // enqueue a real network send on the embedded `Client`, dispatched
-        // by the NEXT `tick_player` call), but every other multi-system
-        // group in this crate that shares exclusive access closes the
-        // ordering explicitly (`PlayerBridgePlugin`'s own `tick_player`/
-        // `mirror_local_player_prediction` chain) — this does the same, for
-        // documentation/determinism: apply this frame's player intent
-        // first, then project the (necessarily one-tick-stale) sim state
-        // back out.
-        // BL-82 EM-8.2: `ActiveReplicaSessions` lives in `xindeler-protocol`
+        // `.chain()` (ecs-design-reviewer follow-up): every one of these
+        // systems takes exclusive `NonSendMut<SimServer>` (and most also
+        // `NonSend<EmbeddedPlayer>`), so Bevy would otherwise have to serialize
+        // them on that shared access anyway — chaining makes the order explicit
+        // and deterministic: apply this frame's player intent (group/dialogue
+        // requests, via `emit_event_now` — processed by the NEXT `tick_sim`)
+        // FIRST, then project the (necessarily one-tick-stale) sim state back
+        // out, matching `PlayerBridgePlugin`'s own `tick_player`/
+        // `mirror_local_player_prediction` chain.
+        // BL-82 EM-8.2/8.3: `ActiveReplicaSessions` lives in `xindeler-protocol`
         // and is NOT auto-initialized by `XindelerProtocolPlugin` (see that
         // type's own doc comment) — `init_resource` is idempotent, so this is
         // safe alongside `xindeler-server-app`'s own explicit insert and
         // guarantees `mirror_group_state`/`mirror_dialogue`'s non-`Option`
         // `Res<ActiveReplicaSessions>` param never panics for want of the
-        // resource existing, on ANY app this plugin is added to (listen
-        // server today; a dedicated server too, once EM-8.3 registers this
-        // plugin there).
+        // resource existing, on ANY app this plugin is added to (listen server
+        // AND, as of EM-8.3, the dedicated server).
         app.init_resource::<ActiveReplicaSessions>()
             .init_resource::<PlayerListCache>()
             .init_resource::<GroupStateCache>()
             .add_systems(
                 FixedUpdate,
                 (
-                    apply_local_group_actions,
-                    apply_local_dialogue_response,
+                    apply_group_action_requests,
+                    apply_dialogue_response_requests,
                     mirror_player_list,
                     mirror_group_state,
                     mirror_dialogue,
@@ -606,5 +705,145 @@ mod tests {
             },
             NetInviteKind::Trade
         );
+    }
+
+    /// BL-82 EM-8.3 acceptance: [`mirror_group_state`], GENERALIZED beyond the
+    /// single embedded player, sends EVERY fully-logged-in replicon client its
+    /// OWN [`NetGroupState`] — targeted `SendTargets::Single` to that exact
+    /// client, NEVER broadcast. This is the multi-client form of the ledger's
+    /// Part A2 fix: with two connected players, each receives exactly one
+    /// group-state message addressed only to itself, so one player's private
+    /// group/invite state can never reach the other.
+    #[test]
+    fn mirror_group_state_targets_each_connected_player_privately() {
+        use bevy::ecs::entity::Entity;
+        use bevy_replicon::prelude::{ClientId, ToClients};
+        use common::uid::IdMaps;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        // Two connected sim players, each with a `Uid` registered in `IdMaps`
+        // the same way a real login path does.
+        let mut spawn_player = || {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let entity = ecs.create_entity().build();
+            let mut uids = ecs.write_storage::<Uid>();
+            let mut id_maps = ecs.write_resource::<IdMaps>();
+            let uid = id_maps.allocate(entity);
+            uids.insert(entity, uid).unwrap();
+            uid
+        };
+        let uid_a = spawn_player();
+        let uid_b = spawn_player();
+
+        // Each maps to a DISTINCT replicon client (the dedicated server's real
+        // per-connection correlation, EM-8.2).
+        let client_a = ClientId::Client(Entity::from_raw_u32(10).expect("valid index"));
+        let client_b = ClientId::Client(Entity::from_raw_u32(20).expect("valid index"));
+        {
+            let mut active = app.world_mut().resource_mut::<ActiveReplicaSessions>();
+            active.insert(uid_a.0.get(), client_a);
+            active.insert(uid_b.0.get(), client_b);
+        }
+
+        app.world_mut()
+            .run_system_once(mirror_group_state)
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<bevy::prelude::Messages<ToClients<NetGroupState>>>()
+            .drain()
+            .collect();
+
+        assert_eq!(
+            sent.len(),
+            2,
+            "each of the two connected players gets its own group-state message"
+        );
+        // Every send is `Single` (never `All`), and each client is targeted
+        // exactly once — the exact Part A2 no-leak guarantee for N clients.
+        let mut hit_a = 0;
+        let mut hit_b = 0;
+        for msg in &sent {
+            match msg.targets {
+                SendTargets::Single(cid) if cid == client_a => hit_a += 1,
+                SendTargets::Single(cid) if cid == client_b => hit_b += 1,
+                SendTargets::Single(other) => {
+                    panic!("group state targeted an unexpected client {other:?}")
+                },
+                _ => panic!(
+                    "group state must be Single per-recipient, never broadcast (Part A2 leak)"
+                ),
+            }
+        }
+        assert_eq!(
+            hit_a, 1,
+            "client A must receive exactly its own group state"
+        );
+        assert_eq!(
+            hit_b, 1,
+            "client B must receive exactly its own group state"
+        );
+    }
+
+    /// BL-82 EM-8.3 owner-attribution guard for the write side: client A's
+    /// [`GroupActionRequest`] resolves to A's OWN sim entity as the acting
+    /// entity — the analogue of `skillset`'s
+    /// `skill_unlock_request_is_scoped_to_the_sender_not_another_client` for
+    /// group actions. Reads the sim's real `EventBus<GroupManipEvent>`
+    /// directly (`common::event::EventBus::recv_all`, the same API
+    /// `server/src/cmd.rs` uses to inspect queued events) to prove the
+    /// EMITTED event carries client A's entity, not client B's — never a
+    /// misattributed action, which would let one client kick/leave/reassign
+    /// leadership on behalf of a DIFFERENT player.
+    #[test]
+    fn group_action_request_resolves_to_the_senders_own_entity_not_another_clients() {
+        use bevy_replicon::prelude::ClientId;
+        use common::event::{EventBus, GroupManipEvent};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+        app.add_message::<FromClient<GroupActionRequest>>();
+
+        let (entity_a, entity_b) = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            (ecs.create_entity().build(), ecs.create_entity().build())
+        };
+        let conn_a = app.world_mut().spawn(PlayerDimensionSession(entity_a)).id();
+        // B has its own real connection but never sends a request this tick.
+        let _conn_b = app.world_mut().spawn(PlayerDimensionSession(entity_b)).id();
+
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Client(conn_a),
+            message: GroupActionRequest(GroupAction::Leave),
+        });
+        app.world_mut()
+            .run_system_once(apply_group_action_requests)
+            .expect("applicator runs");
+
+        let sim = app.world().non_send::<SimServer>();
+        let ecs = sim.server.state().ecs();
+        let events: Vec<_> = ecs
+            .read_resource::<EventBus<GroupManipEvent>>()
+            .recv_all()
+            .collect();
+
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one GroupManipEvent must be queued for the one request sent"
+        );
+        let GroupManipEvent(acting_entity, manip) = &events[0];
+        assert_eq!(
+            *acting_entity, entity_a,
+            "the emitted event's acting entity must be A (the real sender), never B (a different \
+             connected client that sent nothing) — a misattribution here would let one client act \
+             on another player's behalf"
+        );
+        assert_eq!(*manip, comp::GroupManip::Leave);
     }
 }

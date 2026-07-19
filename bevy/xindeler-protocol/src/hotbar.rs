@@ -39,7 +39,8 @@
 //! -law rule 4: sim writes via public APIs only).
 //!
 //! Earlier versions of this module also had a `LocalAssignHotbarSlot`
-//! plain-Bevy-message shortcut (modeled after EM-5.8's `LocalGroupAction`)
+//! plain-Bevy-message shortcut (modeled after EM-5.8's original
+//! `LocalGroupAction`, itself later removed in BL-82 EM-8.3's unification)
 //! that resolved the acting client PURELY via the embedded-player shortcut,
 //! ignoring `client_id` entirely — the exact anti-pattern EM-5.6 was blocked
 //! on and fixed. It has been removed in favour of the single-message

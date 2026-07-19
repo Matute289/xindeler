@@ -66,6 +66,11 @@ serde = { workspace = true }
 # mod.rs::emit_sfx`) and (later) the block/campfire mappers' own randomized
 # ambience timing.
 rand = { workspace = true }
+# BL-82 EM-5.10c (T56.36): `AmbienceChannelTag`'s `EnumIter` derive, ported
+# verbatim from `voxygen::audio::channel::AmbienceChannelTag` — the client-side
+# `ambience` orchestrator iterates every tag each frame the same way the old
+# client's `AmbienceMgr::maintain` did (`AmbienceChannelTag::iter()`).
+strum = { workspace = true }
 
 [dev-dependencies]
 # The T56.34 verification test boots a real headless `App` (`MinimalPlugins` +

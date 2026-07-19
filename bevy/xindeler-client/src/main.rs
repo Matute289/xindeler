@@ -20,6 +20,11 @@
 //! wire shape (`xindeler-protocol`) is unchanged, only the transport
 //! underneath it and who hosts the sim. See `net_client.rs`.
 
+// BL-82 EM-5.10c (T56.36): real per-block indoor detection + weather-driven
+// ambience loops (`crate::terrain_stream::SharedTerrain::is_indoors` + the
+// `xindeler_audio::ambience` manifest/playback).
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod ambience;
 mod atmosphere;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod boss_nameplate;
@@ -79,6 +84,10 @@ mod localization;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod map_view;
 #[cfg(feature = "listen-server")] mod menu;
+// BL-82 EM-5.10c (T56.36): the music state machine (explore/combat via
+// nearby-hostile detection + weighted track selection + crossfade).
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod music;
 #[cfg(feature = "net-client")] mod net_client;
 mod palette_material;
 mod perf_log;
