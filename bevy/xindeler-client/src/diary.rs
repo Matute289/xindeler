@@ -72,8 +72,8 @@ use common::comp::skillset::{
 };
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
-    LocalUnlockSkillRequest, NetAbilityPool, NetBuffs, NetCombo, NetEnergy, NetHealth,
-    NetLocalPlayer, NetPoise, NetSkillSet, NetXp,
+    NetAbilityPool, NetBuffs, NetCombo, NetEnergy, NetHealth, NetLocalPlayer, NetPoise,
+    NetSkillSet, NetXp, UnlockSkillRequest,
 };
 
 use crate::chat::text_input_focused;
@@ -772,10 +772,14 @@ fn sync_stats_panel(
 fn handle_skill_node_activate(
     activate: On<Activate>,
     targets: Query<&SkillNodeTarget>,
-    mut requests: MessageWriter<LocalUnlockSkillRequest>,
+    mut requests: MessageWriter<UnlockSkillRequest>,
 ) {
     if let Ok(target) = targets.get(activate.entity) {
-        requests.write(LocalUnlockSkillRequest(target.0));
+        // BL-82 EM-8.3: the real replicon client message (unified write path),
+        // not a listen-server-only `UnlockSkillRequest` — surfaces on the
+        // bridge as `FromClient<_>` for a genuinely-remote dedicated-server
+        // client AND the listen-server's own `ClientId::Server` local echo.
+        requests.write(UnlockSkillRequest(target.0));
     }
 }
 
@@ -1241,7 +1245,7 @@ mod tests {
 
     /// T56.23 acceptance, exercised directly (no real pointer/click needed):
     /// activating a skill-tree node writes exactly one
-    /// [`LocalUnlockSkillRequest`] for THAT node's [`Skill`] — the real
+    /// [`UnlockSkillRequest`] for THAT node's [`Skill`] — the real
     /// SP-spend action a live `--smoke-screenshot` capture alone could never
     /// prove (it only shows the tree renders; this is the click's actual
     /// effect). `World::trigger` fires the SAME [`Activate`] `EntityEvent`
@@ -1252,7 +1256,7 @@ mod tests {
     fn activating_a_skill_node_writes_an_unlock_request_for_that_skill() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_message::<LocalUnlockSkillRequest>();
+        app.add_message::<UnlockSkillRequest>();
 
         let skill = Skill::Warrior(WarriorSkill::Rally);
         let node = app.world_mut().spawn(SkillNodeTarget(skill)).id();
@@ -1264,10 +1268,10 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<bevy::ecs::message::Messages<LocalUnlockSkillRequest>>()
+            .resource_mut::<bevy::ecs::message::Messages<UnlockSkillRequest>>()
             .drain()
             .collect();
-        assert_eq!(sent, vec![LocalUnlockSkillRequest(skill)]);
+        assert_eq!(sent, vec![UnlockSkillRequest(skill)]);
     }
 
     /// A click on an entity that does NOT carry [`SkillNodeTarget`] (should
@@ -1278,7 +1282,7 @@ mod tests {
     fn activating_a_node_without_a_target_writes_nothing() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_message::<LocalUnlockSkillRequest>();
+        app.add_message::<UnlockSkillRequest>();
 
         let node = app.world_mut().spawn_empty().id();
         app.world_mut()
@@ -1289,7 +1293,7 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<bevy::ecs::message::Messages<LocalUnlockSkillRequest>>()
+            .resource_mut::<bevy::ecs::message::Messages<UnlockSkillRequest>>()
             .drain()
             .collect();
         assert!(sent.is_empty());

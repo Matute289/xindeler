@@ -56,7 +56,7 @@
 //!   field.
 //!
 //! ## Dialogue v1-minimal — what's real vs. deliberately deferred
-//! [`NetDialogue`]/[`LocalDialogueResponse`] carry the REAL
+//! [`NetDialogue`]/[`DialogueResponseRequest`] carry the REAL
 //! `common::rtsim::Dialogue`/`DialogueKind`/`Response` shape (see
 //! `xindeler_protocol::social`'s module doc for why) — this is genuine
 //! server-authoritative dialogue, not a stub. What IS deliberately
@@ -84,8 +84,8 @@ use bevy::{
 };
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
-    GroupAction, LocalDialogueResponse, LocalGroupAction, NetDialogue, NetEnergy, NetGroupMember,
-    NetGroupState, NetHealth, NetLocalPlayer, NetPlayerList, NetUid, NetXp,
+    DialogueResponseRequest, GroupAction, GroupActionRequest, NetDialogue, NetEnergy,
+    NetGroupMember, NetGroupState, NetHealth, NetLocalPlayer, NetPlayerList, NetUid, NetXp,
 };
 use xindeler_ui::{
     bar::{BarValue, spawn_bar},
@@ -399,9 +399,9 @@ fn sync_player_list(
                         .observe(
                             |activate: On<Activate>,
                              targets: Query<&InviteTarget>,
-                             mut actions: MessageWriter<LocalGroupAction>| {
+                             mut actions: MessageWriter<GroupActionRequest>| {
                                 if let Ok(target) = targets.get(activate.entity) {
-                                    actions.write(LocalGroupAction(GroupAction::Invite(
+                                    actions.write(GroupActionRequest(GroupAction::Invite(
                                         target.0,
                                     )));
                                 }
@@ -962,9 +962,9 @@ fn sync_group_panel(
                 .observe(
                     |activate: On<Activate>,
                      targets: Query<&KickTarget>,
-                     mut actions: MessageWriter<LocalGroupAction>| {
+                     mut actions: MessageWriter<GroupActionRequest>| {
                         if let Ok(target) = targets.get(activate.entity) {
-                            actions.write(LocalGroupAction(GroupAction::Kick(target.0)));
+                            actions.write(GroupActionRequest(GroupAction::Kick(target.0)));
                         }
                     },
                 )
@@ -978,9 +978,9 @@ fn sync_group_panel(
                 .observe(
                     |activate: On<Activate>,
                      targets: Query<&AssignLeaderTarget>,
-                     mut actions: MessageWriter<LocalGroupAction>| {
+                     mut actions: MessageWriter<GroupActionRequest>| {
                         if let Ok(target) = targets.get(activate.entity) {
-                            actions.write(LocalGroupAction(GroupAction::AssignLeader(target.0)));
+                            actions.write(GroupActionRequest(GroupAction::AssignLeader(target.0)));
                         }
                     },
                 )
@@ -1230,8 +1230,8 @@ fn sync_dialogue_panel(
                         .spawn((DialogueResponseRow, button_bundle(&theme, &fonts, &label)))
                         .observe(
                             move |_activate: On<Activate>,
-                                  mut actions: MessageWriter<LocalDialogueResponse>| {
-                                actions.write(LocalDialogueResponse {
+                                  mut actions: MessageWriter<DialogueResponseRequest>| {
+                                actions.write(DialogueResponseRequest {
                                     target_uid: sender_uid,
                                     dialogue: common::rtsim::Dialogue {
                                         id: dialogue_id,
@@ -1252,8 +1252,8 @@ fn sync_dialogue_panel(
                     .spawn((DialogueResponseRow, button_bundle(&theme, &fonts, "Continue")))
                     .observe(
                         move |_activate: On<Activate>,
-                              mut actions: MessageWriter<LocalDialogueResponse>| {
-                            actions.write(LocalDialogueResponse {
+                              mut actions: MessageWriter<DialogueResponseRequest>| {
+                            actions.write(DialogueResponseRequest {
                                 target_uid: sender_uid,
                                 dialogue: common::rtsim::Dialogue {
                                     id: dialogue_id,
@@ -1290,7 +1290,7 @@ fn handle_talk_key(
     mut next_id: Local<u64>,
     local_player: Query<&GlobalTransform, With<NetLocalPlayer>>,
     others: Query<(&GlobalTransform, &NetUid), Without<NetLocalPlayer>>,
-    mut actions: MessageWriter<LocalDialogueResponse>,
+    mut actions: MessageWriter<DialogueResponseRequest>,
 ) {
     if !keys.just_pressed(TALK_KEY) || active.0.is_some() {
         return;
@@ -1311,7 +1311,7 @@ fn handle_talk_key(
     };
 
     *next_id += 1;
-    actions.write(LocalDialogueResponse {
+    actions.write(DialogueResponseRequest {
         target_uid,
         dialogue: common::rtsim::Dialogue {
             id: common::rtsim::DialogueId(*next_id),
@@ -1432,8 +1432,8 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                 .spawn(button_bundle(&theme, &fonts, "Leave Group"))
                 .insert(LeaveButton)
                 .observe(
-                    |_activate: On<Activate>, mut actions: MessageWriter<LocalGroupAction>| {
-                        actions.write(LocalGroupAction(GroupAction::Leave));
+                    |_activate: On<Activate>, mut actions: MessageWriter<GroupActionRequest>| {
+                        actions.write(GroupActionRequest(GroupAction::Leave));
                     },
                 );
             parent.spawn((GroupMembersRoot, Node {
@@ -1496,16 +1496,16 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                         .insert(AcceptInviteButton)
                         .observe(
                             |_activate: On<Activate>,
-                             mut actions: MessageWriter<LocalGroupAction>| {
-                                actions.write(LocalGroupAction(GroupAction::AcceptInvite));
+                             mut actions: MessageWriter<GroupActionRequest>| {
+                                actions.write(GroupActionRequest(GroupAction::AcceptInvite));
                             },
                         );
                     row.spawn(button_bundle(&theme, &fonts, "Decline"))
                         .insert(DeclineInviteButton)
                         .observe(
                             |_activate: On<Activate>,
-                             mut actions: MessageWriter<LocalGroupAction>| {
-                                actions.write(LocalGroupAction(GroupAction::DeclineInvite));
+                             mut actions: MessageWriter<GroupActionRequest>| {
+                                actions.write(GroupActionRequest(GroupAction::DeclineInvite));
                             },
                         );
                 });
@@ -2270,7 +2270,7 @@ mod tests {
     #[test]
     fn handle_talk_key_targets_the_nearest_entity_within_range() {
         let mut app = new_app();
-        app.add_message::<LocalDialogueResponse>();
+        app.add_message::<DialogueResponseRequest>();
         app.world_mut().spawn((
             NetLocalPlayer,
             GlobalTransform::from_translation(Vec3::ZERO),
@@ -2296,7 +2296,7 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<Messages<LocalDialogueResponse>>()
+            .resource_mut::<Messages<DialogueResponseRequest>>()
             .drain()
             .collect();
         assert_eq!(sent.len(), 1, "exactly one dialogue Start is sent");
@@ -2311,7 +2311,7 @@ mod tests {
     #[test]
     fn handle_talk_key_ignores_a_press_with_nothing_in_range() {
         let mut app = new_app();
-        app.add_message::<LocalDialogueResponse>();
+        app.add_message::<DialogueResponseRequest>();
         app.world_mut().spawn((
             NetLocalPlayer,
             GlobalTransform::from_translation(Vec3::ZERO),
@@ -2331,7 +2331,7 @@ mod tests {
 
         let sent: Vec<_> = app
             .world_mut()
-            .resource_mut::<Messages<LocalDialogueResponse>>()
+            .resource_mut::<Messages<DialogueResponseRequest>>()
             .drain()
             .collect();
         assert!(sent.is_empty(), "nothing in range must send nothing");

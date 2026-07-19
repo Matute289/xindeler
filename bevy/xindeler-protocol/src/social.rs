@@ -20,23 +20,29 @@
 //! inventing a new schema — see the module doc comment on why this is
 //! deliberate, not a shortcut.
 //!
-//! ## Why client→server actions are TWO types each (wire + local)
-//! Exactly mirroring [`crate::PlayerInput`]/[`crate::LocalPlayerInput`]'s own
-//! split: [`GroupActionRequest`]/[`DialogueResponseRequest`] are real
+//! ## The write half: real `FromClient` requests, the unified posture (BL-82 EM-8.3)
+//! [`GroupActionRequest`]/[`DialogueResponseRequest`] are the real
 //! `bevy_replicon` CLIENT MESSAGES (`add_client_message`, round-trip tested
-//! like `PlayerInput`) — the wire shape a FUTURE genuinely-remote client
-//! (EM-4.2b's `net-client`, once group/dialogue gameplay is wired there) will
-//! send. But today's only client with an actual controllable player is the
-//! LISTEN SERVER (`bevy/xindeler-client`'s `listen-server` feature), which —
-//! per `bevy/xindeler-client/src/listen_server.rs`'s own module doc comment —
-//! runs `bevy_replicon`'s SERVER ROLE ONLY (no client role, no second world),
-//! so there is no connected replicon client to ever produce a `FromClient<_>`
-//! for a message this App's own UI writes. [`LocalGroupAction`]/
-//! [`LocalDialogueResponse`] are the plain (non-replicon) Bevy messages that
-//! actually drive gameplay today, written by the client-side UI and read the
-//! SAME frame by `xindeler_sim_bridge::social`'s action-consuming systems —
-//! exactly the shared-in-process handoff [`crate::LocalPlayerInput`]'s own doc
-//! comment describes for movement input.
+//! like `PlayerInput`) that drive group/dialogue actions on BOTH shells — the
+//! SAME unified path `InventoryActionRequest` already established (see
+//! `xindeler-sim-bridge::inventory::resolve_client_entity`'s doc comment). The
+//! client UI (`xindeler-client::social_hud`) writes these directly; they
+//! surface server-side as `FromClient<_>`, either from a genuinely-remote
+//! dedicated-server client (its real `ClientId`) or from the listen-server's
+//! own local write echoed back with `ClientId::Server` (`bevy_replicon`'s
+//! `add_client_message` local-loopback — see
+//! `bevy/xindeler-client/src/listen_server.rs`'s own module doc comment for
+//! why that shell runs `bevy_replicon`'s SERVER ROLE ONLY). The bridge's
+//! `apply_group_action_requests`/`apply_dialogue_response_requests` resolve
+//! the acting sim entity per message (real connection first via
+//! `PlayerDimensionSession`, embedded local player as the `ClientId::Server`
+//! fallback) and emit the exact sim events the legacy handlers do.
+//!
+//! Before EM-8.3 this went through a listen-server-only `LocalGroupAction`/
+//! `LocalDialogueResponse` + `EmbeddedPlayer` pass-through shortcut (now
+//! removed) that had no `EmbeddedPlayer` (and therefore did nothing) on the
+//! real dedicated server — the ledger's A1 parity gap, closed the same way
+//! EM-5.7's `LocalUnlockSkillRequest` was.
 use bevy::{app::App, ecs::message::Message};
 use serde::{Deserialize, Serialize};
 
@@ -138,13 +144,12 @@ pub struct NetGroupState {
 /// `common::rtsim::Dialogue<true>` verbatim (see this module's doc comment
 /// for why) — the client needs the full structured `DialogueKind`/`Response`
 /// shape (tags, response options, given items) to construct a well-formed
-/// [`DialogueResponseRequest`]/[`LocalDialogueResponse`] back, not a
-/// flattened display string. Same v1 broadcast caveat as [`NetGroupState`].
+/// [`DialogueResponseRequest`] back, not a flattened display string. Same v1
+/// broadcast caveat as [`NetGroupState`].
 #[derive(Message, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetDialogue {
     /// The NPC's stable sim `Uid` — the target of any
-    /// [`DialogueResponseRequest`]/[`LocalDialogueResponse`] the player sends
-    /// back.
+    /// [`DialogueResponseRequest`] the player sends back.
     pub sender_uid: u64,
     /// Display name, flattened server-side the same way
     /// [`NetPlayerListEntry::name`] is.
@@ -153,15 +158,13 @@ pub struct NetDialogue {
 }
 
 /// A group-membership action the local player requests (BL-82 EM-5.8): the
-/// shared payload both [`GroupActionRequest`] (wire) and [`LocalGroupAction`]
-/// (in-process) carry. Mirrors `common::comp::GroupManip` + the
-/// `InitiateInviteEvent`/`InviteResponseEvent` shapes the sim already speaks
-/// — the bridge translates this 1:1 into the embedded player's real
-/// `client::Client::send_invite`/`accept_invite`/`decline_invite`/
-/// `leave_group`/`kick_from_group`/`assign_group_leader` calls (a genuine
-/// client→server network round-trip over the loopback socket, never a
-/// direct sim-state write — the isolation law's "writes go through the
-/// sim's public event/intent API" rule).
+/// payload [`GroupActionRequest`] carries. Mirrors `common::comp::GroupManip`
+/// and the `InitiateInviteEvent`/`InviteResponseEvent` shapes the sim already
+/// speaks — the bridge's `apply_group_action_requests` (BL-82 EM-8.3)
+/// translates this 1:1 into the resolved acting entity's real
+/// `InitiateInviteEvent`/`InviteResponseEvent`/`GroupManipEvent` (via
+/// `State::emit_event_now`, never a direct sim-state write — the isolation
+/// law's "writes go through the sim's public event/intent API" rule).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GroupAction {
     /// Invite the given player (by `Uid`) to the local player's group.
@@ -178,49 +181,31 @@ pub enum GroupAction {
     AssignLeader(u64),
 }
 
-/// Client → server WIRE message (a future genuinely-remote client's request)
-/// — see this module's doc comment for why this is registered
-/// (`add_client_message`, round-trip tested) but NOT what drives the
-/// listen-server's own gameplay today.
+/// Client → server: the real `bevy_replicon` request driving group actions on
+/// BOTH shells (BL-82 EM-8.3 — see this module's doc comment for the full
+/// unified-write rationale; the listen-server's own local write is echoed
+/// back as `FromClient` with `ClientId::Server`, so this is registered and
+/// consumed the same way on every shell, not just a future-remote-client
+/// placeholder).
 #[derive(Message, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupActionRequest(pub GroupAction);
 
-/// The in-process handoff that actually drives the listen server's group UI
-/// today — see this module's doc comment for the full rationale (mirrors
-/// [`crate::LocalPlayerInput`]).
-#[derive(Message, Clone, Copy, Debug, PartialEq)]
-pub struct LocalGroupAction(pub GroupAction);
-
-/// Client → server WIRE message: the player's reply to an outstanding
-/// [`NetDialogue`] (a future genuinely-remote client's request). Carries an
-/// UNVALIDATED `Dialogue` (`IS_VALIDATED = false`), matching
-/// `client::Client::perform_dialogue`'s own signature — the server validates.
+/// Client → server: the player's reply to an outstanding [`NetDialogue`] — the
+/// real `bevy_replicon` request driving dialogue on BOTH shells (BL-82 EM-8.3,
+/// same unified posture as [`GroupActionRequest`]). Carries an UNVALIDATED
+/// `Dialogue` (`IS_VALIDATED = false`), matching `client::Client::
+/// perform_dialogue`'s own signature — the server validates.
 #[derive(Message, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DialogueResponseRequest {
     pub target_uid: u64,
     pub dialogue: common::rtsim::Dialogue<false>,
 }
 
-/// The in-process handoff that actually drives the listen server's dialogue
-/// UI today — see this module's doc comment. Wraps the exact same payload as
-/// [`DialogueResponseRequest`] (kept as a distinct type, not a re-use, for
-/// the same "wire type vs local type" separation [`crate::PlayerInput`]/
-/// [`crate::LocalPlayerInput`] already establish).
-#[derive(Message, Clone, Debug, PartialEq)]
-pub struct LocalDialogueResponse {
-    pub target_uid: u64,
-    pub dialogue: common::rtsim::Dialogue<false>,
-}
-
 /// Registers the social/group/dialogue wire contract: [`NetPlayerList`]/
 /// [`NetGroupState`]/[`NetDialogue`] as server messages (broadcast, no entity
-/// references — `make_message_independent` like [`crate::TerrainAnchor`]),
+/// references — `make_message_independent` like [`crate::TerrainAnchor`]) and
 /// [`GroupActionRequest`]/[`DialogueResponseRequest`] as client messages (the
-/// `Events` lane, like [`crate::LoginRequest`]), and
-/// [`LocalGroupAction`]/[`LocalDialogueResponse`] as plain Bevy messages
-/// (harmless, dormant on any App that never writes them — same "both roles
-/// compile into every shell" posture `xindeler-transport`'s doc comment
-/// establishes for replicon's client/server roles).
+/// `Events` lane, like [`crate::LoginRequest`]).
 pub(crate) fn register(app: &mut App) {
     use bevy_replicon::prelude::{ClientMessageAppExt, ServerMessageAppExt};
 
@@ -233,9 +218,6 @@ pub(crate) fn register(app: &mut App) {
 
     app.add_client_message::<GroupActionRequest>(crate::XindelerChannel::Events.delivery());
     app.add_client_message::<DialogueResponseRequest>(crate::XindelerChannel::Events.delivery());
-
-    app.add_message::<LocalGroupAction>();
-    app.add_message::<LocalDialogueResponse>();
 }
 
 #[cfg(test)]
@@ -542,40 +524,5 @@ mod tests {
             .collect();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].message, request);
-    }
-
-    /// [`LocalGroupAction`]/[`LocalDialogueResponse`] are plain Bevy messages
-    /// — a single App can write and read them back the same frame with no
-    /// replicon/connection involved at all (the listen-server shape).
-    #[test]
-    fn local_messages_are_plain_in_process_bevy_messages() {
-        use common::rtsim::{Dialogue, DialogueId, DialogueKind};
-
-        let mut app = new_app();
-        app.world_mut()
-            .write_message(LocalGroupAction(GroupAction::AcceptInvite));
-        app.world_mut().write_message(LocalDialogueResponse {
-            target_uid: 9,
-            dialogue: Dialogue {
-                id: DialogueId(2),
-                kind: DialogueKind::Ack { tag: 1 },
-            },
-        });
-        app.update();
-
-        let actions: Vec<_> = app
-            .world_mut()
-            .resource_mut::<Messages<LocalGroupAction>>()
-            .drain()
-            .collect();
-        assert_eq!(actions, vec![LocalGroupAction(GroupAction::AcceptInvite)]);
-
-        let responses: Vec<_> = app
-            .world_mut()
-            .resource_mut::<Messages<LocalDialogueResponse>>()
-            .drain()
-            .collect();
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].target_uid, 9);
     }
 }
