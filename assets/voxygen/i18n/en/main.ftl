@@ -1,3 +1,59 @@
+## BL-82 EM-5.16 (T56.44): new keys added for the Bevy `menu.rs` full i18n
+## conversion. These are XINDELER-SPECIFIC copy (the disclaimer/login/server-
+## browser flow this port built for BL-82 EM-5.9 is not the same UX as the
+## legacy `voxygen/src/menu/main/` flow, so the existing `main-notice`/
+## `main-login_process` etc. upstream Veloren boilerplate does not apply here
+## — see `menu.rs`'s own doc comment for the full key-mapping rationale) plus
+## this screen's own server-browser (T56.31) and connect-stage strings.
+main-xindeler_disclaimer_body =
+    Xindeler is early, pre-alpha software built on the Veloren engine. Expect bugs, missing features, placeholder art, and changes that can wipe characters and worlds between builds. Nothing here is final.
+
+    By continuing you acknowledge this is an unfinished work in progress.
+main-xindeler_disclaimer_accept = I understand — continue
+main-xindeler_tagline = A voxel RPG — BL-82 Bevy client
+main-xindeler_login_body = Offline hosts a private singleplayer world. Online multiplayer connects via the in-game server browser (coming soon).
+main-connect = Connect
+main-login-username_placeholder = (click to type a username)
+main-login-password_placeholder = (optional — for authenticated servers)
+main-login-server_placeholder = (offline: not needed)
+main-mode_offline = Mode: Offline (singleplayer)
+main-mode_online = Mode: Online (multiplayer)
+main-options_notice = Settings are available from the in-game Esc menu once you're playing.
+main-xindeler_server_browser_body = Saved multiplayer servers. Ping / version / players are queried live and concurrently; pick a server and Connect. (Remote play is still being brought online — see the notes on Connect.)
+main-server_browser-add_server_heading = Add a server
+main-server_browser-address_label = Address (host or host:port)
+main-server_browser-nickname_label = Nickname (optional)
+main-server_browser-address_placeholder = (e.g. play.example.com:14004)
+main-server_browser-nickname_placeholder = (optional display name)
+main-server_browser-refresh = Refresh
+main-server_browser-connect_selected = Connect to selected
+main-server_browser-delete_selected = Delete selected
+main-server_browser-no_saved_servers = No saved servers yet — add one below.
+main-server_browser-enter_address = Enter an address to add a server.
+main-server_browser-already_in_list = is already in the list.
+main-server_browser-added = Added
+main-server_browser-refreshing = Refreshing…
+main-server_browser-select_server_first = Select a server first.
+main-server_browser-removed = Removed
+main-server_browser-select_to_delete = Select a server to delete.
+main-server_browser-connecting_to = Connecting to
+main-server_browser-querying = querying…
+main-server_browser-unreachable = unreachable
+main-server_browser-version_label = v:
+main-server_browser-players_label = players:
+main-connect_stage-starting = Preparing…
+main-connect_stage-generating_world = Generating your world…
+main-connect_stage-establishing_connection = Establishing connection…
+main-connect_stage-checking_version = Checking server version…
+main-connect_stage-authenticating = Authenticating…
+main-connect_stage-loading_world_data = Loading world data…
+main-connect_stage-preparing_client = Preparing client…
+main-connect_stage-entering_world = Entering world…
+main-online_missing_server = Enter a server address (or switch to Offline).
+main-online_deferred_notice = Online multiplayer connects via the in-game server browser (EM-5.9 T56.31). This build hosts a singleplayer world — switch to Offline to play now.
+main-boot_crashed = Could not start a world (the boot process crashed). Check the logs and try again.
+main-boot_failed = Could not start a world (missing assets or map data). Check XINDELER_ASSETS / the LFS map blobs and try again.
+
 main-username = Username
 main-server = Server
 main-password = Password

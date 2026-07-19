@@ -1,3 +1,53 @@
+## BL-82 EM-5.16 (T56.44): traducciones nuevas para el port a Bevy de menu.rs.
+main-xindeler_disclaimer_body =
+    Xindeler es software temprano, pre-alfa, construido sobre el motor Veloren. Esperá bugs, funciones faltantes, arte de reemplazo, y cambios que pueden borrar personajes y mundos entre versiones. Nada de esto es definitivo.
+
+    Al continuar reconocés que esto es un trabajo en progreso, sin terminar.
+main-xindeler_disclaimer_accept = Entiendo — continuar
+main-xindeler_tagline = Un RPG voxel — cliente Bevy BL-82
+main-xindeler_login_body = Sin conexión aloja un mundo privado para un jugador. El multijugador en línea se conecta a través del buscador de servidores del juego (próximamente).
+main-connect = Conectar
+main-login-username_placeholder = (hacé clic para escribir un nombre de usuario)
+main-login-password_placeholder = (opcional — para servidores con autenticación)
+main-login-server_placeholder = (sin conexión: no hace falta)
+main-mode_offline = Modo: Sin conexión (un jugador)
+main-mode_online = Modo: En línea (multijugador)
+main-options_notice = Las opciones están disponibles desde el menú Esc una vez que estés jugando.
+main-xindeler_server_browser_body = Servidores multijugador guardados. El ping / versión / jugadores se consultan en vivo y de forma concurrente; elegí un servidor y conectate. (El juego remoto todavía se está habilitando — ver las notas en Conectar.)
+main-server_browser-add_server_heading = Agregar un servidor
+main-server_browser-address_label = Dirección (host o host:puerto)
+main-server_browser-nickname_label = Apodo (opcional)
+main-server_browser-address_placeholder = (ej. play.example.com:14004)
+main-server_browser-nickname_placeholder = (nombre para mostrar, opcional)
+main-server_browser-refresh = Actualizar
+main-server_browser-connect_selected = Conectar al seleccionado
+main-server_browser-delete_selected = Eliminar seleccionado
+main-server_browser-no_saved_servers = Todavía no hay servidores guardados — agregá uno abajo.
+main-server_browser-enter_address = Ingresá una dirección para agregar un servidor.
+main-server_browser-already_in_list = ya está en la lista.
+main-server_browser-added = Agregado
+main-server_browser-refreshing = Actualizando…
+main-server_browser-select_server_first = Seleccioná un servidor primero.
+main-server_browser-removed = Eliminado
+main-server_browser-select_to_delete = Seleccioná un servidor para eliminar.
+main-server_browser-connecting_to = Conectando a
+main-server_browser-querying = consultando…
+main-server_browser-unreachable = inalcanzable
+main-server_browser-version_label = v:
+main-server_browser-players_label = jugadores:
+main-connect_stage-starting = Preparando…
+main-connect_stage-generating_world = Generando tu mundo…
+main-connect_stage-establishing_connection = Estableciendo conexión…
+main-connect_stage-checking_version = Verificando versión del servidor…
+main-connect_stage-authenticating = Autenticando…
+main-connect_stage-loading_world_data = Cargando datos del mundo…
+main-connect_stage-preparing_client = Preparando cliente…
+main-connect_stage-entering_world = Entrando al mundo…
+main-online_missing_server = Ingresá una dirección de servidor (o cambiá a Sin conexión).
+main-online_deferred_notice = El multijugador en línea se conecta a través del buscador de servidores del juego (EM-5.9 T56.31). Esta versión aloja un mundo para un jugador — cambiá a Sin conexión para jugar ahora.
+main-boot_crashed = No se pudo iniciar un mundo (el proceso de arranque falló). Revisá los logs e intentá de nuevo.
+main-boot_failed = No se pudo iniciar un mundo (faltan assets o datos del mapa). Revisá XINDELER_ASSETS / los blobs LFS del mapa e intentá de nuevo.
+
 main-username = Nombre de Usuario
 main-server = Servidor
 main-password = Contraseña

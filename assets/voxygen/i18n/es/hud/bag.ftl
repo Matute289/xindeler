@@ -1,4 +1,8 @@
 hud-bag-inventory = Inventario de { $playername }
+# BL-82 EM-5.16 (T56.44 follow-up) — ver el .ftl en para el porqué de este
+# recorte estático (Localization::tr no interpola argumentos de Fluent).
+hud-bag-title = Inventario
+hud-bag-unequip = Desequipar
 hud-bag-stats_title = Atributos de { $playername }
 hud-bag-armor = Armadura
 hud-bag-stats = Atributos

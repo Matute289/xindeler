@@ -6,6 +6,9 @@ hud-chat-connection_lost = Conexión perdida. Saliendo en { $time } segundos.
 hud-chat-goodbye = ¡Adiós!
 hud-chat-chat_tab_hover_tooltip = Click derecho para opciones
 hud-chat-all = Global
+# BL-82 EM-5.16 (T56.44 follow-up): la pestaña de canal "Whisper" (filtro de
+# vista para los mensajes de Tell/susurro).
+hud-chat-tab_whisper = Susurro
 
 ## Maneras de morirse
 

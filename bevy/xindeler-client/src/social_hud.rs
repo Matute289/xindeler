@@ -77,7 +77,7 @@
 //! gate as every other `Net*`-reading module in this crate.
 
 use bevy::{
-    ecs::schedule::common_conditions::not,
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
     picking::Pickable,
     prelude::*,
     ui::{GlobalZIndex, widget::ImageNode},
@@ -91,6 +91,7 @@ use xindeler_ui::{
     bar::{BarValue, spawn_bar},
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     images::{HudImageKey, HudImages},
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -278,11 +279,17 @@ impl Plugin for SocialHudViewPlugin {
                     sync_player_list,
                     sync_group_state,
                     smoke_spawn_party,
-                    sync_group_panel,
+                    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer
+                    // finding): both now also gate their rebuild on a locale
+                    // change (see each function's own updated doc comment) —
+                    // needs the same `.after(LocaleSyncSet)` edge `settings_
+                    // window.rs`'s `refresh_setting_labels` documents as
+                    // load-bearing.
+                    sync_group_panel.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_group_bars,
                     sync_invite_banner,
                     sync_active_dialogue,
-                    sync_dialogue_panel,
+                    sync_dialogue_panel.after(xindeler_ui::i18n::LocaleSyncSet),
                     handle_talk_key,
                 ),
             );
@@ -351,6 +358,7 @@ fn sync_player_list(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
     mut list: MessageReader<NetPlayerList>,
     local_uid: Query<&NetUid, With<NetLocalPlayer>>,
     root: Query<(Entity, Option<&Children>), With<PlayerListRoot>>,
@@ -394,19 +402,21 @@ fn sync_player_list(
                         },
                         TextColor(theme.palette.text),
                     ));
-                    row.spawn(button_bundle(&theme, &fonts, "Invite"))
-                        .insert(InviteTarget(entry.uid))
-                        .observe(
-                            |activate: On<Activate>,
-                             targets: Query<&InviteTarget>,
-                             mut actions: MessageWriter<GroupActionRequest>| {
-                                if let Ok(target) = targets.get(activate.entity) {
-                                    actions.write(GroupActionRequest(GroupAction::Invite(
-                                        target.0,
-                                    )));
-                                }
-                            },
-                        );
+                    row.spawn(button_bundle(
+                        &theme,
+                        &fonts,
+                        &localization.tr("hud-group-invite"),
+                    ))
+                    .insert((InviteTarget(entry.uid), LocalizedLabel("hud-group-invite")))
+                    .observe(
+                        |activate: On<Activate>,
+                         targets: Query<&InviteTarget>,
+                         mut actions: MessageWriter<GroupActionRequest>| {
+                            if let Ok(target) = targets.get(activate.entity) {
+                                actions.write(GroupActionRequest(GroupAction::Invite(target.0)));
+                            }
+                        },
+                    );
                 });
         }
     });
@@ -596,6 +606,8 @@ fn sync_group_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
+    current_locale: Res<CurrentLocale>,
     images: Res<HudImages>,
     state: Res<CurrentGroupState>,
     mut panel_visibility: Query<&mut Visibility, With<GroupPanelRoot>>,
@@ -609,7 +621,13 @@ fn sync_group_panel(
     )>,
     local_uid: Query<&NetUid, With<NetLocalPlayer>>,
 ) {
-    if !state.is_changed() {
+    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer finding): ALSO
+    // rebuild on a locale change — the Invite/Kick/Assign Leader/Leave/"Out
+    // of range" labels resolve via `Localization::tr`, but this gate
+    // previously only checked `state.is_changed()`, so a language switch left
+    // them stale until an unrelated group-state change happened to force a
+    // rebuild.
+    if !state.is_changed() && !current_locale.is_changed() {
         return;
     }
     let my_uid = local_uid.single().ok().map(|u| u.0);
@@ -791,7 +809,8 @@ fn sync_group_panel(
                 commands.entity(frame_container).add_child(oor_container);
                 let out_of_range = commands
                     .spawn((
-                        Text("(out of range)".to_owned()),
+                        LocalizedText("hud-group-out_of_range"),
+                        Text(localization.tr("hud-group-out_of_range")),
                         TextFont {
                             font: bevy::text::FontSource::Handle(fonts.body.clone()),
                             font_size: bevy::text::FontSize::Px(PARTY_NAME_FONT_PX),
@@ -957,8 +976,12 @@ fn sync_group_panel(
 
             let kick_uid = member.uid;
             let kick_entity = commands
-                .spawn(button_bundle(&theme, &fonts, "Kick"))
-                .insert(KickTarget(kick_uid))
+                .spawn(button_bundle(
+                    &theme,
+                    &fonts,
+                    &localization.tr("hud-group-kick"),
+                ))
+                .insert((KickTarget(kick_uid), LocalizedLabel("hud-group-kick")))
                 .observe(
                     |activate: On<Activate>,
                      targets: Query<&KickTarget>,
@@ -973,8 +996,15 @@ fn sync_group_panel(
 
             let leader_uid = member.uid;
             let assign_entity = commands
-                .spawn(button_bundle(&theme, &fonts, "Make Leader"))
-                .insert(AssignLeaderTarget(leader_uid))
+                .spawn(button_bundle(
+                    &theme,
+                    &fonts,
+                    &localization.tr("hud-group-assign_leader"),
+                ))
+                .insert((
+                    AssignLeaderTarget(leader_uid),
+                    LocalizedLabel("hud-group-assign_leader"),
+                ))
                 .observe(
                     |activate: On<Activate>,
                      targets: Query<&AssignLeaderTarget>,
@@ -1164,6 +1194,8 @@ fn sync_dialogue_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
+    current_locale: Res<CurrentLocale>,
     mut active: ResMut<ActiveDialogue>,
     mut panel_visibility: Query<&mut Visibility, With<DialoguePanelRoot>>,
     mut sender_text: Query<&mut Text, (With<DialogueSenderText>, Without<DialogueMessageText>)>,
@@ -1171,7 +1203,13 @@ fn sync_dialogue_panel(
     root: Query<(Entity, Option<&Children>), With<DialogueResponsesRoot>>,
     rows: Query<Entity, With<DialogueResponseRow>>,
 ) {
-    if !active.is_changed() {
+    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer finding): ALSO
+    // rebuild on a locale change — the "Continue" response label resolves
+    // via `Localization::tr` (`hud-dialogue-continue`), but this gate
+    // previously only checked `active.is_changed()`, so a language switch
+    // left it stale until an unrelated dialogue-state change happened to
+    // force a rebuild.
+    if !active.is_changed() && !current_locale.is_changed() {
         return;
     }
 
@@ -1249,7 +1287,11 @@ fn sync_dialogue_panel(
             DialogueKind::Statement { tag, .. } => {
                 let tag = *tag;
                 parent
-                    .spawn((DialogueResponseRow, button_bundle(&theme, &fonts, "Continue")))
+                    .spawn((
+                        DialogueResponseRow,
+                        button_bundle(&theme, &fonts, &localization.tr("hud-dialogue-continue")),
+                        LocalizedLabel("hud-dialogue-continue"),
+                    ))
                     .observe(
                         move |_activate: On<Activate>,
                               mut actions: MessageWriter<DialogueResponseRequest>| {
@@ -1268,7 +1310,11 @@ fn sync_dialogue_panel(
             // panel without sending anything further.
             _ => {
                 parent
-                    .spawn((DialogueResponseRow, button_bundle(&theme, &fonts, "Close")))
+                    .spawn((
+                        DialogueResponseRow,
+                        button_bundle(&theme, &fonts, &localization.tr("common-close")),
+                        LocalizedLabel("common-close"),
+                    ))
                     .observe(
                         |_activate: On<Activate>, mut active: ResMut<ActiveDialogue>| {
                             active.0 = None;
@@ -1324,7 +1370,12 @@ fn handle_talk_key(
 // Startup: spawn every panel (hidden/empty until real data/state arrives)
 // ---------------------------------------------------------------------
 
-fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+fn spawn_social_hud(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
+) {
     // Social window: player list + search (search input is a follow-up —
     // v1 shows the full roster).
     //
@@ -1364,7 +1415,8 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text("Online Players".to_owned()),
+                LocalizedText("hud-social-online_players"),
+                Text(localization.tr("hud-social-online_players")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.title.clone()),
                     font_size: bevy::text::FontSize::Px(20.0),
@@ -1429,8 +1481,12 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         ))
         .with_children(|parent| {
             parent
-                .spawn(button_bundle(&theme, &fonts, "Leave Group"))
-                .insert(LeaveButton)
+                .spawn(button_bundle(
+                    &theme,
+                    &fonts,
+                    &localization.tr("hud-group-leave"),
+                ))
+                .insert((LeaveButton, LocalizedLabel("hud-group-leave")))
                 .observe(
                     |_activate: On<Activate>, mut actions: MessageWriter<GroupActionRequest>| {
                         actions.write(GroupActionRequest(GroupAction::Leave));
@@ -1492,22 +1548,30 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
                     ..Default::default()
                 },))
                 .with_children(|row| {
-                    row.spawn(button_bundle(&theme, &fonts, "Accept"))
-                        .insert(AcceptInviteButton)
-                        .observe(
-                            |_activate: On<Activate>,
-                             mut actions: MessageWriter<GroupActionRequest>| {
-                                actions.write(GroupActionRequest(GroupAction::AcceptInvite));
-                            },
-                        );
-                    row.spawn(button_bundle(&theme, &fonts, "Decline"))
-                        .insert(DeclineInviteButton)
-                        .observe(
-                            |_activate: On<Activate>,
-                             mut actions: MessageWriter<GroupActionRequest>| {
-                                actions.write(GroupActionRequest(GroupAction::DeclineInvite));
-                            },
-                        );
+                    row.spawn(button_bundle(
+                        &theme,
+                        &fonts,
+                        &localization.tr("common-accept"),
+                    ))
+                    .insert((AcceptInviteButton, LocalizedLabel("common-accept")))
+                    .observe(
+                        |_activate: On<Activate>,
+                         mut actions: MessageWriter<GroupActionRequest>| {
+                            actions.write(GroupActionRequest(GroupAction::AcceptInvite));
+                        },
+                    );
+                    row.spawn(button_bundle(
+                        &theme,
+                        &fonts,
+                        &localization.tr("common-decline"),
+                    ))
+                    .insert((DeclineInviteButton, LocalizedLabel("common-decline")))
+                    .observe(
+                        |_activate: On<Activate>,
+                         mut actions: MessageWriter<GroupActionRequest>| {
+                            actions.write(GroupActionRequest(GroupAction::DeclineInvite));
+                        },
+                    );
                 });
         });
 
@@ -1569,6 +1633,19 @@ fn spawn_social_hud(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<Hud
         });
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all the structural tests below need (they never assert specific
+/// translated text, except `group_panel_shows_dual_bars_when_mirrored_and_
+/// out_of_range_text_otherwise`, which overrides this with the REAL `en`
+/// `hud/group.ftl` catalog for that one assertion — the same
+/// `test_localization`-by-default-plus-real-catalog-override-where-it-matters
+/// idiom `settings_window.rs`/`esc_menu.rs` already establish).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce};
@@ -1580,6 +1657,7 @@ mod tests {
     fn new_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        app.insert_non_send(test_localization());
         // BL-82 EM-5.17 Phase 4: `sync_group_panel` now reads `Res<HudImages>`
         // — `AssetPlugin` gives us a real `AssetServer` to build one via
         // `HudImages::load` (mirroring `far_terrain.rs`/`sprite_view.rs`'s
@@ -1598,6 +1676,10 @@ mod tests {
         app.insert_resource(HudTheme::default());
         app.init_resource::<CurrentGroupState>();
         app.init_resource::<ActiveDialogue>();
+        // BL-82 EM-5.16 (T56.44 follow-up): `sync_group_panel`/`sync_
+        // dialogue_panel` now read `Res<CurrentLocale>` as part of their
+        // rebuild gate.
+        app.init_resource::<CurrentLocale>();
         app
     }
 
@@ -1716,6 +1798,16 @@ mod tests {
     #[test]
     fn group_panel_shows_dual_bars_when_mirrored_and_out_of_range_text_otherwise() {
         let mut app = new_app();
+        // BL-82 EM-5.16 (T56.44): overrides `new_app`'s empty-catalog default
+        // with the REAL `en` `hud/group.ftl` catalog for this one test, so
+        // the "out of range" assertion below exercises the actual translated
+        // copy (`hud-group-out_of_range` = "Out of range"), not a bare-key
+        // fallback — the same real-catalog-override-where-it-matters idiom
+        // `esc_menu.rs`'s own hot-swap test uses.
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/group.ftl"],
+        ));
         insert_hud_images(&mut app);
         app.world_mut().insert_resource(HudFonts {
             title: Handle::default(),
@@ -1791,10 +1883,15 @@ mod tests {
             if bar_count == 2 {
                 bar_rows_with_two_bars += 1;
             }
+            // BL-82 EM-5.16 (T56.44): now resolved from the real
+            // `hud-group-out_of_range` catalog key ("Out of range", capital
+            // O) instead of the pre-i18n hardcoded literal
+            // ("(out of range)", lowercase) — matched case-insensitively so
+            // this pins the CONTENT, not incidental capitalization/wrapping.
             let has_out_of_range = descendants.iter().any(|&e| {
                 app.world()
                     .get::<Text>(e)
-                    .is_some_and(|text| text.0.contains("out of range"))
+                    .is_some_and(|text| text.0.to_lowercase().contains("out of range"))
             });
             if has_out_of_range {
                 out_of_range_rows += 1;

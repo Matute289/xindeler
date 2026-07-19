@@ -61,6 +61,7 @@ use xindeler_protocol::{
 };
 use xindeler_ui::{
     button::{Activate, button_bundle},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     scroll::ScrollArea,
     theme::{HudFonts, HudTheme},
 };
@@ -116,22 +117,33 @@ impl WizardStep {
     /// The last step, where the Create action lives.
     pub fn is_last(self) -> bool { self == WizardStep::Finish }
 
-    /// Short title key/label (real i18n depth is EM-5.16; a themed placeholder
-    /// here matches the rest of this crate).
-    pub fn title(self) -> &'static str {
+    /// The `.ftl` key for this step's title LABEL (BL-82 EM-5.16 T56.44 full
+    /// i18n coverage). [`sync_step_title`] composes the actual on-screen
+    /// "`N`/6  Label" string by Rust-formatting this step's own 1-based
+    /// [`Self::index`] around the resolved value — [`Localization::tr`] has
+    /// no Fluent placeable/argument support (see that method's own doc
+    /// comment), so the numeral can never be baked into the `.ftl` message
+    /// itself the way the legacy client's `char_selection-wizard_step`
+    /// (`"Step { $step } of 6"`) does.
+    pub fn title_key(self) -> &'static str {
         match self {
-            WizardStep::Body => "1/6  Body",
-            WizardStep::Appearance => "2/6  Appearance",
-            WizardStep::Class => "3/6  Class",
-            WizardStep::Alignment => "4/6  Alignment",
-            WizardStep::Background => "5/6  Background",
-            WizardStep::Finish => "6/6  Finish",
+            WizardStep::Body => "char_selection-step_body",
+            WizardStep::Appearance => "char_selection-step_appearance",
+            WizardStep::Class => "char_selection-step_class",
+            WizardStep::Alignment => "char_selection-step_alignment",
+            WizardStep::Background => "char_selection-step_background",
+            WizardStep::Finish => "char_selection-step_finish",
         }
     }
 }
 
 /// One selectable starter-weapon option for a class: the mainhand/offhand
-/// asset paths handed to `create_character`, plus a short display label.
+/// asset paths handed to `create_character`, plus the `.ftl` key for its
+/// display label (BL-82 EM-5.16 T56.44: `label` used to be the literal
+/// display text — it is now an i18n key resolved via [`Localization::tr`] at
+/// render time, reusing the `common-weapons-*` catalog the legacy
+/// `voxygen/src/menu/char_selection/ui.rs` resolves these exact same weapon
+/// choices from).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeaponOption {
     pub label: &'static str,
@@ -153,74 +165,83 @@ pub fn class_weapon_options(class: ClassKind) -> &'static [WeaponOption] {
     const SWORD_1H: &str = "common.items.weapons.sword_1h.starter";
     const BOW: &str = "common.items.weapons.bow.starter";
 
+    // BL-82 EM-5.16 (T56.44): every `label` below is now a `common-weapons-*`
+    // i18n key (the same catalog + the same per-weapon key the legacy
+    // `voxygen/src/menu/char_selection/ui.rs` resolves these exact starter
+    // choices from), not literal display text — `class_weapon_options`'s one
+    // call site (`build_wizard_step`'s Class step) resolves it via
+    // `Localization::tr` at spawn time. Rogue's dual-wield and Monk's single
+    // starter both use the SAME asset (`SWORD_1H`) and so both reuse
+    // `common-weapons-shortswords` (plural in the catalog even for Monk's
+    // singular case) — there is no separate singular key upstream either.
     const WARRIOR: &[WeaponOption] = &[
         WeaponOption {
-            label: "Greatsword",
+            label: "common-weapons-greatsword",
             mainhand: Some(SWORD),
             offhand: None,
         },
         WeaponOption {
-            label: "Axe",
+            label: "common-weapons-axe",
             mainhand: Some(AXE),
             offhand: None,
         },
         WeaponOption {
-            label: "Hammer",
+            label: "common-weapons-hammer",
             mainhand: Some(HAMMER),
             offhand: None,
         },
     ];
     const MAGE: &[WeaponOption] = &[WeaponOption {
-        label: "Staff",
+        label: "common-weapons-staff",
         mainhand: Some(STAFF),
         offhand: None,
     }];
     const CLERIC: &[WeaponOption] = &[WeaponOption {
-        label: "Sceptre",
+        label: "common-weapons-sceptre",
         mainhand: Some(SCEPTRE),
         offhand: None,
     }];
     const ROGUE: &[WeaponOption] = &[
         WeaponOption {
-            label: "Dual Swords",
+            label: "common-weapons-shortswords",
             mainhand: Some(SWORD_1H),
             offhand: Some(SWORD_1H),
         },
         WeaponOption {
-            label: "Bow",
+            label: "common-weapons-bow",
             mainhand: Some(BOW),
             offhand: None,
         },
     ];
     const BARBARIAN: &[WeaponOption] = &[
         WeaponOption {
-            label: "Axe",
+            label: "common-weapons-axe",
             mainhand: Some(AXE),
             offhand: None,
         },
         WeaponOption {
-            label: "Hammer",
+            label: "common-weapons-hammer",
             mainhand: Some(HAMMER),
             offhand: None,
         },
     ];
     const CASTER_STAFF: &[WeaponOption] = &[WeaponOption {
-        label: "Staff",
+        label: "common-weapons-staff",
         mainhand: Some(STAFF),
         offhand: None,
     }];
     const SWORD_ONLY: &[WeaponOption] = &[WeaponOption {
-        label: "Sword",
+        label: "common-weapons-sword",
         mainhand: Some(SWORD),
         offhand: None,
     }];
     const BOW_ONLY: &[WeaponOption] = &[WeaponOption {
-        label: "Bow",
+        label: "common-weapons-bow",
         mainhand: Some(BOW),
         offhand: None,
     }];
     const MONK: &[WeaponOption] = &[WeaponOption {
-        label: "Shortsword",
+        label: "common-weapons-shortswords",
         mainhand: Some(SWORD_1H),
         offhand: None,
     }];
@@ -678,8 +699,21 @@ impl Plugin for CharSelectViewPlugin {
                     ingest_char_list,
                     read_name_input,
                     apply_char_actions,
-                    rebuild_content,
-                    sync_step_title,
+                    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer
+                    // finding): both fold the active locale into their own
+                    // rebuild-gate (`rebuild_content`'s `Local` cache key,
+                    // `sync_step_title`'s `current_locale.is_changed()`), so —
+                    // exactly like `settings_window.rs`'s `refresh_setting_
+                    // labels` documents — they must run `.after(LocaleSyncSet)`:
+                    // without this edge, on the exact frame the locale changes
+                    // either system could read the STALE `Localization` bundle
+                    // (Bevy gives no ordering guarantee between two systems
+                    // with conflicting `NonSend`/`NonSendMut` access absent an
+                    // explicit one), and because the gate is now satisfied,
+                    // never retry until an unrelated screen/state change
+                    // happens to force a rebuild anyway.
+                    rebuild_content.after(xindeler_ui::i18n::LocaleSyncSet),
+                    sync_step_title.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_name_value,
                     sync_nav_visibility,
                     sync_preview_image,
@@ -739,6 +773,15 @@ fn spawn_screen(
     mut commands: Commands,
     theme: Option<Res<HudTheme>>,
     fonts: Option<Res<HudFonts>>,
+    // BL-82 EM-5.16 (T56.44): `Localization` is inserted `NonSend` directly in
+    // `XindelerUiPlugin::build` (not deferred to a `Startup` system the way
+    // `HudTheme`/`HudFonts` are — see `theme::init_theme`'s own doc comment),
+    // so by the time `CharSelectViewPlugin::build`'s
+    // `if !app.is_plugin_added::<XindelerUiPlugin>() { .. }` has run, it
+    // already exists — a hard `NonSend<Localization>` here needs no
+    // `Option`/retry dance, matching `settings_window.rs`/`esc_menu.rs`'s own
+    // `Startup`-scheduled spawn functions.
+    localization: NonSend<Localization>,
     roots: Query<Entity, With<CharSelectRoot>>,
 ) {
     if !roots.is_empty() {
@@ -795,9 +838,22 @@ fn spawn_screen(
                 BorderColor::all(theme.palette.panel_border),
             ))
             .with_children(|window| {
+                // NOT tagged `LocalizedText`: unlike a fixed heading, this text's
+                // resolved value depends on BOTH the locale AND which screen/step
+                // is showing (`sync_step_title` recomputes both — the same
+                // "state-dependent value, not a plain tag" posture
+                // `settings_window.rs`'s `SettingValueLabel`/`refresh_setting_
+                // labels` uses instead of `LocalizedLabel` for its cycle-row
+                // values). `sync_step_title` seeds/updates it every frame either
+                // one changes.
                 window.spawn((
                     StepTitleText,
-                    text_bundle(&fonts, &theme, 30.0, "Select Character"),
+                    text_bundle(
+                        &fonts,
+                        &theme,
+                        30.0,
+                        localization.tr("char_selection-select_character"),
+                    ),
                 ));
 
                 // Middle row: scrollable content column + framed 3D preview.
@@ -860,11 +916,37 @@ fn spawn_screen(
                         ..Default::default()
                     }))
                     .with_children(|nr| {
-                        nr.spawn(text_bundle(&fonts, &theme, 20.0, "Name:"));
+                        // No colon: `LocalizedText`'s `relocalize_text` sets `Text.0`
+                        // straight from the resolved `.ftl` VALUE with no room for
+                        // Rust-side wrapping/punctuation (see that component's doc
+                        // comment) — matches `settings_window.rs`'s `row_label`
+                        // convention (a bare label, gapped from its value by layout,
+                        // never a baked-in colon).
+                        nr.spawn((
+                            LocalizedText("char_selection-summary_label_name"),
+                            text_bundle(
+                                &fonts,
+                                &theme,
+                                20.0,
+                                localization.tr("char_selection-summary_label_name"),
+                            ),
+                        ));
                         nr.spawn((NameValueText, text_bundle(&fonts, &theme, 20.0, "")));
                     });
 
-                // Nav row (wizard only): Back | Cancel | Next/Create.
+                // Nav row (wizard only): Back | Cancel | Next/Create. Every
+                // button here is PERSISTENT (spawned once, never despawned while
+                // the screen is up), so each is tagged `LocalizedLabel` +
+                // resolved via `localization.tr` at spawn — the global
+                // `relocalize_button_labels`/`spawn_button_labels` chain
+                // (registered by `XindelerUiPlugin`, already added above) then
+                // keeps them live on a locale change with no extra wiring here.
+                // The legacy `<`/`>` chrome arrows this button pair used to carry
+                // are dropped: `Localization::tr` cannot interpolate a Rust-side
+                // wrapper around its resolved value, and the legacy client's own
+                // `char_selection-wizard_back`/`wizard_next` buttons show the
+                // bare word ("Back"/"Next") with no arrow either — see
+                // `voxygen/src/menu/char_selection/ui.rs`.
                 window
                     .spawn((NavRow, Node {
                         flex_direction: FlexDirection::Row,
@@ -873,13 +955,27 @@ fn spawn_screen(
                         ..Default::default()
                     }))
                     .with_children(|nav| {
-                        spawn_action_button(nav, &theme, &fonts, "< Back", CharAction::Back);
-                        spawn_action_button(
-                            nav,
+                        nav.spawn(button_bundle(
                             &theme,
                             &fonts,
-                            "Cancel",
-                            CharAction::CancelWizard,
+                            &localization.tr("char_selection-wizard_back"),
+                        ))
+                        .insert(LocalizedLabel("char_selection-wizard_back"))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::Back);
+                            },
+                        );
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("common-cancel"),
+                        ))
+                        .insert(LocalizedLabel("common-cancel"))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                                w.write(CharAction::CancelWizard);
+                            },
                         );
                         // Next and Create are separate buttons toggled by
                         // `Display` (a persistent `button_bundle` owns its own
@@ -887,16 +983,28 @@ fn spawn_screen(
                         // `sync_nav_visibility` shows exactly one of these per
                         // step). Create exists ONLY on the last step (spec
                         // §Navigation).
-                        nav.spawn(button_bundle(&theme, &fonts, "Next >"))
-                            .insert(NextButton)
-                            .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("char_selection-wizard_next"),
+                        ))
+                        .insert((NextButton, LocalizedLabel("char_selection-wizard_next")))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
                                 w.write(CharAction::Next);
-                            });
-                        nav.spawn(button_bundle(&theme, &fonts, "Create"))
-                            .insert(CreateButton)
-                            .observe(|_: On<Activate>, mut w: MessageWriter<CharAction>| {
+                            },
+                        );
+                        nav.spawn(button_bundle(
+                            &theme,
+                            &fonts,
+                            &localization.tr("common-create"),
+                        ))
+                        .insert((CreateButton, LocalizedLabel("common-create")))
+                        .observe(
+                            |_: On<Activate>, mut w: MessageWriter<CharAction>| {
                                 w.write(CharAction::Create);
-                            });
+                            },
+                        );
                     });
             });
         });
@@ -1059,6 +1167,7 @@ impl From<&WizardState> for WizardContentKey {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_content(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -1066,12 +1175,28 @@ fn rebuild_content(
     state: Res<WizardState>,
     screen: Res<CharSelectScreen>,
     list: Res<CharListData>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     images: Option<Res<CharSelectImages>>,
     column: Query<Entity, With<ContentColumn>>,
     children_query: Query<&Children>,
-    mut last_key: Local<Option<(CharSelectScreen, WizardContentKey, NetCharList)>>,
+    // BL-82 EM-5.16 (T56.44): the cache key now also carries the CURRENT
+    // locale tag. This whole column is torn down and rebuilt from scratch on
+    // any key change (never persistent, per-node `LocalizedText`/
+    // `LocalizedLabel` tagging inside `build_roster`/`build_wizard_step`), so
+    // folding the locale into the key is what makes a language switch
+    // actually re-resolve every roster/wizard string live — without it, a
+    // locale flip while sitting on an unchanged screen/state would leave
+    // this whole column showing the OLD language until some unrelated
+    // roster/wizard change happened to force a rebuild anyway.
+    mut last_key: Local<Option<(CharSelectScreen, WizardContentKey, NetCharList, String)>>,
 ) {
-    let key = (*screen, WizardContentKey::from(&*state), list.0.clone());
+    let key = (
+        *screen,
+        WizardContentKey::from(&*state),
+        list.0.clone(),
+        current_locale.0.clone(),
+    );
     if last_key.as_ref() == Some(&key) {
         return;
     }
@@ -1086,8 +1211,12 @@ fn rebuild_content(
 
     let images = images.as_deref();
     commands.entity(root).with_children(|parent| match *screen {
-        CharSelectScreen::Roster => build_roster(parent, &theme, &fonts, images, &list),
-        CharSelectScreen::Wizard => build_wizard_step(parent, &theme, &fonts, images, &state),
+        CharSelectScreen::Roster => {
+            build_roster(parent, &theme, &fonts, images, &list, &localization)
+        },
+        CharSelectScreen::Wizard => {
+            build_wizard_step(parent, &theme, &fonts, images, &state, &localization)
+        },
     });
 }
 
@@ -1097,11 +1226,22 @@ fn build_roster(
     fonts: &HudFonts,
     images: Option<&CharSelectImages>,
     list: &CharListData,
+    localization: &Localization,
 ) {
     if list.0.loading {
-        parent.spawn(text_bundle(fonts, theme, 20.0, "Loading characters..."));
+        parent.spawn(text_bundle(
+            fonts,
+            theme,
+            20.0,
+            localization.tr("char_selection-loading_characters"),
+        ));
     } else if list.0.characters.is_empty() {
-        parent.spawn(text_bundle(fonts, theme, 20.0, "No characters yet."));
+        parent.spawn(text_bundle(
+            fonts,
+            theme,
+            20.0,
+            localization.tr("char_selection-no_characters_yet"),
+        ));
     } else {
         for entry in &list.0.characters {
             let NetCharListEntry {
@@ -1111,9 +1251,18 @@ fn build_roster(
                 location,
                 ..
             } = entry;
+            // `alias`/`location` are player/world DATA, never translatable;
+            // only the "[Hardcore]" tag word itself resolves through the
+            // active locale — the surrounding brackets/`@` are left as plain
+            // chrome (no dedicated key exists for either, the same posture
+            // `numeric_row`'s bare `-`/`+` glyphs take).
+            let hardcore_tag = if *hardcore {
+                format!("  [{}]", localization.tr("char_selection-hardcore"))
+            } else {
+                String::new()
+            };
             let label = format!(
-                "{alias}{}{}",
-                if *hardcore { "  [Hardcore]" } else { "" },
+                "{alias}{hardcore_tag}{}",
                 location
                     .as_ref()
                     .map(|l| format!("  @ {l}"))
@@ -1124,21 +1273,38 @@ fn build_roster(
                     flex_grow: 1.0,
                     ..Default::default()
                 }));
-                spawn_action_button(row, theme, fonts, "Enter", CharAction::SelectCharacter(*id));
                 spawn_action_button(
                     row,
                     theme,
                     fonts,
-                    "Delete",
+                    &localization.tr("char_selection-enter_world"),
+                    CharAction::SelectCharacter(*id),
+                );
+                spawn_action_button(
+                    row,
+                    theme,
+                    fonts,
+                    &localization.tr("char_selection-delete"),
                     CharAction::DeleteCharacter(*id),
                 );
             });
         }
     }
     // The "Create New" slot uses the SAME frame art, tinted green — matching
-    // legacy `ui.rs`'s green-tinted create slot.
+    // legacy `ui.rs`'s green-tinted create slot. Legacy's own button for this
+    // exact action shows the bare phrase with no "+" prefix
+    // (`voxygen/src/menu/char_selection/ui.rs`'s
+    // `char_selection-create_new_character` use) — dropped here for the same
+    // reason the wizard nav's `<`/`>` arrows were dropped (see
+    // `spawn_screen`'s doc comment on the Nav row).
     spawn_roster_slot(parent, theme, images, Color::srgb(0.55, 1.0, 0.5), |row| {
-        spawn_action_button(row, theme, fonts, "+ Create New", CharAction::OpenWizard);
+        spawn_action_button(
+            row,
+            theme,
+            fonts,
+            &localization.tr("char_selection-create_new_character"),
+            CharAction::OpenWizard,
+        );
     });
 }
 
@@ -1188,20 +1354,39 @@ fn build_wizard_step(
     fonts: &HudFonts,
     images: Option<&CharSelectImages>,
     state: &WizardState,
+    localization: &Localization,
 ) {
     match state.step {
         WizardStep::Body => {
-            parent.spawn(text_bundle(fonts, theme, 18.0, "Body type"));
+            // "Body type" (Female/Male) reuses `char_selection-sex` — the
+            // exact key the legacy `voxygen/src/menu/char_selection/ui.rs`
+            // resolves for this same Male/Female picker.
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                localization.tr("char_selection-sex"),
+            ));
             for bt in [BodyType::Female, BodyType::Male] {
                 spawn_action_button(
                     parent,
                     theme,
                     fonts,
-                    body_type_label(bt),
+                    &localization.tr(body_type_label_key(bt)),
                     CharAction::SetBodyType(bt),
                 );
             }
-            parent.spawn(text_bundle(fonts, theme, 18.0, "Species"));
+            // "Species" section header reuses `char_selection-step_body`
+            // ("Race") — the same key this step's own title (`title_key`)
+            // resolves; no dedicated "Species" header key exists (the legacy
+            // UI shows this picker as icon-only tooltips, with no visible
+            // text header at all — see that file's `species` `Column`).
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                localization.tr("char_selection-step_body"),
+            ));
             // Real per-species portrait art (legacy `char_select.portraits.*`)
             // for the currently-chosen body type sits beside each species
             // button — a genuine image reuse, not a text-only list.
@@ -1229,21 +1414,24 @@ fn build_wizard_step(
                             row,
                             theme,
                             fonts,
-                            species_label(species),
+                            &localization.tr(species_label_key(species)),
                             CharAction::SetSpecies(species),
                         );
                     });
             }
         },
         WizardStep::Appearance => {
-            for (label, field) in [
-                ("Hair style", AppearanceField::HairStyle),
-                ("Hair color", AppearanceField::HairColor),
-                ("Skin", AppearanceField::Skin),
-                ("Eyes", AppearanceField::Eyes),
-                ("Eye color", AppearanceField::EyeColor),
-                ("Beard", AppearanceField::Beard),
-                ("Accessory", AppearanceField::Accessory),
+            for (label_key, field) in [
+                ("char_selection-hair_style", AppearanceField::HairStyle),
+                ("char_selection-hair_color", AppearanceField::HairColor),
+                ("char_selection-skin", AppearanceField::Skin),
+                // "Eyes" (eye SHAPE, not color) matches the legacy
+                // `char_selection-eyeshape` ("Eye Details") concept, not a
+                // generic "eyes" noun.
+                ("char_selection-eyeshape", AppearanceField::Eyes),
+                ("char_selection-eye_color", AppearanceField::EyeColor),
+                ("char_selection-beard", AppearanceField::Beard),
+                ("char_selection-accessories", AppearanceField::Accessory),
             ] {
                 parent
                     .spawn(Node {
@@ -1253,7 +1441,11 @@ fn build_wizard_step(
                         ..Default::default()
                     })
                     .with_children(|row| {
-                        row.spawn(text_bundle(fonts, theme, 18.0, label));
+                        row.spawn(text_bundle(fonts, theme, 18.0, localization.tr(label_key)));
+                        // `<`/`>` are bare mathematical/directional glyphs,
+                        // deliberately left unlocalized — the same posture
+                        // `settings_window.rs`'s `numeric_row` documents for
+                        // its own `-`/`+` glyphs.
                         spawn_action_button(
                             row,
                             theme,
@@ -1272,13 +1464,18 @@ fn build_wizard_step(
             }
         },
         WizardStep::Class => {
-            parent.spawn(text_bundle(fonts, theme, 18.0, "Class"));
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                localization.tr("char_selection-class"),
+            ));
             for class in wizard_classes() {
                 spawn_action_button(
                     parent,
                     theme,
                     fonts,
-                    class_label(class),
+                    &localization.tr(class_label_key(class)),
                     CharAction::SetClass(class),
                 );
             }
@@ -1286,37 +1483,62 @@ fn build_wizard_step(
                 fonts,
                 theme,
                 18.0,
-                format!("Weapon ({})", class_label(state.class)),
+                format!(
+                    "{} ({})",
+                    localization.tr("char_selection-weapon_for_class"),
+                    localization.tr(class_label_key(state.class))
+                ),
             ));
             // ONLY the selected class's valid weapons are spawned — the other
             // classes' weapons are never rendered, so they are unselectable.
             for (i, opt) in class_weapon_options(state.class).iter().enumerate() {
-                spawn_action_button(parent, theme, fonts, opt.label, CharAction::SetWeapon(i));
+                spawn_action_button(
+                    parent,
+                    theme,
+                    fonts,
+                    &localization.tr(opt.label),
+                    CharAction::SetWeapon(i),
+                );
             }
         },
         WizardStep::Alignment => {
-            parent.spawn(text_bundle(fonts, theme, 18.0, "Alignment"));
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                localization.tr("char_selection-alignment"),
+            ));
             for order in ALIGNMENT_ORDERS {
                 for moral in ALIGNMENT_MORALS {
                     spawn_action_button(
                         parent,
                         theme,
                         fonts,
-                        &alignment_label(order, moral),
+                        &alignment_label(order, moral, localization),
                         CharAction::SetAlignment(order, moral),
                     );
                 }
             }
         },
         WizardStep::Background => {
-            parent.spawn(text_bundle(fonts, theme, 18.0, "Background"));
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                localization.tr("char_selection-background"),
+            ));
             spawn_action_button(
                 parent,
                 theme,
                 fonts,
-                "Uncommitted",
+                &localization.tr("char_selection-background_uncommitted"),
                 CharAction::SetBackground(None),
             );
+            // `BackgroundKind::display_name()` is a documented P1 stand-in
+            // (see that method's own doc comment: BL-31 P3 is the separately
+            // tracked content phase that will author real
+            // `background-<name>-title` i18n keys) — genuinely left English
+            // here, not a literal in THIS file, and out of this task's scope.
             for bg in BackgroundKind::ALL {
                 spawn_action_button(
                     parent,
@@ -1328,30 +1550,65 @@ fn build_wizard_step(
             }
         },
         WizardStep::Finish => {
+            // BL-82 EM-5.16 (T56.44): the old single interpolated sentence
+            // ("{name} the {class} — {alignment}") is split into one row per
+            // field, reusing the `char_selection-summary_label_*` keys the
+            // catalog already ships for exactly this — `Localization::tr` has
+            // no placeable/argument support (see its own doc comment), so a
+            // translated word order can never be baked into a single
+            // Fluent-interpolated message the way the old literal was.
             parent.spawn(text_bundle(
                 fonts,
                 theme,
                 18.0,
                 format!(
-                    "{} the {} — {}",
-                    state.name.trim(),
-                    class_label(state.class),
-                    alignment_label(state.order, state.moral)
+                    "{}: {}",
+                    localization.tr("char_selection-summary_label_name"),
+                    state.name.trim()
+                ),
+            ));
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                format!(
+                    "{}: {}",
+                    localization.tr("char_selection-summary_label_class"),
+                    localization.tr(class_label_key(state.class))
+                ),
+            ));
+            parent.spawn(text_bundle(
+                fonts,
+                theme,
+                18.0,
+                format!(
+                    "{}: {}",
+                    localization.tr("char_selection-summary_label_alignment"),
+                    alignment_label(state.order, state.moral, localization)
                 ),
             ));
             spawn_action_button(
                 parent,
                 theme,
                 fonts,
-                if state.hardcore {
-                    "Hardcore: ON"
-                } else {
-                    "Hardcore: OFF"
-                },
+                &format!(
+                    "{}: {}",
+                    localization.tr("char_selection-hardcore"),
+                    localization.tr(if state.hardcore {
+                        "common-on"
+                    } else {
+                        "common-off"
+                    })
+                ),
                 CharAction::ToggleHardcore,
             );
             if state.name.trim().is_empty() {
-                parent.spawn(text_bundle(fonts, theme, 16.0, "Enter a name to create."));
+                parent.spawn(text_bundle(
+                    fonts,
+                    theme,
+                    16.0,
+                    localization.tr("char_selection-create_info_name"),
+                ));
             }
         },
     }
@@ -1359,21 +1616,36 @@ fn build_wizard_step(
 
 // -- sync systems ------------------------------------------------------------
 
+/// Recomputes the step/screen title from the current screen, step AND
+/// locale — a state-dependent value (not a plain `LocalizedText` tag),
+/// mirroring `settings_window.rs`'s `refresh_setting_labels` posture (see
+/// `spawn_screen`'s doc comment on `StepTitleText`). Numeral formatting
+/// happens here in Rust, around [`WizardStep::title_key`]'s resolved value —
+/// `Localization::tr` has no placeable support.
 fn sync_step_title(
     screen: Res<CharSelectScreen>,
     state: Res<WizardState>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     mut title: Query<&mut Text, With<StepTitleText>>,
 ) {
-    if !screen.is_changed() && !state.is_changed() {
+    if !screen.is_changed() && !state.is_changed() && !current_locale.is_changed() {
         return;
     }
     let Ok(mut text) = title.single_mut() else {
         return;
     };
-    text.0 = match *screen {
-        CharSelectScreen::Roster => "Select Character".to_owned(),
-        CharSelectScreen::Wizard => state.step.title().to_owned(),
+    let new = match *screen {
+        CharSelectScreen::Roster => localization.tr("char_selection-select_character"),
+        CharSelectScreen::Wizard => format!(
+            "{}/6  {}",
+            state.step.index() + 1,
+            localization.tr(state.step.title_key())
+        ),
     };
+    if text.0 != new {
+        text.0 = new;
+    }
 }
 
 fn sync_name_value(state: Res<WizardState>, mut value: Query<&mut Text, With<NameValueText>>) {
@@ -1495,62 +1767,105 @@ fn enter_world_when_ready(
     }
 }
 
-// -- display labels (real i18n is EM-5.16) -----------------------------------
+// -- display labels (BL-82 EM-5.16 T56.44: real i18n) ------------------------
+//
+// Every function below returns an `.ftl` KEY (never literal display text) —
+// callers resolve it via `Localization::tr` at spawn time. New keys
+// (`char_selection-body_female`/`body_male`) were added only where NEITHER
+// `char_selection.ftl` nor `common.ftl` already had a matching concept (see
+// this module's own doc comment / the task's ground-truth check against the
+// legacy `voxygen/src/menu/char_selection/ui.rs`, which this crate's Bevy
+// port otherwise mirrors key-for-key).
 
-fn body_type_label(bt: BodyType) -> &'static str {
+fn body_type_label_key(bt: BodyType) -> &'static str {
     match bt {
-        BodyType::Female => "Female",
-        BodyType::Male => "Male",
+        BodyType::Female => "char_selection-body_female",
+        BodyType::Male => "char_selection-body_male",
     }
 }
 
-fn species_label(species: Species) -> &'static str {
+/// Reuses the `common-species-*` catalog — the same keys the legacy
+/// species-picker tooltips resolve (`voxygen/src/menu/char_selection/ui.rs`'s
+/// `icon_button_tooltip(.., "common-species-human")` etc).
+fn species_label_key(species: Species) -> &'static str {
     match species {
-        Species::Danari => "Danari",
-        Species::Dwarf => "Dwarf",
-        Species::Elf => "Elf",
-        Species::Human => "Human",
-        Species::Orc => "Orc",
-        Species::Draugr => "Draugr",
+        Species::Danari => "common-species-danari",
+        Species::Dwarf => "common-species-dwarf",
+        Species::Elf => "common-species-elf",
+        Species::Human => "common-species-human",
+        Species::Orc => "common-species-orc",
+        Species::Draugr => "common-species-draugr",
     }
 }
 
-fn class_label(class: ClassKind) -> &'static str {
+/// The proof-slice four reuse `char_selection-class_*` — the exact keys the
+/// legacy class-step buttons resolve for these same four classes
+/// (`voxygen/src/menu/char_selection/ui.rs`). Every OTHER playable class (this
+/// port's wizard offers all of `ClassKind::PLAYABLE`, not just the proof
+/// slice) falls back to the fuller `common-class-*` catalog, which has no
+/// gap across any `ClassKind` variant.
+fn class_label_key(class: ClassKind) -> &'static str {
     match class {
-        ClassKind::Adventurer => "Adventurer",
-        ClassKind::Warrior => "Warrior",
-        ClassKind::Mage => "Mage",
-        ClassKind::Cleric => "Cleric",
-        ClassKind::Rogue => "Rogue",
-        ClassKind::Barbarian => "Barbarian",
-        ClassKind::Sorcerer => "Sorcerer",
-        ClassKind::Warlock => "Warlock",
-        ClassKind::Bard => "Bard",
-        ClassKind::Paladin => "Paladin",
-        ClassKind::Druid => "Druid",
-        ClassKind::Ranger => "Ranger",
-        ClassKind::Monk => "Monk",
-        ClassKind::Artificer => "Artificer",
-        ClassKind::BloodSlayer => "Blood Slayer",
+        ClassKind::Warrior => "char_selection-class_warrior",
+        ClassKind::Mage => "char_selection-class_mage",
+        ClassKind::Cleric => "char_selection-class_cleric",
+        ClassKind::Rogue => "char_selection-class_rogue",
+        ClassKind::Adventurer => "common-class-adventurer",
+        ClassKind::Barbarian => "common-class-barbarian",
+        ClassKind::Sorcerer => "common-class-sorcerer",
+        ClassKind::Warlock => "common-class-warlock",
+        ClassKind::Bard => "common-class-bard",
+        ClassKind::Paladin => "common-class-paladin",
+        ClassKind::Druid => "common-class-druid",
+        ClassKind::Ranger => "common-class-ranger",
+        ClassKind::Monk => "common-class-monk",
+        ClassKind::Artificer => "common-class-artificer",
+        ClassKind::BloodSlayer => "common-class-blood_slayer",
     }
 }
 
-fn alignment_label(order: Order, moral: Moral) -> String {
-    let o = match order {
-        Order::Lawful => "Lawful",
-        Order::Neutral => "Neutral",
-        Order::Chaotic => "Chaotic",
-    };
-    let m = match moral {
-        Moral::Good => "Good",
-        Moral::Neutral => "Neutral",
-        Moral::Evil => "Evil",
-    };
-    if order == Order::Neutral && moral == Moral::Neutral {
-        "True Neutral".to_owned()
-    } else {
-        format!("{o} {m}")
+fn order_label_key(order: Order) -> &'static str {
+    match order {
+        Order::Lawful => "char_selection-ethos_lawful",
+        Order::Neutral => "char_selection-ethos_neutral",
+        Order::Chaotic => "char_selection-ethos_chaotic",
     }
+}
+
+fn moral_label_key(moral: Moral) -> &'static str {
+    match moral {
+        Moral::Good => "char_selection-ethos_good",
+        Moral::Neutral => "char_selection-ethos_neutral",
+        Moral::Evil => "char_selection-ethos_evil",
+    }
+}
+
+/// True Neutral gets its own single-word key (`char_selection-ethos_true_
+/// neutral`, matching legacy); every other box composes `"{Order} {Moral}"`
+/// from the two resolved words — this can't be one Fluent-interpolated
+/// message (`Localization::tr` has no placeable support), so the composition
+/// happens here in Rust around two already-`tr`'d words.
+fn alignment_label(order: Order, moral: Moral, localization: &Localization) -> String {
+    if order == Order::Neutral && moral == Moral::Neutral {
+        localization.tr("char_selection-ethos_true_neutral")
+    } else {
+        format!(
+            "{} {}",
+            localization.tr(order_label_key(order)),
+            localization.tr(moral_label_key(moral))
+        )
+    }
+}
+
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all the structural tests below need (matching `settings_window.rs`/
+/// `esc_menu.rs`'s own `test_localization` helper) — see
+/// `switching_locale_relocalizes_the_cancel_button_live` for the one test
+/// that DOES need the real repo catalogs.
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
 }
 
 #[cfg(test)]
@@ -1750,6 +2065,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_screen)
@@ -1781,6 +2097,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_screen)
@@ -1817,6 +2134,10 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         // Deliberately NO `HudTheme`/`HudFonts` inserted — reproduces the
         // pre-`Startup` window `OnEnter(initial_state)` actually runs in.
+        // `Localization` IS inserted (it's orthogonal to this specific
+        // regression — see `spawn_screen`'s own doc comment on why it's a
+        // hard `NonSend` param, not `Option`-wrapped like Theme/Fonts).
+        app.insert_non_send(test_localization());
 
         app.world_mut()
             .run_system_once(spawn_screen)
@@ -1846,6 +2167,7 @@ mod tests {
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        app.insert_non_send(test_localization());
 
         // First frame: resources not ready yet — no-op (see the test above).
         app.world_mut()
@@ -1919,6 +2241,10 @@ mod tests {
                 body: Handle::default(),
             });
         });
+        // `Localization` is inserted directly by `XindelerUiPlugin::build`
+        // (not deferred to `Startup`) — this hand-rolled stand-in app mirrors
+        // that by inserting it up front too.
+        app.insert_non_send(test_localization());
         app.init_resource::<WizardState>()
             .init_resource::<CharSelectScreen>()
             .add_systems(OnEnter(AppState::CharSelect), reset_state)
@@ -1940,6 +2266,80 @@ mod tests {
             1,
             "the char-select screen must be up by the end of the very first frame, even though \
              its OnEnter ran before Startup"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44): switching the active locale re-localizes the
+    /// already-spawned, persistent `NavRow` Cancel button live, using the
+    /// REAL repo `.ftl` catalogs (`char_selection.ftl` + `common.ftl`) via
+    /// `VELOREN_ASSETS`/`XINDELER_ASSETS` — the same real-catalog proof
+    /// `esc_menu.rs`'s own hot-swap test uses, exercised here against a
+    /// `char_select.rs`-spawned `LocalizedLabel`-tagged button (`common-
+    /// cancel`, not one of this screen's own `char_selection-*` keys, since
+    /// that key is genuinely translated in the real `es` catalog — see this
+    /// module's own key-mapping notes).
+    #[test]
+    fn switching_locale_relocalizes_the_cancel_button_live() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["char_selection.ftl", "common.ftl"],
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        // `button::spawn_button_labels` is what turns `HudButtonLabel` into a
+        // real `Text` child — needed for BOTH the initial spawn and the
+        // post-hot-swap relabel this test drives.
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_screen)
+            .expect("spawn_screen runs");
+        app.update(); // let spawn_button_labels give the Cancel button its child
+
+        fn cancel_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "common-cancel")
+                .map(|(_, children)| children[0])
+                .expect("the Cancel button was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            cancel_button_text(&mut app),
+            "Cancel",
+            "the Cancel button must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        let after = cancel_button_text(&mut app);
+        assert_eq!(
+            after, "Cancelar",
+            "must resolve to the REAL es catalog's own common-cancel value, not the en fallback"
         );
     }
 }

@@ -53,14 +53,20 @@
 //! toggles. Categories deliver the filtering; free-text search waits for the
 //! HUD-wide focus system a later epic will add.
 
-use bevy::{ecs::schedule::common_conditions::not, prelude::*};
-use common::comp::{
-    InventoryManip,
-    controller::CraftEvent,
-    inventory::{
-        item::{ItemDefinitionIdOwned, Quality},
-        slot::{InvSlotId, Slot},
+use bevy::{
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
+    prelude::*,
+};
+use common::{
+    comp::{
+        InventoryManip,
+        controller::CraftEvent,
+        inventory::{
+            item::{ItemDefinitionIdOwned, Quality},
+            slot::{InvSlotId, Slot},
+        },
     },
+    terrain::SpriteKind,
 };
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
@@ -70,6 +76,7 @@ use xindeler_protocol::{
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     images::{HudImageKey, HudImages},
     panel::image_panel_bundle,
     scroll::scroll_view_bundle,
@@ -98,12 +105,18 @@ impl CraftingTab {
         CraftingTab::Modular,
     ];
 
-    fn label(self) -> &'static str {
+    /// The `.ftl` key for this tab's label. `Salvage` reuses the legacy
+    /// `hud-crafting-dismantle_title` key — this tab drives the SAME
+    /// mechanic legacy `voxygen`'s "Dismantle" feature does (break an item
+    /// down into materials at a `DismantlingBench`, see
+    /// [`crafting_station_label_key`]), just surfaced as its own top-level
+    /// section here rather than a category filter.
+    fn label_key(self) -> &'static str {
         match self {
-            CraftingTab::Recipes => "Recipes",
-            CraftingTab::Salvage => "Salvage",
-            CraftingTab::Repair => "Repair",
-            CraftingTab::Modular => "Modular",
+            CraftingTab::Recipes => "hud-crafting-recipes",
+            CraftingTab::Salvage => "hud-crafting-dismantle_title",
+            CraftingTab::Repair => "hud-crafting-tabs-repair",
+            CraftingTab::Modular => "hud-crafting-tabs-modular",
         }
     }
 }
@@ -220,10 +233,20 @@ impl Plugin for CraftingUiPlugin {
                         .run_if(not(text_input_focused)),
                     sync_crafting_window_visibility,
                     sync_crafting_tab_content_visibility,
-                    rebuild_recipes_tab,
-                    rebuild_salvage_tab,
-                    rebuild_repair_tab,
-                    rebuild_modular_tab,
+                    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer
+                    // finding): all four gate their rebuild on
+                    // `current_locale.is_changed()` — like `settings_window.
+                    // rs`'s `refresh_setting_labels` documents, this needs an
+                    // explicit `.after(LocaleSyncSet)` edge, since Bevy gives
+                    // no ordering guarantee between two systems with
+                    // conflicting `NonSend`/`NonSendMut` `Localization`
+                    // access absent one; without it, a locale switch could
+                    // read the stale bundle exactly once and then never
+                    // retry (the gate is now satisfied).
+                    rebuild_recipes_tab.after(xindeler_ui::i18n::LocaleSyncSet),
+                    rebuild_salvage_tab.after(xindeler_ui::i18n::LocaleSyncSet),
+                    rebuild_repair_tab.after(xindeler_ui::i18n::LocaleSyncSet),
+                    rebuild_modular_tab.after(xindeler_ui::i18n::LocaleSyncSet),
                 ),
             );
     }
@@ -244,6 +267,7 @@ fn spawn_crafting_window(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
+    localization: NonSend<Localization>,
 ) {
     commands
         .spawn((
@@ -282,10 +306,10 @@ fn spawn_crafting_window(
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn(label_bundle(
+                        row.spawn(localized_label_bundle(
                             &fonts,
-                            &theme,
-                            "Crafting",
+                            &localization,
+                            "hud-crafting",
                             22.0,
                             theme.palette.text,
                         ));
@@ -306,7 +330,7 @@ fn spawn_crafting_window(
                     }))
                     .with_children(|bar| {
                         for tab in CraftingTab::ALL {
-                            bar.spawn(button_bundle(&theme, &fonts, tab.label()))
+                            localized_button(bar, &theme, &fonts, &localization, tab.label_key())
                                 .insert(CraftingTabButton(tab))
                                 .observe(
                                     |activate: On<Activate>,
@@ -366,10 +390,10 @@ fn spawn_crafting_window(
                         ..default()
                     }))
                     .with_children(|tab| {
-                        tab.spawn(label_bundle(
+                        tab.spawn(localized_label_bundle(
                             &fonts,
-                            &theme,
-                            "Break items down into materials. Requires a Dismantling Bench.",
+                            &localization,
+                            "hud-crafting-salvage_desc",
                             14.0,
                             theme.palette.text_muted,
                         ));
@@ -377,7 +401,14 @@ fn spawn_crafting_window(
                             SalvageListRoot,
                             scroll_view_bundle(&theme, CRAFT_WINDOW_W - 40.0, CONTENT_H - 90.0),
                         ));
-                        tab.spawn(button_bundle(&theme, &fonts, "Salvage selected")).observe(
+                        localized_button(
+                            tab,
+                            &theme,
+                            &fonts,
+                            &localization,
+                            "hud-crafting-salvage_selected",
+                        )
+                        .observe(
                             |_: On<Activate>,
                              selection: Res<CraftingSelection>,
                              mut requests: MessageWriter<InventoryActionRequest>| {
@@ -399,10 +430,10 @@ fn spawn_crafting_window(
                         ..default()
                     }))
                     .with_children(|tab| {
-                        tab.spawn(label_bundle(
+                        tab.spawn(localized_label_bundle(
                             &fonts,
-                            &theme,
-                            "Restore a damaged item's durability. Requires a Repair Bench.",
+                            &localization,
+                            "hud-crafting-repair_tab_desc",
                             14.0,
                             theme.palette.text_muted,
                         ));
@@ -410,7 +441,14 @@ fn spawn_crafting_window(
                             RepairListRoot,
                             scroll_view_bundle(&theme, CRAFT_WINDOW_W - 40.0, CONTENT_H - 90.0),
                         ));
-                        tab.spawn(button_bundle(&theme, &fonts, "Repair selected")).observe(
+                        localized_button(
+                            tab,
+                            &theme,
+                            &fonts,
+                            &localization,
+                            "hud-crafting-repair_selected",
+                        )
+                        .observe(
                             |_: On<Activate>,
                              selection: Res<CraftingSelection>,
                              mut requests: MessageWriter<InventoryActionRequest>| {
@@ -432,11 +470,10 @@ fn spawn_crafting_window(
                         ..default()
                     }))
                     .with_children(|tab| {
-                        tab.spawn(label_bundle(
+                        tab.spawn(localized_label_bundle(
                             &fonts,
-                            &theme,
-                            "Forge a weapon from a primary + secondary component of the same tool \
-                             kind. Requires a Crafting Bench.",
+                            &localization,
+                            "hud-crafting-modular_tab_desc",
                             14.0,
                             theme.palette.text_muted,
                         ));
@@ -453,10 +490,10 @@ fn spawn_crafting_window(
                                 ..default()
                             })
                             .with_children(|col| {
-                                col.spawn(label_bundle(
+                                col.spawn(localized_label_bundle(
                                     &fonts,
-                                    &theme,
-                                    "Primary",
+                                    &localization,
+                                    "hud-crafting-primary",
                                     16.0,
                                     theme.palette.text,
                                 ));
@@ -471,10 +508,10 @@ fn spawn_crafting_window(
                                 ..default()
                             })
                             .with_children(|col| {
-                                col.spawn(label_bundle(
+                                col.spawn(localized_label_bundle(
                                     &fonts,
-                                    &theme,
-                                    "Secondary",
+                                    &localization,
+                                    "hud-crafting-secondary",
                                     16.0,
                                     theme.palette.text,
                                 ));
@@ -484,7 +521,14 @@ fn spawn_crafting_window(
                                 ));
                             });
                         });
-                        tab.spawn(button_bundle(&theme, &fonts, "Forge weapon")).observe(
+                        localized_button(
+                            tab,
+                            &theme,
+                            &fonts,
+                            &localization,
+                            "hud-crafting-forge_weapon",
+                        )
+                        .observe(
                             |_: On<Activate>,
                              selection: Res<CraftingSelection>,
                              mut requests: MessageWriter<InventoryActionRequest>| {
@@ -649,6 +693,8 @@ fn rebuild_recipes_tab(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     player: Query<Ref<NetCrafting>, With<NetLocalPlayer>>,
     tab: Res<CraftingTab>,
     category: Res<RecipeCategory>,
@@ -661,15 +707,28 @@ fn rebuild_recipes_tab(
     let Ok(crafting) = player.single() else {
         return;
     };
+    // BL-82 EM-5.16 (T56.44 follow-up): `current_locale.is_changed()` joins
+    // the rebuild gate so a bare language switch — with no crafting/tab/
+    // category/selection change at all — still refreshes this tab's
+    // translated text while it's already open; every string this closure
+    // spawns below is resolved fresh from `localization` each time it runs,
+    // so no separate `LocalizedText`/`LocalizedLabel` tagging is needed here
+    // (unlike `spawn_crafting_window`'s Startup-only, never-rebuilt chrome).
     if !(crafting.is_changed()
         || tab.is_changed()
         || category.is_changed()
-        || selection.is_changed())
+        || selection.is_changed()
+        || current_locale.is_changed())
     {
         return;
     }
 
-    // Category bar: "All" + every distinct output category, sorted.
+    // Category bar: "All" + every distinct output category, sorted. The
+    // per-category buttons themselves stay UNTRANSLATED — `cat` is a raw
+    // asset-path slug (`recipe_category`'s own doc comment: "no hardcoded
+    // per-recipe category table"), and mapping each arbitrary slug to a
+    // `.ftl` key would reintroduce exactly the hardcoded table this fn
+    // deliberately avoids; only the fixed "All" entry has a real key.
     if let Ok(bar) = category_bar.single() {
         let mut categories: Vec<String> = crafting
             .recipes
@@ -680,7 +739,11 @@ fn rebuild_recipes_tab(
             .collect();
         rebuild_children(&mut commands, bar, &children_query, |parent| {
             parent
-                .spawn(button_bundle(&theme, &fonts, "All"))
+                .spawn(button_bundle(
+                    &theme,
+                    &fonts,
+                    &localization.tr("hud-crafting-tabs-all"),
+                ))
                 .insert(CategoryButton(None))
                 .observe(on_category_click);
             for cat in categories.drain(..) {
@@ -734,7 +797,7 @@ fn rebuild_recipes_tab(
                 parent.spawn(label_bundle(
                     &fonts,
                     &theme,
-                    "Select a recipe.",
+                    &localization.tr("hud-crafting-select_a_recipe"),
                     16.0,
                     theme.palette.text_muted,
                 ));
@@ -766,10 +829,16 @@ fn rebuild_recipes_tab(
                     ));
                 });
             if let Some(sprite) = recipe.craft_sprite {
+                let station_name = crafting_station_label_key(sprite)
+                    .map(|key| localization.tr(key))
+                    .unwrap_or_else(|| format!("{sprite:?}"));
                 parent.spawn(label_bundle(
                     &fonts,
                     &theme,
-                    &format!("Station: {sprite:?}"),
+                    &format!(
+                        "{} {station_name}",
+                        localization.tr("hud-crafting-req_crafting_station")
+                    ),
                     13.0,
                     theme.palette.text_muted,
                 ));
@@ -777,7 +846,7 @@ fn rebuild_recipes_tab(
             parent.spawn(label_bundle(
                 &fonts,
                 &theme,
-                "Ingredients:",
+                &localization.tr("hud-crafting-ingredients"),
                 15.0,
                 theme.palette.text,
             ));
@@ -798,7 +867,11 @@ fn rebuild_recipes_tab(
             }
             // Craft button (real end-to-end for station-free recipes).
             parent
-                .spawn(button_bundle(&theme, &fonts, "Craft"))
+                .spawn(button_bundle(
+                    &theme,
+                    &fonts,
+                    &localization.tr("hud-crafting-craft"),
+                ))
                 .observe(on_craft_click());
         });
     }
@@ -850,6 +923,8 @@ fn rebuild_salvage_tab(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     player: Query<(Ref<NetCrafting>, &NetInventory), With<NetLocalPlayer>>,
     selection: Res<CraftingSelection>,
     list_root: Query<Entity, With<SalvageListRoot>>,
@@ -858,7 +933,7 @@ fn rebuild_salvage_tab(
     let Ok((crafting, inventory)) = player.single() else {
         return;
     };
-    if !(crafting.is_changed() || selection.is_changed()) {
+    if !(crafting.is_changed() || selection.is_changed() || current_locale.is_changed()) {
         return;
     }
     let Ok(list) = list_root.single() else {
@@ -869,7 +944,7 @@ fn rebuild_salvage_tab(
             parent.spawn(label_bundle(
                 &fonts,
                 &theme,
-                "No salvageable items.",
+                &localization.tr("hud-crafting-no_salvageable_items"),
                 15.0,
                 theme.palette.text_muted,
             ));
@@ -898,6 +973,8 @@ fn rebuild_repair_tab(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     player: Query<(Ref<NetCrafting>, &NetInventory), With<NetLocalPlayer>>,
     selection: Res<CraftingSelection>,
     list_root: Query<Entity, With<RepairListRoot>>,
@@ -906,7 +983,7 @@ fn rebuild_repair_tab(
     let Ok((crafting, inventory)) = player.single() else {
         return;
     };
-    if !(crafting.is_changed() || selection.is_changed()) {
+    if !(crafting.is_changed() || selection.is_changed() || current_locale.is_changed()) {
         return;
     }
     let Ok(list) = list_root.single() else {
@@ -917,7 +994,7 @@ fn rebuild_repair_tab(
             parent.spawn(label_bundle(
                 &fonts,
                 &theme,
-                "No damaged items.",
+                &localization.tr("hud-crafting-no_damaged_items"),
                 15.0,
                 theme.palette.text_muted,
             ));
@@ -958,6 +1035,8 @@ fn rebuild_modular_tab(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     player: Query<(Ref<NetCrafting>, &NetInventory), With<NetLocalPlayer>>,
     selection: Res<CraftingSelection>,
     primary_root: Query<Entity, With<ModularPrimaryListRoot>>,
@@ -967,7 +1046,7 @@ fn rebuild_modular_tab(
     let Ok((crafting, inventory)) = player.single() else {
         return;
     };
-    if !(crafting.is_changed() || selection.is_changed()) {
+    if !(crafting.is_changed() || selection.is_changed() || current_locale.is_changed()) {
         return;
     }
 
@@ -995,7 +1074,7 @@ fn rebuild_modular_tab(
                 parent.spawn(label_bundle(
                     &fonts,
                     &theme,
-                    "No primary components.",
+                    &localization.tr("hud-crafting-no_primary_components"),
                     15.0,
                     theme.palette.text_muted,
                 ));
@@ -1026,7 +1105,7 @@ fn rebuild_modular_tab(
                 parent.spawn(label_bundle(
                     &fonts,
                     &theme,
-                    "No secondary components.",
+                    &localization.tr("hud-crafting-no_secondary_components"),
                     15.0,
                     theme.palette.text_muted,
                 ));
@@ -1057,6 +1136,74 @@ fn label_bundle(
         },
         TextColor(color),
     )
+}
+
+/// A themed text label bundle whose content is a resolved `.ftl` message
+/// VALUE, tagged [`LocalizedText`] so it re-resolves live on a locale change —
+/// the tagged counterpart to [`label_bundle`], for text spawned ONCE at
+/// `Startup` by [`spawn_crafting_window`] (which, unlike the four `rebuild_*`
+/// tab systems, never reruns on its own to pick up a fresh `Localization`
+/// bundle — see this file's own `LocaleSyncSet`-adjacent doc comments in
+/// `rebuild_recipes_tab` for the other half of this screen's hot-swap
+/// coverage). Mirrors `settings_window.rs`'s `heading`/`note` helpers.
+fn localized_label_bundle(
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+    size: f32,
+    color: Color,
+) -> impl Bundle {
+    (
+        LocalizedText(key),
+        Text(localization.tr(key)),
+        TextFont {
+            font: bevy::text::FontSource::Handle(fonts.body.clone()),
+            font_size: bevy::text::FontSize::Px(size),
+            ..default()
+        },
+        TextColor(color),
+    )
+}
+
+/// Spawns a themed button whose label is a resolved `.ftl` message value,
+/// tagged [`LocalizedLabel`] so it re-resolves live on a locale change — the
+/// same small per-screen helper `settings_window.rs`'s `spawn_labeled_button`/
+/// `esc_menu.rs`'s `labeled_button` establish (duplicated here rather than
+/// shared, matching this crate's existing per-screen-glyph-helper
+/// convention — see `diary.rs`'s `skill_glyph`/`ability_glyph` doc comment).
+fn localized_button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) -> bevy::ecs::system::EntityCommands<'a> {
+    let mut button = parent.spawn(button_bundle(theme, fonts, &localization.tr(key)));
+    button.insert(LocalizedLabel(key));
+    button
+}
+
+/// The `.ftl` key for a crafting station's display name — mirrors legacy
+/// `voxygen::hud::get_sprite_desc`'s station subset (the only [`SpriteKind`]
+/// variants a real crafting recipe's `craft_sprite` ever names, e.g.
+/// `DismantlingBench` displaying as "Salvaging Bench" — the SAME key legacy
+/// uses). `None` for anything else (never reached by a real `craft_sprite`
+/// today, but kept total rather than assumed-unreachable), falling back to
+/// the sprite's raw `Debug` name in the caller.
+fn crafting_station_label_key(sprite: SpriteKind) -> Option<&'static str> {
+    match sprite {
+        SpriteKind::Anvil => Some("hud-crafting-anvil"),
+        SpriteKind::Cauldron => Some("hud-crafting-cauldron"),
+        SpriteKind::CookingPot => Some("hud-crafting-cooking_pot"),
+        SpriteKind::RepairBench => Some("hud-crafting-repair_bench"),
+        SpriteKind::CraftingBench => Some("hud-crafting-crafting_bench"),
+        SpriteKind::Forge => Some("hud-crafting-forge"),
+        SpriteKind::Loom => Some("hud-crafting-loom"),
+        SpriteKind::SpinningWheel => Some("hud-crafting-spinning_wheel"),
+        SpriteKind::TanningRack => Some("hud-crafting-tanning_rack"),
+        SpriteKind::DismantlingBench => Some("hud-crafting-salvaging_station"),
+        _ => None,
+    }
 }
 
 /// The rarity-background [`HudImageKey`] for an item quality — the SAME mapping
@@ -1393,6 +1540,10 @@ mod tests {
         app.init_asset::<bevy::image::Image>();
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &[],
+        ));
 
         app.world_mut()
             .run_system_once(spawn_crafting_window)
@@ -1405,5 +1556,79 @@ mod tests {
             .expect("CraftingWindowRoot exists")
             .0;
         assert_eq!(z_index, zlayer::MODAL_WINDOWS);
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes an already-spawned crafting tab button live, using the
+    /// REAL repo `hud/crafting.ftl` catalog (not a synthetic fixture) via
+    /// `VELOREN_ASSETS`/`XINDELER_ASSETS` — the same real-catalog idiom
+    /// `esc_menu.rs`'s own hot-swap test uses, exercised here against the
+    /// Recipes tab button (`LocalizedLabel`-tagged in `spawn_crafting_window`,
+    /// the one piece of this screen's Startup-only chrome that needs the
+    /// tag rather than a per-frame rebuild — see `rebuild_recipes_tab`'s own
+    /// doc comment for the other half of this screen's hot-swap coverage).
+    #[test]
+    fn switching_locale_relocalizes_a_crafting_tab_button_live() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<bevy::image::Image>();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        app.insert_resource(HudImages::load(&asset_server));
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/crafting.ftl"],
+        ));
+        app.init_resource::<CurrentLocale>();
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_crafting_window)
+            .expect("spawn_crafting_window runs");
+        app.update(); // let spawn_button_labels give each tab button its child
+
+        fn recipes_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let child = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-crafting-recipes")
+                .map(|(_, children)| children[0])
+                .expect("the Recipes tab button was spawned and tagged");
+            world
+                .get::<Text>(child)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            recipes_button_text(&mut app),
+            "Recipes",
+            "the Recipes tab must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        assert_eq!(
+            recipes_button_text(&mut app),
+            "Recetas",
+            "must resolve to the REAL es catalog's own hud-crafting-recipes value, not the en \
+             fallback"
+        );
     }
 }

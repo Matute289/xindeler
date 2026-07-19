@@ -77,6 +77,7 @@
 
 use bevy::{
     color::Alpha as _,
+    ecs::change_detection::NonSend,
     image::Image,
     input::keyboard::{Key, KeyboardInput},
     input_focus::{FocusCause, InputFocus},
@@ -89,6 +90,7 @@ use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
 use xindeler_ui::{
     button::{Activate, button_bundle},
+    i18n::{Localization, LocalizedLabel},
     scroll::scroll_view_bundle,
     theme::{HudFonts, HudTheme},
 };
@@ -272,14 +274,25 @@ fn chat_scroll_height(window_height_px: f32) -> f32 {
 /// The channel tabs shown, in order: `None` = "All" (view filter only); every
 /// `Some(channel)` doubles as a filter AND (for the five sendable kinds) a
 /// send-channel selector. `Tell` is a VIEW filter only.
+///
+/// BL-82 EM-5.16 (T56.44 follow-up): the second element is now a `.ftl` KEY,
+/// not a hardcoded English literal — `spawn_chat_panel` resolves it through
+/// `Localization` for the first paint and tags the button
+/// `xindeler_ui::i18n::LocalizedLabel` so it re-resolves live on a locale
+/// change (the `settings_window.rs`/`esc_menu.rs` convention). Five of the six
+/// reuse the existing per-channel keys `hud/settings.ftl` already carries for
+/// its own chat-notification toggles (same MEANING — a bare channel name);
+/// only `hud-chat-all` (already in `hud/chat.ftl`) and the new
+/// `hud-chat-tab_whisper` (added by this pass — no existing key covers
+/// "Whisper" as a channel/tab label) are chat-catalog-owned.
 const CHAT_TABS: [(Option<NetChatChannel>, &str); 7] = [
-    (None, "All"),
-    (Some(NetChatChannel::Say), "Say"),
-    (Some(NetChatChannel::Region), "Region"),
-    (Some(NetChatChannel::Group), "Group"),
-    (Some(NetChatChannel::Faction), "Faction"),
-    (Some(NetChatChannel::World), "World"),
-    (Some(NetChatChannel::Tell), "Whisper"),
+    (None, "hud-chat-all"),
+    (Some(NetChatChannel::Say), "hud-settings-say"),
+    (Some(NetChatChannel::Region), "hud-settings-region"),
+    (Some(NetChatChannel::Group), "hud-settings-group"),
+    (Some(NetChatChannel::Faction), "hud-settings-faction"),
+    (Some(NetChatChannel::World), "hud-settings-world"),
+    (Some(NetChatChannel::Tell), "hud-chat-tab_whisper"),
 ];
 
 /// The legacy per-channel text color for a scrollback line / the input line's
@@ -1140,6 +1153,7 @@ fn spawn_chat_panel(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     icons: Res<ChatIcons>,
+    localization: NonSend<Localization>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let window = windows.single().ok();
@@ -1208,9 +1222,9 @@ fn spawn_chat_panel(
                 ..Default::default()
             }))
             .with_children(|tabs| {
-                for (channel, label) in CHAT_TABS {
-                    tabs.spawn(button_bundle(&theme, &fonts, label))
-                        .insert(ChatTab(channel))
+                for (channel, key) in CHAT_TABS {
+                    tabs.spawn(button_bundle(&theme, &fonts, &localization.tr(key)))
+                        .insert((ChatTab(channel), LocalizedLabel(key)))
                         .observe(handle_tab_click);
                 }
             });
@@ -1923,6 +1937,18 @@ fn replace_command_name(raw: &str, replacement: &str) -> String {
     }
 }
 
+/// Test-only: an empty-catalog [`Localization`] — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), matching
+/// `settings_window.rs`/`esc_menu.rs`'s own `test_localization` helper. All
+/// but one of this file's tests only need the SHAPE (a button + its
+/// `ChatTab`/`LocalizedLabel` tags), never specific translated text — see
+/// `switching_locale_relocalizes_a_chat_tab_label_live` for the one test that
+/// DOES assert real text, which loads the real repo catalogs instead.
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -1940,6 +1966,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
         app.insert_resource(ChatIcons::dummy());
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
@@ -3044,5 +3071,75 @@ mod tests {
 
         let node = app.world().get::<Node>(scroll_area).unwrap();
         assert_eq!(node.height, Val::Px(chat_scroll_height(2000.0)));
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes an already-spawned chat TAB button live, using the REAL
+    /// repo `.ftl` catalogs via `DEFAULT_HUD_FTL_FILES` (which already
+    /// carries `hud/settings.ftl` — the catalog the World tab's real
+    /// `hud-settings-world` key lives in, reused here rather than a new
+    /// chat-owned key — see [`CHAT_TABS`]'s doc comment) — the same
+    /// real-catalog hot-swap idiom
+    /// `esc_menu.rs::switching_locale_relocalizes_the_quit_button_live` uses,
+    /// exercised here against a chat-tab `LocalizedLabel` button instead of a
+    /// menu button.
+    #[test]
+    fn switching_locale_relocalizes_a_chat_tab_label_live() {
+        let mut app = new_app();
+        // Overrides `new_app`'s empty-catalog `test_localization()` with a
+        // REAL, fully-loaded one for this one hot-swap test.
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        // `button::spawn_button_labels` is what turns `HudButtonLabel` into a
+        // real `Text` child — needed for BOTH the initial spawn and the
+        // post-hot-swap relabel this test drives.
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_chat_panel)
+            .expect("spawn_chat_panel runs");
+        app.update(); // let spawn_button_labels give the World tab its text child
+
+        fn world_tab_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-settings-world")
+                .map(|(_, children)| children[0])
+                .expect("the World tab was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            world_tab_text(&mut app),
+            "World",
+            "the World tab must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        let after = world_tab_text(&mut app);
+        assert_eq!(
+            after, "Mundo",
+            "must resolve to the REAL es catalog's own hud-settings-world value, not the en \
+             fallback"
+        );
     }
 }

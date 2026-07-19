@@ -65,10 +65,17 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use bevy::{ecs::schedule::common_conditions::not, prelude::*};
-use common::comp::skillset::{
-    SkillGroupKind, SkillPrerequisite,
-    skills::{ClassPassiveStat, Skill},
+use bevy::{
+    ecs::{change_detection::NonSend, schedule::common_conditions::not},
+    prelude::*,
+};
+use common::comp::{
+    ClassKind,
+    skillset::{
+        SkillGroupKind, SkillPrerequisite,
+        skills::{ClassPassiveStat, Skill},
+    },
+    tool::ToolKind,
 };
 use xindeler_input::{ActionState, GameInput};
 use xindeler_protocol::{
@@ -80,6 +87,7 @@ use crate::chat::text_input_focused;
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
+    i18n::{CurrentLocale, Localization, LocalizedLabel},
     images::{HudImageKey, HudImages},
     panel::image_panel_bundle,
     scroll::scroll_view_bundle,
@@ -318,8 +326,22 @@ impl Plugin for DiaryUiPlugin {
                     force_select_class_tab_for_smoke_capture,
                     force_select_abilities_tab_for_smoke_capture,
                     sync_tab_content_visibility,
-                    sync_stats_panel,
-                    sync_skill_tree_content,
+                    // BL-82 EM-5.16 (T56.44 follow-up, bevy-migration-reviewer
+                    // finding): `sync_stats_panel` reads `NonSend<Localization>`
+                    // unconditionally every frame while the Stats tab is open
+                    // (self-correcting, worst case one stale frame on a locale
+                    // switch), and `sync_skill_tree_content` folds the locale
+                    // tag into its own `Local` rebuild-cache key — both need
+                    // the SAME `.after(LocaleSyncSet)` edge `settings_window.
+                    // rs`'s `refresh_setting_labels` documents as load-bearing
+                    // (no ordering guarantee between two systems with
+                    // conflicting `NonSend`/`NonSendMut` `Localization` access
+                    // absent one); for `sync_skill_tree_content` specifically,
+                    // without it a locale switch could read the stale bundle
+                    // once and then never rebuild again (the cache-key gate is
+                    // now satisfied).
+                    sync_stats_panel.after(xindeler_ui::i18n::LocaleSyncSet),
+                    sync_skill_tree_content.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_abilities_tab,
                 ),
             );
@@ -541,6 +563,7 @@ fn sync_diary_tabs(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
     player: Query<&NetSkillSet, With<NetLocalPlayer>>,
     tab_bar: Query<Entity, With<DiaryTabBar>>,
     children_query: Query<&Children>,
@@ -573,45 +596,121 @@ fn sync_diary_tabs(
 
     rebuild_children(&mut commands, bar_entity, &children_query, |parent| {
         for tab in tabs {
-            parent
-                .spawn(xindeler_ui::button::button_bundle(
-                    &theme,
-                    &fonts,
-                    &tab_label(tab),
-                ))
-                .insert(DiaryTabButton(tab))
-                .observe(
-                    move |activate: On<xindeler_ui::button::Activate>,
-                          buttons: Query<&DiaryTabButton>,
-                          mut selected: ResMut<DiaryTab>| {
-                        if let Ok(button) = buttons.get(activate.entity) {
-                            *selected = button.0;
-                        }
-                    },
-                );
+            let mut button = parent.spawn(xindeler_ui::button::button_bundle(
+                &theme,
+                &fonts,
+                &tab_label(tab, &localization),
+            ));
+            // BL-82 EM-5.16 (T56.44 follow-up): tag with `LocalizedLabel` when
+            // this tab maps to a real `.ftl` key (every fixed tab + every
+            // group this screen has a translated name for today) so it
+            // re-resolves live on a locale switch via the shared
+            // `xindeler_ui::i18n::relocalize_button_labels` system — this
+            // system's own rebuild gate (the derived tab-LIST identity) never
+            // fires on a bare locale change, so without the tag a language
+            // switch would leave an already-open tab bar showing stale text
+            // until the local player's group set itself changes. A tab with
+            // no mapped key (an as-yet-untranslated `Weapon` kind — see
+            // `weapon_group_label_key`) falls back to its raw `Debug` name,
+            // which never changes with locale, so it is deliberately left
+            // untagged.
+            if let Some(key) = tab_label_key(tab) {
+                button.insert(LocalizedLabel(key));
+            }
+            button.insert(DiaryTabButton(tab)).observe(
+                move |activate: On<xindeler_ui::button::Activate>,
+                      buttons: Query<&DiaryTabButton>,
+                      mut selected: ResMut<DiaryTab>| {
+                    if let Ok(button) = buttons.get(activate.entity) {
+                        *selected = button.0;
+                    }
+                },
+            );
         }
     });
 }
 
-fn tab_label(tab: DiaryTab) -> String {
+/// The `.ftl` key for a tab's label, when this screen has a real translated
+/// name for it — `None` only for a [`SkillGroupKind::Weapon`] tool kind this
+/// screen doesn't have a mapped key for yet (see [`weapon_group_label_key`]),
+/// which falls back to its raw `Debug` name in [`tab_label`].
+fn tab_label_key(tab: DiaryTab) -> Option<&'static str> {
     match tab {
-        DiaryTab::Stats => "Stats".to_owned(),
-        DiaryTab::Abilities => "Abilities".to_owned(),
-        DiaryTab::Group(kind) => group_label(kind),
+        // Reuses the legacy `DiarySection::Character` key: this tab shows
+        // the SAME content (level/XP/health/energy/poise/combo/buffs) that
+        // section names "Character", not "Stats" — see this fn's own call
+        // site doc comment.
+        DiaryTab::Stats => Some("hud-diary-sections-character-title"),
+        DiaryTab::Abilities => Some("hud-diary-sections-abilities-title"),
+        DiaryTab::Group(SkillGroupKind::General) => Some("hud-skill_tree-general"),
+        DiaryTab::Group(SkillGroupKind::Feats) => Some("hud-skill_tree-feats"),
+        DiaryTab::Group(SkillGroupKind::Weapon(tool)) => weapon_group_label_key(tool),
+        DiaryTab::Group(SkillGroupKind::Class(class)) => Some(class_label_key(class)),
     }
 }
 
-/// A short display label for a skill group — generic across every
-/// [`SkillGroupKind`] variant (no per-class/per-weapon hardcoded table),
-/// using `Debug` for the parts i18n doesn't cover yet (real i18n depth is
-/// EM-5.16's job, matching the SAME "themed placeholder, deferred to the
-/// epic that owns real i18n depth" posture EM-5.2's buff strip established).
-fn group_label(kind: SkillGroupKind) -> String {
-    match kind {
-        SkillGroupKind::General => "General".to_owned(),
-        SkillGroupKind::Feats => "Feats".to_owned(),
-        SkillGroupKind::Weapon(tool) => format!("{tool:?}"),
-        SkillGroupKind::Class(class) => format!("{class:?}"),
+/// The `.ftl` key for a weapon skill group's tab label — covers every
+/// [`ToolKind`] that actually owns a skill-tree manifest today (`skills.ftl`'s
+/// `hud-skill_tree-*` keys); any other tool kind (never actually reached as a
+/// real [`SkillGroupKind::Weapon`] in the shipped content, but kept `None`
+/// rather than assumed-unreachable so this stays total) falls back to its raw
+/// `Debug` name.
+fn weapon_group_label_key(tool: ToolKind) -> Option<&'static str> {
+    match tool {
+        ToolKind::Sword => Some("hud-skill_tree-sword"),
+        ToolKind::Axe => Some("hud-skill_tree-axe"),
+        ToolKind::Hammer => Some("hud-skill_tree-hammer"),
+        ToolKind::Bow => Some("hud-skill_tree-bow"),
+        ToolKind::Staff => Some("hud-skill_tree-staff"),
+        ToolKind::Sceptre => Some("hud-skill_tree-sceptre"),
+        ToolKind::Pick => Some("hud-skill_tree-mining"),
+        _ => None,
+    }
+}
+
+/// The `.ftl` key for a class skill group's tab label — `common-class-*`,
+/// already shipped for every [`ClassKind`] variant (the SAME keys
+/// `char_select.rs`'s class picker already resolves — see that module for
+/// the other consumer of this exact table).
+fn class_label_key(class: ClassKind) -> &'static str {
+    match class {
+        ClassKind::Adventurer => "common-class-adventurer",
+        ClassKind::Warrior => "common-class-warrior",
+        ClassKind::Mage => "common-class-mage",
+        ClassKind::Cleric => "common-class-cleric",
+        ClassKind::Rogue => "common-class-rogue",
+        ClassKind::Barbarian => "common-class-barbarian",
+        ClassKind::Sorcerer => "common-class-sorcerer",
+        ClassKind::Warlock => "common-class-warlock",
+        ClassKind::Bard => "common-class-bard",
+        ClassKind::Paladin => "common-class-paladin",
+        ClassKind::Druid => "common-class-druid",
+        ClassKind::Ranger => "common-class-ranger",
+        ClassKind::Monk => "common-class-monk",
+        ClassKind::Artificer => "common-class-artificer",
+        ClassKind::BloodSlayer => "common-class-blood_slayer",
+    }
+}
+
+/// A display label for a diary tab, resolved through the active locale. Falls
+/// back to the tab's raw `Debug` name only for a [`SkillGroupKind::Weapon`]
+/// tool kind [`tab_label_key`] has no mapped key for yet (never a REAL
+/// regression from this screen's earlier fully-generic posture: every kind
+/// that tool kind covers today already has a key).
+fn tab_label(tab: DiaryTab, localization: &Localization) -> String {
+    match tab_label_key(tab) {
+        Some(key) => localization.tr(key),
+        None => match tab {
+            DiaryTab::Group(SkillGroupKind::Weapon(tool)) => format!("{tool:?}"),
+            // Unreachable in practice (every other `DiaryTab` variant always
+            // resolves `Some` above) — degrade to the group's own `Debug`
+            // text rather than panic, matching this module's "never crash
+            // the HUD over a display nuance" posture.
+            DiaryTab::Group(kind) => format!("{kind:?}"),
+            DiaryTab::Stats | DiaryTab::Abilities => {
+                unreachable!("tab_label_key always returns Some for Stats/Abilities")
+            },
+        },
     }
 }
 
@@ -688,6 +787,7 @@ fn sync_stats_panel(
     mut commands: Commands,
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
     selected: Res<DiaryTab>,
     player: Query<
         (
@@ -722,26 +822,69 @@ fn sync_stats_panel(
         return;
     };
 
+    // BL-82 EM-5.16 (T56.44 follow-up): each row's LABEL word is resolved
+    // through the active locale; the numbers themselves are plain data, not
+    // Fluent placeables (`Localization::tr` has no `{ $var }` interpolation
+    // support — see that type's own doc comment), so each line is built as
+    // "translated label" + a plain Rust-formatted value, the same split
+    // `settings_window.rs`'s `value_label`/numeric rows use. This system
+    // already rebuilds every frame the Stats tab is selected (see this
+    // function's own doc comment), so a locale switch while it's open is
+    // picked up on the very next frame with no extra hot-swap wiring needed.
     let mut lines = Vec::new();
     if let Some(xp) = xp {
-        lines.push(format!("Level {}", xp.level));
-        lines.push(format!("XP {}/{}", xp.xp_into_level, xp.xp_for_level));
+        lines.push(format!(
+            "{} {}",
+            localization.tr("character_window-character_level"),
+            xp.level
+        ));
+        lines.push(format!(
+            "{} {}/{}",
+            localization.tr("character_window-character_xp"),
+            xp.xp_into_level,
+            xp.xp_for_level
+        ));
     }
     if let Some(health) = health {
-        lines.push(format!("Health {:.0}/{:.0}", health.current, health.max));
+        lines.push(format!(
+            "{} {:.0}/{:.0}",
+            localization.tr("character_window-character_health"),
+            health.current,
+            health.max
+        ));
     }
     if let Some(energy) = energy {
-        lines.push(format!("Energy {:.0}/{:.0}", energy.current, energy.max));
+        lines.push(format!(
+            "{} {:.0}/{:.0}",
+            localization.tr("character_window-character_energy"),
+            energy.current,
+            energy.max
+        ));
     }
     if let Some(poise) = poise {
-        lines.push(format!("Poise {:.0}/{:.0}", poise.current, poise.max));
+        lines.push(format!(
+            "{} {:.0}/{:.0}",
+            localization.tr("character_window-character_poise"),
+            poise.current,
+            poise.max
+        ));
     }
     if let Some(combo) = combo
         && combo.counter > 0
     {
-        lines.push(format!("Combo {}", combo.counter));
+        lines.push(format!(
+            "{} {}",
+            localization.tr("character_window-character_combo"),
+            combo.counter
+        ));
     }
     if let Some(buffs) = buffs {
+        // `entry.kind`'s `{:?}` is the raw `BuffKind` Rust identifier — left
+        // untranslated deliberately: unlike the labels above, there is no
+        // existing `BuffKind -> .ftl key` lookup anywhere in this crate yet
+        // (`buff.ftl`'s `buff-*` keys are addressed by a DIFFERENT id scheme
+        // than `BuffKind`'s own variant names — building that mapping table
+        // is its own, much larger task, out of scope here).
         for entry in &buffs.0 {
             lines.push(format!("{:?} x{}", entry.kind, entry.stacks));
         }
@@ -895,10 +1038,12 @@ fn sync_skill_tree_content(
     hud_images: Res<HudImages>,
     shape: Res<SkillTreeShape>,
     selected: Res<DiaryTab>,
+    current_locale: Res<CurrentLocale>,
+    localization: NonSend<Localization>,
     player: Query<&NetSkillSet, With<NetLocalPlayer>>,
     root: Query<Entity, With<TreeRoot>>,
     children_query: Query<&Children>,
-    mut last_built: Local<Option<(SkillGroupKind, Vec<(Skill, u16)>)>>,
+    mut last_built: Local<Option<(SkillGroupKind, Vec<(Skill, u16)>, String)>>,
 ) {
     let DiaryTab::Group(kind) = *selected else {
         return;
@@ -910,15 +1055,18 @@ fn sync_skill_tree_content(
         return;
     };
 
-    // Rebuild only when `(selected group, unlocked-skill snapshot)` actually
-    // differs from last time — a plain value comparison, not `Changed<
-    // NetSkillSet>`/`is_changed()` (BL-82 EM-5.7 follow-up: see
+    // Rebuild only when `(selected group, unlocked-skill snapshot, active
+    // locale)` actually differs from last time — a plain value comparison,
+    // not `Changed<NetSkillSet>`/`is_changed()` (BL-82 EM-5.7 follow-up: see
     // `sync_diary_tabs`'s own doc comment for why ECS change-detection
     // raced against the listen-server's local-replication re-emit and never
-    // fired in a live `--smoke-screenshot`).
+    // fired in a live `--smoke-screenshot`). The locale tag (BL-82 EM-5.16
+    // T56.44 follow-up) is what makes a bare language switch, with no
+    // skillset change at all, still refresh this tab's tooltip text while
+    // it's already open.
     let mut snapshot = skillset.skills.clone();
     snapshot.sort_by_key(|(skill, _)| format!("{skill:?}"));
-    let key = (kind, snapshot);
+    let key = (kind, snapshot, current_locale.0.clone());
     if last_built.as_ref() == Some(&key) {
         return;
     }
@@ -1009,26 +1157,48 @@ fn sync_skill_tree_content(
 
                 let level = unlocked.get(&skill).copied().unwrap_or(0);
                 let max = shape.max_level(skill);
+                // BL-82 EM-5.16 (T56.44 follow-up): the STATUS phrasing
+                // (passive-note/maxed/level/cost/locked) is resolved through
+                // the active locale; `{skill:?}` itself (the skill's own
+                // identity, e.g. "Warrior(Rally)") deliberately stays a raw
+                // `Debug` name — there is no `Skill -> .ftl key` lookup
+                // anywhere in this crate today (legacy `voxygen`'s per-skill
+                // titles are hand-authored per widget TYPE, not derivable
+                // generically from the `Skill` enum — see this fn's own doc
+                // comment history), and building one (~200 skills.ftl
+                // `hud-skill-*`/`hud-skill-class-*` keys) is its own,
+                // much larger task, out of scope here.
                 let kind_note = if shape.is_passive(skill) {
-                    " (passive)"
+                    format!(" {}", localization.tr("hud-skill_tree-node_passive"))
                 } else {
-                    ""
+                    String::new()
                 };
                 let (border, tooltip) = if level >= max {
                     (
                         theme.palette.buff_good,
-                        format!("{skill:?}{kind_note}\nMaxed ({level}/{max})"),
+                        format!(
+                            "{skill:?}{kind_note}\n{} ({level}/{max})",
+                            localization.tr("hud-skill_tree-node_maxed")
+                        ),
                     )
                 } else if shape.prerequisites_met(skill, &unlocked) {
                     let cost = skill.skill_cost(level + 1);
                     (
                         theme.palette.accent,
-                        format!("{skill:?}{kind_note}\nLevel {level}/{max}\nCost: {cost} SP"),
+                        format!(
+                            "{skill:?}{kind_note}\n{} {level}/{max}\n{}: {cost} {}",
+                            localization.tr("hud-skill_tree-node_level"),
+                            localization.tr("hud-skill_tree-node_cost"),
+                            localization.tr("hud-sp_arrow_txt"),
+                        ),
                     )
                 } else {
                     (
                         theme.palette.text_muted,
-                        format!("{skill:?}{kind_note}\nLocked (prerequisites not met)"),
+                        format!(
+                            "{skill:?}{kind_note}\n{}",
+                            localization.tr("hud-skill_tree-node_locked")
+                        ),
                     )
                 };
 
@@ -1480,6 +1650,150 @@ mod tests {
         assert!(
             shape.direct_prerequisites(leaf_b).is_empty(),
             "a skill absent from the prerequisite manifest has no direct prerequisites"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes an already-spawned diary TAB button live, using the REAL
+    /// repo `.ftl` catalog (not a synthetic fixture) via
+    /// `VELOREN_ASSETS`/`XINDELER_ASSETS` — the same real-catalog idiom
+    /// `esc_menu.rs`'s own hot-swap test uses, exercised here against
+    /// `sync_diary_tabs`'s `LocalizedLabel`-tagged Abilities tab (a plain
+    /// fixed-key tab that needs no `SkillTreeShape`/group content, keeping
+    /// this test focused on the i18n wiring itself).
+    #[test]
+    fn switching_locale_relocalizes_a_diary_tab_button_live() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = diary_window_test_app();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["common.ftl"],
+        ));
+        app.init_resource::<CurrentLocale>();
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .spawn((NetLocalPlayer, NetSkillSet::default()));
+
+        app.world_mut()
+            .run_system_once(spawn_diary_window)
+            .expect("spawn_diary_window runs");
+        app.world_mut()
+            .run_system_once(sync_diary_tabs)
+            .expect("sync_diary_tabs runs");
+        app.update(); // let spawn_button_labels give each tab button its child
+
+        fn abilities_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let child = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-diary-sections-abilities-title")
+                .map(|(_, children)| children[0])
+                .expect("the Abilities tab button was spawned and tagged");
+            world
+                .get::<Text>(child)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            abilities_button_text(&mut app),
+            "Abilities",
+            "the Abilities tab must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        assert_eq!(
+            abilities_button_text(&mut app),
+            "Habilidades",
+            "must resolve to the REAL es catalog's own hud-diary-sections-abilities-title value, \
+             not the en fallback"
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): the Stats tab's per-frame content
+    /// rebuild (`sync_stats_panel`) resolves its row labels through the
+    /// active locale directly (no tag needed — it rebuilds every frame the
+    /// tab is selected), proven here against the REAL repo `.ftl` catalog:
+    /// spawn with `en` active, confirm the Level row, reload to `es`, confirm
+    /// the SAME row now reads the real Spanish catalog value.
+    #[test]
+    fn stats_panel_resolves_row_labels_through_the_active_locale() {
+        use bevy::ecs::system::RunSystemOnce;
+        use xindeler_protocol::NetXp;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(DiaryTab::Stats);
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/char_window.ftl"],
+        ));
+
+        let root = app.world_mut().spawn(StatsPanelRoot).id();
+        app.world_mut().spawn((NetLocalPlayer, NetXp {
+            level: 3,
+            xp_into_level: 10,
+            xp_for_level: 100,
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_stats_panel)
+            .expect("sync_stats_panel runs");
+
+        fn first_line(app: &mut App, root: Entity) -> String {
+            let world = app.world_mut();
+            let children = world
+                .get::<Children>(root)
+                .expect("StatsPanelRoot has children");
+            world
+                .get::<Text>(children[0])
+                .expect("first line is a Text node")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            first_line(&mut app, root),
+            "Level 3",
+            "the Level row must show the real en catalog label at spawn time"
+        );
+
+        // Reload to the real es catalog and re-run the same system — no
+        // separate hot-swap chain needed here, `sync_stats_panel` just reads
+        // whatever `Localization` bundle is current every time it rebuilds.
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::parse_locale("es"),
+            &["hud/char_window.ftl"],
+        ));
+        app.world_mut()
+            .run_system_once(sync_stats_panel)
+            .expect("sync_stats_panel runs again");
+
+        assert_eq!(
+            first_line(&mut app, root),
+            "Nivel 3",
+            "must resolve to the real es catalog's own character_window-character_level value"
         );
     }
 }

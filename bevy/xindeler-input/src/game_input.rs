@@ -205,6 +205,102 @@ impl GameInput {
     #[must_use]
     pub fn localization_key(&self) -> &str { self.as_ref() }
 
+    /// The SAME key as [`Self::localization_key`], but `'static` — needed by
+    /// `xindeler_ui::i18n::LocalizedText`/`LocalizedLabel`, which store their
+    /// key as a `&'static str` component field. `AsRefStr`'s generated
+    /// `as_ref(&self)` ties its return to `&self`'s (non-`'static`) lifetime
+    /// even though the underlying data is always one of these `'static`
+    /// string literals, so `bevy/xindeler-client::controls_screen` (the one
+    /// caller, BL-82 EM-5.16 follow-up) needs this instead. Mirrors the
+    /// `#[strum(serialize = ..)]` attribute on each variant above 1:1; the
+    /// `ftl_key_matches_localization_key` test below guards against the two
+    /// ever drifting apart.
+    #[must_use]
+    pub const fn ftl_key(self) -> &'static str {
+        match self {
+            GameInput::Primary => "gameinput-primary",
+            GameInput::Secondary => "gameinput-secondary",
+            GameInput::Block => "gameinput-block",
+            GameInput::Roll => "gameinput-roll",
+            GameInput::MoveForward => "gameinput-moveforward",
+            GameInput::MoveBack => "gameinput-moveback",
+            GameInput::MoveLeft => "gameinput-moveleft",
+            GameInput::MoveRight => "gameinput-moveright",
+            GameInput::SwimUp => "gameinput-swimup",
+            GameInput::SwimDown => "gameinput-swimdown",
+            GameInput::Jump => "gameinput-jump",
+            GameInput::WallJump => "gameinput-walljump",
+            GameInput::CancelClimb => "gameinput-cancelclimb",
+            GameInput::Interact => "gameinput-interact",
+            GameInput::Trade => "gameinput-trade",
+            GameInput::Glide => "gameinput-glide",
+            GameInput::ToggleLantern => "gameinput-togglelantern",
+            GameInput::SwapLoadout => "gameinput-swaploadout",
+            GameInput::ToggleWield => "gameinput-togglewield",
+            GameInput::Sneak => "gameinput-sneak",
+            GameInput::Sit => "gameinput-sit",
+            GameInput::Crawl => "gameinput-crawl",
+            GameInput::Dance => "gameinput-dance",
+            GameInput::Greet => "gameinput-greet",
+            GameInput::Mount => "gameinput-mount",
+            GameInput::StayFollow => "gameinput-stayfollow",
+            GameInput::ToggleWalk => "gameinput-togglewalk",
+            GameInput::AutoWalk => "gameinput-autowalk",
+            GameInput::FreeLook => "gameinput-freelook",
+            GameInput::GiveUp => "gameinput-giveup",
+            GameInput::Respawn => "gameinput-respawn",
+            GameInput::Inventory => "gameinput-inventory",
+            GameInput::Map => "gameinput-map",
+            GameInput::Settings => "gameinput-settings",
+            GameInput::Crafting => "gameinput-crafting",
+            GameInput::Diary => "gameinput-diary",
+            GameInput::Chat => "gameinput-chat",
+            GameInput::Social => "gameinput-social",
+            GameInput::Escape => "gameinput-escape",
+            GameInput::Controls => "gameinput-controls",
+            GameInput::Select => "gameinput-select",
+            GameInput::AcceptGroupInvite => "gameinput-acceptgroupinvite",
+            GameInput::DeclineGroupInvite => "gameinput-declinegroupinvite",
+            GameInput::PreviousSlot => "gameinput-previousslot",
+            GameInput::NextSlot => "gameinput-nextslot",
+            GameInput::CurrentSlot => "gameinput-currentslot",
+            GameInput::Slot1 => "gameinput-slot1",
+            GameInput::Slot2 => "gameinput-slot2",
+            GameInput::Slot3 => "gameinput-slot3",
+            GameInput::Slot4 => "gameinput-slot4",
+            GameInput::Slot5 => "gameinput-slot5",
+            GameInput::Slot6 => "gameinput-slot6",
+            GameInput::Slot7 => "gameinput-slot7",
+            GameInput::Slot8 => "gameinput-slot8",
+            GameInput::Slot9 => "gameinput-slot9",
+            GameInput::Slot10 => "gameinput-slot10",
+            GameInput::ZoomIn => "gameinput-zoomin",
+            GameInput::ZoomOut => "gameinput-zoomout",
+            GameInput::ToggleCursor => "gameinput-togglecursor",
+            GameInput::ZoomLock => "gameinput-zoomlock",
+            GameInput::MapZoomIn => "gameinput-mapzoomin",
+            GameInput::MapZoomOut => "gameinput-mapzoomout",
+            GameInput::MapSetMarker => "gameinput-map-locationmarkerbutton",
+            GameInput::Fullscreen => "gameinput-fullscreen",
+            GameInput::Screenshot => "gameinput-screenshot",
+            GameInput::Command => "gameinput-command",
+            GameInput::Fly => "gameinput-fly",
+            GameInput::ToggleInterface => "gameinput-toggleinterface",
+            GameInput::ToggleDebug => "gameinput-toggledebug",
+            GameInput::ToggleChat => "gameinput-togglechat",
+            GameInput::ToggleIngameUi => "gameinput-toggleingameui",
+            GameInput::CameraClamp => "gameinput-cameraclamp",
+            GameInput::CycleCamera => "gameinput-cyclecamera",
+            GameInput::SpectateSpeedBoost => "gameinput-spectatespeedboost",
+            GameInput::SpectateViewpoint => "gameinput-spectateviewpoint",
+            GameInput::MuteMaster => "gameinput-mutemaster",
+            GameInput::MuteInactiveMaster => "gameinput-muteinactivemaster",
+            GameInput::MuteMusic => "gameinput-mutemusic",
+            GameInput::MuteSfx => "gameinput-mutesfx",
+            GameInput::MuteAmbience => "gameinput-muteambience",
+        }
+    }
+
     /// Returns true if `a` and `b` may be bound to the same physical input at
     /// the same time without a *disallowed* conflict — e.g. the player can't
     /// jump and climb at once, so `Jump`/`CancelClimb` are safe to share.
@@ -259,6 +355,21 @@ mod tests {
         for input in GameInput::iter() {
             let key = input.localization_key();
             assert!(key.starts_with("gameinput-"), "{input:?} -> {key}");
+        }
+    }
+
+    /// [`GameInput::ftl_key`] duplicates the `#[strum(serialize = ..)]`
+    /// association as a `'static`-returning match (see its own doc comment
+    /// for why) — this pins that the duplication never drifts from the
+    /// derive-generated [`GameInput::localization_key`].
+    #[test]
+    fn ftl_key_matches_localization_key() {
+        for input in GameInput::iter() {
+            assert_eq!(
+                input.ftl_key(),
+                input.localization_key(),
+                "{input:?}: ftl_key() must match the strum-derived localization_key()"
+            );
         }
     }
 

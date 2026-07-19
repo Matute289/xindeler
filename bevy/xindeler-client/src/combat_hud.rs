@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use bevy::{prelude::*, ui::GlobalZIndex};
+use bevy::{ecs::change_detection::NonSend, prelude::*, ui::GlobalZIndex};
 use xindeler_app::XindelerSettings;
 use xindeler_protocol::{
     NetBuffs, NetCombo, NetEnergy, NetHealth, NetLocalPlayer, NetPoise, NetXp,
@@ -34,6 +34,7 @@ use xindeler_protocol::{
 use xindeler_ui::{
     bar::{BarValue, spawn_bar, spawn_orb_bar},
     button::button_bundle,
+    i18n::{Localization, LocalizedLabel, LocalizedText},
     images::{HudImageKey, HudImages},
     orb_material::OrbLiquidMaterial,
     theme::{HudFonts, HudTheme},
@@ -42,6 +43,20 @@ use xindeler_ui::{
 };
 
 use crate::hud_layout;
+
+/// The `.ftl` key for the level readout's static abbreviation (e.g. `"Lv."` /
+/// es `"Nv."`) — the number itself is never a Fluent placeable (see
+/// `xindeler_ui::i18n::Localization::tr`'s own doc comment for why this crate
+/// never puts a `{ $var }` inside a plain `.tr(key)` call):
+/// [`sync_local_player_bars`] composes `"{tr(key)} {level}"` itself every frame
+/// instead, the same static-label-plus-dynamic-value split
+/// `settings_window.rs`'s `value_label` helper already establishes.
+const LEVEL_ABBR_KEY: &str = "hud-combat_hud-level_abbr";
+/// The `.ftl` key for the combo counter's static suffix noun (`"combo"` in
+/// both `en`/`es` — a loanword already standard in Spanish-language game UI).
+/// See [`LEVEL_ABBR_KEY`]'s doc comment for why the count itself is composed
+/// in code rather than interpolated through a Fluent placeable.
+const COMBO_LABEL_KEY: &str = "hud-combat_hud-combo_label";
 
 /// Marks the health bar's container entity (so [`sync_local_player_bars`]
 /// can update its [`BarValue`] without re-querying by position every frame).
@@ -117,7 +132,19 @@ impl Plugin for CombatHudViewPlugin {
         .add_systems(
             Update,
             (
-                sync_local_player_bars,
+                // BL-82 EM-5.16 (T56.44 follow-up): reads `NonSend<Localization>`
+                // for the level/combo text's static labels — ordered after
+                // `LocaleSyncSet` for the same reason `settings_window.rs`'s
+                // `refresh_setting_labels` is (see that system's own doc
+                // comment): Bevy gives no ordering guarantee between two
+                // systems with conflicting `NonSend`/`NonSendMut` access
+                // absent an explicit edge. This system already re-reads the
+                // mirror unconditionally every frame (no `Changed` gate — see
+                // its own doc comment), so a missed edge would only cost one
+                // stale frame rather than a permanently-missed relocalize,
+                // but the edge keeps this consistent with every other
+                // locale-reading sync system in this crate.
+                sync_local_player_bars.after(xindeler_ui::i18n::LocaleSyncSet),
                 sync_buff_strip,
                 sync_death_screen_and_vignette,
                 handle_respawn_button,
@@ -141,6 +168,7 @@ fn spawn_combat_hud(
     fonts: Res<HudFonts>,
     images: Res<HudImages>,
     mut orb_materials: ResMut<Assets<OrbLiquidMaterial>>,
+    localization: NonSend<Localization>,
 ) {
     // Bottom-centre resource-orb cluster (spec §3.1), left to right: Health
     // (angel frame) — Stamina (a genuine full orb, dead centre, mirrors
@@ -294,9 +322,17 @@ fn spawn_combat_hud(
             ..Default::default()
         }))
         .with_children(|parent| {
+            // Not `LocalizedText`-tagged: the level NUMBER is glued onto the
+            // static abbreviation (`"{tr(key)} {level}"`), and `.tr()` has no
+            // placeable/interpolation support (see `LEVEL_ABBR_KEY`'s own doc
+            // comment) — `sync_local_player_bars` recomposes this same string
+            // every frame once real `NetXp` data arrives, the same
+            // static-label-plus-dynamic-value split `settings_window.rs`'s
+            // `SettingValueLabel`/`refresh_setting_labels` pair uses instead
+            // of a bare `LocalizedText` tag.
             parent.spawn((
                 LevelText,
-                Text("Lv. 1".to_owned()),
+                Text(format!("{} 1", localization.tr(LEVEL_ABBR_KEY))),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.body.clone()),
                     font_size: bevy::text::FontSize::Px(18.0),
@@ -387,7 +423,14 @@ fn spawn_combat_hud(
     // GlobalZIndex(ORBS_ACTION_BAR_PARTY_MINIMAP) in this same phase — a
     // node with a GlobalZIndex sorts as an independent stack partition, so
     // an un-indexed sibling can end up BELOW it regardless of spawn order).
-    let respawn_button = button_bundle(&theme, &fonts, "Respawn");
+    // BL-82 EM-5.16 (T56.44 follow-up): reuses the ALREADY-loaded
+    // `hud-you_died`/`gameinput-respawn` keys (`hud/misc.ftl`/`gameinput.ftl`,
+    // both in `DEFAULT_HUD_FTL_FILES`) rather than duplicating a near-
+    // identical new key — "You have died" (the old hardcoded literal) and
+    // `hud-you_died`'s real value ("You Died") carry the same meaning; the
+    // task convention (see `settings_window.rs`'s own doc comment) is to
+    // reuse a matching existing key over adding a redundant one.
+    let respawn_button = button_bundle(&theme, &fonts, &localization.tr("gameinput-respawn"));
     commands
         .spawn((
             DeathScreenRoot,
@@ -407,7 +450,8 @@ fn spawn_combat_hud(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text("You have died".to_owned()),
+                LocalizedText("hud-you_died"),
+                Text(localization.tr("hud-you_died")),
                 TextFont {
                     font: bevy::text::FontSource::Handle(fonts.title.clone()),
                     font_size: bevy::text::FontSize::Px(42.0),
@@ -415,7 +459,9 @@ fn spawn_combat_hud(
                 },
                 TextColor(theme.palette.danger),
             ));
-            parent.spawn(respawn_button).observe(
+            let mut respawn = parent.spawn(respawn_button);
+            respawn.insert(LocalizedLabel("gameinput-respawn"));
+            respawn.observe(
                 |_activate: On<xindeler_ui::button::Activate>,
                  mut actions: MessageWriter<xindeler_ui::hud_state::HudAction>| {
                     actions.write(xindeler_ui::hud_state::HudAction::Respawn);
@@ -524,6 +570,7 @@ fn sync_local_player_bars(
     >,
     mut combo_texts: Query<&mut Text, (With<ComboText>, Without<LevelText>)>,
     mut level_texts: Query<&mut Text, (With<LevelText>, Without<ComboText>)>,
+    localization: NonSend<Localization>,
 ) {
     let Ok((health, energy, poise, xp, combo)) = player.single() else {
         return;
@@ -561,7 +608,7 @@ fn sync_local_player_bars(
             }
         }
         if let Ok(mut text) = level_texts.single_mut() {
-            let new_text = format!("Lv. {}", xp.level);
+            let new_text = format!("{} {}", localization.tr(LEVEL_ABBR_KEY), xp.level);
             if text.0 != new_text {
                 text.0 = new_text;
             }
@@ -571,7 +618,7 @@ fn sync_local_player_bars(
         && let Ok(mut text) = combo_texts.single_mut()
     {
         let new_text = if combo.counter > 0 {
-            format!("{}x combo", combo.counter)
+            format!("{}x {}", combo.counter, localization.tr(COMBO_LABEL_KEY))
         } else {
             String::new()
         };
@@ -588,6 +635,26 @@ fn sync_local_player_bars(
 /// [`Tooltip`] showing the buff kind + strength + remaining seconds. Rebuilds
 /// the strip only when `NetBuffs` actually changes (`Changed<NetBuffs>`), not
 /// every frame.
+///
+/// ## BL-82 EM-5.16 (T56.44 follow-up) — the tooltip text stays English
+/// `tooltip_text` below (`{:?} ×{stacks} — {strength} ({remaining})`) is
+/// deliberately NOT routed through [`Localization::tr`]. The buff KIND
+/// portion is a `{:?}` Debug print of [`common::comp::buff::BuffKind`], and
+/// making it real prose needs a per-variant `BuffKind -> "buff-<key>"` lookup
+/// (the legacy `voxygen::hud::util::buff_key` table this crate hasn't ported
+/// is the reference) — but that table's target catalog, `assets/voxygen/
+/// i18n/*/buff.ftl`, is missing entries for several CURRENT `BuffKind`
+/// variants (e.g. `Amnesia`, `OffBalance` have no `buff-*` key at all; the
+/// file's only `buff-concussion`/`buff-staggered` entries correspond to
+/// variants that no longer exist), and `buff.ftl` is outside this task's
+/// owned-file scope (only `combat_hud.rs`/`hotbar.rs` + their OWN new `.ftl`
+/// catalogs). Porting the table here would still leave some kinds
+/// unresolvable via a catalog this module isn't allowed to complete — so
+/// this tooltip is left as an honest, flagged English/Debug-text gap rather
+/// than a half-working lookup. Follow-up: complete `buff.ftl`'s `BuffKind`
+/// coverage, then port/point a real key lookup at it (likely from a shared
+/// `xindeler-ui`/`xindeler-protocol` location so other screens can reuse it
+/// too, not duplicated per-screen).
 fn sync_buff_strip(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -798,6 +865,17 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.insert_resource(HudTheme::default());
         app.insert_resource(XindelerSettings::default());
+        // BL-82 EM-5.16 (T56.44 follow-up): `spawn_combat_hud`/
+        // `sync_local_player_bars` now read `NonSend<Localization>` for the
+        // level/combo static labels — loads the REAL repo `hud/combat_hud.ftl`
+        // catalog (via `VELOREN_ASSETS`/`XINDELER_ASSETS`, exactly like
+        // `settings_window.rs`/`esc_menu.rs`'s own hot-swap tests) so this
+        // suite's existing "Lv. 3"/"4x combo" text assertions keep resolving
+        // to real catalog values, not an empty-catalog bare-key fallback.
+        app.insert_non_send(xindeler_ui::i18n::Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/combat_hud.ftl"],
+        ));
         app
     }
 
@@ -1506,5 +1584,97 @@ mod tests {
             .expect("BuffStripRoot exists")
             .0;
         assert_eq!(z_index, zlayer::ORBS_ACTION_BAR_PARTY_MINIMAP);
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes the already-spawned death screen's "You Died" text
+    /// ([`LocalizedText`]) AND the Respawn button's label ([`LocalizedLabel`])
+    /// live, using the REAL repo `.ftl` catalogs (via `VELOREN_ASSETS`/
+    /// `XINDELER_ASSETS`) — the exact hot-swap idiom
+    /// `esc_menu.rs`'s own `switching_locale_relocalizes_the_quit_button_live`
+    /// test establishes, exercised here against BOTH tag mechanisms in one
+    /// test since this screen uses both.
+    #[test]
+    fn switching_locale_relocalizes_the_death_screen_live() {
+        let mut app = new_app_with_images();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            xindeler_ui::i18n::DEFAULT_HUD_FTL_FILES,
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        // `button::spawn_button_labels` is what turns the Respawn button's
+        // `HudButtonLabel` into a real `Text` child — needed for both the
+        // initial spawn and the post-hot-swap relabel this test drives.
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_combat_hud)
+            .expect("spawn_combat_hud runs");
+        app.update(); // let spawn_button_labels give the Respawn button its child
+
+        fn you_died_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            world
+                .query::<(&LocalizedText, &Text)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-you_died")
+                .map(|(_, text)| text.0.clone())
+                .expect("the death screen's You Died text was spawned and tagged")
+        }
+        fn respawn_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "gameinput-respawn")
+                .map(|(_, children)| children[0])
+                .expect("the Respawn button was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        assert_eq!(
+            you_died_text(&mut app),
+            "You Died",
+            "the death screen text must show the real en catalog value at spawn time"
+        );
+        assert_eq!(
+            respawn_button_text(&mut app),
+            "Respawn",
+            "the Respawn button must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_text)
+            .expect("relocalize_text runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize_button_labels runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change onto Text
+
+        assert_eq!(
+            you_died_text(&mut app),
+            "Has muerto",
+            "must resolve to the REAL es catalog's own hud-you_died value, not the en fallback"
+        );
+        assert_eq!(
+            respawn_button_text(&mut app),
+            "Reaparecer",
+            "must resolve to the REAL es catalog's own gameinput-respawn value, not the en \
+             fallback"
+        );
     }
 }

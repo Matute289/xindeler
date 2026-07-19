@@ -187,12 +187,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bevy::{prelude::*, ui::GlobalZIndex};
+use bevy::{ecs::change_detection::NonSend, prelude::*, ui::GlobalZIndex};
 use xindeler_input::{GameInput, KeyMap};
 use xindeler_protocol::{
     AssignHotbarSlot, NetAbilities, NetAuxiliaryAbility, NetCooldowns, NetLocalPlayer,
 };
 use xindeler_ui::{
+    i18n::Localization,
     images::{HudImageKey, HudImages},
     slot::{
         ChromelessSlot, SLOT_BORDER_PX, SlotAddress, SlotContents, SlotDropped, SlotGroup,
@@ -351,7 +352,18 @@ impl Plugin for HotbarViewPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_hotbar_slots,
+                    // BL-82 EM-5.16 (T56.44 follow-up): reads
+                    // `NonSend<Localization>` for a placeholder slot's
+                    // "Empty" tooltip — ordered after `LocaleSyncSet`, same
+                    // reasoning as `settings_window.rs`'s
+                    // `refresh_setting_labels` (Bevy gives no ordering
+                    // guarantee between two systems with conflicting
+                    // `NonSend`/`NonSendMut` access absent an explicit edge).
+                    // This system already re-reads `NetAbilities`
+                    // unconditionally every frame (see its own doc comment),
+                    // so a missed edge would only cost one stale frame, not a
+                    // permanently-missed relocalize.
+                    sync_hotbar_slots.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_slot_half_parenting.after(sync_hotbar_slots),
                     sync_empty_slot_backgrounds.after(sync_hotbar_slots),
                     sync_primary_secondary_indicators,
@@ -663,6 +675,7 @@ fn spawn_hotbar(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFont
 /// `SlotContents` only when the computed value actually differs (the
 /// `if *slot_contents != new_contents` check below), which is the correct
 /// place to avoid redundant work, not the query filter.
+#[allow(clippy::too_many_arguments)]
 fn sync_hotbar_slots(
     mut commands: Commands,
     theme: Res<HudTheme>,
@@ -671,6 +684,7 @@ fn sync_hotbar_slots(
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
     mut slot_entities: ResMut<HotbarSlotEntities>,
     mut contents: Query<&mut SlotContents>,
+    localization: NonSend<Localization>,
 ) {
     let Ok(abilities) = abilities.single() else {
         return;
@@ -921,6 +935,13 @@ fn sync_hotbar_slots(
         // holders render as an empty placeholder: no icon glyph, a neutral
         // "Empty" tooltip (same text an in-range-but-unassigned slot already
         // shows), same chromeless frame/border art as every other holder.
+        //
+        // BL-82 EM-5.16 (T56.44 follow-up): reuses the already-loaded
+        // `common-empty` key (`common.ftl`, already in `DEFAULT_HUD_FTL_FILES`)
+        // rather than a new duplicate key — this system re-reads
+        // `NetAbilities`/`Localization` unconditionally every frame (see this
+        // function's own doc comment above), so a locale flip re-resolves
+        // this tooltip the very next frame with no extra wiring.
         let new_contents = match abilities.slots.get(index) {
             Some(slot) => SlotContents {
                 icon_text: slot
@@ -935,12 +956,12 @@ fn sync_hotbar_slots(
                 tooltip: slot
                     .ability_id
                     .clone()
-                    .unwrap_or_else(|| "Empty".to_owned()),
+                    .unwrap_or_else(|| localization.tr("common-empty")),
             },
             None => SlotContents {
                 icon_text: String::new(),
                 quantity: None,
-                tooltip: "Empty".to_owned(),
+                tooltip: localization.tr("common-empty"),
             },
         };
         if index < old_len {
@@ -1065,6 +1086,14 @@ fn sync_empty_slot_backgrounds(
 /// doc comment for why that filter is unsafe to use against a server-side
 /// deduped mirror), diffing before writing `Text` to avoid a pointless
 /// per-frame mutation once the value settles.
+///
+/// BL-82 EM-5.16 (T56.44 follow-up): the `"M1"`/`"M2"` prefixes below are
+/// deliberately NOT routed through [`Localization::tr`] — like the numbered
+/// slots' key-glyph labels (`crate::controls_screen::key_label`, this
+/// module's own doc comment) and `settings_window.rs`'s bare `"-"`/`"+"`
+/// numeric-row glyphs, `"M1"`/`"M2"` are short mouse-button abbreviations,
+/// not language-dependent prose — they read the same in `es` (and every other
+/// locale this screen might one day support) as they do in `en`.
 fn sync_primary_secondary_indicators(
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
     mut primary_text: Query<&mut Text, (With<HotbarPrimaryText>, Without<HotbarSecondaryText>)>,
@@ -1295,6 +1324,17 @@ mod tests {
         let asset_server = app.world().resource::<AssetServer>().clone();
         app.insert_resource(HudImages::load(&asset_server));
         app.init_resource::<HotbarSlotEntities>();
+        // BL-82 EM-5.16 (T56.44 follow-up): `sync_hotbar_slots` now reads
+        // `NonSend<Localization>` for a placeholder slot's "Empty" tooltip —
+        // loads the REAL repo `common.ftl` catalog (via `VELOREN_ASSETS`/
+        // `XINDELER_ASSETS`, exactly like `settings_window.rs`/`esc_menu.rs`'s
+        // own hot-swap tests) so this suite's existing `tooltip == "Empty"`
+        // assertions keep resolving to the real catalog value, not an
+        // empty-catalog bare-key fallback.
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["common.ftl"],
+        ));
         app
     }
 
@@ -2329,6 +2369,68 @@ mod tests {
                 .iter()
                 .count(),
             SLOTS_PER_HALF
+        );
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes a placeholder slot's "Empty" tooltip live, using the REAL
+    /// repo `common.ftl` catalog (via `VELOREN_ASSETS`/`XINDELER_ASSETS`) —
+    /// the same real-catalog hot-swap idiom `esc_menu.rs`'s/`combat_hud.rs`'s
+    /// own tests use. `SlotContents.tooltip` isn't `LocalizedText`/
+    /// `LocalizedLabel`-tagged (it's a plain field `xindeler_ui::slot::
+    /// update_slot_visuals` copies into a `Tooltip` component, in a crate
+    /// this task doesn't own) — instead, exactly like `settings_window.rs`'s
+    /// `SettingValueLabel`/`refresh_setting_labels` pair, `sync_hotbar_slots`
+    /// itself re-resolves `common-empty` from the live `Localization` on
+    /// every run (see that system's own doc comment for why it re-reads
+    /// unconditionally every frame), so simply re-running it after a locale
+    /// flip is the correct way to prove the hot-swap.
+    #[test]
+    fn switching_locale_relocalizes_the_empty_slot_tooltip_live() {
+        let mut app = new_app();
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: None,
+            secondary: None,
+            slots: vec![NetHotbarSlot::default()],
+        }));
+
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("first run resolves the en tooltip");
+        app.update();
+
+        let slot_entities = app.world().resource::<HotbarSlotEntities>().0.clone();
+        let empty_tooltip = |world: &World| -> String {
+            world
+                .get::<SlotContents>(slot_entities[0])
+                .expect("slot 0 has SlotContents")
+                .tooltip
+                .clone()
+        };
+
+        assert_eq!(
+            empty_tooltip(app.world()),
+            "Empty",
+            "the placeholder tooltip must show the real en catalog's common-empty value at first \
+             sync"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(sync_hotbar_slots)
+            .expect("second run re-resolves against the new locale");
+        app.update();
+
+        assert_eq!(
+            empty_tooltip(app.world()),
+            "Vacío",
+            "must resolve to the REAL es catalog's own common-empty value, not the en fallback"
         );
     }
 }

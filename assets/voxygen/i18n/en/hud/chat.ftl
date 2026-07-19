@@ -78,6 +78,10 @@ hud-chat-default_death_msg = [{ $name }] died
 
 hud-chat-all = All
 hud-chat-chat_tab_hover_tooltip = Right click for settings
+# BL-82 EM-5.16 (T56.44 follow-up): the chat panel's "Whisper" channel-tab
+# label (view filter for Tell messages) — no existing key elsewhere in the
+# catalogs covers "Whisper" as a channel/tab name.
+hud-chat-tab_whisper = Whisper
 
 ## HUD Pickup message
 

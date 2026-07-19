@@ -29,14 +29,15 @@
 //! through the sim's OWN `Trades`/invite event handling
 //! (`server::events::trade`/`invite`) — nothing here is client-only mocked.
 
-use bevy::prelude::*;
-use common::trade::TradeAction;
+use bevy::{ecs::change_detection::NonSend, prelude::*};
+use common::trade::{TradeAction, TradePhase};
 use xindeler_protocol::{
     NetIncomingTradeInvite, NetLocalPlayer, NetTrade, NetTradeOfferEntry, NetUid,
     TradeActionRequest, TradeInviteRequest, TradeInviteResponseRequest,
 };
 use xindeler_ui::{
     button::{Activate, button_bundle},
+    i18n::{Localization, LocalizedLabel, LocalizedText},
     panel::panel_bundle,
     slot::{HudSlot, SlotAddress, SlotContents, SlotDropped, SlotGroup, slot_bundle},
     theme::{HudFonts, HudTheme},
@@ -84,7 +85,14 @@ impl Plugin for TradeUiPlugin {
             (
                 send_trade_invite_to_nearest,
                 sync_invite_prompt,
-                sync_trade_window,
+                // BL-82 EM-5.16 (T56.44 follow-up): reads `NonSend<
+                // Localization>` (for the trade-phase label) — ordered after
+                // `LocaleSyncSet` so a locale switch is reflected the SAME
+                // frame while a trade is active, matching `settings_window
+                // .rs`'s `refresh_setting_labels` ordering rationale (no
+                // ordering guarantee otherwise between two systems with a
+                // conflicting `NonSend` access).
+                sync_trade_window.after(xindeler_ui::i18n::LocaleSyncSet),
                 handle_offer_slot_drops,
             ),
         );
@@ -115,7 +123,12 @@ impl Plugin for TradeUiPlugin {
 /// so does NOT free the OS cursor via `cursor.rs`'s
 /// `HudState::any_window_open` — that's a pre-existing gap this patch
 /// neither introduces nor fixes.
-fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFonts>) {
+fn spawn_trade_ui(
+    mut commands: Commands,
+    theme: Res<HudTheme>,
+    fonts: Res<HudFonts>,
+    localization: NonSend<Localization>,
+) {
     // --- Invite prompt ---
     let mut invite_entity = commands.spawn((
         InviteRoot,
@@ -130,16 +143,42 @@ fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
         node.flex_direction = FlexDirection::Column;
     });
     invite_entity.with_children(|parent| {
-        parent.spawn((
-            InviteStatusText,
-            Text(String::new()),
-            TextFont {
-                font: bevy::text::FontSource::Handle(fonts.body.clone()),
-                font_size: bevy::text::FontSize::Px(16.0),
+        // BL-82 EM-5.16 (T56.44 follow-up): the invite text embeds a raw
+        // player UID (no player-name mirror exists yet — see the module doc
+        // comment's "Initiating" note), so the static "Trade request from
+        // player" label and the dynamic "#<uid>" value are two SIBLING `Text`
+        // nodes rather than one `format!`-ed string — the static half stays
+        // reactively localized (tagged `LocalizedText`, no code in
+        // `sync_invite_prompt` needs to re-resolve it); only the number is
+        // written at runtime.
+        parent
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(4.0),
                 ..Default::default()
-            },
-            TextColor(theme.palette.text),
-        ));
+            })
+            .with_children(|row| {
+                row.spawn((
+                    LocalizedText("hud-trade-invite_from_player"),
+                    Text(localization.tr("hud-trade-invite_from_player")),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(16.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+                row.spawn((
+                    InviteStatusText,
+                    Text(String::new()),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                        font_size: bevy::text::FontSize::Px(16.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+            });
         parent
             .spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -147,13 +186,13 @@ fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
                 ..Default::default()
             })
             .with_children(|row| {
-                row.spawn(button_bundle(&theme, &fonts, "Accept")).observe(
+                labeled_button(row, &theme, &fonts, &localization, "common-accept").observe(
                     |_activate: On<Activate>,
                      mut requests: MessageWriter<TradeInviteResponseRequest>| {
                         requests.write(TradeInviteResponseRequest { accept: true });
                     },
                 );
-                row.spawn(button_bundle(&theme, &fonts, "Decline")).observe(
+                labeled_button(row, &theme, &fonts, &localization, "common-decline").observe(
                     |_activate: On<Activate>,
                      mut requests: MessageWriter<TradeInviteResponseRequest>| {
                         requests.write(TradeInviteResponseRequest { accept: false });
@@ -176,16 +215,38 @@ fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
         node.flex_direction = FlexDirection::Column;
     });
     window_entity.with_children(|parent| {
-        parent.spawn((
-            TradeStatusText,
-            Text(String::new()),
-            TextFont {
-                font: bevy::text::FontSource::Handle(fonts.title.clone()),
-                font_size: bevy::text::FontSize::Px(20.0),
+        // BL-82 EM-5.16 (T56.44 follow-up): same static-label/dynamic-value
+        // split as the invite prompt above — the counterparty's raw UID and
+        // the `TradePhase`'s per-variant label (see [`trade_phase_key`]) are
+        // genuinely dynamic; the leading "Trading with player" phrase is not.
+        parent
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(4.0),
                 ..Default::default()
-            },
-            TextColor(theme.palette.text),
-        ));
+            })
+            .with_children(|row| {
+                row.spawn((
+                    LocalizedText("hud-trade-trading_with_player"),
+                    Text(localization.tr("hud-trade-trading_with_player")),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.title.clone()),
+                        font_size: bevy::text::FontSize::Px(20.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+                row.spawn((
+                    TradeStatusText,
+                    Text(String::new()),
+                    TextFont {
+                        font: bevy::text::FontSource::Handle(fonts.title.clone()),
+                        font_size: bevy::text::FontSize::Px(20.0),
+                        ..Default::default()
+                    },
+                    TextColor(theme.palette.text),
+                ));
+            });
         parent
             .spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -232,34 +293,69 @@ fn spawn_trade_ui(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFo
                 ..Default::default()
             })
             .with_children(|row| {
-                row.spawn(button_bundle(&theme, &fonts, "Accept Trade"))
-                    .observe(
-                        |_activate: On<Activate>,
-                         trade: Query<&NetTrade, With<NetLocalPlayer>>,
-                         mut requests: MessageWriter<TradeActionRequest>| {
-                            if let Ok(trade) = trade.single() {
-                                requests.write(TradeActionRequest {
-                                    trade_id: trade.trade_id,
-                                    action: TradeAction::Accept(trade.phase),
-                                });
-                            }
-                        },
-                    );
-                row.spawn(button_bundle(&theme, &fonts, "Decline Trade"))
-                    .observe(
-                        |_activate: On<Activate>,
-                         trade: Query<&NetTrade, With<NetLocalPlayer>>,
-                         mut requests: MessageWriter<TradeActionRequest>| {
-                            if let Ok(trade) = trade.single() {
-                                requests.write(TradeActionRequest {
-                                    trade_id: trade.trade_id,
-                                    action: TradeAction::Decline,
-                                });
-                            }
-                        },
-                    );
+                // Reuses `hud-trade-accept`/`hud-trade-decline` — the SAME
+                // keys legacy `voxygen/src/hud/trade.rs::accept_decline_
+                // buttons` resolves for this exact pair (finalizing the
+                // active trade, `TradeAction::Accept`/`Decline`), whose real
+                // catalog value is the plain "Accept"/"Decline" (not the
+                // hardcoded "Accept Trade"/"Decline Trade" wording this
+                // screen used to show) — preferred over inventing new keys
+                // for a near-duplicate meaning.
+                labeled_button(row, &theme, &fonts, &localization, "hud-trade-accept").observe(
+                    |_activate: On<Activate>,
+                     trade: Query<&NetTrade, With<NetLocalPlayer>>,
+                     mut requests: MessageWriter<TradeActionRequest>| {
+                        if let Ok(trade) = trade.single() {
+                            requests.write(TradeActionRequest {
+                                trade_id: trade.trade_id,
+                                action: TradeAction::Accept(trade.phase),
+                            });
+                        }
+                    },
+                );
+                labeled_button(row, &theme, &fonts, &localization, "hud-trade-decline").observe(
+                    |_activate: On<Activate>,
+                     trade: Query<&NetTrade, With<NetLocalPlayer>>,
+                     mut requests: MessageWriter<TradeActionRequest>| {
+                        if let Ok(trade) = trade.single() {
+                            requests.write(TradeActionRequest {
+                                trade_id: trade.trade_id,
+                                action: TradeAction::Decline,
+                            });
+                        }
+                    },
+                );
             });
     });
+}
+
+/// Spawns a themed button whose label is a resolved `.ftl` message value,
+/// tagged [`LocalizedLabel`] so it re-resolves live on a locale change (the
+/// same small helper `settings_window.rs`/`esc_menu.rs` both already use).
+fn labeled_button<'a>(
+    parent: &'a mut ChildSpawnerCommands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    localization: &Localization,
+    key: &'static str,
+) -> EntityCommands<'a> {
+    let mut button = parent.spawn(button_bundle(theme, fonts, &localization.tr(key)));
+    button.insert(LocalizedLabel(key));
+    button
+}
+
+/// The `.ftl` key for a [`TradePhase`]'s short display label — used in the
+/// trade window's "Trading with player #N — <phase>" header (see
+/// [`sync_trade_window`]); distinct from `hud-trade-phase1_description`/
+/// `phase2_description`/`phase3_description` (already existing, but those are
+/// the longer explanatory paragraphs the module doc references, not a header
+/// word).
+fn trade_phase_key(phase: TradePhase) -> &'static str {
+    match phase {
+        TradePhase::Mutate => "hud-trade-phase_mutate",
+        TradePhase::Review => "hud-trade-phase_review",
+        TradePhase::Complete => "hud-trade-phase_complete",
+    }
 }
 
 /// Sends [`TradeInviteRequest`] on `T` to the nearest OTHER mirrored entity
@@ -307,7 +403,11 @@ fn sync_invite_prompt(
         Some(invite) => {
             *visibility = Visibility::Visible;
             if let Ok(mut text) = text.single_mut() {
-                text.0 = format!("Trade request from player #{}", invite.from_uid);
+                // The static "Trade request from player" label is a SIBLING
+                // `Text` node (tagged `LocalizedText`, spawned in
+                // `spawn_trade_ui`) — this one only ever holds the raw,
+                // never-translated UID.
+                text.0 = format!("#{}", invite.from_uid);
             }
         },
         None => *visibility = Visibility::Hidden,
@@ -323,6 +423,7 @@ fn sync_trade_window(
     mut window_visibility: Query<&mut Visibility, (With<TradeWindowRoot>, Without<InviteRoot>)>,
     mut status_text: Query<&mut Text, (With<TradeStatusText>, Without<InviteStatusText>)>,
     mut offer_slots: Query<(&SlotGroup, &SlotAddress, &mut SlotContents), With<HudSlot>>,
+    localization: NonSend<Localization>,
 ) {
     let Ok(mut visibility) = window_visibility.single_mut() else {
         return;
@@ -333,9 +434,17 @@ fn sync_trade_window(
     };
     *visibility = Visibility::Visible;
     if let Ok(mut text) = status_text.single_mut() {
+        // The static "Trading with player" label is a SIBLING `Text` node
+        // (tagged `LocalizedText`, spawned in `spawn_trade_ui`) — this one
+        // only holds the raw UID plus the `TradePhase`'s own resolved label
+        // ([`trade_phase_key`]), so it must re-resolve on a locale change too
+        // (this system reads `NonSend<Localization>` every frame and is
+        // ordered `.after(xindeler_ui::i18n::LocaleSyncSet)` in
+        // `TradeUiPlugin::build` for exactly that reason).
         text.0 = format!(
-            "Trading with player #{} — {:?}",
-            trade.counterparty_uid, trade.phase
+            "#{} — {}",
+            trade.counterparty_uid,
+            localization.tr(trade_phase_key(trade.phase))
         );
     }
 
@@ -414,6 +523,15 @@ fn handle_offer_slot_drops(
     }
 }
 
+/// Test-only: an empty-catalog `Localization` — every `.tr(key)` call
+/// resolves to `key` itself (the documented, never-panic fallback), which is
+/// all these structural tests need (mirrors `settings_window.rs`/
+/// `esc_menu.rs`'s own identically-named test helper).
+#[cfg(test)]
+fn test_localization() -> Localization {
+    Localization::load(&xindeler_ui::i18n::fallback_locale(), &[])
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -433,6 +551,7 @@ mod tests {
             title: Handle::default(),
             body: Handle::default(),
         });
+        app.insert_non_send(test_localization());
         app
     }
 
@@ -493,5 +612,99 @@ mod tests {
         assert_eq!(contents.quantity, Some(3));
         assert!(contents.tooltip.contains("Minor Potion"));
         assert!(contents.tooltip.contains("3 of 10"));
+    }
+
+    /// BL-82 EM-5.16 (T56.44 follow-up): switching the active locale
+    /// re-localizes the already-spawned "Accept"/"Decline" trade-window
+    /// buttons AND the static "Trading with player" header label live, using
+    /// the REAL repo `.ftl` catalogs (not a synthetic fixture) via
+    /// `VELOREN_ASSETS`/`XINDELER_ASSETS` — the same idiom
+    /// `esc_menu.rs`'s `switching_locale_relocalizes_the_quit_button_live`
+    /// test uses, covering both halves of the reactive chain
+    /// (`LocalizedLabel`-tagged buttons via `relocalize_button_labels` +
+    /// `button::spawn_button_labels`, and a bare `LocalizedText` node via
+    /// `relocalize_text`) for this screen.
+    #[test]
+    fn switching_locale_relocalizes_the_trade_window_live() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(HudTheme::default());
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["common.ftl", "hud/trade.ftl"],
+        ));
+        app.init_resource::<xindeler_ui::i18n::CurrentLocale>();
+        app.add_systems(Update, xindeler_ui::button::spawn_button_labels);
+
+        app.world_mut()
+            .run_system_once(spawn_trade_ui)
+            .expect("spawn_trade_ui runs");
+        app.update(); // let spawn_button_labels give each button its child
+
+        fn accept_trade_button_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            let button = world
+                .query::<(&LocalizedLabel, &Children)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-trade-accept")
+                .map(|(_, children)| children[0])
+                .expect("the Accept Trade button was spawned and tagged");
+            world
+                .get::<Text>(button)
+                .expect("label child exists")
+                .0
+                .clone()
+        }
+
+        fn trading_with_player_label_text(app: &mut App) -> String {
+            let world = app.world_mut();
+            world
+                .query::<(&LocalizedText, &Text)>()
+                .iter(world)
+                .find(|(tag, _)| tag.0 == "hud-trade-trading_with_player")
+                .map(|(_, text)| text.0.clone())
+                .expect("the trade-window header label was spawned and tagged")
+        }
+
+        assert_eq!(
+            accept_trade_button_text(&mut app),
+            "Accept",
+            "the Accept Trade button must show the real en catalog text at spawn time"
+        );
+        assert_eq!(
+            trading_with_player_label_text(&mut app),
+            "Trading with player",
+            "the header's static label must show the real en catalog text at spawn time"
+        );
+
+        app.world_mut()
+            .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
+            .0 = "es".to_owned();
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
+            .expect("reload runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_text)
+            .expect("relocalize_text runs");
+        app.world_mut()
+            .run_system_once(xindeler_ui::i18n::relocalize_button_labels)
+            .expect("relocalize_button_labels runs");
+        app.update(); // spawn_button_labels propagates the HudButtonLabel change
+
+        assert_eq!(
+            accept_trade_button_text(&mut app),
+            "Aceptar",
+            "must resolve to the REAL es catalog's own hud-trade-accept value, not the en fallback"
+        );
+        assert_eq!(
+            trading_with_player_label_text(&mut app),
+            "Comerciando con el jugador",
+            "must resolve to the REAL es catalog's own hud-trade-trading_with_player value, not \
+             the en fallback"
+        );
     }
 }

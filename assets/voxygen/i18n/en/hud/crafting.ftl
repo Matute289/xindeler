@@ -54,3 +54,21 @@ hud-crafting-recipe-uncraftable = Recipe Cannot be Crafted
 hud-crafting-recipe-unlearned = You must first learn how to craft this recipe.
 hud-crafting-show_unknown_recipes = Show Unknown Recipes
 hud-crafting-hide_unknown_recipes = Hide Unknown Recipes
+
+## BL-82 EM-5.16 (T56.44 follow-up) — the Bevy crafting window's four
+## top-level section tabs + their per-tab chrome (spec §Q4=A)
+hud-crafting-tabs-repair = Repair
+hud-crafting-tabs-modular = Modular
+hud-crafting-salvage_desc = Break items down into materials. Requires a Salvaging Bench.
+hud-crafting-repair_tab_desc = Restore a damaged item's durability. Requires a Repair Bench.
+hud-crafting-modular_tab_desc = Forge a weapon from a primary + secondary component of the same tool kind. Requires a Crafting Bench.
+hud-crafting-select_a_recipe = Select a recipe.
+hud-crafting-no_salvageable_items = No salvageable items.
+hud-crafting-no_damaged_items = No damaged items.
+hud-crafting-no_primary_components = No primary components.
+hud-crafting-no_secondary_components = No secondary components.
+hud-crafting-primary = Primary
+hud-crafting-secondary = Secondary
+hud-crafting-salvage_selected = Salvage selected
+hud-crafting-repair_selected = Repair selected
+hud-crafting-forge_weapon = Forge weapon
