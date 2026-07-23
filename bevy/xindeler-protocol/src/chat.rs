@@ -194,8 +194,16 @@ pub struct NetChatMsg {
     /// whose already-final text is in [`Self::text`]. When `Some`,
     /// [`Self::text`] still carries a best-effort server-side fallback (the
     /// bare key) for any consumer that ignores the payload.
-    /// `#[serde(default)]` keeps the wire shape backward-compatible
-    /// (additive) with the pre-EM-5.16 four-field form.
+    /// `#[serde(default)]` is additive at the Rust type level (any code still
+    /// building the pre-EM-5.16 four-field literal keeps compiling once this
+    /// field gets a default in a struct-update `..Default::default()`-style
+    /// site, and self-describing formats like `ron` degrade old data
+    /// gracefully). It is NOT a cross-version wire guarantee on bincode/
+    /// postcard (non-self-describing): decoding an old byte stream that
+    /// lacks this trailing field would still fail — harmless here since
+    /// client and server (embedded listen-server + co-shipped replicon
+    /// server) always ship from the same build, so no old `NetChatMsg` bytes
+    /// ever cross a version boundary.
     #[serde(default)]
     pub localized: Option<NetLocalizedContent>,
 }
