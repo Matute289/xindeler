@@ -123,6 +123,40 @@ impl NetChatChannel {
     }
 }
 
+/// One Fluent argument value carried on the wire for a localized chat line
+/// (BL-82 EM-5.16). The recursive `common_i18n::Content` arg tree is
+/// deliberately NOT put on the wire: the bridge flattens every arg to one of
+/// these two leaf shapes server-side (a nested localized arg degrades to its
+/// `hacky_descriptor` plain string — a documented v1 cut, since chat args are
+/// `Nat` or plain strings in practice, never nested localized content).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum NetChatArg {
+    /// A plain-text argument (a player alias, a flattened nested content, …).
+    Text(String),
+    /// A natural-number argument (`common_i18n::LocalizationArg::Nat`).
+    Nat(u64),
+}
+
+/// A wire-serialisable localized chat payload (BL-82 EM-5.16): a `.ftl` key
+/// (optionally one attribute) plus already-flattened Fluent args, resolved
+/// CLIENT-side via `xindeler_ui::i18n::Localization::tr_args`/`tr_attr` so a
+/// live language switch re-localizes the scrollback. Built bridge-side from a
+/// `common_i18n::Content::Localized`/`Key`/`Attr` (command feedback) OR from a
+/// localizable `ChatType` (Online/Offline join/leave) — see
+/// `xindeler-sim-bridge::chat`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NetLocalizedContent {
+    /// The Fluent message key (e.g. `players-list-header`,
+    /// `hud-chat-online_msg`).
+    pub key: String,
+    /// The message ATTRIBUTE, when the source was a `Content::Attr(key, attr)`
+    /// (resolved via `Localization::tr_attr`, which takes no args). `None` for
+    /// the common value-message case (resolved via `tr_args`).
+    pub attr: Option<String>,
+    /// Flattened Fluent args (order irrelevant — Fluent looks them up by name).
+    pub args: Vec<(String, NetChatArg)>,
+}
+
 /// One chat line delivered to the client (BL-82 EM-5.4). Server → client
 /// broadcast (`SendTargets::All` — chat has no per-recipient narrowing yet;
 /// `Tell`'s privacy is enforced server-side by who the sim actually routes
@@ -153,6 +187,17 @@ pub struct NetChatMsg {
     /// the i18n-depth epic); this keeps the wire shape simple and the
     /// client dumb.
     pub text: String,
+    /// BL-82 EM-5.16: the OPTIONAL structured localized payload. `Some` for a
+    /// genuinely localized line (command feedback, join/leave) — the client
+    /// resolves it through `Localization::tr_args`/`tr_attr` at render time and
+    /// re-resolves it on a locale change. `None` for a plain player-typed line,
+    /// whose already-final text is in [`Self::text`]. When `Some`,
+    /// [`Self::text`] still carries a best-effort server-side fallback (the
+    /// bare key) for any consumer that ignores the payload.
+    /// `#[serde(default)]` keeps the wire shape backward-compatible
+    /// (additive) with the pre-EM-5.16 four-field form.
+    #[serde(default)]
+    pub localized: Option<NetLocalizedContent>,
 }
 
 /// Client → server: send a chat line (BL-82 EM-5.4). Registered as a
@@ -273,5 +318,35 @@ mod tests {
         assert_eq!(NetChatChannel::Tell.send_command_name(), None);
         assert_eq!(NetChatChannel::Npc.send_command_name(), None);
         assert_eq!(NetChatChannel::System.send_command_name(), None);
+    }
+
+    /// A `NetChatMsg` carrying a `NetLocalizedContent` payload (key + attr +
+    /// mixed `Text`/`Nat` args) survives a bincode round trip unchanged — the
+    /// additive `localized` field is on the wire exactly as built.
+    #[test]
+    fn localized_chat_payload_round_trips() {
+        let msg = NetChatMsg {
+            channel: NetChatChannel::System,
+            sender_uid: None,
+            sender_alias: None,
+            text: "players-list-header".to_owned(),
+            localized: Some(NetLocalizedContent {
+                key: "players-list-header".to_owned(),
+                attr: None,
+                args: vec![
+                    ("count".to_owned(), NetChatArg::Nat(2)),
+                    (
+                        "player_list".to_owned(),
+                        NetChatArg::Text("Hero, Villain".to_owned()),
+                    ),
+                ],
+            }),
+        };
+        let bytes =
+            bincode::serde::encode_to_vec(&msg, bincode::config::legacy()).expect("serialize");
+        let (back, _): (NetChatMsg, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
+                .expect("deserialize");
+        assert_eq!(back, msg);
     }
 }

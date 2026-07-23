@@ -1797,6 +1797,7 @@ mod tests {
             sender_uid: Some(NetUid(7)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello there".to_owned(),
+            localized: None,
         };
         server_app.world_mut().write_message(ToClients {
             targets: SendTargets::All,
@@ -1829,6 +1830,7 @@ mod tests {
             sender_uid: None,
             sender_alias: None,
             text: "server started".to_owned(),
+            localized: None,
         };
         app.world_mut().write_message(ToClients {
             targets: SendTargets::All,
