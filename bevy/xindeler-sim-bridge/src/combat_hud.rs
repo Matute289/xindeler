@@ -290,6 +290,7 @@ mod tests {
                         mass: None,
                     },
                     None,
+                    None,
                 ),
                 now,
             );
@@ -374,6 +375,7 @@ mod tests {
                             stats: None,
                             mass: None,
                         },
+                        None,
                         None,
                     ),
                     now,

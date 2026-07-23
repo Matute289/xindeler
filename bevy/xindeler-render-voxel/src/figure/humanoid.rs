@@ -1199,6 +1199,7 @@ mod tests {
             hair_color: 0,
             skin: 0,
             eye_color: 0,
+            height_scale: 0,
         }
     }
 

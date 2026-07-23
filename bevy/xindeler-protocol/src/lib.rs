@@ -1223,6 +1223,7 @@ mod tests {
             hair_color: 0,
             skin: 0,
             eye_color: 0,
+            height_scale: 0,
         }));
         server_app
             .world_mut()
@@ -1317,6 +1318,7 @@ mod tests {
             hair_color: 0,
             skin: 0,
             eye_color: 0,
+            height_scale: 0,
         }));
         let npc_uid = NetUid(2);
         let npc_body = NetBody(common::comp::Body::QuadrupedSmall(
@@ -1402,6 +1404,7 @@ mod tests {
                         hair_color: 0,
                         skin: 0,
                         eye_color: 0,
+                        height_scale: 0,
                     }),
                 }],
                 selected: Some(common::character::CharacterId(1)),
@@ -1891,6 +1894,7 @@ mod tests {
             hair_color: 2,
             skin: 3,
             eye_color: 1,
+            height_scale: 0,
         })
     }
 

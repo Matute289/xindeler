@@ -20,6 +20,7 @@ mod prompt_dialog;
 mod quest;
 mod settings_window;
 mod skillbar;
+mod slot_grid;
 mod slots;
 mod social;
 mod subtitles;
@@ -60,6 +61,7 @@ use quest::Quest;
 use serde::{Deserialize, Serialize};
 use settings_window::{SettingsTab, SettingsWindow};
 use skillbar::Skillbar;
+use slot_grid::SlotGrid;
 use social::Social;
 use subtitles::Subtitles;
 use trade::Trade;
@@ -90,14 +92,13 @@ use crate::{
         img_ids::Rotations,
         slot::{self, SlotKey},
     },
-    window::Event as WinEvent,
+    window::{Event as WinEvent, MenuInput},
 };
 use client::{Client, UserNotification};
 use common::{
     combat,
     comp::{
-        self, AbilityCooldowns, BuffData, BuffKind, Content, Health, Item, MapMarkerChange,
-        PickupItem, PresenceKind,
+        self, BuffData, BuffKind, Content, Health, Item, MapMarkerChange, PickupItem, PresenceKind,
         ability::{AuxiliaryAbility, Stance},
         fluid_dynamics,
         inventory::{
@@ -107,7 +108,7 @@ use common::{
         },
         item::{
             ItemDefinitionIdOwned, ItemDesc, ItemI18n, MaterialStatManifest, Quality,
-            tool::{AbilityContext, ToolKind},
+            tool::ToolKind,
         },
         loot_owner::LootOwnerKind,
         skillset::{SkillGroupKind, SkillsPersistenceError, skills::Skill},
@@ -115,7 +116,7 @@ use common::{
     consts::{MAX_NPCINTERACT_RANGE, MAX_PICKUP_RANGE},
     link::Is,
     mounting::{Mount, Rider, VolumePos},
-    outcome::{HealthChangeInfo, Outcome},
+    outcome::Outcome,
     recipe::RecipeBookManifest,
     resources::{BattleMode, Secs, Time},
     rtsim,
@@ -144,7 +145,7 @@ use std::{
     cmp::Ordering,
     collections::VecDeque,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::{instrument, trace, warn};
@@ -214,6 +215,7 @@ const WORLD_COLOR: Color = Color::Rgba(0.95, 1.0, 0.95, 1.0);
 //Nametags
 const GROUP_MEMBER: Color = Color::Rgba(0.47, 0.84, 1.0, 1.0);
 const DEFAULT_NPC: Color = Color::Rgba(1.0, 1.0, 1.0, 1.0);
+const MARKED_NPC: Color = Color::Rgba(1.0, 0.8, 0.0, 1.0);
 
 // UI Color-Theme
 const UI_MAIN: Color = Color::Rgba(0.61, 0.70, 0.70, 1.0); // Greenish Blue
@@ -902,6 +904,12 @@ impl TradeAmountInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowId {
+    None,
+    Bag,
+}
+
 pub struct Show {
     ui: bool,
     intro: bool,
@@ -933,11 +941,65 @@ pub struct Show {
     camera_clamp: bool,
     prompt_dialog: Option<PromptDialogSettings>,
     trade_amount_input_key: Option<TradeAmountInput>,
+    // A stack of open menus; the menu in focus should be on top
+    focus: Vec<WindowId>,
 }
+
+impl Default for Show {
+    fn default() -> Self { Self::new() }
+}
+
 impl Show {
+    pub fn new() -> Self {
+        Self {
+            ui: true,
+            intro: false,
+            crafting: false,
+            bag: false,
+            bag_inv: false,
+            bag_details: false,
+            trade: false,
+            trade_details: false,
+            social: false,
+            diary: false,
+            group: false,
+            quest: false,
+            group_menu: false,
+            esc_menu: false,
+            open_windows: Windows::None,
+            map: false,
+            ingame: true,
+            chat_tab_settings_index: None,
+            settings_tab: SettingsTab::Interface,
+            diary_fields: diary::DiaryShow::default(),
+            crafting_fields: crafting::CraftingShow::default(),
+            social_search_key: None,
+            want_grab: true,
+            stats: false,
+            free_look: false,
+            auto_walk: false,
+            zoom_lock: ChangeNotification::default(),
+            camera_clamp: false,
+            prompt_dialog: None,
+            trade_amount_input_key: None,
+            focus: Vec::new(),
+        }
+    }
+
+    // Changing a window state must go through these functions
+    fn set_bag_state(&mut self, state: bool) {
+        if state {
+            self.focus.push(WindowId::Bag); // use hashset to avoid duplicates?
+            self.bag = true;
+        } else {
+            self.focus.retain(|x| *x != WindowId::Bag);
+            self.bag = false;
+        }
+    }
+
     fn bag(&mut self, open: bool) {
         if !self.esc_menu {
-            self.bag = open;
+            self.set_bag_state(open);
             self.map = false;
             self.crafting_fields.salvage = false;
 
@@ -949,9 +1011,11 @@ impl Show {
         }
     }
 
+    pub fn bag_print(&self) -> bool { self.bag }
+
     fn trade(&mut self, open: bool) {
         if !self.esc_menu {
-            self.bag = open;
+            self.set_bag_state(open);
             self.trade = open;
             self.map = false;
             self.want_grab = !self.any_window_requires_cursor();
@@ -961,7 +1025,7 @@ impl Show {
     fn map(&mut self, open: bool) {
         if !self.esc_menu {
             self.map = open;
-            self.bag = false;
+            self.set_bag_state(false);
             self.crafting = false;
             self.crafting_fields.salvage = false;
             self.social = false;
@@ -1001,7 +1065,7 @@ impl Show {
             self.crafting = open;
             self.crafting_fields.salvage = false;
             self.crafting_fields.recipe_inputs = HashMap::new();
-            self.bag = open;
+            self.set_bag_state(open);
             self.map = false;
             self.want_grab = !self.any_window_requires_cursor();
         }
@@ -1031,7 +1095,7 @@ impl Show {
             self.quest = false;
             self.crafting = false;
             self.crafting_fields.salvage = false;
-            self.bag = false;
+            self.set_bag_state(false);
             self.map = false;
             self.diary_fields = diary::DiaryShow::default();
             self.diary = open;
@@ -1046,7 +1110,7 @@ impl Show {
             } else {
                 Windows::None
             };
-            self.bag = false;
+            self.set_bag_state(false);
             self.social = false;
             self.quest = false;
             self.crafting = false;
@@ -1104,7 +1168,7 @@ impl Show {
 
     fn toggle_windows(&mut self, global_state: &mut GlobalState) {
         if self.any_window_requires_cursor() {
-            self.bag = false;
+            self.set_bag_state(false);
             self.trade = false;
             self.esc_menu = false;
             self.intro = false;
@@ -1135,7 +1199,7 @@ impl Show {
         self.open_windows = Windows::Settings;
         self.esc_menu = false;
         self.settings_tab = tab;
-        self.bag = false;
+        self.set_bag_state(false);
         self.want_grab = false;
     }
 
@@ -1281,9 +1345,6 @@ pub struct Hud {
     content_bubbles: Vec<(Vec3<f32>, comp::SpeechBubble)>,
     pub persisted_state: Rc<RefCell<PersistedHudState>>,
     pub show: Show,
-    //never_show: bool,
-    //intro: bool,
-    //intro_2: bool,
     to_focus: Option<Option<widget::Id>>,
     force_ungrab: bool,
     force_chat_input: Option<String>,
@@ -1294,6 +1355,7 @@ pub struct Hud {
     slot_manager: slots::SlotManager,
     hotbar: hotbar::State,
     events: Vec<Event>,
+    menu_events: Vec<MenuInput>,
     crosshair_opacity: f32,
     floaters: Floaters,
     voxel_minimap: VoxelMinimap,
@@ -1302,7 +1364,6 @@ pub struct Hud {
     clear_chat: bool,
     current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
     extra_markers: Vec<map::ExtraMarker>,
-    bug_report_status: Option<Arc<Mutex<Option<crate::bug_report::BugReportResult>>>>,
 }
 
 impl Hud {
@@ -1387,43 +1448,8 @@ impl Hud {
             persisted_state,
             speech_bubbles: HashMap::new(),
             content_bubbles: Vec::new(),
-            //intro: false,
-            //intro_2: false,
-            show: Show {
-                intro: false,
-                bag: false,
-                bag_inv: false,
-                bag_details: false,
-                trade: false,
-                trade_details: false,
-                esc_menu: false,
-                open_windows: Windows::None,
-                map: false,
-                crafting: false,
-                ui: true,
-                social: false,
-                diary: false,
-                group: false,
-                // Change this before implementation!
-                quest: false,
-                group_menu: false,
-                chat_tab_settings_index: None,
-                settings_tab: SettingsTab::Interface,
-                diary_fields: diary::DiaryShow::default(),
-                crafting_fields: crafting::CraftingShow::default(),
-                social_search_key: None,
-                want_grab: true,
-                ingame: true,
-                stats: false,
-                free_look: false,
-                auto_walk: false,
-                zoom_lock: ChangeNotification::default(),
-                camera_clamp: false,
-                prompt_dialog: None,
-                trade_amount_input_key: None,
-            },
+            show: Show::new(),
             to_focus: None,
-            //never_show: false,
             force_ungrab: false,
             force_chat_input: None,
             force_chat_cursor: None,
@@ -1433,6 +1459,7 @@ impl Hud {
             slot_manager,
             hotbar: hotbar_state,
             events: Vec::new(),
+            menu_events: Vec::new(),
             crosshair_opacity: 0.0,
             floaters: Floaters {
                 exp_floaters: Vec::new(),
@@ -1445,7 +1472,6 @@ impl Hud {
             clear_chat: false,
             current_dialogue: None,
             extra_markers: Vec::new(),
-            bug_report_status: None,
         }
     }
 
@@ -1717,9 +1743,7 @@ impl Hud {
                             .abs()
                             .clamp(Health::HEALTH_EPSILON, health.maximum() * 1.25)
                             / health.maximum();
-                        let hp_dmg_text = if floater.miss {
-                            i18n.get_msg("hud-sct-miss").to_string()
-                        } else if floater.info.amount.abs() < 0.1 {
+                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
                             String::new()
                         } else if global_state.settings.interface.sct_damage_rounding
                             && floater.info.amount.abs() >= 1.0
@@ -1781,10 +1805,7 @@ impl Hud {
                         Text::new(&hp_dmg_text)
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
-                            .color(if floater.miss {
-                                // BL-52 P4: neutral grey for a miss.
-                                Color::Rgba(0.8, 0.8, 0.8, hp_fade)
-                            } else if floater.info.amount < 0.0 {
+                            .color(if floater.info.amount < 0.0 {
                                 Color::Rgba(font_col.r, font_col.g, font_col.b, hp_fade)
                             } else {
                                 Color::Rgba(0.1, 1.0, 0.1, hp_fade)
@@ -2362,6 +2383,7 @@ impl Hud {
             }
 
             let speech_bubbles = &self.speech_bubbles;
+            let my_stats = stats.get(me);
             // Render overhead name tags and health bars
             for (
                 entity,
@@ -2425,12 +2447,13 @@ impl Hud {
                         let is_me = entity == me;
                         let dist_sqr = pos.distance_squared(player_pos);
 
+                        let is_marked = my_stats.is_some_and(|s| s.marked_entities.contains(uid));
+
                         // Determine whether to display nametag and healthbar based on whether the
                         // entity is mounted, has been damaged, is targeted/selected, or is in your
                         // group
                         // Note: even if this passes the healthbar can
                         // be hidden in some cases if it is at maximum
-                        let has_active_buffs = buffs.iter_active().next().is_some();
                         let display_overhead_info = !is_me
                             && (is_mount.is_none()
                                 || health.is_none_or(overhead::should_show_healthbar))
@@ -2440,7 +2463,7 @@ impl Hud {
                                 || info.selected_entity.is_some_and(|s| s.0 == entity)
                                 || health.is_none_or(overhead::should_show_healthbar)
                                 || in_group
-                                || has_active_buffs)
+                                || is_marked)
                             && dist_sqr
                                 < (if in_group {
                                     NAMETAG_GROUP_RANGE
@@ -2456,7 +2479,6 @@ impl Hud {
 
                         let info = display_overhead_info.then(|| overhead::Info {
                             name: Some(i18n.get_content(&stats.name)),
-                            level: Some(skill_set.character_level()),
                             health,
                             buffs: Some(buffs),
                             energy,
@@ -2471,6 +2493,7 @@ impl Hud {
                             },
                             hardcore: hardcore.contains(entity),
                             stance,
+                            marked: is_marked,
                         });
                         // Only render bubble if nearby or if its me and setting is on
                         let bubble = if (dist_sqr < SPEECH_BUBBLE_RANGE.powi(2) && !is_me)
@@ -2610,9 +2633,7 @@ impl Hud {
                             .abs()
                             .clamp(Health::HEALTH_EPSILON, health.map_or(1.0, |h| h.maximum()))
                             / health.map_or(1.0, |h| h.maximum());
-                        let hp_dmg_text = if floater.miss {
-                            i18n.get_msg("hud-sct-miss").to_string()
-                        } else if floater.info.amount.abs() < 0.1 {
+                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
                             String::new()
                         } else if global_state.settings.interface.sct_damage_rounding
                             && floater.info.amount.abs() >= 1.0
@@ -2661,7 +2682,7 @@ impl Hud {
                         Text::new(&hp_dmg_text)
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
-                            .color(if floater.miss || floater.info.amount < 0.0 {
+                            .color(if floater.info.amount < 0.0 {
                                 Color::Rgba(0.0, 0.0, 0.0, fade)
                             } else {
                                 Color::Rgba(0.0, 0.0, 0.0, 1.0)
@@ -2673,11 +2694,7 @@ impl Hud {
                             .font_size(font_size)
                             .font_id(self.fonts.cyri.conrod_id)
                             .x_y(x, y)
-                            .color(if floater.miss {
-                                // BL-52 P4: a miss is neutral grey and fades out
-                                // (not heal-green / non-fading).
-                                Color::Rgba(0.8, 0.8, 0.8, fade)
-                            } else if floater.info.amount < 0.0 {
+                            .color(if floater.info.amount < 0.0 {
                                 Color::Rgba(font_col.r, font_col.g, font_col.b, fade)
                             } else {
                                 Color::Rgba(0.1, 1.0, 0.1, 1.0)
@@ -3135,10 +3152,7 @@ impl Hud {
         {
             Some(buttons::Event::ToggleSettings) => self.show.toggle_settings(global_state),
             Some(buttons::Event::ToggleSocial) => self.show.toggle_social(),
-            Some(buttons::Event::ToggleMap) => {
-                common::telemetry!("ui", widget = "Map", action = "toggle");
-                self.show.toggle_map();
-            },
+            Some(buttons::Event::ToggleMap) => self.show.toggle_map(),
             Some(buttons::Event::ToggleCrafting) => self.show.toggle_crafting(),
             None => {},
         }
@@ -3216,9 +3230,6 @@ impl Hud {
         let energies = ecs.read_storage::<comp::Energy>();
         let skillsets = ecs.read_storage::<comp::SkillSet>();
         let active_abilities = ecs.read_storage::<comp::ActiveAbilities>();
-        let ability_pools = ecs.read_storage::<comp::AbilityPool>();
-        let ability_cooldowns_storage = ecs.read_storage::<AbilityCooldowns>();
-        let ability_map = ecs.read_resource::<comp::item::tool::AbilityMap>();
         let bodies = ecs.read_storage::<comp::Body>();
         let poises = ecs.read_storage::<comp::Poise>();
         let uids = ecs.read_storage::<Uid>();
@@ -3249,9 +3260,6 @@ impl Hud {
             skillsets.get(entity),
             bodies.get(entity),
         ) {
-            let stance = stances.get(entity);
-            let context = AbilityContext::from(stance, Some(inventory), combo);
-
             let skillbar_events = Skillbar::new(
                 client,
                 &info,
@@ -3266,7 +3274,6 @@ impl Hud {
                 poise,
                 skillset,
                 active_abilities.get(entity),
-                ability_pools.get(entity),
                 body,
                 //&character_state,
                 self.pulse,
@@ -3278,16 +3285,13 @@ impl Hud {
                 i18n,
                 &self.item_i18n,
                 &msm,
-                &ability_map,
                 &rbm,
                 self.floaters.combo_floater,
-                &context,
                 combo,
                 char_states.get(entity),
-                stance,
+                stances.get(entity),
                 stats.get(entity),
-                ability_cooldowns_storage.get(entity),
-                time.0,
+                buffs.get(entity),
             )
             .set(self.ids.skillbar, ui_widgets);
 
@@ -3297,10 +3301,7 @@ impl Hud {
                         self.show.diary(true);
                         self.show.open_skill_tree(skillgroup);
                     },
-                    skillbar::Event::OpenBag => {
-                        common::telemetry!("ui", widget = "Inventory", action = "toggle");
-                        self.show.bag(!self.show.bag);
-                    },
+                    skillbar::Event::OpenBag => self.show.bag(!self.show.bag),
                 }
             }
         }
@@ -3554,6 +3555,7 @@ impl Hud {
                 &msm,
                 &rbm,
                 poise,
+                &self.menu_events,
             )
             .set(self.ids.bag, ui_widgets)
             {
@@ -3569,6 +3571,10 @@ impl Hud {
                         } else {
                             self.force_ungrab = true
                         };
+                        // Also closes any open trade windows
+                        if self.show.trade {
+                            self.events.push(Event::TradeAction(TradeAction::Decline));
+                        }
                     },
                     bag::Event::ChangeInventorySortOrder(sort_order) => {
                         self.events
@@ -3582,9 +3588,6 @@ impl Hud {
                     bag::Event::SwapEquippedWeapons => self.events.push(Event::SwapEquippedWeapons),
                     bag::Event::MoveBag(pos) => {
                         global_state.settings.hud_position.bag.own = pos;
-                    },
-                    bag::Event::ToggleStatsTab => {
-                        self.show.stats = !self.show.stats;
                     },
                 }
             }
@@ -3736,12 +3739,6 @@ impl Hud {
 
         self.new_messages.clear();
         self.new_notifications.clear();
-
-        // Windows
-
-        // Char Window will always appear at the left side. Other Windows default to the
-        // left side, but when the Char Window is opened they will appear to the right
-        // of it.
 
         // Settings
         if let Windows::Settings = self.show.open_windows {
@@ -3925,14 +3922,12 @@ impl Hud {
                 poises.get(entity),
                 uids.get(entity),
             ) {
-                let context = AbilityContext::from(stances.get(entity), Some(inventory), combo);
                 for event in Diary::new(
                     &self.show,
                     client,
                     global_state,
                     skill_set,
                     active_abilities.get(entity).unwrap_or(&Default::default()),
-                    ability_pools.get(entity),
                     inventory,
                     char_state,
                     health,
@@ -3950,8 +3945,10 @@ impl Hud {
                     tooltip_manager,
                     &mut self.slot_manager,
                     self.pulse,
-                    &context,
+                    stances.get(entity),
+                    combo,
                     stats.get(entity),
+                    buffs.get(entity),
                 )
                 .set(self.ids.diary, ui_widgets)
                 {
@@ -4031,11 +4028,9 @@ impl Hud {
         if self.show.esc_menu {
             match EscMenu::new(&self.imgs, &self.fonts, i18n).set(self.ids.esc_menu, ui_widgets) {
                 Some(esc_menu::Event::OpenSettings(tab)) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "Settings");
                     self.show.open_setting_tab(tab);
                 },
                 Some(esc_menu::Event::Close) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "Close");
                     self.show.esc_menu = false;
                     self.show.want_grab = true;
                     self.force_ungrab = false;
@@ -4045,48 +4040,19 @@ impl Hud {
                     global_state.unpause();
                 },
                 Some(esc_menu::Event::Logout) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "Logout");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
 
                     events.push(Event::Logout);
                 },
-                Some(esc_menu::Event::Quit) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "Quit");
-                    events.push(Event::Quit);
-                },
+                Some(esc_menu::Event::Quit) => events.push(Event::Quit),
                 Some(esc_menu::Event::CharacterSelection) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "CharacterSelection");
                     // Unpause the game if we are on singleplayer so that we can logout
                     #[cfg(feature = "singleplayer")]
                     global_state.unpause();
 
                     events.push(Event::CharacterSelection)
-                },
-                Some(esc_menu::Event::ReportBug) => {
-                    common::telemetry!("ui", widget = "EscMenu", btn = "ReportBug");
-                    if let Some(url) = global_state.settings.networking.bug_report_url.clone() {
-                        let status =
-                            Arc::new(Mutex::new(None::<crate::bug_report::BugReportResult>));
-                        let status_clone = Arc::clone(&status);
-                        let logs_dir = common_base::userdata_dir().join("voxygen").join("logs");
-                        std::thread::spawn(move || {
-                            let result = crate::bug_report::send_bug_report(&url, &logs_dir);
-                            if let Ok(mut guard) = status_clone.lock() {
-                                *guard = Some(result);
-                            }
-                        });
-                        self.bug_report_status = Some(status);
-                        self.new_messages.push_back(
-                            comp::ChatType::CommandInfo.into_plain_msg("Bug report sending…"),
-                        );
-                    } else {
-                        self.new_messages.push_back(
-                            comp::ChatType::CommandError
-                                .into_plain_msg("No bug report URL configured."),
-                        );
-                    }
                 },
                 None => {},
             }
@@ -4768,6 +4734,10 @@ impl Hud {
             }
         }
 
+        // if a menu is open, notify window so it can restrict GameInputs
+        global_state.window.menu_open = !self.show.focus.is_empty();
+
+        self.menu_events.clear(); // clear all menu inputs after they have been read
         events
     }
 
@@ -5036,11 +5006,35 @@ impl Hud {
                         self.slot_manager.idle();
                     }
                     self.show.toggle_windows(global_state);
+                    self.force_ungrab = false;
                 }
                 true
             },
 
             // Press key while not typing
+            // MenuInput
+            WinEvent::MenuInput(key, state) => {
+                if self.typing() {
+                    // Close an opened chat using MenuInputs
+                    if key == MenuInput::Back {
+                        self.ui.focus_widget(None);
+                        self.force_chat = false;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    // Pass MenuInputs along to the UI
+                    if state {
+                        self.menu_events.push(key);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            },
+
+            // GameInput
             WinEvent::InputUpdate(key, state) if !self.typing() => {
                 let gs_audio = &global_state.settings.audio;
                 let mut toggle_mute = |audio: Audio| {
@@ -5225,29 +5219,6 @@ impl Hud {
         ),
     ) -> Vec<Event> {
         span!(_guard, "maintain", "Hud::maintain");
-
-        // Poll bug report background thread for completion
-        if let Some(status) = self.bug_report_status.take() {
-            let result = status.try_lock().ok().and_then(|mut g| g.take());
-            if let Some(result) = result {
-                let msg = match result {
-                    crate::bug_report::BugReportResult::Sent => {
-                        "Bug report sent successfully.".to_owned()
-                    },
-                    crate::bug_report::BugReportResult::Skipped(reason) => {
-                        format!("Bug report skipped: {reason}")
-                    },
-                    crate::bug_report::BugReportResult::Failed(reason) => {
-                        format!("Bug report failed: {reason}")
-                    },
-                };
-                self.new_message(comp::ChatType::CommandInfo.into_plain_msg(msg));
-                // bug_report_status remains None (already taken)
-            } else {
-                // Result not ready yet — put it back
-                self.bug_report_status = Some(status);
-            }
-        }
 
         // Remove extra map markers that we've wandered a long distance away from
         if let Some(pos) = client.position() {
@@ -5440,20 +5411,6 @@ impl Hud {
                     });
                 }
             },
-            Outcome::CharacterLevelUp { uid, new_level } => {
-                let ecs = client.state().ecs();
-                let uids = ecs.read_storage::<Uid>();
-                let me = scene_data.viewpoint_entity;
-
-                if uids.get(me).is_some_and(|me| *me == *uid) {
-                    self.new_messages.push_back(comp::ChatType::Meta.into_msg(
-                        Content::localized_with_args("hud-level_up_msg", [(
-                            "level",
-                            u64::from(*new_level),
-                        )]),
-                    ));
-                }
-            },
             Outcome::ComboChange { uid, combo } => {
                 let ecs = client.state().ecs();
                 let uids = ecs.read_storage::<Uid>();
@@ -5553,37 +5510,10 @@ impl Hud {
                                     jump_timer: 0.0,
                                     info: *info,
                                     rand: rand::random(),
-                                    miss: false,
                                 });
                             },
                         }
                     }
-                }
-            },
-            // BL-52 P4: a missed single-target attack → a floating "Miss" over
-            // the target, reusing the SCT floater pipeline (text branched on
-            // `miss` at render). Only shown for the attacker or the target, like
-            // damage floaters.
-            Outcome::Miss { target, .. } => {
-                let ecs = client.state().ecs();
-                let mut hp_floater_lists = ecs.write_storage::<HpFloaterList>();
-                if let Some(entity) = ecs.entity_from_uid(*target)
-                    && let Some(floater_list) = hp_floater_lists.get_mut(entity)
-                {
-                    floater_list.floaters.push(HpFloater {
-                        timer: 0.0,
-                        jump_timer: 0.0,
-                        info: HealthChangeInfo {
-                            amount: 0.0,
-                            precise: false,
-                            target: *target,
-                            by: None,
-                            cause: None,
-                            instance: rand::random(),
-                        },
-                        rand: rand::random(),
-                        miss: true,
-                    });
                 }
             },
 
@@ -5645,73 +5575,62 @@ pub fn cr_color(combat_rating: f32) -> Color {
 
 pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
     match buff {
-        // BL-67: all buff/debuff icons are game-icons.net art (24x24 RGBA), on a
-        // category-coloured shape (debuff = hexagon, buff = circle, Polymorphed =
-        // star). Bloodfeast + Asleep keep their prior icons; Bleeding reuses the
-        // BleedingMark drop.
-        BuffKind::Agility => imgs.buff_agility,
-        BuffKind::Amnesia => imgs.debuff_confused,
-        BuffKind::Anchored => imgs.debuff_anchored,
-        BuffKind::Antimagic => imgs.debuff_antimagic,
-        BuffKind::ArdentHunted => imgs.debuff_ardent_hunted,
-        BuffKind::ArdentHunter => imgs.buff_ardent_hunter,
-        BuffKind::Asleep => imgs.debuff_asleep,
-        BuffKind::Berserk => imgs.buff_berserk,
-        BuffKind::Bleeding => imgs.debuff_bleeding_mark,
-        BuffKind::BleedingMark => imgs.debuff_bleeding_mark,
-        BuffKind::Blinded => imgs.debuff_blinded,
-        BuffKind::Bloodfeast => imgs.buff_bloodfeast,
-        BuffKind::Burning => imgs.debuff_burning,
-        BuffKind::Charmed => imgs.debuff_charmed,
-        BuffKind::Chilled => imgs.debuff_chilled,
-        BuffKind::ComboGeneration => imgs.buff_combo_generation,
-        BuffKind::Crippled => imgs.debuff_crippled,
-        BuffKind::Cursed => imgs.debuff_cursed,
-        BuffKind::Defiance => imgs.buff_defiance,
-        BuffKind::DifficultTerrain => imgs.debuff_difficult_terrain,
-        BuffKind::EagleEye => imgs.buff_eagle_eye,
-        BuffKind::EnergyRegen => imgs.buff_energy_regen,
-        BuffKind::Ensnared => imgs.debuff_ensnared,
-        BuffKind::Flame => imgs.buff_flame,
-        BuffKind::Fortitude => imgs.buff_fortitude,
-        BuffKind::FreedomOfMovement => imgs.buff_freedom_of_movement,
-        BuffKind::Frenzied => imgs.buff_frenzied,
-        BuffKind::Frigid => imgs.buff_frigid,
-        BuffKind::Frozen => imgs.debuff_frozen,
-        BuffKind::Fury => imgs.buff_fury,
-        BuffKind::Hastened => imgs.buff_hastened,
-        BuffKind::Heartseeker => imgs.buff_heartseeker,
-        BuffKind::Heatstroke => imgs.debuff_heatstroke,
-        BuffKind::HeavyNock => imgs.buff_heavy_nock,
-        BuffKind::Hollowtouched => imgs.debuff_hollowtouched,
-        BuffKind::ImminentCritical => imgs.buff_imminent_critical,
-        BuffKind::IncreaseMaxEnergy => imgs.buff_increase_max_energy,
-        BuffKind::IncreaseMaxHealth => imgs.buff_increase_max_health,
-        BuffKind::Invulnerability => imgs.buff_invulnerability,
-        BuffKind::Lifesteal => imgs.buff_lifesteal,
-        BuffKind::OffBalance => imgs.debuff_off_balance,
-        BuffKind::OwlTalon => imgs.buff_owl_talon,
-        BuffKind::Parried => imgs.debuff_parried,
-        BuffKind::Poisoned => imgs.debuff_poisoned,
-        BuffKind::Polymorphed => imgs.debuff_polymorphed,
-        BuffKind::Potion => imgs.buff_potion,
-        BuffKind::PotionSickness => imgs.debuff_potion_sickness,
-        BuffKind::ProtectingWard => imgs.buff_protecting_ward,
+        // Buffs
+        BuffKind::Regeneration => imgs.buff_plus_0,
+        BuffKind::Saturation => imgs.buff_saturation_0,
+        BuffKind::Potion => imgs.buff_potion_0,
+        // TODO: Need unique image for Agility (uses same as Hastened atm)
+        BuffKind::Agility => imgs.buff_haste_0,
+        BuffKind::RestingHeal => imgs.buff_resting_heal_0,
+        BuffKind::EnergyRegen => imgs.buff_energyplus_0,
+        BuffKind::ComboGeneration => imgs.buff_fury,
+        BuffKind::IncreaseMaxEnergy => imgs.buff_energyplus_0,
+        BuffKind::IncreaseMaxHealth => imgs.buff_healthplus_0,
+        BuffKind::Invulnerability => imgs.buff_invincibility_0,
+        BuffKind::ProtectingWard => imgs.buff_dmg_red_0,
+        BuffKind::Frenzied => imgs.buff_frenzy_0,
+        BuffKind::Hastened => imgs.buff_haste_0,
+        BuffKind::Fortitude => imgs.buff_fortitude_0,
         BuffKind::Reckless => imgs.buff_reckless,
-        BuffKind::Regeneration => imgs.buff_regeneration,
+        BuffKind::Flame => imgs.buff_flame,
+        BuffKind::Frigid => imgs.buff_frigid,
+        BuffKind::Lifesteal => imgs.buff_lifesteal,
         BuffKind::Resilience => imgs.buff_resilience,
-        BuffKind::RestingHeal => imgs.buff_resting_heal,
-        BuffKind::Rooted => imgs.debuff_rooted,
-        BuffKind::Saturation => imgs.buff_saturation,
-        BuffKind::ScornfulTaunt => imgs.buff_scornful_taunt,
-        BuffKind::SepticShot => imgs.buff_septic_shot,
-        BuffKind::Shielded => imgs.buff_shielded,
-        BuffKind::Slowed => imgs.debuff_slowed,
+        // TODO: Get image
+        // BuffKind::SalamanderAspect => imgs.debuff_burning_0,
+        BuffKind::ImminentCritical => imgs.buff_imminentcritical,
+        BuffKind::Fury => imgs.buff_fury,
         BuffKind::Sunderer => imgs.buff_sunderer,
+        BuffKind::Defiance => imgs.buff_defiance,
+        BuffKind::Bloodfeast => imgs.buff_plus_0,
+        BuffKind::Berserk => imgs.buff_reckless,
+        BuffKind::ScornfulTaunt => imgs.buff_scornfultaunt,
         BuffKind::Tenacity => imgs.buff_tenacity,
-        BuffKind::Terrified => imgs.debuff_terrified,
-        BuffKind::Wet => imgs.debuff_wet,
-        BuffKind::Winded => imgs.debuff_winded,
+        BuffKind::StormChaser => imgs.buff_stormchaser,
+        BuffKind::EagleEye => imgs.buff_eagleeye,
+        BuffKind::ArdentHunt => imgs.buff_ardenthunt,
+        BuffKind::IgniteArrow => imgs.bow_ignite_arrow,
+        BuffKind::FreezeArrow => imgs.bow_freeze_arrow,
+        BuffKind::DrenchArrow => imgs.bow_drench_arrow,
+        BuffKind::JoltArrow => imgs.bow_jolt_arrow,
+        //  Debuffs
+        BuffKind::Bleeding => imgs.debuff_bleed_0,
+        BuffKind::Cursed => imgs.debuff_cursed_0,
+        BuffKind::Burning => imgs.debuff_burning_0,
+        BuffKind::Crippled => imgs.debuff_crippled_0,
+        BuffKind::Frozen => imgs.debuff_frozen_0,
+        BuffKind::Wet => imgs.debuff_wet_0,
+        BuffKind::Ensnared => imgs.debuff_ensnared_0,
+        BuffKind::Poisoned => imgs.debuff_poisoned_0,
+        BuffKind::Parried => imgs.debuff_parried_0,
+        BuffKind::PotionSickness => imgs.debuff_potionsickness_0,
+        BuffKind::Polymorphed => imgs.debuff_polymorphed_0,
+        BuffKind::Heatstroke => imgs.debuff_heatstroke_0,
+        BuffKind::Rooted => imgs.debuff_rooted_0,
+        BuffKind::Winded => imgs.debuff_winded_0,
+        BuffKind::Amnesia => imgs.debuff_amnesia_0,
+        BuffKind::OffBalance => imgs.debuff_offbalance_0,
+        BuffKind::Chilled => imgs.debuff_chilled,
     }
 }
 

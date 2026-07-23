@@ -1,7 +1,4 @@
-use common::{
-    character::CharacterId,
-    rtsim::{Actor, FactionId, NpcId},
-};
+use common::rtsim::{ActorId, FactionId};
 use hashbrown::HashMap;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -25,27 +22,15 @@ const DECAY_TIME_FACTOR: f32 = 2500.0;
 // - etc.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum Target {
-    Character(CharacterId),
-    Npc(NpcId),
+    Actor(ActorId),
     Faction(FactionId),
 }
 
-impl From<NpcId> for Target {
-    fn from(npc: NpcId) -> Self { Self::Npc(npc) }
+impl From<ActorId> for Target {
+    fn from(actor_id: ActorId) -> Self { Self::Actor(actor_id) }
 }
 impl From<FactionId> for Target {
     fn from(faction: FactionId) -> Self { Self::Faction(faction) }
-}
-impl From<CharacterId> for Target {
-    fn from(character: CharacterId) -> Self { Self::Character(character) }
-}
-impl From<Actor> for Target {
-    fn from(actor: Actor) -> Self {
-        match actor {
-            Actor::Character(character) => Self::Character(character),
-            Actor::Npc(npc) => Self::Npc(npc),
-        }
-    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -220,44 +205,33 @@ impl Sentiment {
 mod tests {
     use super::*;
 
+    // `ActorId` is an opaque slotmap key (not a plain newtype like the old
+    // `CharacterId` this test used to build `Target`s from), so tests mint
+    // deterministic dummy keys via the standard slotmap escape hatch
+    // (`KeyData::from_ffi`) rather than a real `SlotMap` — the test only
+    // needs distinct, stable `Target`s, not real actors.
+    fn test_actor(id: u64) -> Target {
+        Target::Actor(ActorId::from(slotmap::KeyData::from_ffi(id)))
+    }
+
     #[test]
     fn cleanup_forgets_weakest_sentiments_first() {
         let mut sentiments = Sentiments::default();
         for (id, positivity) in [(1, 5), (2, -120), (3, 60), (4, -10), (5, 100)] {
             sentiments
                 .map
-                .insert(Target::Character(CharacterId(id)), Sentiment { positivity });
+                .insert(test_actor(id), Sentiment { positivity });
         }
 
         sentiments.cleanup(3);
 
         assert_eq!(sentiments.map.len(), 3);
         // The two weakest sentiments (|5| and |-10|) should be forgotten first
-        assert!(
-            !sentiments
-                .map
-                .contains_key(&Target::Character(CharacterId(1)))
-        );
-        assert!(
-            !sentiments
-                .map
-                .contains_key(&Target::Character(CharacterId(4)))
-        );
+        assert!(!sentiments.map.contains_key(&test_actor(1)));
+        assert!(!sentiments.map.contains_key(&test_actor(4)));
         // The stronger sentiments should be retained
-        assert!(
-            sentiments
-                .map
-                .contains_key(&Target::Character(CharacterId(2)))
-        );
-        assert!(
-            sentiments
-                .map
-                .contains_key(&Target::Character(CharacterId(3)))
-        );
-        assert!(
-            sentiments
-                .map
-                .contains_key(&Target::Character(CharacterId(5)))
-        );
+        assert!(sentiments.map.contains_key(&test_actor(2)));
+        assert!(sentiments.map.contains_key(&test_actor(3)));
+        assert!(sentiments.map.contains_key(&test_actor(5)));
     }
 }

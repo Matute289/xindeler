@@ -402,13 +402,14 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::ScornfulTaunt
         | BuffKind::Tenacity
         | BuffKind::Resilience
-        | BuffKind::OwlTalon
-        | BuffKind::HeavyNock
-        | BuffKind::Heartseeker
+        | BuffKind::StormChaser
         | BuffKind::EagleEye
-        | BuffKind::ArdentHunter
-        | BuffKind::SepticShot
-        | BuffKind::FreedomOfMovement => {
+        | BuffKind::FreedomOfMovement
+        | BuffKind::ArdentHunt
+        | BuffKind::IgniteArrow
+        | BuffKind::FreezeArrow
+        | BuffKind::DrenchArrow
+        | BuffKind::JoltArrow => {
             tracing::error!("Player was killed by a positive buff!");
             "mysterious"
         },
@@ -424,7 +425,6 @@ fn get_buff_ident(buff: BuffKind) -> &'static str {
         | BuffKind::Amnesia
         | BuffKind::OffBalance
         | BuffKind::Chilled
-        | BuffKind::ArdentHunted
         | BuffKind::Terrified
         | BuffKind::Charmed
         | BuffKind::Hollowtouched

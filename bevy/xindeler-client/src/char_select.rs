@@ -353,6 +353,10 @@ impl WizardState {
     /// The chosen humanoid body, clamped to valid ranges for its species /
     /// body-type (`humanoid::Body::validate`).
     pub fn humanoid_body(&self) -> humanoid::Body {
+        // `height_scale` has no wizard step yet (upstream cosmetic addition) —
+        // 0 matches every other default-body site in the codebase
+        // (`humanoid::Body::iter`, the bot/test fixtures) until a real
+        // height-slider step is added.
         let mut body = humanoid::Body {
             species: self.species,
             body_type: self.body_type,
@@ -363,6 +367,7 @@ impl WizardState {
             hair_color: self.hair_color,
             skin: self.skin,
             eye_color: self.eye_color,
+            height_scale: 0,
         };
         body.validate();
         body

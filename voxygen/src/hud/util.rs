@@ -2,12 +2,10 @@ use super::img_ids;
 use common::{
     comp::{
         BuffData, BuffKind,
-        body::humanoid::Species,
-        class::ClassKind,
         inventory::trade_pricing::TradePricing,
         item::{
             Effects, Item, ItemDefinitionId, ItemDesc, ItemI18n, ItemKind, MaterialKind,
-            MaterialStatManifest, Quality, UnmetRequirement,
+            MaterialStatManifest, Quality,
             armor::{Armor, ArmorKind, Protection},
             tool::{Hands, Tool, ToolKind},
         },
@@ -73,108 +71,6 @@ pub fn item_text<'a, I: ItemDesc + ?Sized>(
     let (title, desc) = item.i18n(i18n_spec);
 
     (i18n.get_content(&title), i18n.get_content(&desc))
-}
-
-/// Requirement lines for an item tooltip, split into (met, unmet) for the
-/// given viewer `(character_level, species)`. `viewer: None` (no SkillSet,
-/// e.g. spectators) renders everything as met.
-pub fn requirements_text(
-    item: &dyn ItemDesc,
-    class: Option<ClassKind>,
-    viewer: Option<(u16, Option<Species>)>,
-    i18n: &Localization,
-) -> (Vec<String>, Vec<String>) {
-    let (mut met, mut unmet) = (Vec::new(), Vec::new());
-    let Some(requirements) = item.requirements() else {
-        return (met, unmet);
-    };
-    // Reuse the shared predicate so the tooltip can never disagree with the
-    // server's enforcement.
-    let unmet_kinds = viewer
-        .map(|(level, species)| requirements.unmet(class, level, species))
-        .unwrap_or_default();
-
-    if let Some(classes) = &requirements.classes {
-        let names = classes
-            .iter()
-            .map(|c| i18n.get_msg(class_i18n_key(*c)).into_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let line = i18n
-            .get_msg_ctx("hud-bag-requirement_class", &fluent_args! {
-                "classes" => names,
-            })
-            .into_owned();
-        if unmet_kinds.contains(&UnmetRequirement::Class) {
-            unmet.push(line);
-        } else {
-            met.push(line);
-        }
-    }
-    if let Some(needed) = requirements.min_level {
-        let line = i18n
-            .get_msg_ctx("hud-bag-requirement_level", &fluent_args! {
-                "level" => u32::from(needed),
-            })
-            .into_owned();
-        if unmet_kinds
-            .iter()
-            .any(|u| matches!(u, UnmetRequirement::Level { .. }))
-        {
-            unmet.push(line);
-        } else {
-            met.push(line);
-        }
-    }
-    if let Some(races) = &requirements.races {
-        let names = races
-            .iter()
-            .map(|species| i18n.get_msg(species_i18n_key(*species)).into_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let line = i18n
-            .get_msg_ctx("hud-bag-requirement_race", &fluent_args! {
-                "races" => names,
-            })
-            .into_owned();
-        if unmet_kinds.contains(&UnmetRequirement::Race) {
-            unmet.push(line);
-        } else {
-            met.push(line);
-        }
-    }
-    (met, unmet)
-}
-
-fn species_i18n_key(species: Species) -> &'static str {
-    match species {
-        Species::Danari => "common-species-danari",
-        Species::Dwarf => "common-species-dwarf",
-        Species::Elf => "common-species-elf",
-        Species::Human => "common-species-human",
-        Species::Orc => "common-species-orc",
-        Species::Draugr => "common-species-draugr",
-    }
-}
-
-fn class_i18n_key(class: ClassKind) -> &'static str {
-    match class {
-        ClassKind::Adventurer => "common-class-adventurer",
-        ClassKind::Warrior => "common-class-warrior",
-        ClassKind::Mage => "common-class-mage",
-        ClassKind::Cleric => "common-class-cleric",
-        ClassKind::Rogue => "common-class-rogue",
-        ClassKind::Barbarian => "common-class-barbarian",
-        ClassKind::Sorcerer => "common-class-sorcerer",
-        ClassKind::Warlock => "common-class-warlock",
-        ClassKind::Bard => "common-class-bard",
-        ClassKind::Paladin => "common-class-paladin",
-        ClassKind::Druid => "common-class-druid",
-        ClassKind::Ranger => "common-class-ranger",
-        ClassKind::Monk => "common-class-monk",
-        ClassKind::Artificer => "common-class-artificer",
-        ClassKind::BloodSlayer => "common-class-blood_slayer",
-    }
 }
 
 pub fn describe<'a, I: ItemDesc + ?Sized>(
@@ -289,7 +185,6 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::ComboGeneration => "buff-combo_generation",
         BuffKind::IncreaseMaxHealth => "buff-increase_max_health",
         BuffKind::IncreaseMaxEnergy => "buff-increase_max_energy",
-        BuffKind::Shielded => "buff-shielded",
         BuffKind::Invulnerability => "buff-invulnerability",
         BuffKind::ProtectingWard => "buff-protectingward",
         BuffKind::Frenzied => "buff-frenzied",
@@ -309,15 +204,15 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::ScornfulTaunt => "buff-scornfultaunt",
         BuffKind::Tenacity => "buff-tenacity",
         BuffKind::Resilience => "buff-resilience",
-        BuffKind::OwlTalon => "buff-owltalon",
-        BuffKind::HeavyNock => "buff-heavynock",
-        BuffKind::Heartseeker => "buff-heartseeker",
+        BuffKind::StormChaser => "buff-stormchaser",
         BuffKind::EagleEye => "buff-eagleeye",
-        BuffKind::ArdentHunter => "buff-ardenthunter",
-        BuffKind::SepticShot => "buff-septicshot",
+        BuffKind::ArdentHunt => "buff-ardenthunt",
+        BuffKind::IgniteArrow => "buff-ignitearrow",
+        BuffKind::FreezeArrow => "buff-freezearrow",
+        BuffKind::DrenchArrow => "buff-drencharrow",
+        BuffKind::JoltArrow => "buff-joltarrow",
         // Debuffs
         BuffKind::Bleeding => "buff-bleed",
-        BuffKind::BleedingMark => "buff-bleeding_mark",
         BuffKind::Cursed => "buff-cursed",
         BuffKind::Burning => "buff-burn",
         BuffKind::Crippled => "buff-crippled",
@@ -333,20 +228,8 @@ fn buff_key(buff: BuffKind) -> &'static str {
         BuffKind::Amnesia => "buff-amnesia",
         BuffKind::OffBalance => "buff-offbalance",
         BuffKind::Chilled => "buff-chilled",
-        BuffKind::ArdentHunted => "buff-ardenthunted",
-        BuffKind::Terrified => "buff-terrified",
-        BuffKind::Charmed => "buff-charmed",
-        BuffKind::Hollowtouched => "buff-hollowtouched",
-        BuffKind::DifficultTerrain => "buff-difficult_terrain",
-        BuffKind::Antimagic => "buff-antimagic",
-        BuffKind::Anchored => "buff-anchored",
-        BuffKind::Asleep => "buff-asleep",
-        BuffKind::Blinded => "buff-blinded",
-        BuffKind::Slowed => "buff-slowed",
         // Neutral
         BuffKind::Polymorphed => "buff-polymorphed",
-        // Positive
-        BuffKind::FreedomOfMovement => "buff-freedom_of_movement",
     }
 }
 
@@ -427,8 +310,7 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         },
                         // Show buff strength
                         BuffKind::IncreaseMaxEnergy
-                        | BuffKind::IncreaseMaxHealth
-                        | BuffKind::Shielded => {
+                        | BuffKind::IncreaseMaxHealth => {
                             let key = buff_key(buff.kind);
                             i18n.get_attr_ctx(key, "stat", &i18n::fluent_args! {
                                 "strength" => format_float(strength),
@@ -453,7 +335,6 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         },
                         // Have no stat description
                         BuffKind::Bleeding
-                        | BuffKind::BleedingMark
                         | BuffKind::Burning
                         | BuffKind::RestingHeal
                         | BuffKind::Cursed
@@ -487,24 +368,14 @@ pub fn consumable_desc(effects: &Effects, i18n: &Localization) -> Vec<String> {
                         | BuffKind::OffBalance
                         | BuffKind::Tenacity
                         | BuffKind::Resilience
-                        | BuffKind::OwlTalon
-                        | BuffKind::HeavyNock
-                        | BuffKind::Heartseeker
+                        | BuffKind::StormChaser
                         | BuffKind::EagleEye
                         | BuffKind::Chilled
-                        | BuffKind::ArdentHunter
-                        | BuffKind::ArdentHunted
-                        | BuffKind::SepticShot
-                        | BuffKind::Terrified
-                        | BuffKind::Charmed
-                        | BuffKind::Hollowtouched
-                        | BuffKind::DifficultTerrain
-                        | BuffKind::FreedomOfMovement
-                        | BuffKind::Antimagic
-                        | BuffKind::Anchored
-                        | BuffKind::Asleep
-                        | BuffKind::Blinded
-                        | BuffKind::Slowed => Cow::Borrowed(""),
+                        | BuffKind::ArdentHunt
+                        | BuffKind::IgniteArrow
+                        | BuffKind::FreezeArrow
+                        | BuffKind::DrenchArrow
+                        | BuffKind::JoltArrow => Cow::Borrowed(""),
                     };
 
                     write!(&mut description, "{}", buff_desc).unwrap();
@@ -545,9 +416,6 @@ fn tool_kind<'a>(tool: &Tool, i18n: &'a Localization) -> Cow<'a, str> {
         ToolKind::Dagger => i18n.get_msg("common-weapons-dagger"),
         ToolKind::Staff => i18n.get_msg("common-weapons-staff"),
         ToolKind::Sceptre => i18n.get_msg("common-weapons-sceptre"),
-        ToolKind::Tome => i18n.get_msg("common-weapons-tome"),
-        ToolKind::HolySymbol => i18n.get_msg("common-weapons-holy_symbol"),
-        ToolKind::Focus => i18n.get_msg("common-weapons-focus"),
         ToolKind::Shield => i18n.get_msg("common-weapons-shield"),
         ToolKind::Spear => i18n.get_msg("common-weapons-spear"),
         ToolKind::Blowgun => i18n.get_msg("common-weapons-blowgun"),
@@ -779,47 +647,41 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         "common.abilities.bow.foothold" => imgs.bow_foothold,
         "common.abilities.bow.heavy_nock" => imgs.bow_heavy_nock,
         "common.abilities.bow.ardent_hunt" => imgs.bow_ardent_hunt,
-        "common.abilities.bow.owl_talon" => imgs.bow_owl_talon,
+        "common.abilities.bow.ardent_hunt_clear" => imgs.bow_ardent_hunt,
+        "common.abilities.bow.storm_chaser" => imgs.bow_storm_chaser,
+        "common.abilities.bow.storm_chaser_clear" => imgs.bow_storm_chaser,
         "common.abilities.bow.eagle_eye" => imgs.bow_eagle_eye,
         "common.abilities.bow.heartseeker" => imgs.bow_heartseeker,
+        "common.abilities.bow.heartseeker_shot" => imgs.bow_heartseeker,
+        "common.abilities.bow.burning_heartseeker_shot" => imgs.bow_burning_heartseeker,
+        "common.abilities.bow.freezing_heartseeker_shot" => imgs.bow_freezing_heartseeker,
+        "common.abilities.bow.poison_heartseeker_shot" => imgs.bow_poison_heartseeker,
+        "common.abilities.bow.lightning_heartseeker_shot" => imgs.bow_lightning_heartseeker,
         "common.abilities.bow.hawkstrike" => imgs.bow_hawkstrike,
         "common.abilities.bow.hawkstrike_shot" => imgs.bow_hawkstrike,
+        "common.abilities.bow.burning_hawkstrike_shot" => imgs.bow_burning_hawkstrike,
+        "common.abilities.bow.freezing_hawkstrike_shot" => imgs.bow_freezing_hawkstrike,
+        "common.abilities.bow.poison_hawkstrike_shot" => imgs.bow_poison_hawkstrike,
+        "common.abilities.bow.lightning_hawkstrike_shot" => imgs.bow_lightning_hawkstrike,
         "common.abilities.bow.septic_shot" => imgs.bow_septic_shot,
         "common.abilities.bow.ignite_arrow" => imgs.bow_ignite_arrow,
-        "common.abilities.bow.burning_arrow" => imgs.bow_burning_arrow,
         "common.abilities.bow.burning_broadhead" => imgs.bow_burning_broadhead,
         "common.abilities.bow.drench_arrow" => imgs.bow_drench_arrow,
-        "common.abilities.bow.poison_arrow" => imgs.bow_poison_arrow,
         "common.abilities.bow.poison_broadhead" => imgs.bow_poison_broadhead,
         "common.abilities.bow.freeze_arrow" => imgs.bow_freeze_arrow,
-        "common.abilities.bow.freezing_arrow" => imgs.bow_freezing_arrow,
         "common.abilities.bow.freezing_broadhead" => imgs.bow_freezing_broadhead,
         "common.abilities.bow.jolt_arrow" => imgs.bow_jolt_arrow,
-        "common.abilities.bow.lightning_arrow" => imgs.bow_lightning_arrow,
         "common.abilities.bow.lightning_broadhead" => imgs.bow_lightning_broadhead,
         "common.abilities.bow.barrage" => imgs.bow_barrage,
         "common.abilities.bow.barrage_shot" => imgs.bow_barrage,
         "common.abilities.bow.piercing_gale" => imgs.bow_piercing_gale,
-        "common.abilities.bow.piercing_gale_shot" => imgs.bow_piercing_gale,
-        "common.abilities.bow.scatterburst" => imgs.bow_scatterburst,
-        "common.abilities.bow.lesser_scatterburst" => imgs.bow_lesser_scatterburst,
-        "common.abilities.bow.greater_scatterburst" => imgs.bow_greater_scatterburst,
         "common.abilities.bow.fusillade" => imgs.bow_fusillade,
-        "common.abilities.bow.fusillade_shot" => imgs.bow_fusillade,
         "common.abilities.bow.death_volley" => imgs.bow_death_volley,
-        "common.abilities.bow.death_volley_shot" => imgs.bow_death_volley,
-        "common.abilities.bow.death_volley_heavy_shot" => imgs.bow_death_volley,
-        // Spells (cantrips) — TODO(magic-v2 polish): dedicated spell icons
-        "common.abilities.spells.arcane.cinderbolt" => imgs.fireball,
-        "common.abilities.spells.divine.dawnmote" => imgs.fireball,
-        "common.abilities.spells.primal.thornspit" => imgs.fireball,
-        // Racial innates (magic-abilities Task 14) — reused icons until dedicated art.
-        "innate.human" => imgs.skill_sceptre_heal,
-        "innate.elf" => imgs.sword_agile_stance,
-        "innate.dwarf" => imgs.sword_heavy_stance,
-        "innate.orc" => imgs.sword_crippling_stance,
-        "innate.danari" => imgs.staff_fire_dash,
-        "innate.draugr" => imgs.hammer_seismic_shock,
+        "common.abilities.bow.thorn_stake" => imgs.bow_thorn_stake,
+        "common.abilities.bow.burning_thorn_stake" => imgs.bow_burning_thorn_stake,
+        "common.abilities.bow.freezing_thorn_stake" => imgs.bow_freezing_thorn_stake,
+        "common.abilities.bow.poison_thorn_stake" => imgs.bow_poison_thorn_stake,
+        "common.abilities.bow.lightning_thorn_stake" => imgs.bow_lightning_thorn_stake,
         // Staff
         "common.abilities.staff.firebomb" => imgs.fireball,
         "common.abilities.staff.flamethrower" => imgs.flamethrower,
@@ -871,16 +733,6 @@ pub fn ability_image(imgs: &img_ids::Imgs, ability_id: &str) -> image::Id {
         // Glider
         "common.abilities.debug.glide_boost" => imgs.flyingrod_m2,
         "common.abilities.debug.glide_speeder" => imgs.flyingrod_m1,
-        // BL-06 class signature/capstone abilities (Innate pool keys). Reuse
-        // existing skill/buff icons until bespoke art lands.
-        "class.warrior.rally" => imgs.buff_healthplus_0,
-        "class.warrior.onslaught" => imgs.buff_frenzy_0,
-        "class.mage.arcanesurge" => imgs.magic_energy_regen_skill,
-        "class.mage.arcanemastery" => imgs.magic_damage_skill,
-        "class.cleric.mendinglight" => imgs.buff_healthplus_0,
-        "class.cleric.radiantchannel" => imgs.buff_plus_0,
-        "class.rogue.ambush" => imgs.buff_imminentcritical,
-        "class.rogue.vanish" => imgs.buff_haste_0,
         _ => imgs.not_found,
     }
 }

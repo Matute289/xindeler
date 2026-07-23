@@ -67,3 +67,4 @@ char_selection-summary_label_alignment = Alineamiento
 char_selection-sex = Sexo
 char_selection-background = Elige tu trasfondo
 char_selection-background_uncommitted = Sin definir
+char_selection-height_scale = Altura
