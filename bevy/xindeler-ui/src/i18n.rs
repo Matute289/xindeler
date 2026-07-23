@@ -336,6 +336,10 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     "hud/map.ftl",
     "hud/quest.ftl",
     "hud/skills.ftl",
+    // BL-82 EM-5.16 item D: the Diary skill-tree name lookup resolves its 89
+    // weapon nodes through this catalog's `common-abilities-*` /
+    // `veloren-core-pseudo_abilities-*` keys.
+    "hud/ability.ftl",
     "hud/social.ftl",
     "hud/group.ftl",
     "hud/trade.ftl",
@@ -583,5 +587,22 @@ mod tests {
         assert_eq!(parse_locale("es"), langid!("es"));
         assert_eq!(parse_locale("zh-Hans"), langid!("zh-Hans"));
         assert_eq!(parse_locale("!!!not-a-locale!!!"), langid!("en"));
+    }
+
+    /// `hud/ability.ftl` must be in the default catalog: the Diary skill-tree
+    /// name lookup (BL-82 EM-5.16 item D) resolves its 89 weapon nodes through
+    /// `common-abilities-*` / `veloren-core-pseudo_abilities-*` keys that live
+    /// only there.
+    #[test]
+    fn ability_ftl_is_loaded_and_resolves_a_weapon_key() {
+        let l10n = Localization::load(&fallback_locale(), DEFAULT_HUD_FTL_FILES);
+        // A representative weapon-ability key + the one naming-quirk key.
+        for key in [
+            "common-abilities-sword-heavy_sweep",
+            "veloren-core-pseudo_abilities-sword-fell_strike",
+            "common-abilities-staff-fireshockwave",
+        ] {
+            assert_ne!(l10n.tr(key), key, "{key} must resolve to real text");
+        }
     }
 }
