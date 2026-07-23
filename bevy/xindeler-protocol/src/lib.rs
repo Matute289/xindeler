@@ -76,7 +76,9 @@ pub use crate::{
     map::{MAP_IMAGE_MAX_DIM, NetMapData, NetMapMarker, NetMapPoi, NetPoiKind, wpos_to_screen_uv},
     narrative::{HudToast, HudToastPlugin, NarrativeHooks},
     owner_visibility::{ClientOwnedUid, NetOwnerOnly},
-    sfx::{NetCombatMove, NetGroundBlock, NetLocomotion, NetMoveState, NetOutcome},
+    sfx::{
+        NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLocomotion, NetMoveState, NetOutcome,
+    },
     skillset::{NetAbilityPool, NetSkillGroup, NetSkillSet, UnlockSkillRequest},
     social::{
         DialogueResponseRequest, GroupAction, GroupActionRequest, NetDialogue, NetGroupMember,
@@ -938,7 +940,11 @@ impl Plugin for XindelerProtocolPlugin {
             // other entity-visible comp above (NOT owner-scoped: hearing a
             // NEARBY entity's footsteps/attack sounds is the whole point).
             .replicate::<NetLocomotion>()
-            .replicate::<NetCombatMove>();
+            .replicate::<NetCombatMove>()
+            // BL-82 EM-5.10e (T56.37): the instrument note-bank sub-mapper's
+            // own snapshot — broadcast the same way as `NetCombatMove` above
+            // (hearing a nearby entity's music is the whole point).
+            .replicate::<NetInstrumentMove>();
 
         // Client → server messages. v0 keeps PlayerInput on the ordered lane
         // (no client-side redundancy/resampling yet); it moves to the

@@ -19,7 +19,7 @@
 //!   documented v1 cut, not a silent gap — see [`NetOutcome`]'s own doc
 //!   comment.
 use bevy::{ecs::component::Component, math::Vec3};
-use common::comp::{CharacterAbilityType, poise::PoiseState};
+use common::comp::{CharacterAbilityType, inventory::item::tool::AbilitySpec, poise::PoiseState};
 use serde::{Deserialize, Serialize};
 
 /// Coarse ground-material grouping under an entity's feet, mirroring the old
@@ -152,6 +152,33 @@ pub struct NetCombatMove {
     pub weapon_drawn: bool,
 }
 
+/// Replicated per-entity instrument-playing snapshot (BL-82 EM-5.10e,
+/// T56.37 — the 252-file bard instrument note-bank). Kept as its OWN
+/// component rather than folded into [`NetCombatMove`] because
+/// [`AbilitySpec::Custom`] carries a `String`, which would cost that struct
+/// its `Copy` derive (relied on by call sites that construct a `NetCombatMove`
+/// value and then still use it after spawning, e.g. this module's own
+/// round-trip test) — a clean "one extra component" split, the same shape
+/// [`crate::narrative::HudToast`] takes alongside [`crate::chat::NetChatMsg`]
+/// rather than merging unrelated shapes into one payload.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct NetInstrumentMove {
+    /// `Some(ability_spec)` while `character_state.is_music()` AND the
+    /// equipped instrument (the hand `character_state.ability_info()` names,
+    /// falling back to `ActiveMainhand`) resolves an
+    /// `common::comp::inventory::item::ItemDesc::ability_spec()` — ported
+    /// verbatim from the old combat mapper's own `Music(ToolKind,
+    /// AbilitySpec)` construction (`voxygen/src/audio/sfx/event_mapper/
+    /// combat/mod.rs::map_event`'s `is_music()` arm). `None` while not
+    /// playing, or if the equipped item carries no `ability_spec` (both
+    /// cases are the client's cue to stay silent). `ToolKind` is NOT
+    /// mirrored here — every music-playing item is `ToolKind::Instrument`
+    /// (verified against every `assets/common/items/tool/instruments/*.ron`),
+    /// so the client-side mapper hardcodes it the same way `sfx.ron`'s own
+    /// `Music(Instrument, Custom(..))` keys do.
+    pub playing: Option<AbilitySpec>,
+}
+
 /// Server → client: a DELIBERATELY PARTIAL projection of
 /// `common::outcome::Outcome` (BL-82 EM-5.10b, T56.35's `handle_outcome`
 /// port) — see this module's doc comment for the full "why only 5 of ~40"
@@ -263,6 +290,40 @@ mod tests {
             .expect("exactly one mirrored entity");
         assert_eq!(*got_locomotion, locomotion);
         assert_eq!(*got_combat_move, combat_move);
+    }
+
+    /// [`NetInstrumentMove`] round-trip (BL-82 EM-5.10e, T56.37) — the same
+    /// acceptance bar as the sibling [`NetLocomotion`]/[`NetCombatMove`] test,
+    /// exercising the `Custom(String)` payload specifically (the whole reason
+    /// this is its own component rather than a `NetCombatMove` field).
+    #[test]
+    fn instrument_move_replicates_to_the_client() {
+        let mut server_app = new_app();
+        let mut client_app = new_app();
+        server_app.connect_client(&mut client_app);
+
+        let instrument_move = NetInstrumentMove {
+            playing: Some(AbilitySpec::Custom("Flute".to_owned())),
+        };
+
+        server_app
+            .world_mut()
+            .spawn((Replicated, instrument_move.clone()));
+
+        server_app.update();
+        server_app.exchange_with_client(&mut client_app);
+        client_app.update();
+
+        let mut q = client_app.world_mut().query::<&NetInstrumentMove>();
+        let got = q
+            .single(client_app.world())
+            .expect("exactly one mirrored entity");
+        assert_eq!(*got, instrument_move);
+    }
+
+    #[test]
+    fn instrument_move_default_is_silent() {
+        assert_eq!(NetInstrumentMove::default().playing, None);
     }
 
     /// [`NetOutcome`] travels as a broadcast server message (`SendTargets::
