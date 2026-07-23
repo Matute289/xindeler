@@ -1713,7 +1713,7 @@ mod tests {
             "the Abilities tab must show the real en catalog text at spawn time"
         );
 
-        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -1725,8 +1725,8 @@ mod tests {
         assert_eq!(
             abilities_button_text(&mut app),
             "Habilidades",
-            "must resolve to the REAL es catalog's own hud-diary-sections-abilities-title value, \
-             not the en fallback"
+            "must resolve to the REAL es-419 catalog's own hud-diary-sections-abilities-title \
+             value, not the en fallback"
         );
     }
 
@@ -1783,11 +1783,11 @@ mod tests {
             "the Level row must show the real en catalog label at spawn time"
         );
 
-        // Reload to the real es catalog and re-run the same system — no
+        // Reload to the real es-419 catalog and re-run the same system — no
         // separate hot-swap chain needed here, `sync_stats_panel` just reads
         // whatever `Localization` bundle is current every time it rebuilds.
         app.insert_non_send(Localization::load(
-            &xindeler_ui::i18n::parse_locale("es"),
+            &xindeler_ui::i18n::parse_locale("es-419"),
             &["hud/char_window.ftl"],
         ));
         app.world_mut()
@@ -1797,7 +1797,7 @@ mod tests {
         assert_eq!(
             first_line(&mut app, root),
             "Nivel 3",
-            "must resolve to the real es catalog's own character_window-character_level value"
+            "must resolve to the real es-419 catalog's own character_window-character_level value"
         );
     }
 

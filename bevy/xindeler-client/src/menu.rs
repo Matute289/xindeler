@@ -3161,7 +3161,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
-            .0 = "es".to_owned();
+            .0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -3182,7 +3182,7 @@ mod tests {
         );
         assert!(
             after.iter().any(|l| l == "Salir"),
-            "must resolve to the REAL es catalog's own common-quit value: {after:?}"
+            "must resolve to the REAL es-419 catalog's own common-quit value: {after:?}"
         );
     }
 }

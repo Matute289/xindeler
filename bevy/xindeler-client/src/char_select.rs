@@ -2332,7 +2332,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
-            .0 = "es".to_owned();
+            .0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -2344,7 +2344,8 @@ mod tests {
         let after = cancel_button_text(&mut app);
         assert_eq!(
             after, "Cancelar",
-            "must resolve to the REAL es catalog's own common-cancel value, not the en fallback"
+            "must resolve to the REAL es-419 catalog's own common-cancel value, not the en \
+             fallback"
         );
     }
 }
