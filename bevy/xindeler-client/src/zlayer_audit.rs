@@ -210,7 +210,7 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     // subtitle_overlay.rs (BL-82 EM-5.16 Phase 5 close-out): the
     // positional-sound subtitle column — ambient chrome, never claims the
     // HudState window slot.
-    ("SubtitleOverlayRoot", RootKind::TopLevel), // GlobalZIndex(50)
+    ("SubtitleOverlayRoot", RootKind::TopLevel), // GlobalZIndex(zlayer::SUBTITLE_OVERLAY)
 ];
 
 /// Scans every `.rs` file under `dir` (recursively) for a top-level `struct

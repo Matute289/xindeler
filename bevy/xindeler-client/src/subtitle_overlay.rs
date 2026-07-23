@@ -5,7 +5,7 @@
 //! direction arrow pointing from the `MainCamera` toward the sound source.
 
 use bevy::prelude::*;
-use xindeler_ui::i18n::Localization;
+use xindeler_ui::{i18n::Localization, zlayer};
 
 /// Sound-source direction relative to where the listener/camera faces,
 /// collapsed to one of 8 compass arrows. `forward`/`right` are the camera's
@@ -78,9 +78,7 @@ fn spawn_subtitle_overlay_root(mut commands: Commands) {
             row_gap: Val::Px(4.0),
             ..Default::default()
         },
-        // Behind interactive HUD, above the world — reuse the crate's HUD z
-        // convention (see `xindeler_ui::zlayer`); a mid GlobalZIndex is fine.
-        GlobalZIndex(50),
+        GlobalZIndex(zlayer::SUBTITLE_OVERLAY),
         Pickable::IGNORE,
     ));
 }
@@ -178,6 +176,6 @@ mod tests {
             .query_filtered::<&GlobalZIndex, With<SubtitleOverlayRoot>>()
             .single(world)
             .expect("SubtitleOverlayRoot exists");
-        assert_eq!(z_index.0, 50);
+        assert_eq!(z_index.0, zlayer::SUBTITLE_OVERLAY);
     }
 }
