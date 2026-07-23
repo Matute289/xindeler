@@ -177,6 +177,10 @@ hud-settings-group_only = Group only
 hud-settings-reset_chat = Reset to Defaults
 hud-settings-third_party_integrations = Third-party Integrations
 hud-settings-enable_discord_integration = Enable Discord Integration
+# BL-82 EM-5.16: this pre-existing legacy key is now the real row label the
+# Bevy client's Accessibility→Subtitles toggle resolves through
+# (`xindeler-client::settings_window`) — a duplicate re-declaration of it was
+# accidentally added lower in this file during that same PR; removed there.
 hud-settings-subtitles = Subtitles
 hud-settings-show_all_recipes = Show All Recipes
 hud-settings-gamepad = Gamepad
@@ -197,7 +201,6 @@ hud-settings-contact_shadows = Contact shadows
 hud-settings-vignette = Vignette
 hud-settings-reduce_flashing = Reduce flashing
 hud-settings-high_contrast_ui = High-contrast UI
-hud-settings-subtitles = Subtitles
 hud-settings-shadow_cascades = Shadow cascades
 hud-settings-mouse_sensitivity = Mouse sensitivity
 hud-settings-fly_speed = Fly-cam speed

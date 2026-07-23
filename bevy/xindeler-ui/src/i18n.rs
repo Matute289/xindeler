@@ -346,6 +346,12 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     // label, `hud-settings-subtitles`, lives in the already-registered
     // `hud/settings.ftl`).
     "hud/subtitles.ftl",
+    // BL-82 EM-5.16 chat i18n interpolation: `command.ftl`'s `/command`
+    // feedback keys (e.g. `players-list-header`) — the client resolves these
+    // client-side (via `Localization::tr_args`) once `xindeler-sim-bridge`
+    // projects a `Content::Localized` command-feedback line into a
+    // `NetLocalizedContent` payload (see `xindeler-client::chat`).
+    "command.ftl",
 ];
 
 /// Tracks which BCP-47 tag the currently-loaded [`Localization`] catalog is
