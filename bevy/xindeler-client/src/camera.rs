@@ -174,6 +174,12 @@ pub struct FlyCam {
     pub fast_multiplier: f32,
     /// Mouse-look sensitivity, rad/px.
     pub sensitivity: f32,
+    /// Inverts the pitch axis (BL-82 EM-5.12+, ported from legacy
+    /// `gameplay.invert_mouse_y`) — `true` flips [`fly_cam_look`]'s pitch
+    /// contribution so pushing the mouse up looks DOWN. Baked from
+    /// `CameraSettings::invert_pitch` at spawn time, same as
+    /// `sensitivity`/`speed` above.
+    pub invert_pitch: bool,
     pub yaw: f32,
     pub pitch: f32,
     /// Rotation left over from a frame whose desired yaw/pitch step exceeded
@@ -196,6 +202,7 @@ impl Default for FlyCam {
             speed: 12.0,
             fast_multiplier: 4.0,
             sensitivity: 0.002,
+            invert_pitch: false,
             yaw: 0.0,
             pitch: 0.0,
             yaw_carry: 0.0,
@@ -314,6 +321,7 @@ fn spawn_camera(
             speed: settings.camera.fly_speed,
             fast_multiplier: settings.camera.fly_fast_multiplier,
             sensitivity: settings.camera.mouse_sensitivity,
+            invert_pitch: settings.camera.invert_pitch,
             ..Default::default()
         },
     ));
@@ -463,7 +471,19 @@ fn fly_cam_look(
         cam.yaw += yaw_step;
         cam.yaw_carry = yaw_carry;
 
-        let desired_pitch = cam.pitch_carry - motion.delta.y * cam.sensitivity - gamepad_look.y;
+        // BL-82 EM-5.12+ (invert-Y port): flips ONLY the fresh mouse-delta
+        // contribution, never the gamepad stick term or the carried-over
+        // remainder — the stick already applies its own inversion upstream
+        // (`xindeler_input::gamepad::GamepadBindings::apply_axis`, see this
+        // function's own doc above), and the carry is just deferred motion
+        // from a PREVIOUS frame that was already signed correctly when it
+        // was computed.
+        let pitch_mouse_delta = if cam.invert_pitch {
+            -motion.delta.y
+        } else {
+            motion.delta.y
+        };
+        let desired_pitch = cam.pitch_carry - pitch_mouse_delta * cam.sensitivity - gamepad_look.y;
         let (pitch_step, pitch_carry) = capped_look_step(desired_pitch);
         cam.pitch_carry = pitch_carry;
         cam.pitch = (cam.pitch + pitch_step).clamp(
@@ -742,6 +762,57 @@ mod tests {
         assert!(
             (total_applied - 10.0).abs() < 1e-4,
             "no rotation is lost, only spread out: {total_applied}"
+        );
+    }
+
+    /// BL-82 (legacy `gameplay.invert_mouse_y` port): [`FlyCam::invert_pitch`]
+    /// flips only the fresh mouse-delta term of [`fly_cam_look`]'s pitch
+    /// integration — with a zero carry and zero gamepad look (both true
+    /// here), a normal and an inverted cam fed the SAME mouse delta must end
+    /// the frame with exactly opposite pitch, proving the sign flip is real
+    /// and isolated to the mouse contribution (not, say, a global negation
+    /// that would also flip yaw or the gamepad stick).
+    #[test]
+    fn invert_pitch_flips_only_the_mouse_pitch_contribution() {
+        let mut app = App::new();
+        app.insert_resource(AccumulatedMouseMotion {
+            delta: Vec2::new(0.0, 10.0),
+        });
+        app.init_resource::<xindeler_input::ActionState>();
+        app.init_resource::<Time>();
+        app.world_mut().spawn((PrimaryWindow, CursorOptions {
+            grab_mode: CursorGrabMode::Locked,
+            visible: false,
+            ..Default::default()
+        }));
+        let normal = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, FlyCam {
+                sensitivity: 0.01,
+                ..Default::default()
+            }))
+            .id();
+        let inverted = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, FlyCam {
+                sensitivity: 0.01,
+                invert_pitch: true,
+                ..Default::default()
+            }))
+            .id();
+        app.add_systems(Update, fly_cam_look);
+        app.update();
+
+        let normal_pitch = app.world().get::<FlyCam>(normal).unwrap().pitch;
+        let inverted_pitch = app.world().get::<FlyCam>(inverted).unwrap().pitch;
+        assert_ne!(
+            normal_pitch, 0.0,
+            "sanity: the mouse delta must move the pitch at all"
+        );
+        assert!(
+            (normal_pitch + inverted_pitch).abs() < 1e-6,
+            "the same mouse delta must land at exactly opposite pitch when inverted: \
+             normal={normal_pitch} inverted={inverted_pitch}"
         );
     }
 }

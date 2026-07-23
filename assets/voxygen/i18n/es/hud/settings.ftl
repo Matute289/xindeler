@@ -196,6 +196,7 @@ hud-settings-high_contrast_ui = UI de alto contraste
 hud-settings-shadow_cascades = Cascadas de sombra
 hud-settings-mouse_sensitivity = Sensibilidad del ratón
 hud-settings-fly_speed = Velocidad de la cámara libre
+hud-settings-fly_fast_multiplier = Multiplicador rápido de la cámara libre
 hud-settings-language = Idioma
 hud-settings-custom_graphics = Personalizado
 hud-settings-open_controls = Abrir Controles / Reasignación

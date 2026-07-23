@@ -1424,10 +1424,15 @@ fn sync_chat_panel_bottom_to_window(
 /// channel via the per-line ICON + text color rather than a bracketed prefix,
 /// so this is just `alias: text` (or bare `text` for a senderless line) — the
 /// icon/color carry the channel.
-fn format_chat_line(msg: &NetChatMsg) -> String {
+/// Formats one chat line, optionally prefixing the speaker's alias — the
+/// legacy `chat_character_name` toggle (BL-82 port, `XindelerSettings::chat.
+/// show_character_name`). `show_character_name = false` drops the alias
+/// prefix entirely (not just hides it visually), matching the legacy
+/// behaviour of the same name.
+fn format_chat_line(msg: &NetChatMsg, show_character_name: bool) -> String {
     match &msg.sender_alias {
-        Some(alias) => format!("{alias}: {}", msg.text),
-        None => msg.text.clone(),
+        Some(alias) if show_character_name => format!("{alias}: {}", msg.text),
+        _ => msg.text.clone(),
     }
 }
 
@@ -1450,6 +1455,7 @@ fn ingest_chat_messages(
     fonts: Res<HudFonts>,
     icons: Res<ChatIcons>,
     filter: Res<ChatUiState>,
+    settings: Res<XindelerSettings>,
     scroll_area: Query<Entity, With<ChatScrollArea>>,
     mut scroll_positions: Query<&mut ScrollPosition, With<ChatScrollArea>>,
 ) {
@@ -1501,7 +1507,7 @@ fn ingest_chat_messages(
                 // The channel-tinted message text (word-wraps within the box).
                 row.spawn((
                     ChatRowText,
-                    Text(format_chat_line(msg)),
+                    Text(format_chat_line(msg, settings.chat.show_character_name)),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
                         font_size: bevy::text::FontSize::Px(14.0),
@@ -1985,6 +1991,7 @@ mod tests {
         });
         app.insert_non_send(test_localization());
         app.insert_resource(ChatIcons::dummy());
+        app.insert_resource(XindelerSettings::default());
         app.init_resource::<ChatUiState>();
         app.init_resource::<ChatHistory>();
         app.init_resource::<ChatInput>();
@@ -2208,7 +2215,7 @@ mod tests {
         };
         // Legacy conveys the channel via the per-line icon + text color, not a
         // bracketed prefix, so the text is just `alias: text`.
-        assert_eq!(format_chat_line(&with_sender), "Hero: hello");
+        assert_eq!(format_chat_line(&with_sender, true), "Hero: hello");
 
         let without_sender = NetChatMsg {
             channel: NetChatChannel::System,
@@ -2216,7 +2223,29 @@ mod tests {
             sender_alias: None,
             text: "server started".to_owned(),
         };
-        assert_eq!(format_chat_line(&without_sender), "server started");
+        assert_eq!(format_chat_line(&without_sender, true), "server started");
+    }
+
+    /// BL-82 (legacy `chat_character_name` port): `show_character_name =
+    /// false` drops the alias prefix entirely — a message with no resolvable
+    /// alias is unaffected either way (there's nothing to strip).
+    #[test]
+    fn show_character_name_false_drops_the_alias_prefix() {
+        let with_sender = NetChatMsg {
+            channel: NetChatChannel::Say,
+            sender_uid: Some(NetUid(1)),
+            sender_alias: Some("Hero".to_owned()),
+            text: "hello".to_owned(),
+        };
+        assert_eq!(format_chat_line(&with_sender, false), "hello");
+
+        let without_sender = NetChatMsg {
+            channel: NetChatChannel::System,
+            sender_uid: None,
+            sender_alias: None,
+            text: "server started".to_owned(),
+        };
+        assert_eq!(format_chat_line(&without_sender, false), "server started");
     }
 
     #[test]
@@ -2270,6 +2299,39 @@ mod tests {
             .find_map(|c| app.world().get::<Text>(c).map(|t| t.0.clone()))
             .expect("the row has a text child");
         assert_eq!(text, "Hero: hello world");
+    }
+
+    /// BL-82 (legacy `chat_character_name` port), end-to-end through the real
+    /// system (not just the pure `format_chat_line` helper): turning
+    /// `XindelerSettings::chat.show_character_name` off makes a freshly
+    /// ingested row drop the alias prefix.
+    #[test]
+    fn ingest_respects_show_character_name_setting() {
+        let mut app = new_app();
+        app.world_mut()
+            .resource_mut::<XindelerSettings>()
+            .chat
+            .show_character_name = false;
+        app.world_mut()
+            .spawn((ChatScrollArea, ScrollPosition::default()));
+
+        app.world_mut().write_message(NetChatMsg {
+            channel: NetChatChannel::World,
+            sender_uid: Some(NetUid(1)),
+            sender_alias: Some("Hero".to_owned()),
+            text: "hello world".to_owned(),
+        });
+        app.world_mut()
+            .run_system_once(ingest_chat_messages)
+            .expect("system runs");
+
+        let history = app.world().resource::<ChatHistory>();
+        let row = *history.0.first().expect("one row was ingested");
+        assert_eq!(
+            row_text(&app, row),
+            Some("hello world".to_owned()),
+            "the alias prefix must be dropped when show_character_name is off"
+        );
     }
 
     /// Finds the `ChatRowText` line under a `ChatRow` container entity.

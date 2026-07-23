@@ -137,10 +137,24 @@ pub struct ChatSettings {
     /// Chat scrollback background opacity, `0.0` (fully transparent) … `1.0`
     /// (opaque). Legacy default `0.4` (`voxygen` `ChatSettings::chat_opacity`).
     pub opacity: f32,
+    /// Whether a message's speaker alias is prefixed onto its line (legacy
+    /// `chat_character_name`, ported from `voxygen`'s Chat tab). `true` by
+    /// default. Read by `xindeler-client::chat::format_chat_line` at the
+    /// moment a message is ingested, so toggling it only affects messages
+    /// that arrive afterward — already-rendered rows keep whatever alias
+    /// state they were spawned with (they're never rebuilt), the same
+    /// "future rows only" honesty `chat.opacity`'s live-but-not-retroactive
+    /// apply already has for colour.
+    pub show_character_name: bool,
 }
 
 impl Default for ChatSettings {
-    fn default() -> Self { Self { opacity: 0.4 } }
+    fn default() -> Self {
+        Self {
+            opacity: 0.4,
+            show_character_name: true,
+        }
+    }
 }
 
 /// BL-82 EM-5.16 (T56.43) — accessibility toggles (the settings window's
@@ -252,6 +266,12 @@ pub struct CameraSettings {
     /// yaw/pitch integration, `player_input::third_person_camera`'s doc
     /// comment).
     pub mouse_sensitivity: f32,
+    /// Inverts the mouse-look pitch axis (legacy `gameplay.invert_mouse_y`,
+    /// ported from `voxygen`'s Gameplay tab). `false` (normal, "push mouse
+    /// up to look up") by default. Baked into `FlyCam::invert_pitch` at
+    /// spawn time — same apply-on-next-launch honesty `fly_speed`/
+    /// `mouse_sensitivity` already have (see `camera::spawn_camera`'s doc).
+    pub invert_pitch: bool,
 }
 
 impl Default for CameraSettings {
@@ -260,6 +280,7 @@ impl Default for CameraSettings {
             fly_speed: 12.0,
             fly_fast_multiplier: 4.0,
             mouse_sensitivity: 0.002,
+            invert_pitch: false,
         }
     }
 }
