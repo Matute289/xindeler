@@ -39,3 +39,7 @@ tracy-test-server = "run --bin xindeler-server-cli --no-default-features --featu
 swarm = "run --bin swarm --features client/bin_bot,client/tick_network --"
 ci-clippy = "clippy --all-targets --locked --features=bin_compression,bin_csv,bin_graphviz,bin_bot,bin_asset_migrate,bin,stat"
 # BL-82 (EM-1.1): ci-clippy2 (voxygen default-publish check) removed with voxygen.
+# upstream also added `bin_cmd_doc_gen` here, but that feature is declared only
+# in voxygen/Cargo.toml (frozen, unbuilt reference per EM-1.1) — adding it to
+# this workspace-wide alias would break `ci-clippy` since no built crate here
+# declares it.

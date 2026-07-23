@@ -205,6 +205,7 @@ fn spawn_cluster(app: &mut App, anchor: SimVec2<f32>, count: usize) -> Vec<Entit
                     hair_color: 0,
                     skin: 0,
                     eye_color: 0,
+                    height_scale: 0,
                 })
             } else {
                 common::comp::Body::QuadrupedSmall(common::comp::quadruped_small::Body {
@@ -503,6 +504,7 @@ fn interest_management_scoping_boundary_and_bandwidth() {
         hair_color: 0,
         skin: 0,
         eye_color: 0,
+        height_scale: 0,
     }));
     let sample_loadout = NetLoadout {
         active_tool: Some(NetTool {

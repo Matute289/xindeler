@@ -1392,6 +1392,7 @@ fn default_body() -> comp::body::humanoid::Body {
         hair_color: 0,
         skin: 0,
         eye_color: 0,
+        height_scale: 0,
     }
 }
 

@@ -36,7 +36,7 @@ use bevy::{
     },
 };
 use bevy_replicon::prelude::FromClient;
-use common::{comp, comp::inventory::item::tool::AbilityContext, uid::Uid};
+use common::{comp, uid::Uid};
 use specs::WorldExt;
 use xindeler_protocol::{
     NetAbilityPool, NetHotbarSlot, NetOwnerOnly, NetSkillGroup, NetSkillSet, UnlockSkillRequest,
@@ -100,6 +100,7 @@ pub fn mirror_skillset_state(
     let char_states = ecs.read_storage::<comp::CharacterState>();
     let stances = ecs.read_storage::<comp::Stance>();
     let combos = ecs.read_storage::<comp::Combo>();
+    let buffs_storage = ecs.read_storage::<comp::Buffs>();
     let uids = ecs.read_storage::<Uid>();
 
     for (&sim_entity, &bevy_entity) in mirror.0.iter() {
@@ -143,11 +144,19 @@ pub fn mirror_skillset_state(
         let char_state = char_states.get(sim_entity);
         let stance = stances.get(sim_entity);
         let combo = combos.get(sim_entity);
-        let context = AbilityContext::from(stance, inv, combo);
+        let buffs = buffs_storage.get(sim_entity);
 
         let resolve = |ability: comp::ability::Ability| -> Option<String> {
             ability
-                .ability_id(char_state, inv, Some(skill_set), ability_pool, &context)
+                .ability_id(
+                    char_state,
+                    inv,
+                    Some(skill_set),
+                    ability_pool,
+                    stance,
+                    combo,
+                    buffs,
+                )
                 .map(str::to_owned)
         };
 

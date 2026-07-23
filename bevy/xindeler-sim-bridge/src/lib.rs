@@ -1438,6 +1438,7 @@ fn emit_wandering_humanoid(server: &Server, wpos: vek::Vec3<f32>, index: u32) {
         hair_color: 0,
         skin: 0,
         eye_color: 0,
+        height_scale: 0,
     };
     hum.validate();
     let body: comp::Body = hum.into();
@@ -2839,6 +2840,7 @@ mod tests {
             hair_color: 0,
             skin: 0,
             eye_color: 0,
+            height_scale: 0,
         }
         .into();
         let inventory = humanoid_test_inventory(body);

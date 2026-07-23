@@ -210,9 +210,9 @@ struct ChunkStoreView<'a> {
 
 /// Unit error for [`ChunkStoreView`]: `collide_boom`'s ray always finishes
 /// with `.ignore_error()`, so the value itself is never inspected — this
-/// exists only to satisfy `BaseVol::Error: Debug`.
+/// exists only to satisfy `BaseVol::Error: Copy + Debug`.
 #[cfg(feature = "listen-server")]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct ChunkStoreViewError;
 
 #[cfg(feature = "listen-server")]

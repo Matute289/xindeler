@@ -209,3 +209,5 @@ hud-settings-note_language = La selección de idioma es en vivo — cada pantall
 hud-settings-note_networking = Todavía no hay ajustes de red configurables — el cliente se conecta automáticamente. El ajuste de conexión llegará con el navegador de servidores.
 hud-settings-note_sound = Los ajustes de sonido llegarán pronto.
 hud-settings-note_accessibility = Los ajustes de accesibilidad llegarán pronto.
+hud-settings-keyboard-binding = Atajos de teclado
+hud-settings-instrument_volume = Volumen del Instrumento
