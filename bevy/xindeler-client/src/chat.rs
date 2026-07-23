@@ -771,8 +771,9 @@ fn chat_smoke_verify(
 /// 4. F5 ([`GameInput::ToggleChat`]) → assert every [`ChatCollapsible`] hides
 ///    AND the seeded row + typed text both survive (collapse hides, never
 ///    discards).
-/// 5. Enter again → assert the panel re-expands AND `InputFocus` returns with
-///    no click.
+/// 5. Enter again → assert the panel re-expands (every [`ChatCollapsible`]
+///    flips back to `Display::Flex`, not just `ChatUiState::collapsed`
+///    flipping) AND `InputFocus` returns with no click.
 /// 6. Type `yo` → assert it APPENDS (proving the refocused box is genuinely
 ///    typable).
 ///
@@ -854,6 +855,7 @@ fn chat_focus_smoke_verify(
     mut stage: Local<ChatFocusSmokeStage>,
     mut frames_waited: Local<u32>,
     mut collapse_display_wait: Local<u32>,
+    mut reexpand_display_wait: Local<u32>,
     windows: Query<Entity, With<PrimaryWindow>>,
     inputs: Query<Entity, With<ChatInputBox>>,
     collapsible: Query<&Node, With<ChatCollapsible>>,
@@ -1006,6 +1008,21 @@ fn chat_focus_smoke_verify(
                 *stage = ChatFocusSmokeStage::Done;
                 return;
             }
+            if collapsible.iter().any(|node| node.display == Display::None) {
+                *reexpand_display_wait += 1;
+                if *reexpand_display_wait <= AWAIT_COLLAPSED_DISPLAY_TOLERANCE_FRAMES {
+                    return;
+                }
+                fail(
+                    &mut exit,
+                    &stage,
+                    "ChatUiState re-expanded but at least one ChatCollapsible node never flipped \
+                     back to Display::Flex",
+                );
+                *stage = ChatFocusSmokeStage::Done;
+                return;
+            }
+            *reexpand_display_wait = 0;
             *stage = ChatFocusSmokeStage::TypeWord2(0);
         },
         ChatFocusSmokeStage::TypeWord2(i) => {
