@@ -42,6 +42,7 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+pub use fluent::FluentArgs;
 use fluent::{FluentBundle, FluentResource};
 use unic_langid::{LanguageIdentifier, langid};
 
@@ -137,6 +138,11 @@ impl Localization {
     /// never panic the whole HUD over one bad/missing localization file).
     fn build_bundle(lang: &LanguageIdentifier, ftl_files: &[&str]) -> FluentBundle<FluentResource> {
         let mut bundle = FluentBundle::new(vec![lang.clone()]);
+        // Fluent wraps interpolated argument values in U+2068/U+2069 isolation
+        // marks by default; disable it (legacy Veloren's i18n loader does the
+        // same) so `tr_args` output is clean, matchable text. No-op for the
+        // arg-less `tr`/`tr_attr` paths (nothing is interpolated there).
+        bundle.set_use_isolating(false);
         let root = assets_root().join("voxygen/i18n").join(lang.to_string());
         for rel_path in ftl_files {
             let full_path = root.join(rel_path);
@@ -226,6 +232,21 @@ impl Localization {
         )
     }
 
+    fn resolve_with_args(
+        bundle: &FluentBundle<FluentResource>,
+        key: &str,
+        args: &FluentArgs,
+    ) -> Option<String> {
+        let message = bundle.get_message(key)?;
+        let pattern = message.value()?;
+        let mut errors = Vec::new();
+        Some(
+            bundle
+                .format_pattern(pattern, Some(args), &mut errors)
+                .into_owned(),
+        )
+    }
+
     /// Resolves `key`'s message VALUE: tries the active locale, then the `en`
     /// fallback bundle (if any), then falls back to `key` itself — never
     /// panics.
@@ -236,6 +257,24 @@ impl Localization {
         }
         if let Some(fallback) = &self.fallback
             && let Some(value) = Self::resolve(fallback, key)
+        {
+            return value;
+        }
+        key.to_owned()
+    }
+
+    /// Resolves `key`'s message VALUE with Fluent argument interpolation — the
+    /// argument-carrying sibling of [`Self::tr`], same active-locale-then-`en`-
+    /// fallback-then-bare-key order. Never panics. (`Content::Attr` carries no
+    /// args, so its client resolves via the existing [`Self::tr_attr`]; there
+    /// is deliberately no `tr_attr_args`.)
+    #[must_use]
+    pub fn tr_args(&self, key: &str, args: &FluentArgs) -> String {
+        if let Some(value) = Self::resolve_with_args(&self.bundle, key, args) {
+            return value;
+        }
+        if let Some(fallback) = &self.fallback
+            && let Some(value) = Self::resolve_with_args(fallback, key, args)
         {
             return value;
         }
@@ -307,6 +346,12 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     // label, `hud-settings-subtitles`, lives in the already-registered
     // `hud/settings.ftl`).
     "hud/subtitles.ftl",
+    // BL-82 EM-5.16 chat i18n interpolation: `command.ftl`'s `/command`
+    // feedback keys (e.g. `players-list-header`) — the client resolves these
+    // client-side (via `Localization::tr_args`) once `xindeler-sim-bridge`
+    // projects a `Content::Localized` command-feedback line into a
+    // `NetLocalizedContent` payload (see `xindeler-client::chat`).
+    "command.ftl",
 ];
 
 /// Tracks which BCP-47 tag the currently-loaded [`Localization`] catalog is
@@ -425,7 +470,8 @@ mod tests {
         std::fs::create_dir_all(&en_dir).expect("mkdir en");
         std::fs::write(
             en_dir.join("test.ftl"),
-            "hello-world = Hello, world!\n    .desc = A greeting.\nbye = Bye\n",
+            "hello-world = Hello, world!\n    .desc = A greeting.\nbye = Bye\ngreet = Hello, { \
+             $name }!\n",
         )
         .expect("write en fixture");
 
@@ -440,6 +486,24 @@ mod tests {
         assert!(
             en.fallback.is_none(),
             "the en locale is its own fallback target — no separate bundle needed"
+        );
+
+        // -- `tr_args` interpolates Fluent arguments (the arg-less `tr`
+        // cannot), with no U+2068/U+2069 isolation marks around the
+        // interpolated value, and degrades to the bare key when the message
+        // is missing — never panics --
+        let mut args = FluentArgs::new();
+        args.set("name", "world");
+        assert_eq!(
+            en.tr_args("greet", &args),
+            "Hello, world!",
+            "interpolated value must appear verbatim, with no isolation marks"
+        );
+        let empty_args = FluentArgs::new();
+        assert_eq!(
+            en.tr_args("totally-unknown-key", &empty_args),
+            "totally-unknown-key",
+            "a missing key must degrade to the bare key, never panic"
         );
 
         // -- a missing .ftl FILE degrades to a usable (empty) bundle rather

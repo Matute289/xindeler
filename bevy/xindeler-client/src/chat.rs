@@ -87,10 +87,12 @@ use bevy::{
 };
 use xindeler_app::XindelerSettings;
 use xindeler_input::{ActionState, GameInput};
-use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg};
+use xindeler_protocol::{
+    ChatSendRequest, NetChatArg, NetChatChannel, NetChatMsg, NetLocalizedContent,
+};
 use xindeler_ui::{
     button::{Activate, button_bundle},
-    i18n::{Localization, LocalizedLabel},
+    i18n::{CurrentLocale, FluentArgs, Localization, LocalizedLabel},
     scroll::scroll_view_bundle,
     theme::{HudFonts, HudTheme},
 };
@@ -517,6 +519,19 @@ struct ChatRowIcon;
 /// row container + its icon sibling.
 #[derive(Component, Debug, Clone, Copy, Default)]
 struct ChatRowText;
+/// The re-localizable source of a scrollback row's text — its optional
+/// localized payload, plain fallback, and speaker alias — kept on the
+/// [`ChatRowText`] entity so [`relocalize_chat_rows`] can re-resolve the row
+/// through the CURRENT [`Localization`] when the player switches language.
+/// Chat rows can't use the static `xindeler_ui::i18n::LocalizedText` (their
+/// text is interpolated from runtime args, not one static key), so this is the
+/// runtime-args sibling of that reactive contract.
+#[derive(Component, Debug, Clone)]
+struct ChatRowSource {
+    sender_alias: Option<String>,
+    localized: Option<NetLocalizedContent>,
+    plain: String,
+}
 /// Tags every element that hides while [`ChatUiState::collapsed`] — the
 /// scrollback, the tab strip, and the input row. Collapsing hides the whole
 /// box (legacy's F5 toggle fully hides chat; there is no minimize BUTTON).
@@ -653,6 +668,9 @@ impl Plugin for ChatViewPlugin {
             (
                 seed_chat_for_smoke_capture,
                 ingest_chat_messages.after(seed_chat_for_smoke_capture),
+                relocalize_chat_rows
+                    .after(xindeler_ui::i18n::LocaleSyncSet)
+                    .run_if(resource_changed::<CurrentLocale>),
                 apply_chat_filter,
                 sync_chat_tabs,
                 reveal_chat_tabs,
@@ -902,6 +920,7 @@ fn chat_focus_smoke_verify(
                 sender_uid: None,
                 sender_alias: None,
                 text: "smoke-chat-focus seeded history line".to_owned(),
+                localized: None,
             });
             *stage = ChatFocusSmokeStage::AwaitHistorySeeded;
         },
@@ -1151,6 +1170,7 @@ fn seed_chat_for_smoke_capture(
             sender_uid: None,
             sender_alias: alias.map(str::to_owned),
             text: text.to_owned(),
+            localized: None,
         });
     }
 
@@ -1420,19 +1440,41 @@ fn sync_chat_panel_bottom_to_window(
     }
 }
 
-/// Renders one [`NetChatMsg`] to its scrollback line text. Legacy conveys the
-/// channel via the per-line ICON + text color rather than a bracketed prefix,
-/// so this is just `alias: text` (or bare `text` for a senderless line) — the
-/// icon/color carry the channel.
-/// Formats one chat line, optionally prefixing the speaker's alias — the
-/// legacy `chat_character_name` toggle (BL-82 port, `XindelerSettings::chat.
-/// show_character_name`). `show_character_name = false` drops the alias
-/// prefix entirely (not just hides it visually), matching the legacy
-/// behaviour of the same name.
-fn format_chat_line(msg: &NetChatMsg, show_character_name: bool) -> String {
+/// Resolves a [`NetLocalizedContent`] to display text through the client's
+/// live [`Localization`] (so a language switch re-localizes it). An `attr`
+/// payload resolves via `tr_attr` (no args); a value payload builds a
+/// `FluentArgs` from the wire args and resolves via `tr_args`.
+fn resolve_localized(localization: &Localization, lc: &NetLocalizedContent) -> String {
+    if let Some(attr) = &lc.attr {
+        return localization.tr_attr(&lc.key, attr);
+    }
+    let mut args = FluentArgs::new();
+    for (name, value) in &lc.args {
+        match value {
+            NetChatArg::Nat(n) => args.set(name.clone(), *n),
+            NetChatArg::Text(text) => args.set(name.clone(), text.clone()),
+        }
+    }
+    localization.tr_args(&lc.key, &args)
+}
+
+/// Formats one chat line for display: resolves its localized payload (if any)
+/// through the current [`Localization`], else uses its plain `text`, then
+/// optionally prefixes the speaker's alias — the legacy `chat_character_name`
+/// toggle (`XindelerSettings::chat.show_character_name`). `show_character_name
+/// = false` drops the alias prefix entirely.
+fn format_chat_line(
+    localization: &Localization,
+    msg: &NetChatMsg,
+    show_character_name: bool,
+) -> String {
+    let body = match &msg.localized {
+        Some(lc) => resolve_localized(localization, lc),
+        None => msg.text.clone(),
+    };
     match &msg.sender_alias {
-        Some(alias) if show_character_name => format!("{alias}: {}", msg.text),
-        _ => msg.text.clone(),
+        Some(alias) if show_character_name => format!("{alias}: {body}"),
+        _ => body,
     }
 }
 
@@ -1454,6 +1496,7 @@ fn ingest_chat_messages(
     theme: Res<HudTheme>,
     fonts: Res<HudFonts>,
     icons: Res<ChatIcons>,
+    localization: NonSend<Localization>,
     filter: Res<ChatUiState>,
     settings: Res<XindelerSettings>,
     scroll_area: Query<Entity, With<ChatScrollArea>>,
@@ -1507,7 +1550,16 @@ fn ingest_chat_messages(
                 // The channel-tinted message text (word-wraps within the box).
                 row.spawn((
                     ChatRowText,
-                    Text(format_chat_line(msg, settings.chat.show_character_name)),
+                    ChatRowSource {
+                        sender_alias: msg.sender_alias.clone(),
+                        localized: msg.localized.clone(),
+                        plain: msg.text.clone(),
+                    },
+                    Text(format_chat_line(
+                        &localization,
+                        msg,
+                        settings.chat.show_character_name,
+                    )),
                     TextFont {
                         font: bevy::text::FontSource::Handle(fonts.body.clone()),
                         font_size: bevy::text::FontSize::Px(14.0),
@@ -1534,6 +1586,33 @@ fn ingest_chat_messages(
 
     if appended_any && let Ok(mut scroll) = scroll_positions.single_mut() {
         scroll.y = f32::MAX / 2.0;
+    }
+}
+
+/// Re-renders every scrollback row through the CURRENT [`Localization`] when
+/// the player switches language — the runtime-args analogue of
+/// `xindeler_ui::i18n::relocalize_text`. Gated on `CurrentLocale` changing and
+/// ordered `.after(LocaleSyncSet)` (so the bundle is already reloaded), it
+/// reads each row's stored [`ChatRowSource`] and re-resolves it exactly as
+/// ingest did. A row whose text is unchanged is left untouched (no needless
+/// layout churn).
+fn relocalize_chat_rows(
+    localization: NonSend<Localization>,
+    settings: Res<XindelerSettings>,
+    mut rows: Query<(&ChatRowSource, &mut Text), With<ChatRowText>>,
+) {
+    for (source, mut text) in &mut rows {
+        let msg = NetChatMsg {
+            channel: NetChatChannel::System, // unused by `format_chat_line`
+            sender_uid: None,                // unused by `format_chat_line`
+            sender_alias: source.sender_alias.clone(),
+            text: source.plain.clone(),
+            localized: source.localized.clone(),
+        };
+        let resolved = format_chat_line(&localization, &msg, settings.chat.show_character_name);
+        if text.0 != resolved {
+            text.0 = resolved;
+        }
     }
 }
 
@@ -1976,6 +2055,7 @@ fn test_localization() -> Localization {
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use xindeler_protocol::NetUid;
+    use xindeler_ui::i18n::{DEFAULT_HUD_FTL_FILES, fallback_locale};
 
     use super::*;
 
@@ -2205,25 +2285,37 @@ mod tests {
 
     // ---- scrollback / tabs / filter / collapse -----------------------------
 
+    /// A real catalog so `tr_args` resolves the shipped `hud-chat-*` /
+    /// `command-*` keys used by the localized-line tests below.
+    fn real_localization() -> Localization {
+        Localization::load(&fallback_locale(), DEFAULT_HUD_FTL_FILES)
+    }
+
     #[test]
     fn formats_lines_with_and_without_a_resolved_sender() {
+        let l10n = real_localization();
         let with_sender = NetChatMsg {
             channel: NetChatChannel::Say,
             sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello".to_owned(),
+            localized: None,
         };
         // Legacy conveys the channel via the per-line icon + text color, not a
         // bracketed prefix, so the text is just `alias: text`.
-        assert_eq!(format_chat_line(&with_sender, true), "Hero: hello");
+        assert_eq!(format_chat_line(&l10n, &with_sender, true), "Hero: hello");
 
         let without_sender = NetChatMsg {
             channel: NetChatChannel::System,
             sender_uid: None,
             sender_alias: None,
             text: "server started".to_owned(),
+            localized: None,
         };
-        assert_eq!(format_chat_line(&without_sender, true), "server started");
+        assert_eq!(
+            format_chat_line(&l10n, &without_sender, true),
+            "server started"
+        );
     }
 
     /// BL-82 (legacy `chat_character_name` port): `show_character_name =
@@ -2231,21 +2323,90 @@ mod tests {
     /// alias is unaffected either way (there's nothing to strip).
     #[test]
     fn show_character_name_false_drops_the_alias_prefix() {
+        let l10n = real_localization();
         let with_sender = NetChatMsg {
             channel: NetChatChannel::Say,
             sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello".to_owned(),
+            localized: None,
         };
-        assert_eq!(format_chat_line(&with_sender, false), "hello");
+        assert_eq!(format_chat_line(&l10n, &with_sender, false), "hello");
 
         let without_sender = NetChatMsg {
             channel: NetChatChannel::System,
             sender_uid: None,
             sender_alias: None,
             text: "server started".to_owned(),
+            localized: None,
         };
-        assert_eq!(format_chat_line(&without_sender, false), "server started");
+        assert_eq!(
+            format_chat_line(&l10n, &without_sender, false),
+            "server started"
+        );
+    }
+
+    /// A localized join line resolves through `tr_args` to the shipped
+    /// `hud-chat-online_msg` with the `name` arg interpolated (no isolation
+    /// marks, courtesy of Task 1).
+    #[test]
+    fn resolves_a_localized_join_line() {
+        let l10n = real_localization();
+        let msg = NetChatMsg {
+            channel: NetChatChannel::System,
+            sender_uid: None,
+            sender_alias: None,
+            text: "hud-chat-online_msg".to_owned(),
+            localized: Some(NetLocalizedContent {
+                key: "hud-chat-online_msg".to_owned(),
+                attr: None,
+                args: vec![("name".to_owned(), NetChatArg::Text("Aldwin".to_owned()))],
+            }),
+        };
+        // `hud-chat-online_msg = [{ $name }] is online now.`
+        assert_eq!(
+            format_chat_line(&l10n, &msg, true),
+            "[Aldwin] is online now."
+        );
+    }
+
+    /// A localized command-feedback line interpolates a `Nat` arg via
+    /// `tr_args`.
+    #[test]
+    fn resolves_a_localized_count_line() {
+        let l10n = real_localization();
+        let msg = NetChatMsg {
+            channel: NetChatChannel::System,
+            sender_uid: None,
+            sender_alias: None,
+            text: "players-list-header".to_owned(),
+            localized: Some(NetLocalizedContent {
+                key: "players-list-header".to_owned(),
+                attr: None,
+                args: vec![
+                    ("count".to_owned(), NetChatArg::Nat(2)),
+                    (
+                        "player_list".to_owned(),
+                        NetChatArg::Text("Hero, Villain".to_owned()),
+                    ),
+                ],
+            }),
+        };
+        let rendered = format_chat_line(&l10n, &msg, true);
+        // The shipped `players-list-header` is a `{ $count -> … }` select; assert
+        // the interpolated members appear (exact wording is catalog-owned).
+        assert!(
+            rendered.contains('2'),
+            "count arg interpolated: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Hero, Villain"),
+            "list arg interpolated: {rendered:?}"
+        );
+        assert_ne!(
+            rendered, "players-list-header",
+            "must not degrade to the bare key"
+        );
     }
 
     #[test]
@@ -2268,6 +2429,7 @@ mod tests {
             sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello world".to_owned(),
+            localized: None,
         });
         app.world_mut()
             .run_system_once(ingest_chat_messages)
@@ -2320,6 +2482,7 @@ mod tests {
             sender_uid: Some(NetUid(1)),
             sender_alias: Some("Hero".to_owned()),
             text: "hello world".to_owned(),
+            localized: None,
         });
         app.world_mut()
             .run_system_once(ingest_chat_messages)
@@ -2354,6 +2517,7 @@ mod tests {
                 sender_uid: None,
                 sender_alias: None,
                 text: format!("line {i}"),
+                localized: None,
             });
             app.world_mut()
                 .run_system_once(ingest_chat_messages)
