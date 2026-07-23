@@ -78,8 +78,9 @@ pub fn parse_locale(tag: &str) -> LanguageIdentifier {
 }
 
 /// The one field of a locale's `_manifest.ron` this crate reads — its own
-/// declared display name (e.g. `assets/voxygen/i18n/es/_manifest.ron`'s
-/// `metadata.language_name = "Español de España (Spanish - Spain)"`). A
+/// declared display name (e.g. `assets/voxygen/i18n/es-419/_manifest.ron`'s
+/// `metadata.language_name = "Español de Hispanoamérica (Spanish - Latin
+/// America)"`). A
 /// nested struct (not a flat one) because that's the manifest's real shape;
 /// every other field (`language_identifier`, `fonts`) is intentionally
 /// un-deserialized (`serde` ignores unknown-to-it siblings by default, but

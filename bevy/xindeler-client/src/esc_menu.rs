@@ -542,7 +542,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
-            .0 = "es".to_owned();
+            .0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -553,8 +553,8 @@ mod tests {
 
         let after = quit_button_text(&mut app);
         assert_eq!(
-            after, "Salir del juego",
-            "must resolve to the REAL es catalog's own esc_menu-quit_game value, not the en \
+            after, "Salir del Juego",
+            "must resolve to the REAL es-419 catalog's own esc_menu-quit_game value, not the en \
              fallback"
         );
     }

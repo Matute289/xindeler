@@ -782,7 +782,7 @@ mod tests {
             "must show the real en catalog text at spawn time"
         );
 
-        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -793,8 +793,8 @@ mod tests {
         assert_eq!(
             move_forward_label(&mut app),
             "Avanzar",
-            "must resolve to the REAL es catalog's own gameinput-moveforward value, not the en \
-             fallback"
+            "must resolve to the REAL es-419 catalog's own gameinput-moveforward value, not the \
+             en fallback"
         );
     }
 }

@@ -1615,7 +1615,7 @@ mod tests {
             "the Recipes tab must show the real en catalog text at spawn time"
         );
 
-        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -1627,7 +1627,7 @@ mod tests {
         assert_eq!(
             recipes_button_text(&mut app),
             "Recetas",
-            "must resolve to the REAL es catalog's own hud-crafting-recipes value, not the en \
+            "must resolve to the REAL es-419 catalog's own hud-crafting-recipes value, not the en \
              fallback"
         );
     }

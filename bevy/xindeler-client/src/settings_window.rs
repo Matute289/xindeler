@@ -1940,7 +1940,7 @@ mod tests {
 
         // Flip the locale and run the SAME reload+relocalize chain
         // `XindelerUiPlugin` wires into the real app.
-        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -1957,8 +1957,8 @@ mod tests {
             .expect("the same row still carries its LocalizedText tag");
         assert_eq!(
             after_text, "Punto de mira",
-            "must resolve to the REAL es catalog's own hud-settings-crosshair value, not the en \
-             fallback"
+            "must resolve to the REAL es-419 catalog's own hud-settings-crosshair value, not the \
+             en fallback"
         );
         assert_ne!(
             after_text, before_text,
@@ -2063,13 +2063,13 @@ mod tests {
             "the crosshair toggle must show the real en catalog value at spawn time"
         );
 
-        app.world_mut().resource_mut::<CurrentLocale>().0 = "es".to_owned();
+        app.world_mut().resource_mut::<CurrentLocale>().0 = "es-419".to_owned();
         app.update();
 
         assert_eq!(
             crosshair_toggle_text(&mut app),
             "Activado",
-            "must re-localize to the real es catalog's common-on value in the SAME frame the \
+            "must re-localize to the real es-419 catalog's common-on value in the SAME frame the \
              locale changed — this is what `refresh_setting_labels.after(LocaleSyncSet)` \
              guarantees"
         );

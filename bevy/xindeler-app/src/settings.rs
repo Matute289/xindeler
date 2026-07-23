@@ -684,13 +684,13 @@ mod tests {
         let mut settings = XindelerSettings::default();
         settings.interface.show_crosshair = false;
         settings.chat.opacity = 0.75;
-        settings.language = "es".to_owned();
+        settings.language = "es-419".to_owned();
         let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
             .expect("settings serialize");
         let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
         assert!(!round_tripped.interface.show_crosshair);
         assert_eq!(round_tripped.chat.opacity, 0.75);
-        assert_eq!(round_tripped.language, "es");
+        assert_eq!(round_tripped.language, "es-419");
     }
 
     /// BL-82 EM-5.16 (T56.43): a settings.ron predating the `accessibility`/

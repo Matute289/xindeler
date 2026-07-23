@@ -683,7 +683,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<xindeler_ui::i18n::CurrentLocale>()
-            .0 = "es".to_owned();
+            .0 = "es-419".to_owned();
         app.world_mut()
             .run_system_once(xindeler_ui::i18n::reload_localization_on_locale_change)
             .expect("reload runs");
@@ -698,13 +698,14 @@ mod tests {
         assert_eq!(
             accept_trade_button_text(&mut app),
             "Aceptar",
-            "must resolve to the REAL es catalog's own hud-trade-accept value, not the en fallback"
+            "must resolve to the REAL es-419 catalog's own hud-trade-accept value, not the en \
+             fallback"
         );
         assert_eq!(
             trading_with_player_label_text(&mut app),
-            "Comerciando con el jugador",
-            "must resolve to the REAL es catalog's own hud-trade-trading_with_player value, not \
-             the en fallback"
+            "Comerciando con un jugador",
+            "must resolve to the REAL es-419 catalog's own hud-trade-trading_with_player value, \
+             not the en fallback"
         );
     }
 }
