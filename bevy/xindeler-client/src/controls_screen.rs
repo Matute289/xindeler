@@ -52,7 +52,7 @@ use xindeler_input::{
 use xindeler_ui::{
     button::{Activate, button_bundle},
     hud_state::{HudAction, HudState, HudWindow},
-    i18n::{CurrentLocale, Localization, LocalizedText},
+    i18n::{CurrentLocale, Localization, LocalizedLabel, LocalizedText},
     panel::panel_bundle,
     theme::{HudFonts, HudTheme},
     zlayer,
@@ -273,6 +273,27 @@ fn spawn_controls_screen(
                     },
                     TextColor(theme.palette.text),
                 ));
+                // This screen is opened as its own mutually-exclusive
+                // `HudWindow` (via `settings_window.rs`'s Controls tab OR its
+                // own `GameInput::Controls` hotkey), so once here there was
+                // previously no way back to the Settings window short of
+                // Escape (which closes everything, not just this one). Since
+                // `HudState::toggle` is a single-slot swap (see its own doc
+                // comment), simply toggling to `Settings` both opens it AND
+                // implicitly closes this Controls screen — no explicit close
+                // needed first.
+                panel
+                    .spawn(button_bundle(
+                        &theme,
+                        &fonts,
+                        &localization.tr("common-back"),
+                    ))
+                    .insert(LocalizedLabel("common-back"))
+                    .observe(
+                        |_activate: On<Activate>, mut actions: MessageWriter<HudAction>| {
+                            actions.write(HudAction::ToggleWindow(HudWindow::Settings));
+                        },
+                    );
                 for &input in CURATED_ACTIONS {
                     spawn_row(panel, &theme, &fonts, &keymap, &localization, input);
                 }
