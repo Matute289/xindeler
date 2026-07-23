@@ -349,6 +349,169 @@ mod tests {
         }
     }
 
+    /// Every key translated in this batch resolves to real, non-English
+    /// es-419 text, validating that the translation completeness.
+    #[test]
+    fn es419_settings_keys_are_translated() {
+        use xindeler_ui::i18n::{
+            DEFAULT_HUD_FTL_FILES, Localization, fallback_locale, parse_locale,
+        };
+
+        const KEYS: &[&str] = &[
+            "hud-settings-cloud_rendering_mode-flat",
+            "hud-settings-instrument_volume",
+            "hud-settings-indoor_ambience",
+            "hud-settings-keyboard-binding",
+            "hud-settings-quality_preset",
+            "hud-settings-ssao",
+            "hud-settings-taa",
+            "hud-settings-volumetric_fog",
+            "hud-settings-contact_shadows",
+            "hud-settings-vignette",
+            "hud-settings-reduce_flashing",
+            "hud-settings-high_contrast_ui",
+            "hud-settings-shadow_cascades",
+            "hud-settings-mouse_sensitivity",
+            "hud-settings-fly_speed",
+            "hud-settings-fly_fast_multiplier",
+            "hud-settings-language",
+            "hud-settings-custom_graphics",
+            "hud-settings-open_controls",
+            "hud-settings-note_interface",
+            "hud-settings-note_video",
+            "hud-settings-note_controls",
+            "hud-settings-note_gameplay",
+            "hud-settings-note_chat",
+            "hud-settings-note_language",
+            "hud-settings-note_networking",
+            "hud-settings-note_sound",
+            "hud-settings-note_accessibility",
+        ];
+
+        const COGNATE_ALLOWLIST: &[&str] =
+            &["hud-settings-language", "hud-settings-custom_graphics"];
+
+        let es = Localization::load(&parse_locale("es-419"), DEFAULT_HUD_FTL_FILES);
+        let en = Localization::load(&fallback_locale(), DEFAULT_HUD_FTL_FILES);
+
+        for &k in KEYS {
+            let v = es.tr(k);
+            assert_ne!(
+                v, k,
+                "{k}: es-419 does not resolve (fell through to bare key)"
+            );
+            assert!(!v.trim().is_empty(), "{k}: es-419 resolves to empty");
+            if !COGNATE_ALLOWLIST.contains(&k) {
+                assert_ne!(
+                    v,
+                    en.tr(k),
+                    "{k}: es-419 is byte-identical to en (untranslated?)"
+                );
+            }
+        }
+    }
+
+    /// Every key translated in the HUD-CHROME batch resolves to real,
+    /// non-English es-419 text, validating translation completeness of ~50
+    /// keys across 15 files.
+    #[test]
+    fn es419_hud_chrome_keys_are_translated() {
+        use xindeler_ui::i18n::{Localization, fallback_locale, parse_locale};
+
+        const FILES: &[&str] = &[
+            "hud/bag.ftl",
+            "hud/crafting.ftl",
+            "hud/trade.ftl",
+            "hud/map.ftl",
+            "hud/misc.ftl",
+            "hud/chat.ftl",
+            "hud/social.ftl",
+            "hud/sct.ftl",
+            "hud/quest.ftl",
+            "hud/controls.ftl",
+            "hud/combat_hud.ftl",
+            "hud/subtitles.ftl",
+            "item/armor/armor.ftl",
+            "item/weapon/weapon.ftl",
+            "item/items/quest.ftl",
+        ];
+
+        const KEYS: &[&str] = &[
+            "hud-bag-tab_items",
+            "hud-bag-tab_stats",
+            "hud-bag-title",
+            "hud-bag-unequip",
+            "hud-bag-requirements_not_met",
+            "hud-bag-requirement_level",
+            "hud-bag-requirement_race",
+            "hud-bag-requirement_class",
+            "hud-bag-requires_attunement",
+            "hud-context-menu-use",
+            "hud-context-menu-drop",
+            "hud-context-menu-cancel",
+            "hud-crafting-tabs-repair",
+            "hud-crafting-tabs-modular",
+            "hud-crafting-salvage_desc",
+            "hud-crafting-repair_tab_desc",
+            "hud-crafting-modular_tab_desc",
+            "hud-crafting-select_a_recipe",
+            "hud-crafting-no_salvageable_items",
+            "hud-crafting-no_damaged_items",
+            "hud-crafting-no_primary_components",
+            "hud-crafting-no_secondary_components",
+            "hud-crafting-primary",
+            "hud-crafting-secondary",
+            "hud-crafting-salvage_selected",
+            "hud-crafting-repair_selected",
+            "hud-crafting-forge_weapon",
+            "hud-trade-invite_from_player",
+            "hud-trade-trading_with_player",
+            "hud-trade-phase_mutate",
+            "hud-trade-phase_review",
+            "hud-trade-phase_complete",
+            "hud-map-objectives",
+            "hud-map-full_map_instructions",
+            "hud-level_up_msg",
+            "hud-chat-tab_whisper",
+            "hud-social-online_players",
+            "hud-sct-miss",
+            "hud-dialogue-continue",
+            "hud-controls-conflicts_with",
+            "hud-combat_hud-level_abbr",
+            "hud-combat_hud-combo_label",
+            "subtitle-character_level_up",
+            "armor-misc-ring-test_attunement_ring",
+            "armor-misc-ring-test_attunement_ring_2",
+            "weapon-tome-apprentice_tome",
+            "weapon-holy_symbol-initiate_symbol",
+            "weapon-focus-wanderer_focus",
+            "sprite-quest-legoom_leaf",
+            "sprite-quest-gnarling_carving",
+        ];
+
+        const COGNATE_ALLOWLIST: &[&str] =
+            &["hud-crafting-tabs-modular", "hud-combat_hud-combo_label"];
+
+        let es = Localization::load(&parse_locale("es-419"), FILES);
+        let en = Localization::load(&fallback_locale(), FILES);
+
+        for &k in KEYS {
+            let v = es.tr(k);
+            assert_ne!(
+                v, k,
+                "{k}: es-419 does not resolve (fell through to bare key)"
+            );
+            assert!(!v.trim().is_empty(), "{k}: es-419 resolves to empty");
+            if !COGNATE_ALLOWLIST.contains(&k) {
+                assert_ne!(
+                    v,
+                    en.tr(k),
+                    "{k}: es-419 is byte-identical to en (untranslated?)"
+                );
+            }
+        }
+    }
+
     /// Verifies that all recently-added ability and buff localization keys
     /// in es-419 resolve to real, non-English text (not untranslated).
     #[test]
