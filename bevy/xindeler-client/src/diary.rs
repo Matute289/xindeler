@@ -1800,4 +1800,28 @@ mod tests {
             "must resolve to the real es catalog's own character_window-character_level value"
         );
     }
+
+    /// Every skill in every group of the real skill-tree manifest resolves to
+    /// real localized text via `skill_i18n_key` (BL-82 EM-5.16 item D). Loads
+    /// the same `SkillTreeShape` the Diary renders from, so it covers exactly
+    /// the leaves that can appear as nodes — no skill can regress to a raw
+    /// Debug name unnoticed.
+    #[test]
+    fn every_manifest_skill_resolves_to_real_text() {
+        use xindeler_ui::i18n::{DEFAULT_HUD_FTL_FILES, Localization, fallback_locale};
+        let shape = SkillTreeShape::load();
+        let l10n = Localization::load(&fallback_locale(), DEFAULT_HUD_FTL_FILES);
+        assert!(!shape.groups.is_empty(), "skill-groups manifest must load");
+        for skills in shape.groups.values() {
+            for &skill in skills {
+                let key = crate::skill_i18n::skill_i18n_key(skill)
+                    .unwrap_or_else(|| panic!("{skill:?} (a rendered node) has no i18n key"));
+                assert_ne!(
+                    l10n.tr(key),
+                    key,
+                    "{skill:?} -> {key} must resolve to real text"
+                );
+            }
+        }
+    }
 }
