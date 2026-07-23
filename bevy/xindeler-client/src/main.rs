@@ -107,6 +107,8 @@ mod social_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod sprite_view;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod subtitle_overlay;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod targeting;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod terrain_stream;
