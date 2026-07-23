@@ -200,13 +200,13 @@ use bevy::{
         message::MessageWriter,
         resource::Resource,
         schedule::IntoScheduleConfigs,
-        system::{Commands, Res},
+        system::{Commands, Query, Res},
     },
     math::{Quat, Vec3},
     state::condition::in_state,
     time::Time,
 };
-use bevy_replicon::prelude::{ClientState, Replicated, SendTargets, ToClients};
+use bevy_replicon::prelude::{ClientId, ClientState, Replicated, SendTargets, ToClients};
 use common::{
     comp,
     comp::inventory::{
@@ -227,9 +227,9 @@ use xindeler_dimensions::{
     DimensionsPlugin,
 };
 use xindeler_protocol::{
-    AiExecutionMode, AuroraOverlay, CompressedChunk, NetAlignment, NetBody, NetFarTerrain,
-    NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool, NetToolKey, NetUid, NetVel,
-    RegionKey, RemoveChunk, TerrainAnchor, region_key_for_pos,
+    AiExecutionMode, AuroraOverlay, ClientVisibleRegions, CompressedChunk, NetAlignment, NetBody,
+    NetFarTerrain, NetHealth, NetLoadout, NetLocalPlayer, NetOri, NetPos, NetTool, NetToolKey,
+    NetUid, NetVel, RegionKey, RemoveChunk, TerrainAnchor, region_key_for_pos,
 };
 
 /// The embedded specs simulation: the authoritative `Server` plus the tokio
@@ -786,17 +786,18 @@ fn ensure_terrain_anchor(
 ///   codec),
 /// - `removed_chunks` → [`RemoveChunk`].
 ///
-/// v1 broadcasts to ALL clients (`SendTargets::All`, which also re-emits
-/// locally for the listen server). TODO (still open past EM-4.2d): per-client
-/// terrain interest management — only send a chunk to clients whose presence
-/// covers it. EM-4.2d (BL-82 T47.6) scoped ENTITY visibility via a
-/// `bevy_replicon` `VisibilityFilter` (`RegionKey`/`ClientVisibleRegions`,
-/// `xindeler_protocol::visibility`); `CompressedChunk`/`RemoveChunk` are
-/// one-shot MESSAGES, not replicated components, so that same
-/// entity-visibility mechanism does not apply to them — scoping the terrain
-/// broadcast needs its own (structurally different) per-client filter and
-/// remains a known, tracked gap, not silently fixed by this comment's mere
-/// existence.
+/// BL-82 EM-8.3b: per-client terrain interest, closing the ledger's Part A2
+/// terrain-streaming gap — see [`resolve_terrain_targets`] for the exact
+/// rule. Short version: while no connected entity carries a real
+/// [`ClientVisibleRegions`] yet (the listen server, which never computes one
+/// at all, or a dedicated server before its first client's viewpoint
+/// recompute), behavior is UNCHANGED from before this task
+/// (`SendTargets::All`, including its local-loopback re-emit). Once real
+/// per-client interest data exists (a genuine dedicated-server client),
+/// each chunk is scoped to exactly the clients whose visible-region set
+/// covers it, unioned with the listen server's embedded player (always
+/// included when present, region-unscoped, matching prior behavior for it
+/// specifically).
 ///
 /// The changes themselves were snapshotted (keys only) inside [`tick_sim`],
 /// BEFORE the sim's `cleanup()` cleared its `TerrainChanges` resource; here we
@@ -804,6 +805,8 @@ fn ensure_terrain_anchor(
 /// `.after(tick_sim)` in the same `Update`.
 fn stream_terrain_changes(
     sim: Option<NonSendMut<SimServer>>,
+    player: Option<bevy::ecs::change_detection::NonSend<EmbeddedPlayer>>,
+    client_regions: Query<(Entity, &ClientVisibleRegions)>,
     mut chunk_writer: MessageWriter<ToClients<CompressedChunk>>,
     mut remove_writer: MessageWriter<ToClients<RemoveChunk>>,
 ) {
@@ -812,6 +815,8 @@ fn stream_terrain_changes(
     if pending.upserted.is_empty() && pending.removed.is_empty() {
         return;
     }
+
+    let has_embedded_player = player.is_some();
 
     for key in pending.upserted {
         // The chunk may have been removed again after being upserted this
@@ -823,18 +828,84 @@ fn stream_terrain_changes(
             .get_key_arc(vek::Vec2::new(key[0], key[1]))
             .cloned();
         if let Some(chunk) = chunk {
-            chunk_writer.write(ToClients {
-                targets: SendTargets::All,
-                message: CompressedChunk::encode(key, &chunk),
-            });
+            let message = CompressedChunk::encode(key, &chunk);
+            for targets in resolve_terrain_targets(key, has_embedded_player, &client_regions) {
+                chunk_writer.write(ToClients {
+                    targets,
+                    message: message.clone(),
+                });
+            }
         }
     }
     for key in pending.removed {
-        remove_writer.write(ToClients {
-            targets: SendTargets::All,
-            message: RemoveChunk { key },
-        });
+        for targets in resolve_terrain_targets(key, has_embedded_player, &client_regions) {
+            remove_writer.write(ToClients {
+                targets,
+                message: RemoveChunk { key },
+            });
+        }
     }
+}
+
+/// Resolves the exact [`SendTargets`] a terrain-chunk `key` (a chunk-grid
+/// coordinate, NOT a world position — see [`stream_terrain_changes`]'s own
+/// `get_key_arc` call for the same convention) should be sent to.
+///
+/// **Fallback (unchanged prior behavior):** if NO connected entity currently
+/// carries a [`ClientVisibleRegions`] component at all, there is no interest
+/// data to scope by — this is the listen server (which never populates
+/// `ClientVisibleRegions`, an `xindeler-server-app`-only mechanism — see that
+/// crate's `recompute_client_visible_regions`) and a dedicated server before
+/// its first client's `ClientViewpoint` recompute. In that case this returns
+/// exactly `[SendTargets::All]`, preserving pre-EM-8.3b behavior bit-for-bit
+/// (including the local-loopback re-emit `SendTargets::All` always performs,
+/// which `tests::streams_real_chunks_to_local_client` depends on for a
+/// listen-server/persister-only config with no embedded player at all).
+///
+/// **Scoped path:** once at least one entity DOES carry `ClientVisibleRegions`
+/// (a genuine dedicated-server client past its first viewpoint recompute),
+/// this returns one [`SendTargets::Single`] per such client whose visible-
+/// region set covers the chunk's [`RegionKey`] (via [`region_key_for_pos`] —
+/// the SAME region grid EM-4.2d's entity-visibility filter uses, applied
+/// here to a one-shot MESSAGE instead of a replicated component, which
+/// `VisibilityFilter` itself cannot do), PLUS [`SendTargets::SERVER_ONLY`]
+/// whenever `has_embedded_player` — mirroring `crate::social`'s own "union
+/// with the embedded local player" pattern (BL-82 EM-8.2/8.3) so the listen
+/// server's one player keeps receiving every chunk unconditionally even in a
+/// (currently hypothetical) mixed topology. `SendTargets` has no "send to
+/// this specific SET of clients" variant (`bevy_replicon` 0.41.1:
+/// `All`/`AllExcept`/`Single` only), so a chunk with N interested recipients
+/// is written N times by the caller, each targeted — the same "write once
+/// per recipient" shape `crate::social::mirror_group_state` already uses. A
+/// client whose `ClientVisibleRegions` doesn't (yet) cover this chunk simply
+/// isn't included — no client, no send, the same "blind until scoped"
+/// default `ClientVisibleRegions`'s own doc comment already establishes for
+/// entity visibility.
+///
+/// `32.0` is the chunk edge length in world units — kept as a literal here
+/// for the SAME reason `ensure_terrain_anchor`'s own `chunk_sz` local is (this
+/// crate depends on `server`, not `common`, for terrain constants).
+fn resolve_terrain_targets(
+    key: [i32; 2],
+    has_embedded_player: bool,
+    client_regions: &Query<(Entity, &ClientVisibleRegions)>,
+) -> Vec<SendTargets> {
+    if client_regions.is_empty() {
+        return vec![SendTargets::All];
+    }
+
+    let chunk_world_pos = vek::Vec2::new(key[0] as f32, key[1] as f32) * 32.0;
+    let region = region_key_for_pos(DimensionId::default(), chunk_world_pos);
+
+    let mut targets: Vec<SendTargets> = client_regions
+        .iter()
+        .filter(|(_, visible)| visible.0.contains(&region))
+        .map(|(entity, _)| SendTargets::Single(ClientId::Client(entity)))
+        .collect();
+    if has_embedded_player {
+        targets.push(SendTargets::SERVER_ONLY);
+    }
+    targets
 }
 
 // ---------------------------------------------------------------------------
@@ -5013,5 +5084,91 @@ mod tests {
     /// borrow has already gone out of scope.
     fn registry_lifecycle(app: &App, id: DimensionId) -> Option<DimensionLifecycle> {
         app.world().resource::<DimensionRegistry>().lifecycle(id)
+    }
+
+    /// BL-82 EM-8.3b [`resolve_terrain_targets`]: with NO entity carrying
+    /// [`ClientVisibleRegions`] at all (the listen server's own permanent
+    /// state — it never populates that component), the result must be
+    /// EXACTLY `[SendTargets::All]` — unchanged from pre-EM-8.3b behavior —
+    /// regardless of `has_embedded_player`. This is the regression guard for
+    /// `streams_real_chunks_to_local_client` (a persister-only, no-embedded-
+    /// player config that still relies on the `SendTargets::All`
+    /// local-loopback re-emit): this task's per-client scoping must never
+    /// silently drop terrain in a topology with no interest data to scope
+    /// by.
+    #[test]
+    fn resolve_terrain_targets_falls_back_to_broadcast_with_no_client_interest_data() {
+        let mut world = bevy::prelude::World::new();
+        let query = world.query::<(Entity, &ClientVisibleRegions)>();
+        let query = query.query_manual(&world);
+
+        let targets = resolve_terrain_targets([0, 0], false, &query);
+        assert!(matches!(targets.as_slice(), [SendTargets::All]));
+
+        let targets = resolve_terrain_targets([0, 0], true, &query);
+        assert!(
+            matches!(targets.as_slice(), [SendTargets::All]),
+            "no client interest data at all must fall back to All even with an embedded player, \
+             matching pre-EM-8.3b behavior exactly"
+        );
+    }
+
+    /// BL-82 EM-8.3b [`resolve_terrain_targets`]: once real per-client
+    /// interest data exists, a chunk is scoped EXACTLY to the clients whose
+    /// `ClientVisibleRegions` covers it — a client with a DIFFERENT visible
+    /// region must NOT receive it (the "wrong recipient" regression this
+    /// whole task exists to prevent) — plus `SendTargets::SERVER_ONLY`
+    /// whenever `has_embedded_player`.
+    #[test]
+    fn resolve_terrain_targets_scopes_to_only_the_covering_clients_plus_embedded_player() {
+        use bevy_replicon::prelude::ClientId;
+
+        let mut world = bevy::prelude::World::new();
+        let dim = DimensionId::default();
+        let chunk_key = [0, 0];
+        let covering_region = region_key_for_pos(dim, vek::Vec2::new(0.0, 0.0));
+        let other_region = region_key_for_pos(dim, vek::Vec2::new(100_000.0, 100_000.0));
+
+        let covering_client = world
+            .spawn(ClientVisibleRegions::from_regions(dim, [
+                covering_region.region
+            ]))
+            .id();
+        let non_covering_client = world
+            .spawn(ClientVisibleRegions::from_regions(dim, [
+                other_region.region
+            ]))
+            .id();
+
+        let query = world.query::<(Entity, &ClientVisibleRegions)>();
+        let query = query.query_manual(&world);
+
+        let targets = resolve_terrain_targets(chunk_key, true, &query);
+
+        let expected_client = ClientId::Client(covering_client);
+        let wrong_client = ClientId::Client(non_covering_client);
+        assert!(
+            targets
+                .iter()
+                .any(|t| matches!(t, SendTargets::Single(cid) if *cid == expected_client)),
+            "the covering client must be targeted"
+        );
+        assert!(
+            !targets
+                .iter()
+                .any(|t| matches!(t, SendTargets::Single(cid) if *cid == wrong_client)),
+            "the NON-covering client must never be targeted — a leak/misdelivery regression"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|t| matches!(t, SendTargets::Single(ClientId::Server))),
+            "the embedded player must always be included when present"
+        );
+        assert_eq!(
+            targets.len(),
+            2,
+            "exactly the covering client + the embedded player, nothing else"
+        );
     }
 }

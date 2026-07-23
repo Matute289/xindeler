@@ -22,6 +22,7 @@ pub mod location;
 pub mod lod;
 pub mod login_provider;
 pub mod metrics;
+pub mod msg_capture;
 pub mod persistence;
 mod pet;
 pub mod presence;
@@ -57,6 +58,7 @@ use crate::{
     data_dir::DataDir,
     location::Locations,
     login_provider::LoginProvider,
+    msg_capture::OutgoingMessageCapture,
     persistence::PersistedComponents,
     presence::{RegionSubscription, RepositionToFreeSpace},
     state_ext::StateExt,
@@ -392,6 +394,12 @@ impl Server {
         });
         state.ecs_mut().insert(Tick(0));
         state.ecs_mut().insert(TickStart(Instant::now()));
+        // BL-82 EM-8.3b: the sim-side per-player outgoing-message capture
+        // buffer (chat/outcomes/dialogue) — see `msg_capture`'s module doc
+        // comment. Registered on EVERY `Server`, listen-server's embedded
+        // sim included; it just stays empty there (see that same doc
+        // comment for why).
+        state.ecs_mut().insert(OutgoingMessageCapture::default());
         state.ecs_mut().insert(job_metrics);
         state.ecs_mut().insert(network_request_metrics);
         state.ecs_mut().insert(player_metrics);

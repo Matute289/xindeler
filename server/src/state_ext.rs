@@ -6,6 +6,7 @@ use crate::{
     chat::ChatExporter,
     client::Client,
     events::{self, shared::update_map_markers},
+    msg_capture::OutgoingMessageCapture,
     persistence::PersistedComponents,
     pet::restore_pet,
     presence::RepositionToFreeSpace,
@@ -37,7 +38,8 @@ use common_net::{
 };
 use common_state::State;
 use specs::{
-    Builder, Entity as EcsEntity, EntityBuilder as EcsEntityBuilder, Join, WorldExt, WriteStorage,
+    Builder, Entity as EcsEntity, EntityBuilder as EcsEntityBuilder, Join, LendJoin, WorldExt,
+    WriteStorage,
     storage::{GenericReadStorage, GenericWriteStorage},
 };
 use std::time::{Duration, Instant};
@@ -962,24 +964,26 @@ impl StateExt for State {
                 | comp::ChatType::CommandError
                 | comp::ChatType::Meta
                 | comp::ChatType::World(_) => {
-                    self.notify_players(ServerGeneral::ChatMsg(resolved_msg))
+                    self.notify_players(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                    capture_chat_for_clientless_players(ecs, &resolved_msg);
                 },
                 comp::ChatType::Online(u) => {
-                    for (client, uid) in
-                        (&ecs.read_storage::<Client>(), &ecs.read_storage::<Uid>()).join()
-                    {
+                    let uids = ecs.read_storage::<Uid>();
+                    let players = ecs.read_storage::<Player>();
+                    let clients = ecs.read_storage::<Client>();
+                    for (uid, _player, client) in (&uids, &players, clients.maybe()).join() {
                         if uid != u {
-                            client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                            deliver_chat(ecs, client, *uid, &resolved_msg);
                         }
                     }
                 },
                 &comp::ChatType::Tell(from, to) => {
                     let clients = ecs.read_storage::<Client>();
-                    if let Some(from_client) = entity_from_uid(from).and_then(|e| clients.get(e)) {
-                        from_client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                    if let Some(from_entity) = entity_from_uid(from) {
+                        deliver_chat(ecs, clients.get(from_entity), from, &resolved_msg);
                     }
-                    if let Some(to_client) = entity_from_uid(to).and_then(|e| clients.get(e)) {
-                        to_client.send_fallible(ServerGeneral::ChatMsg(resolved_msg));
+                    if let Some(to_entity) = entity_from_uid(to) {
+                        deliver_chat(ecs, clients.get(to_entity), to, &resolved_msg);
                     }
                 },
                 comp::ChatType::Kill(kill_source, uid) => {
@@ -1006,8 +1010,16 @@ impl StateExt for State {
                         let positions = ecs.read_storage::<comp::Pos>();
                         if let Some(died_player_pos) = killed_entity.and_then(|e| positions.get(e))
                         {
-                            for (ent, client, pos) in
-                                (&*ecs.entities(), &clients, &positions).join()
+                            let uids = ecs.read_storage::<Uid>();
+                            let players = ecs.read_storage::<Player>();
+                            for (ent, recipient_uid, _player, client, pos) in (
+                                &*ecs.entities(),
+                                &uids,
+                                &players,
+                                clients.maybe(),
+                                &positions,
+                            )
+                                .join()
                             {
                                 let client_group = groups.get(ent);
                                 let is_different_group =
@@ -1015,17 +1027,15 @@ impl StateExt for State {
                                 if is_within(comp::ChatMsg::SAY_DISTANCE, pos, died_player_pos)
                                     && is_different_group
                                 {
-                                    client.send_fallible(ServerGeneral::ChatMsg(
-                                        resolved_msg.clone(),
-                                    ));
+                                    deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                                 }
                             }
                         }
                     } else {
-                        self.notify_players(ServerGeneral::server_msg(
-                            comp::ChatType::Kill(kill_source.clone(), *uid),
-                            msg.into_content(),
-                        ))
+                        let broadcast_msg = comp::ChatType::Kill(kill_source.clone(), *uid)
+                            .into_msg(msg.into_content());
+                        self.notify_players(ServerGeneral::ChatMsg(broadcast_msg.clone()));
+                        capture_chat_for_clientless_players(ecs, &broadcast_msg);
                     }
                 },
                 comp::ChatType::Say(uid) => {
@@ -1033,9 +1043,14 @@ impl StateExt for State {
 
                     let positions = ecs.read_storage::<comp::Pos>();
                     if let Some(speaker_pos) = entity_opt.and_then(|e| positions.get(e)) {
-                        for (client, pos) in (&ecs.read_storage::<Client>(), &positions).join() {
+                        let uids = ecs.read_storage::<Uid>();
+                        let players = ecs.read_storage::<Player>();
+                        let clients = ecs.read_storage::<Client>();
+                        for (recipient_uid, _player, client, pos) in
+                            (&uids, &players, clients.maybe(), &positions).join()
+                        {
                             if is_within(comp::ChatMsg::SAY_DISTANCE, pos, speaker_pos) {
-                                client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                                deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                             }
                         }
                     }
@@ -1045,9 +1060,14 @@ impl StateExt for State {
 
                     let positions = ecs.read_storage::<comp::Pos>();
                     if let Some(speaker_pos) = entity_opt.and_then(|e| positions.get(e)) {
-                        for (client, pos) in (&ecs.read_storage::<Client>(), &positions).join() {
+                        let uids = ecs.read_storage::<Uid>();
+                        let players = ecs.read_storage::<Player>();
+                        let clients = ecs.read_storage::<Client>();
+                        for (recipient_uid, _player, client, pos) in
+                            (&uids, &players, clients.maybe(), &positions).join()
+                        {
                             if is_within(comp::ChatMsg::REGION_DISTANCE, pos, speaker_pos) {
-                                client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                                deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                             }
                         }
                     }
@@ -1057,9 +1077,14 @@ impl StateExt for State {
 
                     let positions = ecs.read_storage::<comp::Pos>();
                     if let Some(speaker_pos) = entity_opt.and_then(|e| positions.get(e)) {
-                        for (client, pos) in (&ecs.read_storage::<Client>(), &positions).join() {
+                        let uids = ecs.read_storage::<Uid>();
+                        let players = ecs.read_storage::<Player>();
+                        let clients = ecs.read_storage::<Client>();
+                        for (recipient_uid, _player, client, pos) in
+                            (&uids, &players, clients.maybe(), &positions).join()
+                        {
                             if is_within(comp::ChatMsg::NPC_DISTANCE, pos, speaker_pos) {
-                                client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                                deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                             }
                         }
                     }
@@ -1069,31 +1094,37 @@ impl StateExt for State {
 
                     let positions = ecs.read_storage::<comp::Pos>();
                     if let Some(speaker_pos) = entity_opt.and_then(|e| positions.get(e)) {
-                        for (client, pos) in (&ecs.read_storage::<Client>(), &positions).join() {
+                        let uids = ecs.read_storage::<Uid>();
+                        let players = ecs.read_storage::<Player>();
+                        let clients = ecs.read_storage::<Client>();
+                        for (recipient_uid, _player, client, pos) in
+                            (&uids, &players, clients.maybe(), &positions).join()
+                        {
                             if is_within(comp::ChatMsg::NPC_SAY_DISTANCE, pos, speaker_pos) {
-                                client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                                deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                             }
                         }
                     }
                 },
                 &comp::ChatType::NpcTell(from, to) => {
                     let clients = ecs.read_storage::<Client>();
-                    if let Some(from_client) = entity_from_uid(from).and_then(|e| clients.get(e)) {
-                        from_client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                    if let Some(from_entity) = entity_from_uid(from) {
+                        deliver_chat(ecs, clients.get(from_entity), from, &resolved_msg);
                     }
-                    if let Some(to_client) = entity_from_uid(to).and_then(|e| clients.get(e)) {
-                        to_client.send_fallible(ServerGeneral::ChatMsg(resolved_msg));
+                    if let Some(to_entity) = entity_from_uid(to) {
+                        deliver_chat(ecs, clients.get(to_entity), to, &resolved_msg);
                     }
                 },
                 comp::ChatType::FactionMeta(s) | comp::ChatType::Faction(_, s) => {
-                    for (client, faction) in (
-                        &ecs.read_storage::<Client>(),
-                        &ecs.read_storage::<comp::Faction>(),
-                    )
-                        .join()
+                    let uids = ecs.read_storage::<Uid>();
+                    let players = ecs.read_storage::<Player>();
+                    let clients = ecs.read_storage::<Client>();
+                    let factions = ecs.read_storage::<comp::Faction>();
+                    for (recipient_uid, _player, client, faction) in
+                        (&uids, &players, clients.maybe(), &factions).join()
                     {
                         if s == &faction.0 {
-                            client.send_fallible(ServerGeneral::ChatMsg(resolved_msg.clone()));
+                            deliver_chat(ecs, client, *recipient_uid, &resolved_msg);
                         }
                     }
                 },
@@ -1109,10 +1140,8 @@ impl StateExt for State {
                             .into_msg(Content::localized("command-message-group-missing"));
 
                         let clients = ecs.read_storage::<Client>();
-                        if let Some(client) =
-                            entity_from_uid(*from).and_then(|entity| clients.get(entity))
-                        {
-                            client.send_fallible(ServerGeneral::ChatMsg(reply));
+                        if let Some(from_entity) = entity_from_uid(*from) {
+                            deliver_chat(ecs, clients.get(from_entity), *from, &reply);
                         }
                     } else {
                         send_to_group(g, ecs, &resolved_msg);
@@ -1378,10 +1407,50 @@ pub fn position_mut<T>(
 }
 
 fn send_to_group(g: &Group, ecs: &specs::World, msg: &comp::ChatMsg) {
-    for (client, group) in (&ecs.read_storage::<Client>(), &ecs.read_storage::<Group>()).join() {
+    let uids = ecs.read_storage::<Uid>();
+    let players = ecs.read_storage::<Player>();
+    let clients = ecs.read_storage::<Client>();
+    let groups = ecs.read_storage::<Group>();
+    for (uid, _player, client, group) in (&uids, &players, clients.maybe(), &groups).join() {
         if g == group {
-            client.send_fallible(ServerGeneral::ChatMsg(msg.clone()));
+            deliver_chat(ecs, client, *uid, msg);
         }
+    }
+}
+
+/// BL-82 EM-8.3b: delivers `msg` to `recipient`'s legacy `comp::Client` (the
+/// UNCHANGED existing path) if it has one; otherwise CAPTURES it into
+/// `msg_capture::OutgoingMessageCapture` keyed by `recipient` — the new sim-
+/// side hook a `comp::Client`-less dedicated-server player's bridge plugin
+/// drains post-tick (see that module's own doc comment for the full
+/// rationale). Every per-recipient `send_chat` arm above resolves its
+/// recipient's `Uid` anyway (radius/group/faction join, or a direct `Tell`/
+/// `NpcTell` uid), so this is a drop-in replacement for what used to be a
+/// bare `client.send_fallible(..)` call — never a behavior change for a
+/// recipient that DOES have a `Client`.
+fn deliver_chat(ecs: &specs::World, client: Option<&Client>, recipient: Uid, msg: &comp::ChatMsg) {
+    match client {
+        Some(client) => client.send_fallible(ServerGeneral::ChatMsg(msg.clone())),
+        None => ecs
+            .write_resource::<OutgoingMessageCapture>()
+            .capture_chat(recipient, msg.clone()),
+    }
+}
+
+/// BL-82 EM-8.3b: the broadcast half of the capture hook — every
+/// `comp::Player`-tagged entity with NO legacy `comp::Client` gets `msg`
+/// captured, mirroring what `StateExt::notify_players` already does (via a
+/// SEPARATE, unmodified join) for every `comp::Client`-having entity. Called
+/// alongside (never instead of) `notify_players` at each `send_chat` arm
+/// that broadcasts to everyone (`Offline`/`CommandInfo`/`CommandError`/
+/// `Meta`/`World`, and `Kill`'s low-population broadcast branch).
+fn capture_chat_for_clientless_players(ecs: &specs::World, msg: &comp::ChatMsg) {
+    let uids = ecs.read_storage::<Uid>();
+    let players = ecs.read_storage::<Player>();
+    let clients = ecs.read_storage::<Client>();
+    let mut capture = ecs.write_resource::<OutgoingMessageCapture>();
+    for (uid, _player, ()) in (&uids, &players, !&clients).join() {
+        capture.capture_chat(*uid, msg.clone());
     }
 }
 

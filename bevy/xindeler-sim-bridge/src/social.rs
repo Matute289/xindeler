@@ -25,12 +25,15 @@
 //!   player's private group/invite state can never leak to another connected
 //!   client (the ledger's Part A2 leak, now closed for the true N-client case).
 //! - [`mirror_dialogue`]: the NPC→player READ direction stays
-//!   LISTEN-SERVER-ONLY (see that system's own doc comment) — an NPC dialogue
-//!   turn only surfaces via the embedded `client::Client`, and the sim delivers
-//!   dialogue through a `comp::Client` a replicon-login player never has;
-//!   capturing it for a real dedicated-server client needs a new sim-side
-//!   per-player outgoing-message hook (EM-8.3b, same as chat/outcome
-//!   broadcast). It simply no-ops on the dedicated server.
+//!   LISTEN-SERVER-ONLY BY DESIGN (see that system's own doc comment) — an NPC
+//!   dialogue turn surfaces via the embedded `client::Client`'s own inbox,
+//!   which only the listen server's one embedded player has.
+//!   [`broadcast_captured_dialogue`] (BL-82 EM-8.3b) covers the real
+//!   dedicated-server case via a NEW sim-side per-player outgoing-message
+//!   capture hook (`server::msg_capture::OutgoingMessageCapture`, the SAME hook
+//!   `crate::chat`/`crate::sfx`'s own captured-broadcast systems drain), so
+//!   this is no longer an open gap — both functions run side by side, each a
+//!   no-op on the shell it doesn't apply to.
 //! - [`apply_group_action_requests`]/[`apply_dialogue_response_requests`]:
 //!   BL-82 EM-8.3 UNIFIED onto the `FromClient` write path — they drain the
 //!   real `bevy_replicon` [`xindeler_protocol::GroupActionRequest`]/
@@ -309,21 +312,18 @@ pub fn mirror_group_state(
 /// than `SendTargets::All`. No-ops until both a [`SimServer`] (to resolve the
 /// sender's display name) and an [`EmbeddedPlayer`] exist.
 ///
-/// ## ⚠️ Still listen-server-only (BL-82 EM-8.3, disclosed not narrowed)
-/// The NPC→player READ direction stays scoped to the embedded local player: an
-/// NPC-initiated dialogue turn surfaces only via the embedded
+/// ## Listen-server-only by design (real remote clients: see
+/// [`broadcast_captured_dialogue`] below)
+/// The NPC→player READ direction here is scoped to the embedded local
+/// player: an NPC-initiated dialogue turn surfaces via the embedded
 /// `client::Client`'s `ClientEvent::Dialogue` (captured in
-/// `crate::player::capture_social_events`). The sim delivers dialogue to a
-/// player through its legacy `comp::Client` (`server::events::interaction`'s
-/// `DialogueEvent` handler → `notify_client`), which a `comp::Client`-less
-/// replicon-login player entity never has — so a real dedicated-server client's
-/// incoming dialogue turns cannot be captured here at all, and this system
-/// simply no-ops there. Closing that (like chat/outcome broadcast) needs a NEW
-/// sim-side per-player outgoing-message capture hook — the same EM-8.3b
-/// follow-up disclosed in `chat.rs`/`sfx.rs` and `xindeler-server-app`'s plugin
-/// registration. The player→NPC WRITE direction
-/// ([`apply_dialogue_response_requests`]) IS fully generalized to real remote
-/// clients below.
+/// `crate::player::capture_social_events`) — a mechanism only the
+/// listen-server's one embedded player has at all.
+/// [`broadcast_captured_dialogue`] covers the real-remote-client case (BL-82
+/// EM-8.3b) via the NEW sim-side capture hook, so this function's own scope is
+/// unchanged and intentional, not a remaining gap. The player→NPC WRITE
+/// direction ([`apply_dialogue_response_requests`]) IS fully generalized to
+/// real remote clients below.
 pub fn mirror_dialogue(
     sim: Option<NonSendMut<SimServer>>,
     player: Option<NonSendMut<EmbeddedPlayer>>,
@@ -352,6 +352,64 @@ pub fn mirror_dialogue(
             targets,
             message: NetDialogue {
                 sender_uid: sender_uid.0.get(),
+                sender_name,
+                dialogue,
+            },
+        });
+    }
+}
+
+/// BL-82 EM-8.3b: the real-dedicated-server counterpart to [`mirror_dialogue`]
+/// above. `server::events::interaction`'s `DialogueEvent` handler now ALSO
+/// captures an NPC→player turn into `server::msg_capture::
+/// OutgoingMessageCapture` (keyed by the RECIPIENT player's `Uid`, sender
+/// carried alongside) for exactly the recipients that have no legacy
+/// `comp::Client` — the case [`mirror_dialogue`] structurally cannot reach
+/// (it only ever reads the embedded player's own inbox). This system drains
+/// that buffer every tick and, for each captured turn, resolves the
+/// recipient's real `ClientId` via [`ActiveReplicaSessions`] (dropping it,
+/// same posture as [`crate::chat::broadcast_captured_chat`], if no session
+/// currently correlates — no fallback target is guessed), flattens the
+/// sender's display name the SAME way [`mirror_dialogue`] does, and sends
+/// [`SendTargets::Single`] — never broadcast, so one player's NPC
+/// conversation can never reach a different connected client. A no-op if no
+/// [`SimServer`] exists yet; a harmless no-op on the listen server too (the
+/// capture buffer stays empty there — the listen server's one player always
+/// has a legacy `comp::Client`, see `msg_capture`'s own doc comment).
+pub fn broadcast_captured_dialogue(
+    sim: Option<NonSendMut<SimServer>>,
+    active: Res<ActiveReplicaSessions>,
+    mut writer: MessageWriter<ToClients<NetDialogue>>,
+) {
+    let Some(sim) = sim else { return };
+    let captured = sim
+        .server
+        .state()
+        .ecs()
+        .write_resource::<server::msg_capture::OutgoingMessageCapture>()
+        .drain_dialogue();
+    if captured.is_empty() {
+        return;
+    }
+
+    let ecs = sim.server.state().ecs();
+    let stats = ecs.read_storage::<comp::Stats>();
+
+    for server::msg_capture::CapturedDialogue {
+        recipient,
+        sender,
+        dialogue,
+    } in captured
+    {
+        let Some(client_id) = active.client_for_uid(recipient.0.get()) else {
+            continue;
+        };
+        let sender_entity = player_sim_entity(&sim, sender);
+        let sender_name = flatten_name(sender_entity.and_then(|e| stats.get(e)), "Someone");
+        writer.write(ToClients {
+            targets: SendTargets::Single(client_id),
+            message: NetDialogue {
+                sender_uid: sender.0.get(),
                 sender_name,
                 dialogue,
             },
@@ -499,6 +557,11 @@ impl Plugin for SocialMirrorPlugin {
                     mirror_player_list,
                     mirror_group_state,
                     mirror_dialogue,
+                    // BL-82 EM-8.3b: the real-dedicated-server counterpart to
+                    // `mirror_dialogue` above (drains the NEW sim-side
+                    // capture hook instead of `EmbeddedPlayer`'s inbox) —
+                    // see its own doc comment.
+                    broadcast_captured_dialogue,
                 )
                     .chain()
                     .after(tick_sim),
@@ -845,5 +908,67 @@ mod tests {
              on another player's behalf"
         );
         assert_eq!(*manip, comp::GroupManip::Leave);
+    }
+
+    /// BL-82 EM-8.3b [`broadcast_captured_dialogue`]: a captured NPC→player
+    /// dialogue turn relays ONLY to its own recipient's correlated
+    /// `ClientId` — never a different connected client's, and never a
+    /// captured turn addressed to an uncorrelated recipient. Same class of
+    /// regression guard as `sfx::tests::
+    /// captured_outcome_relays_only_to_its_own_correlated_client` — a
+    /// dialogue turn is private (an NPC conversation), so misdelivering it
+    /// to the wrong client would be a real leak, not just cosmetic.
+    #[test]
+    fn captured_dialogue_relays_only_to_its_own_correlated_recipient() {
+        use bevy_replicon::prelude::ClientId;
+        use common::rtsim::{Dialogue, DialogueId, DialogueKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let recipient_a = Uid(std::num::NonZeroU64::new(101).unwrap());
+        let recipient_b = Uid(std::num::NonZeroU64::new(102).unwrap());
+        let npc_sender = Uid(std::num::NonZeroU64::new(200).unwrap());
+        let client_a = ClientId::Client(bevy::ecs::entity::Entity::from_raw_u32(50).unwrap());
+
+        let dialogue = Dialogue::<true> {
+            id: DialogueId(1),
+            kind: DialogueKind::Start,
+        };
+
+        {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let mut capture = ecs.write_resource::<server::msg_capture::OutgoingMessageCapture>();
+            capture.capture_dialogue(recipient_a, npc_sender, dialogue.clone());
+            // `recipient_b` has NO correlated session below — must be
+            // dropped, never delivered to `client_a` by mistake.
+            capture.capture_dialogue(recipient_b, npc_sender, dialogue.clone());
+        }
+        app.world_mut()
+            .resource_mut::<ActiveReplicaSessions>()
+            .insert(recipient_a.0.get(), client_a);
+
+        app.world_mut()
+            .run_system_once(broadcast_captured_dialogue)
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<bevy::prelude::Messages<bevy_replicon::prelude::ToClients<NetDialogue>>>()
+            .drain()
+            .collect();
+
+        assert_eq!(
+            sent.len(),
+            1,
+            "only recipient_a (correlated) is relayed; recipient_b (uncorrelated) must be dropped"
+        );
+        assert!(
+            matches!(sent[0].targets, SendTargets::Single(cid) if cid == client_a),
+            "the relayed dialogue must target recipient_a's own client"
+        );
+        assert_eq!(sent[0].message.sender_uid, npc_sender.0.get());
+        assert_eq!(sent[0].message.dialogue.kind, DialogueKind::Start);
     }
 }

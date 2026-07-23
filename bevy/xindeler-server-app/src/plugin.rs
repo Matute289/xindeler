@@ -24,10 +24,10 @@ use xindeler_protocol::{
     ActiveReplicaSessions, ClientInterestPlugin, HudToastPlugin, XindelerProtocolPlugin,
 };
 use xindeler_sim_bridge::{
-    CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin, InventoryMirrorPlugin,
-    PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin, SfxLocomotionMirrorPlugin,
-    SimBridgePlugin, SimEntityMirrorPlugin, SimTerrainStreamPlugin, SkillSetMirrorPlugin,
-    SocialMirrorPlugin, TradeMirrorPlugin, tick_sim,
+    ChatBridgePlugin, CombatHudMirrorPlugin, CraftingMirrorPlugin, HotbarMirrorPlugin,
+    InventoryMirrorPlugin, PlayerTransferPlugin, SIM_TICK_HZ, ServerOraclePlugin,
+    SfxLocomotionMirrorPlugin, SfxOutcomeBridgePlugin, SimBridgePlugin, SimEntityMirrorPlugin,
+    SimTerrainStreamPlugin, SkillSetMirrorPlugin, SocialMirrorPlugin, TradeMirrorPlugin, tick_sim,
 };
 use xindeler_transport::{QuinnetTransport, ReplicaTransport, TransportConfig};
 
@@ -314,25 +314,33 @@ impl Plugin for SimServerPlugin {
         // they mirror + apply correctly for N genuinely-connected clients here.
         // Same ordering reasoning as the mirrors above (each reads `SimMirror`,
         // populated this same tick by `SimEntityMirrorPlugin`).
-        //
-        // NOTE (honest scope, EM-8.3): the two REMAINING listen-server-only
-        // plugins — `ChatBridgePlugin` (chat broadcast) and
-        // `SfxOutcomeBridgePlugin` (outcome→SFX broadcast) — are deliberately
-        // NOT registered here, and neither is `SocialMirrorPlugin::
-        // mirror_dialogue`'s NPC→player capture (which no-ops without an
-        // `EmbeddedPlayer`). All three depend on OBSERVING the sim's own
-        // per-recipient outgoing message stream (chat routed by
-        // `StateExt::send_chat`, outcomes drained inside `Server::tick` by
-        // `entity_sync`, NPC dialogue turns delivered via a `comp::Client`).
-        // Every one of those paths targets the sim's legacy `comp::Client` send
-        // queues — which a replicon-login player entity never has — and is
-        // consumed INSIDE `Server::tick`, so the bridge cannot tap it
-        // post-tick. Delivering those to `comp::Client`-less replicon players
-        // needs a NEW sim-side per-player outgoing-message capture hook, a
-        // distinct follow-up (ledger A1, tracked as EM-8.3b in
-        // `docs/backlog/engine-migration.md`) — not a copy of the
-        // embedded-player shape onto this shell.
         app.add_plugins((SkillSetMirrorPlugin, SocialMirrorPlugin));
+
+        // BL-82 EM-8.3b: closes the ledger's remaining A1 items — chat
+        // broadcast, outcome→SFX broadcast, and (folded into
+        // `SocialMirrorPlugin` above) NPC→player dialogue capture — which
+        // EM-8.3 explicitly could NOT close here because all three depended
+        // on OBSERVING the sim's own per-recipient outgoing message stream
+        // (chat routed by `StateExt::send_chat`, outcomes drained inside
+        // `Server::tick` by `entity_sync`, dialogue delivered via a
+        // `comp::Client`), and every one of those paths targeted the sim's
+        // legacy `comp::Client` send queue — which a replicon-login player
+        // entity never has — consumed INSIDE `Server::tick`, so nothing was
+        // left to read post-tick. `server::msg_capture::
+        // OutgoingMessageCapture` is the fix: a new sim-side, per-player
+        // capture buffer (`server/src/state_ext.rs`'s `send_chat`,
+        // `server/src/sys/entity_sync.rs`'s outcome sync, and
+        // `server/src/events/interaction.rs`'s `DialogueEvent` handler each
+        // ALSO push into it for exactly the recipients with no legacy
+        // `comp::Client`). `ChatBridgePlugin`/`SfxOutcomeBridgePlugin` (added
+        // here for the first time) each register a `broadcast_captured_*`
+        // system alongside their pre-existing listen-server-only
+        // `broadcast_embedded_*` one; on THIS shell the embedded-only system
+        // is a no-op (no `EmbeddedPlayer` exists), while the captured one
+        // resolves every real recipient's `ClientId` via
+        // `ActiveReplicaSessions` and targets `SendTargets::Single` — never
+        // broadcast. Same ordering reasoning as the mirrors above.
+        app.add_plugins((ChatBridgePlugin, SfxOutcomeBridgePlugin));
 
         // EM-4.2b: the transport seam — this crate names ONLY
         // `xindeler_transport::{ReplicaTransport, TransportConfig,
