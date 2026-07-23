@@ -93,7 +93,7 @@ use crate::{camera::MainCamera, chat::text_input_focused, combat_hud::Crosshair}
 /// locales get real translations; `Localization`'s `en`-fallback (see
 /// `xindeler_ui::i18n`'s doc) means an entry here with only PARTIAL `.ftl`
 /// coverage still degrades cleanly rather than looking broken.
-const AVAILABLE_LANGUAGES: &[&str] = &["en", "es"];
+const AVAILABLE_LANGUAGES: &[&str] = &["en", "es-419"];
 
 // Numeric-control step / clamp bounds (px-free, per setting).
 const UI_SCALE_STEP: f32 = 0.1;
@@ -1765,11 +1765,15 @@ mod tests {
     /// the list from a single (no-op) entry to two.
     #[test]
     fn next_language_cycles_through_every_available_locale() {
-        assert_eq!(next_language("en"), "es");
-        assert_eq!(next_language("es"), "en", "wraps back to the first entry");
+        assert_eq!(next_language("en"), "es-419");
+        assert_eq!(
+            next_language("es-419"),
+            "en",
+            "wraps back to the first entry"
+        );
         assert_eq!(
             next_language("totally-unknown"),
-            "es",
+            "es-419",
             "an unrecognised current tag falls back to cycling from the first entry"
         );
     }
@@ -1782,8 +1786,8 @@ mod tests {
     fn language_display_name_reads_the_real_manifest_and_degrades_for_unknown_tags() {
         assert_eq!(language_display_name("en"), "English");
         assert_eq!(
-            language_display_name("es"),
-            "Español de España (Spanish - Spain)",
+            language_display_name("es-419"),
+            "Español de Hispanoamérica (Spanish - Latin America)",
             "must read the manifest's own declared name, not a shortened guess"
         );
         assert_eq!(language_display_name("xx"), "xx");
