@@ -4,7 +4,9 @@
 //! `xindeler-client::sfx`'s movement/combat event mappers need, following the
 //! SAME `NetHealth`/`NetLoadout` pattern [`crate::mirror_sim_entities`]
 //! established — a NEW, separate system (like [`crate::combat_hud`]), not
-//! folded into that already-huge function.
+//! folded into that already-huge function. Extended by BL-82 EM-5.10e
+//! (T56.37) to also mirror [`xindeler_protocol::NetInstrumentMove`] — the
+//! same `CharacterState`/`Inventory` read, one more UPSERT.
 //!
 //! Project, don't dump (spec §3.2): [`xindeler_protocol::NetMoveState`] is
 //! the `CharacterState` CLASSIFICATION (Roll/RollCancel/Sneak/Climb/Glide/
@@ -24,9 +26,14 @@ use bevy::{
     },
 };
 use bevy_replicon::prelude::{SendTargets, ToClients};
-use common::comp::{CharacterAbilityType, CharacterState, PhysicsState};
+use common::comp::{
+    CharacterAbilityType, CharacterState, Inventory, PhysicsState,
+    inventory::{item::tool::AbilitySpec, slot::EquipSlot},
+};
 use specs::WorldExt;
-use xindeler_protocol::{NetCombatMove, NetGroundBlock, NetLocomotion, NetMoveState, NetOutcome};
+use xindeler_protocol::{
+    NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLocomotion, NetMoveState, NetOutcome,
+};
 
 use crate::{
     EmbeddedPlayer, SimMirror, SimServer, mirror_sim_entities, player::tick_player, tick_sim,
@@ -68,11 +75,40 @@ fn classify_move_state(character_state: &CharacterState) -> NetMoveState {
     NetMoveState::Idle
 }
 
-/// Reads the sim's `PhysicsState`/`CharacterState` for every currently-
-/// mirrored entity ([`SimMirror`]) and UPSERTs [`NetLocomotion`]/
-/// [`NetCombatMove`], removing them when the sim entity no longer carries the
-/// underlying components — mirrors `mirror_sim_entities`'s own `Some(h) =>
-/// insert / None => remove::<NetHealth>()` shape.
+/// Resolves the [`AbilitySpec`] the instrument note-bank sub-mapper
+/// (BL-82 EM-5.10e, T56.37) needs, if `character_state` is
+/// `character_state.is_music()` — ported verbatim from the old combat
+/// mapper's own `Music(ToolKind, AbilitySpec)` construction
+/// (`voxygen/src/audio/sfx/event_mapper/combat/mod.rs::map_event`'s
+/// `is_music()` arm): resolve the equip slot from
+/// `character_state.ability_info().and_then(|info| info.hand)`, falling back
+/// to `ActiveMainhand` (matching the old code's own `map_or`), then read that
+/// item's `ability_spec()` off `inventory`. `None` while not playing, or if
+/// the resolved item carries no `ability_spec` — both are a normal "stay
+/// silent" case, never a panic/default.
+fn playing_instrument(
+    character_state: &CharacterState,
+    inventory: Option<&Inventory>,
+) -> Option<AbilitySpec> {
+    if !character_state.is_music() {
+        return None;
+    }
+    let equip_slot = character_state
+        .ability_info()
+        .and_then(|info| info.hand)
+        .map_or(EquipSlot::ActiveMainhand, |hand| hand.to_equip_slot());
+    inventory
+        .and_then(|inventory| inventory.equipped(equip_slot))
+        .and_then(|item| item.ability_spec())
+        .map(|spec| spec.into_owned())
+}
+
+/// Reads the sim's `PhysicsState`/`CharacterState`/`Inventory` for every
+/// currently-mirrored entity ([`SimMirror`]) and UPSERTs [`NetLocomotion`]/
+/// [`NetCombatMove`]/[`NetInstrumentMove`], removing them when the sim entity
+/// no longer carries the underlying components — mirrors
+/// `mirror_sim_entities`'s own `Some(h) => insert / None =>
+/// remove::<NetHealth>()` shape.
 ///
 /// A no-op (returns immediately) if no [`SimServer`] is booted yet — same
 /// early-out every sibling mirror system uses.
@@ -86,6 +122,7 @@ pub fn mirror_locomotion_and_combat_state(
     let ecs = sim.server.state().ecs();
     let physics_states = ecs.read_storage::<PhysicsState>();
     let character_states = ecs.read_storage::<CharacterState>();
+    let inventories = ecs.read_storage::<Inventory>();
 
     for (&sim_entity, &bevy_entity) in mirror.0.iter() {
         let mut ec = commands.entity(bevy_entity);
@@ -126,9 +163,13 @@ pub fn mirror_locomotion_and_combat_state(
                     attacking,
                     weapon_drawn: weapon_drawn(character_state),
                 });
+                ec.insert(NetInstrumentMove {
+                    playing: playing_instrument(character_state, inventories.get(sim_entity)),
+                });
             },
             None => {
                 ec.remove::<NetCombatMove>();
+                ec.remove::<NetInstrumentMove>();
             },
         }
     }
@@ -526,6 +567,112 @@ mod tests {
         assert_eq!(combat_move.attacking, Some(CharacterAbilityType::SelfBuff));
     }
 
+    // -----------------------------------------------------------------
+    // Instrument note-bank sub-mapper (BL-82 EM-5.10e, T56.37).
+    // -----------------------------------------------------------------
+
+    /// A non-`Music` `CharacterState` never resolves an [`AbilitySpec`],
+    /// regardless of what's equipped — the pure-function guard against
+    /// firing music notes off an unrelated state.
+    #[test]
+    fn playing_instrument_is_none_outside_the_music_state() {
+        assert_eq!(playing_instrument(&CharacterState::default(), None), None);
+    }
+
+    /// A real `CharacterState::Music` with a `Flute` equipped in
+    /// `ActiveMainhand` resolves `Some(AbilitySpec::Custom("Flute"))` —
+    /// ported behaviour from the old combat mapper's own `Music(ToolKind,
+    /// AbilitySpec)` construction.
+    #[test]
+    fn playing_instrument_resolves_the_equipped_flutes_ability_spec() {
+        let mut inventory = Inventory::with_empty();
+        let flute =
+            common::comp::Item::new_from_asset_expect("common.items.tool.instruments.flute");
+        inventory.replace_loadout_item(
+            EquipSlot::ActiveMainhand,
+            Some(flute),
+            common::resources::Time(0.0),
+        );
+
+        assert_eq!(
+            playing_instrument(&dummy_music_state(), Some(&inventory)),
+            Some(AbilitySpec::Custom("Flute".to_owned()))
+        );
+    }
+
+    /// No `Inventory` at all (e.g. a scenery entity somehow in `Music`, which
+    /// never really happens, but the function must stay total) resolves
+    /// `None`, not a panic.
+    #[test]
+    fn playing_instrument_with_no_inventory_is_none() {
+        assert_eq!(playing_instrument(&dummy_music_state(), None), None);
+    }
+
+    /// The full mirror system: a sim entity in `CharacterState::Music` with a
+    /// `Flute` equipped mirrors `NetInstrumentMove::playing ==
+    /// Some(Custom("Flute"))` — the task's own headline verify ("the
+    /// instrument notes load + play" starts here, at the mirror that tells
+    /// the client-side mapper WHICH note-bank to draw from).
+    #[test]
+    fn mirrors_a_playing_instrument_entity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let sim_entity = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let mut inventory = Inventory::with_empty();
+            let flute =
+                common::comp::Item::new_from_asset_expect("common.items.tool.instruments.flute");
+            inventory.replace_loadout_item(
+                EquipSlot::ActiveMainhand,
+                Some(flute),
+                common::resources::Time(0.0),
+            );
+            ecs.create_entity()
+                .with(PhysicsState::default())
+                .with(dummy_music_state())
+                .with(inventory)
+                .build()
+        };
+        let bevy_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SimMirror>()
+            .0
+            .insert(sim_entity, bevy_entity);
+
+        app.world_mut()
+            .run_system_once(mirror_locomotion_and_combat_state)
+            .expect("system runs");
+        app.update();
+
+        let instrument_move = app
+            .world()
+            .get::<NetInstrumentMove>(bevy_entity)
+            .expect("NetInstrumentMove must be mirrored");
+        assert_eq!(
+            instrument_move.playing,
+            Some(AbilitySpec::Custom("Flute".to_owned()))
+        );
+    }
+
+    /// Builds a minimal `CharacterState::Music` — `is_music()`-true by
+    /// construction, `ability_info.hand: None` so [`playing_instrument`]'s
+    /// own `ActiveMainhand` fallback is what's under test.
+    fn dummy_music_state() -> CharacterState {
+        use common::states::music;
+        CharacterState::Music(music::Data {
+            static_data: music::StaticData {
+                play_duration: Default::default(),
+                ori_modifier: 1.0,
+                ability_info: dummy_ability_info(),
+            },
+            timer: Default::default(),
+            stage_section: StageSection::Action,
+            exhausted: false,
+        })
+    }
+
     /// Losing the sim-side `PhysicsState`/`CharacterState` components
     /// removes the corresponding `Net*` mirrors too.
     #[test]
@@ -553,6 +700,7 @@ mod tests {
         app.update();
         assert!(app.world().get::<NetLocomotion>(bevy_entity).is_some());
         assert!(app.world().get::<NetCombatMove>(bevy_entity).is_some());
+        assert!(app.world().get::<NetInstrumentMove>(bevy_entity).is_some());
 
         {
             let mut sim = app.world_mut().non_send_mut::<SimServer>();
@@ -567,6 +715,7 @@ mod tests {
         app.update();
         assert!(app.world().get::<NetLocomotion>(bevy_entity).is_none());
         assert!(app.world().get::<NetCombatMove>(bevy_entity).is_none());
+        assert!(app.world().get::<NetInstrumentMove>(bevy_entity).is_none());
     }
 
     /// Builds a minimal `SelfBuff` `CharacterState` — `is_attack()`-true per

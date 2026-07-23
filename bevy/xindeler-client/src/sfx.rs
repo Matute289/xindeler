@@ -14,8 +14,20 @@
 //!   `NetVel`/`NetBody`.
 //! - **Combat** ([`combat_sfx_mapper`]) — REAL. Attack/Wield/Unwield off the
 //!   real `NetCombatMove` mirror + already-mirrored `NetLoadout::active_tool`
-//!   for the tool kind. `Music` (playing an instrument) is EXPLICITLY deferred
-//!   — it needs the instrument note-bank, EM-5.10e/T56.37's own job.
+//!   for the tool kind.
+//! - **Instrument note-bank** ([`music_sfx_mapper`], BL-82 EM-5.10e/T56.37) —
+//!   REAL. The `Music` sfx event `combat_sfx_mapper` explicitly deferred: off
+//!   the new `NetInstrumentMove` mirror (`Some(ability_spec)` while
+//!   `character_state.is_music()`), constructs `SfxEvent::Music(Instrument,
+//!   ability_spec)` — every music-playing item is `ToolKind::Instrument`
+//!   (verified against all 22 `assets/common/items/tool/instruments/*.ron`), so
+//!   this hardcodes it the same way `sfx.ron`'s own `Music(Instrument,
+//!   Custom(..))` keys do. `sfx.ron` already carries all 22 instruments' full
+//!   252-file note banks (`Music(Instrument, Custom("Flute"))` etc., each
+//!   listing every note `.ogg` under `assets/voxygen/audio/sfx/instrument/
+//!   <name>/`) — `xindeler_audio::sfx::SfxManifestLoader`'s existing
+//!   `AssetLoader` parses them with zero new manifest code; this mapper is the
+//!   missing "when to trigger + which random note" half.
 //! - **Campfire** ([`campfire_sfx_mapper`]) — REAL, using ONLY already-mirrored
 //!   state (`NetBody::Object(CampfireLit)` + `Transform`) — no new mirror
 //!   needed at all.
@@ -42,7 +54,7 @@
 use std::{collections::HashMap, time::Instant};
 
 use bevy::prelude::*;
-use common::comp::{self, Body};
+use common::comp::{self, Body, inventory::item::tool::ToolKind};
 use xindeler_audio::{
     AudioBackend, XindelerAudioAsset,
     sfx::{
@@ -51,8 +63,8 @@ use xindeler_audio::{
     },
 };
 use xindeler_protocol::{
-    NetBody, NetCombatMove, NetGroundBlock, NetLoadout, NetLocalPlayer, NetLocomotion,
-    NetMoveState, NetOutcome, NetUid, NetVel,
+    NetBody, NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLoadout, NetLocalPlayer,
+    NetLocomotion, NetMoveState, NetOutcome, NetUid, NetVel,
 };
 
 // ---------------------------------------------------------------------------
@@ -388,6 +400,109 @@ fn combat_sfx_mapper(
 }
 
 // ---------------------------------------------------------------------------
+// Instrument note-bank mapper (REAL, BL-82 EM-5.10e/T56.37) — the 252-file
+// bard instrument note-bank the combat mapper explicitly deferred.
+// ---------------------------------------------------------------------------
+
+struct MusicHistory {
+    event: SfxEvent,
+    time: Instant,
+}
+
+impl Default for MusicHistory {
+    fn default() -> Self {
+        Self {
+            // `Idle` is never a real `Music(..)` key, so a brand-new entry
+            // always reads as "changed event" below — the first note of a
+            // playing session fires immediately, matching every sibling
+            // mapper's own `Default` (`MoveHistory`/`CombatHistory`) "never
+            // equal to a real mapped event" trick.
+            event: SfxEvent::Idle,
+            time: Instant::now(),
+        }
+    }
+}
+
+/// Ported from the old combat mapper's own `should_emit`: repeating the SAME
+/// instrument note-bank key gates on the manifest threshold (this is what
+/// makes a HELD note key cycle through random notes at the manifest's own
+/// cadence, e.g. every 0.5s for most instruments per `sfx.ron`); switching to
+/// a different instrument (or starting play from silence) emits immediately.
+fn should_emit_music(history: &MusicHistory, mapped_event: &SfxEvent, threshold: f32) -> bool {
+    if &history.event == mapped_event {
+        history.time.elapsed().as_secs_f32() >= threshold
+    } else {
+        true
+    }
+}
+
+/// The instrument note-bank sub-mapper: for every mirrored entity within
+/// [`SFX_DIST_LIMIT_SQR`] currently playing an instrument
+/// ([`NetInstrumentMove::playing`] is `Some`), constructs
+/// `SfxEvent::Music(ToolKind::Instrument, ability_spec)` and lets
+/// [`trigger_sfx`] pick a random note file out of that instrument's manifest
+/// entry — exactly the old client's own `Music(ToolKind, AbilitySpec)`
+/// construction, now driven by the real `NetInstrumentMove` mirror
+/// (`xindeler-sim-bridge::sfx::playing_instrument`) instead of a raw
+/// `CharacterState`.
+fn music_sfx_mapper(
+    entities: Query<(Entity, &Transform, &NetInstrumentMove), With<NetUid>>,
+    manifest_handle: Option<Res<SfxManifestHandle>>,
+    manifests: Res<Assets<SfxManifest>>,
+    audio_listener: Res<AudioListener>,
+    asset_server: Res<AssetServer>,
+    audio_assets: Res<Assets<XindelerAudioAsset>>,
+    mut cache: ResMut<SfxAssetCache>,
+    mut backend: ResMut<AudioBackend>,
+    mut history: Local<HashMap<Entity, MusicHistory>>,
+) {
+    let Some(manifest_handle) = manifest_handle else {
+        return;
+    };
+    let Some(manifest) = manifests.get(&manifest_handle.0) else {
+        return;
+    };
+    // Cull from the listener/camera — the same point we attenuate/pan from.
+    let listener_pos = audio_listener.pos;
+
+    for (entity, transform, instrument) in &entities {
+        if transform.translation.distance_squared(listener_pos) >= SFX_DIST_LIMIT_SQR {
+            continue;
+        }
+        let Some(ability_spec) = instrument.playing.clone() else {
+            // Not playing right now — stop tracking so a future re-start
+            // (potentially a different instrument) emits immediately rather
+            // than inheriting a stale threshold gate.
+            history.remove(&entity);
+            continue;
+        };
+        let mapped_event = SfxEvent::Music(ToolKind::Instrument, ability_spec);
+        let entry = history.entry(entity).or_default();
+
+        if let Some(item) = manifest.get(&mapped_event)
+            && should_emit_music(entry, &mapped_event, item.threshold)
+            && trigger_sfx(
+                manifest,
+                &mapped_event,
+                1.0,
+                transform.translation,
+                &audio_listener,
+                &asset_server,
+                &audio_assets,
+                &mut cache,
+                &mut backend,
+            )
+        {
+            entry.time = Instant::now();
+        }
+
+        entry.event = mapped_event;
+    }
+
+    history.retain(|entity, _| entities.contains(*entity));
+}
+
+// ---------------------------------------------------------------------------
 // Campfire mapper (REAL) — uses ONLY already-mirrored state.
 // ---------------------------------------------------------------------------
 
@@ -571,7 +686,7 @@ fn update_audio_listener(
 // Plugin
 // ---------------------------------------------------------------------------
 
-/// Adds the 3 real event-mapper systems + `handle_outcome_sfx` to `Update`
+/// Adds the 4 real event-mapper systems + `handle_outcome_sfx` to `Update`
 /// (frame rate — matches every other Phase-5 HUD/view system's own
 /// schedule; distance/threshold culling happens INSIDE each system, not via
 /// scheduling). Does NOT register anything for the block/vehicle
@@ -591,6 +706,7 @@ impl Plugin for SfxViewPlugin {
             (
                 movement_sfx_mapper,
                 combat_sfx_mapper,
+                music_sfx_mapper,
                 campfire_sfx_mapper,
                 handle_outcome_sfx,
             )
@@ -607,6 +723,7 @@ mod tests {
     use common::{
         comp::{
             CharacterAbilityType, humanoid,
+            inventory::item::tool::AbilitySpec,
             tool::{Hands, ToolKind},
         },
         states::utils::StageSection,
@@ -688,6 +805,44 @@ mod tests {
         assert_eq!(
             classify_combat_event(&combat_move, Some(ToolKind::Sword), true),
             SfxEvent::Idle
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Instrument note-bank mapper (BL-82 EM-5.10e, T56.37).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn should_emit_music_fires_immediately_on_a_brand_new_history() {
+        let history = MusicHistory::default();
+        let mapped = SfxEvent::Music(
+            ToolKind::Instrument,
+            AbilitySpec::Custom("Flute".to_owned()),
+        );
+        assert!(
+            should_emit_music(&history, &mapped, 0.5),
+            "a brand-new (Idle-default) history must fire the first note immediately"
+        );
+    }
+
+    #[test]
+    fn should_emit_music_gates_the_same_note_bank_on_threshold_but_not_a_different_one() {
+        let flute = SfxEvent::Music(
+            ToolKind::Instrument,
+            AbilitySpec::Custom("Flute".to_owned()),
+        );
+        let lute = SfxEvent::Music(ToolKind::Instrument, AbilitySpec::Custom("Lute".to_owned()));
+        let history = MusicHistory {
+            event: flute.clone(),
+            time: Instant::now(),
+        };
+        assert!(
+            !should_emit_music(&history, &flute, 0.5),
+            "the SAME instrument, just triggered, must gate on the threshold"
+        );
+        assert!(
+            should_emit_music(&history, &lute, 0.5),
+            "switching to a DIFFERENT instrument must emit immediately"
         );
     }
 
@@ -914,6 +1069,82 @@ mod tests {
             count_after_transition >= 1,
             "the footstep + attack state transition must have started at least one real sound, \
              got {count_after_transition}"
+        );
+    }
+
+    /// BL-82 EM-5.10e (T56.37)'s own headline verify: "the instrument notes
+    /// load + play" — a mirrored entity transitioning from not-playing to
+    /// `NetInstrumentMove { playing: Some(Custom("Flute")) }` starts a real
+    /// sound drawn from the real 252-file note-bank's `Flute` entry, on the
+    /// real Kira backend — not merely "the system ran without panicking".
+    #[test]
+    fn instrument_note_bank_plays_a_real_note_from_a_real_state_transition() {
+        let mut app = boot_app();
+
+        poll_until(&mut app, 400, |app| {
+            let ready = app.world().resource::<AudioBackend>().is_available();
+            let handle = app
+                .world()
+                .get_resource::<SfxManifestHandle>()
+                .map(|h| h.0.clone());
+            let manifest_loaded = match handle {
+                Some(h) => app
+                    .world()
+                    .resource::<Assets<SfxManifest>>()
+                    .get(&h)
+                    .is_some(),
+                None => false,
+            };
+            ready && manifest_loaded
+        });
+
+        if !app.world().resource::<AudioBackend>().is_available() {
+            eprintln!(
+                "skipping real-playback assertions: no cpal output device in this environment"
+            );
+            return;
+        }
+
+        let music_event = SfxEvent::Music(
+            ToolKind::Instrument,
+            AbilitySpec::Custom("Flute".to_owned()),
+        );
+        preload_event_assets(&mut app, &music_event);
+
+        app.world_mut()
+            .spawn((Transform::from_translation(Vec3::ZERO), NetLocalPlayer));
+
+        // A mirrored entity right next to the player, not playing yet — no
+        // sound should fire.
+        let npc = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                NetUid(1),
+                NetInstrumentMove { playing: None },
+            ))
+            .id();
+
+        app.update();
+        assert_eq!(
+            sfx_sound_count(&mut app),
+            Some(0),
+            "a not-playing entity must not trigger any sfx yet"
+        );
+
+        // --- The real state transition: the entity starts playing its
+        // Flute — exactly the "instrument notes load + play" bar.
+        app.world_mut().entity_mut(npc).insert(NetInstrumentMove {
+            playing: Some(AbilitySpec::Custom("Flute".to_owned())),
+        });
+
+        app.update();
+        let count_after_transition = sfx_sound_count(&mut app)
+            .expect("AudioBackend must still be Ready after the transition");
+        assert!(
+            count_after_transition >= 1,
+            "starting to play the Flute must have started at least one real sound, got \
+             {count_after_transition}"
         );
     }
 
