@@ -55,6 +55,7 @@ use std::{collections::HashMap, time::Instant};
 
 use bevy::prelude::*;
 use common::comp::{self, Body, inventory::item::tool::ToolKind};
+use xindeler_app::XindelerSettings;
 use xindeler_audio::{
     AudioBackend, XindelerAudioAsset,
     sfx::{
@@ -66,6 +67,32 @@ use xindeler_protocol::{
     NetBody, NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLoadout, NetLocalPlayer,
     NetLocomotion, NetMoveState, NetOutcome, NetUid, NetVel,
 };
+
+use crate::subtitle_overlay::SubtitleTriggered;
+
+/// Emits a `SubtitleTriggered` for `event` iff the Subtitles accessibility
+/// toggle is on and the manifest item carries a `subtitle` key. Called right
+/// after a successful `trigger_sfx` so a subtitle only ever shows for a sound
+/// that actually played.
+fn push_subtitle(
+    writer: &mut MessageWriter<SubtitleTriggered>,
+    enabled: bool,
+    manifest: &SfxManifest,
+    event: &SfxEvent,
+    emitter_pos: Vec3,
+) {
+    if !enabled {
+        return;
+    }
+    if let Some(item) = manifest.get(event)
+        && let Some(key) = &item.subtitle
+    {
+        writer.write(SubtitleTriggered {
+            key: key.clone(),
+            emitter_pos,
+        });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Movement mapper (REAL) — footsteps + swim + roll + sneak + climb + glide.
@@ -236,6 +263,8 @@ fn movement_sfx_mapper(
     mut cache: ResMut<SfxAssetCache>,
     mut backend: ResMut<AudioBackend>,
     mut history: Local<HashMap<Entity, MoveHistory>>,
+    settings: Res<XindelerSettings>,
+    mut subtitles: MessageWriter<SubtitleTriggered>,
 ) {
     let Some(manifest_handle) = manifest_handle else {
         return;
@@ -272,6 +301,13 @@ fn movement_sfx_mapper(
             )
         {
             entry.time = Instant::now();
+            push_subtitle(
+                &mut subtitles,
+                settings.accessibility.subtitles,
+                manifest,
+                &mapped_event,
+                transform.translation,
+            );
         }
 
         entry.event = mapped_event;
@@ -357,6 +393,8 @@ fn combat_sfx_mapper(
     mut cache: ResMut<SfxAssetCache>,
     mut backend: ResMut<AudioBackend>,
     mut history: Local<HashMap<Entity, CombatHistory>>,
+    settings: Res<XindelerSettings>,
+    mut subtitles: MessageWriter<SubtitleTriggered>,
 ) {
     let Some(manifest_handle) = manifest_handle else {
         return;
@@ -390,6 +428,13 @@ fn combat_sfx_mapper(
             )
         {
             entry.time = Instant::now();
+            push_subtitle(
+                &mut subtitles,
+                settings.accessibility.subtitles,
+                manifest,
+                &mapped_event,
+                transform.translation,
+            );
         }
 
         entry.event = mapped_event;
@@ -455,6 +500,8 @@ fn music_sfx_mapper(
     mut cache: ResMut<SfxAssetCache>,
     mut backend: ResMut<AudioBackend>,
     mut history: Local<HashMap<Entity, MusicHistory>>,
+    settings: Res<XindelerSettings>,
+    mut subtitles: MessageWriter<SubtitleTriggered>,
 ) {
     let Some(manifest_handle) = manifest_handle else {
         return;
@@ -494,6 +541,13 @@ fn music_sfx_mapper(
             )
         {
             entry.time = Instant::now();
+            push_subtitle(
+                &mut subtitles,
+                settings.accessibility.subtitles,
+                manifest,
+                &mapped_event,
+                transform.translation,
+            );
         }
 
         entry.event = mapped_event;
@@ -534,6 +588,8 @@ fn campfire_sfx_mapper(
     mut cache: ResMut<SfxAssetCache>,
     mut backend: ResMut<AudioBackend>,
     mut history: Local<HashMap<Entity, CampfireHistory>>,
+    settings: Res<XindelerSettings>,
+    mut subtitles: MessageWriter<SubtitleTriggered>,
 ) {
     let Some(manifest_handle) = manifest_handle else {
         return;
@@ -569,6 +625,13 @@ fn campfire_sfx_mapper(
             )
         {
             entry.time = Instant::now();
+            push_subtitle(
+                &mut subtitles,
+                settings.accessibility.subtitles,
+                manifest,
+                &SfxEvent::Campfire,
+                transform.translation,
+            );
         }
     }
 
@@ -625,6 +688,8 @@ fn handle_outcome_sfx(
     audio_assets: Res<Assets<XindelerAudioAsset>>,
     mut cache: ResMut<SfxAssetCache>,
     mut backend: ResMut<AudioBackend>,
+    settings: Res<XindelerSettings>,
+    mut subtitles: MessageWriter<SubtitleTriggered>,
 ) {
     let Some(manifest_handle) = manifest_handle else {
         outcomes.read().for_each(drop);
@@ -636,17 +701,26 @@ fn handle_outcome_sfx(
     };
     for outcome in outcomes.read() {
         let (event, volume) = outcome_sfx(outcome);
-        trigger_sfx(
+        let pos = outcome_pos(outcome);
+        if trigger_sfx(
             manifest,
             &event,
             volume,
-            outcome_pos(outcome),
+            pos,
             &audio_listener,
             &asset_server,
             &audio_assets,
             &mut cache,
             &mut backend,
-        );
+        ) {
+            push_subtitle(
+                &mut subtitles,
+                settings.accessibility.subtitles,
+                manifest,
+                &event,
+                pos,
+            );
+        }
     }
 }
 
@@ -728,7 +802,7 @@ mod tests {
         },
         states::utils::StageSection,
     };
-    use xindeler_audio::sfx::dotted_key_to_ogg_path;
+    use xindeler_audio::sfx::{SfxTriggerItem, dotted_key_to_ogg_path};
     use xindeler_protocol::{NetTool, NetToolKey};
 
     use super::*;
@@ -896,6 +970,13 @@ mod tests {
         // `add_server_message`; `handle_outcome_sfx`'s `MessageReader<
         // NetOutcome>` just needs the type initialized.
         app.add_message::<NetOutcome>();
+        // BL-82 EM-5.16 Phase 5 close-out: every mapper now reads
+        // `Res<XindelerSettings>` (the Subtitles toggle) and writes
+        // `MessageWriter<SubtitleTriggered>` — neither is registered by
+        // `SfxViewPlugin` itself (that's `SubtitleOverlayPlugin`'s job in the
+        // real shell), so this harness registers them directly.
+        app.insert_resource(XindelerSettings::default());
+        app.add_message::<SubtitleTriggered>();
         app.add_plugins(SfxViewPlugin);
         app.finish();
         app
@@ -1260,6 +1341,73 @@ mod tests {
             !played_far,
             "a campfire 400 m away (past SFX_DIST_LIMIT) must be silent"
         );
+    }
+
+    /// BL-82 EM-5.16 Phase 5 close-out: [`push_subtitle`] (the helper every
+    /// real mapper calls right after a successful [`trigger_sfx`]) only
+    /// queues a [`SubtitleTriggered`] when the Subtitles accessibility
+    /// toggle is on AND the manifest item carries a `subtitle` key — the
+    /// exact gate `campfire_sfx_mapper`/`movement_sfx_mapper`/etc. all rely
+    /// on, exercised directly (not through the mapper's own ~22 s
+    /// re-trigger threshold, which a scheduled-system test can't fast-
+    /// forward through).
+    #[test]
+    fn push_subtitle_only_queues_when_the_toggle_is_on_and_the_manifest_has_a_key() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut manifest = SfxManifest::default();
+        manifest.0.insert(SfxEvent::Campfire, SfxTriggerItem {
+            files: vec!["voxygen.audio.sfx.ambient.fire".to_owned()],
+            threshold: 21.835,
+            subtitle: Some("subtitle-campfire".to_owned()),
+        });
+
+        let mut app = App::new();
+        app.add_message::<SubtitleTriggered>();
+
+        // Toggle OFF: nothing queued even though the manifest has a key.
+        let manifest_off = manifest.clone();
+        app.world_mut()
+            .run_system_once(move |mut writer: MessageWriter<SubtitleTriggered>| {
+                push_subtitle(
+                    &mut writer,
+                    false,
+                    &manifest_off,
+                    &SfxEvent::Campfire,
+                    Vec3::ZERO,
+                );
+            })
+            .expect("system runs");
+        assert_eq!(
+            app.world().resource::<Messages<SubtitleTriggered>>().len(),
+            0,
+            "no subtitle must be queued while the toggle is off"
+        );
+
+        // Toggle ON: the campfire's `subtitle-campfire` key is queued, with
+        // the emitter position carried through untouched.
+        let manifest_on = manifest.clone();
+        let emitter_pos = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut()
+            .run_system_once(move |mut writer: MessageWriter<SubtitleTriggered>| {
+                push_subtitle(
+                    &mut writer,
+                    true,
+                    &manifest_on,
+                    &SfxEvent::Campfire,
+                    emitter_pos,
+                );
+            })
+            .expect("system runs");
+        let queued: Vec<_> = app
+            .world()
+            .resource::<Messages<SubtitleTriggered>>()
+            .iter_current_update_messages()
+            .cloned()
+            .collect();
+        assert_eq!(queued.len(), 1, "exactly one subtitle must be queued");
+        assert_eq!(queued[0].key, "subtitle-campfire");
+        assert_eq!(queued[0].emitter_pos, emitter_pos);
     }
 
     /// EM-5.10d — the listener "ears" track the player camera + underwater

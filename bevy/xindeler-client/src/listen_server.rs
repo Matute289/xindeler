@@ -52,7 +52,8 @@ use crate::{
     hud_toast::HudToastViewPlugin, localization::ClientLocalizationPlugin, lod::LodCullingPlugin,
     lod_objects::LodObjectsPlugin, map_view::MapViewPlugin, music::MusicViewPlugin,
     player_input::PlayerInputPlugin, sfx::SfxViewPlugin, social_hud::SocialHudViewPlugin,
-    sprite_view::SpriteViewPlugin, terrain_stream::TerrainStreamPlugin,
+    sprite_view::SpriteViewPlugin, subtitle_overlay::SubtitleOverlayPlugin,
+    terrain_stream::TerrainStreamPlugin,
 };
 
 /// Adds the whole listen-server stack to the client `App`.
@@ -427,6 +428,7 @@ impl Plugin for ListenServerPlugin {
             SfxLocomotionMirrorPlugin,
             SfxOutcomeBridgePlugin,
             SfxViewPlugin,
+            SubtitleOverlayPlugin,
         ));
 
         // BL-82 EM-5.10c (T56.36): music state machine (explore/combat via

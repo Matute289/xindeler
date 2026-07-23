@@ -21,6 +21,7 @@
 //!   < AMBIENT_CHROME_OVERLAY (21)
 //!   < BOSS_NAMEPLATE (25)
 //!   < CHAT (30)
+//!   < SUBTITLE_OVERLAY (50)
 //!   < MODAL_WINDOWS (100)
 //!   < TOOLTIP (200)
 //!   < TOAST (300)
@@ -93,6 +94,12 @@ pub const BOSS_NAMEPLATE: i32 = 25;
 /// takes over the screen.
 pub const CHAT: i32 = 30;
 
+/// The positional-sound accessibility subtitle overlay (BL-82 EM-5.16 Phase
+/// 5 close-out, `xindeler-client::subtitle_overlay`) — above ambient chrome
+/// and chat (an accessibility aid must never be hidden behind either) but
+/// below anything that temporarily owns the whole screen.
+pub const SUBTITLE_OVERLAY: i32 = 50;
+
 /// Modal/full-screen windows: diary (Phase 6), inventory (Phase 7), the
 /// full (non-mini) map. These temporarily own the screen and must draw over
 /// every always-on panel below this line.
@@ -129,6 +136,7 @@ mod tests {
             AMBIENT_CHROME_OVERLAY,
             BOSS_NAMEPLATE,
             CHAT,
+            SUBTITLE_OVERLAY,
             MODAL_WINDOWS,
             MODAL_WINDOWS_STACKED,
             TOOLTIP,

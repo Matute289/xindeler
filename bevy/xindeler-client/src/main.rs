@@ -28,6 +28,8 @@ mod ambience;
 mod atmosphere;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod boss_nameplate;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod buff_i18n;
 mod camera;
 // BL-82 EM-5.14: char-select screen + 3D preview (listen-server only — the
 // char-list mirror lives in the embedded-player bridge).
@@ -104,6 +106,8 @@ mod smoke;
 mod social_hud;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod sprite_view;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod subtitle_overlay;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod targeting;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]

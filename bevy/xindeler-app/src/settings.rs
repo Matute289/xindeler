@@ -184,6 +184,10 @@ pub struct AccessibilitySettings {
     /// honestly documented the same way the Video tab's shadow-cascade
     /// count already is ("applies on next launch").
     pub high_contrast_ui: bool,
+    /// Shows a text overlay (`xindeler-client::subtitle_overlay`) for triggered
+    /// SFX/dialogue cues. `false` (no overlay) by default, matching the other
+    /// two accessibility toggles' honest derived default.
+    pub subtitles: bool,
 }
 
 /// BL-82 EM-5.16 (T56.43) — the first-run tutorial overlay's persisted state
@@ -706,6 +710,7 @@ mod tests {
             !settings.accessibility.high_contrast_ui,
             "the normal palette by default"
         );
+        assert!(!settings.accessibility.subtitles, "no overlay by default");
         assert_eq!(settings.tutorial, TutorialSettings::default());
         assert!(!settings.tutorial.seen, "unseen on a fresh install");
     }
@@ -718,12 +723,14 @@ mod tests {
         let mut settings = XindelerSettings::default();
         settings.accessibility.reduce_flashing = true;
         settings.accessibility.high_contrast_ui = true;
+        settings.accessibility.subtitles = true;
         settings.tutorial.seen = true;
         let text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
             .expect("settings serialize");
         let round_tripped: XindelerSettings = ron::from_str(&text).expect("settings deserialize");
         assert!(round_tripped.accessibility.reduce_flashing);
         assert!(round_tripped.accessibility.high_contrast_ui);
+        assert!(round_tripped.accessibility.subtitles);
         assert!(round_tripped.tutorial.seen);
     }
 

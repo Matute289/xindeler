@@ -879,14 +879,15 @@ fn sync_stats_panel(
         ));
     }
     if let Some(buffs) = buffs {
-        // `entry.kind`'s `{:?}` is the raw `BuffKind` Rust identifier — left
-        // untranslated deliberately: unlike the labels above, there is no
-        // existing `BuffKind -> .ftl key` lookup anywhere in this crate yet
-        // (`buff.ftl`'s `buff-*` keys are addressed by a DIFFERENT id scheme
-        // than `BuffKind`'s own variant names — building that mapping table
-        // is its own, much larger task, out of scope here).
+        // BL-82 EM-5.16 close-out: resolves through the same
+        // `crate::buff_i18n::buff_i18n_key` table `combat_hud.rs`'s buff
+        // strip uses, instead of a raw `{:?}` Debug identifier.
         for entry in &buffs.0 {
-            lines.push(format!("{:?} x{}", entry.kind, entry.stacks));
+            lines.push(format!(
+                "{} x{}",
+                localization.tr(crate::buff_i18n::buff_i18n_key(entry.kind)),
+                entry.stacks
+            ));
         }
     }
 

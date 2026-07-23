@@ -302,6 +302,11 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     "hud/trade.ftl",
     "hud/combat_hud.ftl",
     "char_selection.ftl",
+    // BL-82 EM-5.16 Phase 5 close-out: the `subtitle-*` overlay keys
+    // `xindeler-client::subtitle_overlay` resolves (the toggle's own row
+    // label, `hud-settings-subtitles`, lives in the already-registered
+    // `hud/settings.ftl`).
+    "hud/subtitles.ftl",
 ];
 
 /// Tracks which BCP-47 tag the currently-loaded [`Localization`] catalog is
