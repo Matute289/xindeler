@@ -30,9 +30,11 @@ use common::comp::{
     CharacterAbilityType, CharacterState, Inventory, PhysicsState,
     inventory::{item::tool::AbilitySpec, slot::EquipSlot},
 };
+use server::msg_capture::CapturedOutcome;
 use specs::WorldExt;
 use xindeler_protocol::{
-    NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLocomotion, NetMoveState, NetOutcome,
+    ActiveReplicaSessions, NetCombatMove, NetGroundBlock, NetInstrumentMove, NetLocomotion,
+    NetMoveState, NetOutcome,
 };
 
 use crate::{
@@ -248,18 +250,8 @@ fn project_outcome(outcome: &common::outcome::Outcome) -> Option<NetOutcome> {
 /// real participant). A no-op (and the pending queue simply never
 /// accumulates) if either the sim or the embedded player doesn't exist yet.
 ///
-/// ## ⚠️ Known gap: not wired into `xindeler-server-app` yet (disclosed, not
-/// silently narrowed — same class of gap `ChatBridgePlugin`'s own module doc
-/// comment discloses)
-/// [`SfxOutcomeBridgePlugin`] is added ONLY by `xindeler-client::listen_server`
-/// today. `xindeler-server-app` (the real dedicated multiplayer server) has no
-/// [`crate::EmbeddedPlayer`] at all, so there is nothing for THIS mechanism to
-/// read there — a genuinely-remote client's own `Outcome` stream would need a
-/// different capture point (e.g. sniffing the sim's own outgoing
-/// `ServerGeneral::Outcomes` per real connection), not a copy of this
-/// listen-server-only shape. Tracked as a required follow-up before the
-/// EM-5.13 cutover checklist, same class as EM-5.4/5.6/5.7/5.8's own disclosed
-/// gaps.
+/// listen-server-only by design — see [`broadcast_captured_outcomes`] below
+/// for the BL-82 EM-8.3b dedicated-server half.
 pub fn broadcast_embedded_outcomes(
     player: Option<NonSendMut<EmbeddedPlayer>>,
     mut writer: MessageWriter<ToClients<NetOutcome>>,
@@ -275,16 +267,62 @@ pub fn broadcast_embedded_outcomes(
     }
 }
 
+/// BL-82 EM-8.3b: the dedicated-server half [`broadcast_embedded_outcomes`]
+/// above could never cover — a genuinely-remote client has no
+/// [`crate::EmbeddedPlayer`] at all, so there was nothing for that mechanism
+/// to read for it. `entity_sync::Sys::run` (`server/src/sys/entity_sync.rs`)
+/// now ALSO captures each already-radius-filtered `Outcome` into
+/// `server::msg_capture::OutgoingMessageCapture`, keyed by recipient `Uid`,
+/// for exactly the recipients that have no legacy `comp::Client`. This
+/// system drains that buffer every `FixedUpdate` tick and forwards each
+/// entry to its resolved `ClientId` via [`ActiveReplicaSessions`] (BL-82
+/// EM-8.2), targeted `SendTargets::Single` — a captured `Uid` with no
+/// correlated session is dropped, matching
+/// [`crate::chat::broadcast_captured_chat`]'s identical posture (see that
+/// function's own doc comment for why no fallback target is guessed). A
+/// no-op if no [`SimServer`] exists yet; a harmless no-op on the listen
+/// server too (its capture buffer stays empty — see `msg_capture`'s own doc
+/// comment).
+pub fn broadcast_captured_outcomes(
+    sim: Option<NonSendMut<SimServer>>,
+    active: Res<ActiveReplicaSessions>,
+    mut writer: MessageWriter<ToClients<NetOutcome>>,
+) {
+    let Some(sim) = sim else { return };
+    let captured = sim
+        .server
+        .state()
+        .ecs()
+        .write_resource::<server::msg_capture::OutgoingMessageCapture>()
+        .drain_outcomes();
+    for CapturedOutcome { recipient, outcome } in captured {
+        let Some(net_outcome) = project_outcome(&outcome) else {
+            continue;
+        };
+        let Some(client_id) = active.client_for_uid(recipient.0.get()) else {
+            continue;
+        };
+        writer.write(ToClients {
+            targets: SendTargets::Single(client_id),
+            message: net_outcome,
+        });
+    }
+}
+
 /// Registers [`broadcast_embedded_outcomes`] in `Update` (frame rate,
 /// matching [`tick_player`]'s own schedule — outcomes ride the embedded
 /// Client's tick, not the sim's 30 Hz `FixedUpdate`, exactly like
 /// [`crate::ChatBridgePlugin`]), `.after(tick_player)` so an outcome
-/// captured THIS frame broadcasts the SAME frame.
+/// captured THIS frame broadcasts the SAME frame — plus (BL-82 EM-8.3b)
+/// [`broadcast_captured_outcomes`] in `FixedUpdate`, `.after(tick_sim)`,
+/// which works on any shell (see that function's own doc comment).
 pub struct SfxOutcomeBridgePlugin;
 
 impl Plugin for SfxOutcomeBridgePlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<ActiveReplicaSessions>();
         app.add_systems(Update, broadcast_embedded_outcomes.after(tick_player));
+        app.add_systems(FixedUpdate, broadcast_captured_outcomes.after(tick_sim));
     }
 }
 
@@ -302,6 +340,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.init_resource::<SimMirror>();
+        app.add_message::<ToClients<NetOutcome>>();
+        app.init_resource::<ActiveReplicaSessions>();
         app.insert_non_send(sim);
         app
     }
@@ -764,5 +804,70 @@ mod tests {
             ability_meta: Default::default(),
             ability: None,
         }
+    }
+
+    /// BL-82 EM-8.3b [`broadcast_captured_outcomes`]: a captured `Outcome`
+    /// resolves to its recipient's own `ClientId` (never a broadcast, never
+    /// a different client's), and a captured recipient with NO correlated
+    /// session is silently dropped rather than guessing a fallback target —
+    /// the exact "message delivered to the wrong player" and "message lost/
+    /// misdelivered across a tick boundary" regressions this task exists to
+    /// prevent. Populates `OutgoingMessageCapture` directly via its public
+    /// API — the SAME calls `entity_sync::Sys::run`'s new capture branch
+    /// makes — so this test exercises the bridge-relay half in isolation
+    /// from the (separately covered) sim-side radius-filtering join.
+    #[test]
+    fn captured_outcome_relays_only_to_its_own_correlated_client() {
+        use bevy_replicon::prelude::ClientId;
+        use common::uid::Uid;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let uid_known = Uid(std::num::NonZeroU64::new(1).unwrap());
+        let uid_unknown = Uid(std::num::NonZeroU64::new(2).unwrap());
+        let client_known = ClientId::Client(bevy::ecs::entity::Entity::from_raw_u32(7).unwrap());
+
+        {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+            let mut capture = ecs.write_resource::<server::msg_capture::OutgoingMessageCapture>();
+            capture.capture_outcome(uid_known, common::outcome::Outcome::Death {
+                pos: vek::Vec3::new(1.0, 2.0, 3.0),
+            });
+            // A second recipient with NO correlated `ActiveReplicaSessions`
+            // entry (e.g. a disconnect/login race) — must be DROPPED, never
+            // routed to a guessed fallback target.
+            capture.capture_outcome(uid_unknown, common::outcome::Outcome::Death {
+                pos: vek::Vec3::new(9.0, 9.0, 9.0),
+            });
+        }
+        app.world_mut()
+            .resource_mut::<ActiveReplicaSessions>()
+            .insert(uid_known.0.get(), client_known);
+
+        app.world_mut()
+            .run_system_once(broadcast_captured_outcomes)
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<bevy::prelude::Messages<ToClients<NetOutcome>>>()
+            .drain()
+            .collect();
+
+        assert_eq!(
+            sent.len(),
+            1,
+            "only the recipient with a correlated session is relayed — the uncorrelated one must \
+             be dropped, not broadcast and not guessed"
+        );
+        assert!(
+            matches!(sent[0].targets, SendTargets::Single(cid) if cid == client_known),
+            "the relayed outcome must target its OWN recipient's client, never a different one"
+        );
+        assert_eq!(sent[0].message, NetOutcome::Death {
+            pos: crate::sim_pos_to_bevy(vek::Vec3::new(1.0, 2.0, 3.0))
+        });
     }
 }

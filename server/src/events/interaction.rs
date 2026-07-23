@@ -32,7 +32,7 @@ use common::{
     vol::ReadVol,
 };
 
-use crate::{Server, ServerGeneral, Time, client::Client};
+use crate::{Server, ServerGeneral, Time, client::Client, msg_capture::OutgoingMessageCapture};
 
 use crate::pet::tame_pet;
 use hashbrown::{HashMap, HashSet};
@@ -136,6 +136,7 @@ impl ServerEvent for DialogueEvent {
         ReadExpect<'a, AbilityMap>,
         ReadExpect<'a, MaterialStatManifest>,
         WriteStorage<'a, comp::InventoryUpdateBuffer>,
+        specs::Write<'a, OutgoingMessageCapture>,
     );
 
     fn handle(
@@ -149,6 +150,7 @@ impl ServerEvent for DialogueEvent {
             ability_map,
             msm,
             mut inventory_update_buffers,
+            mut msg_capture,
         ): Self::SystemData<'_>,
     ) {
         for DialogueEvent(sender, target, dialogue) in events {
@@ -211,8 +213,21 @@ impl ServerEvent for DialogueEvent {
                         .push_back(AgentEvent::Dialogue(*sender_uid, dialogue.clone()));
                 }
 
-                if let Some(client) = clients.get(target) {
-                    client.send_fallible(ServerGeneral::Dialogue(*sender_uid, dialogue));
+                match clients.get(target) {
+                    Some(client) => {
+                        client.send_fallible(ServerGeneral::Dialogue(*sender_uid, dialogue));
+                    },
+                    // BL-82 EM-8.3b: `target` has no legacy `comp::Client` —
+                    // the normal case for a real dedicated-server replicon-
+                    // login player (see `msg_capture`'s module doc comment).
+                    // Capture the turn keyed by the RECIPIENT's `Uid` (the
+                    // player this dialogue is FOR, not the NPC `sender`) so
+                    // the bevy-side bridge can still deliver it.
+                    None => {
+                        if let Some(&target_uid) = uids.get(target) {
+                            msg_capture.capture_dialogue(target_uid, *sender_uid, dialogue);
+                        }
+                    },
                 }
             }
         }

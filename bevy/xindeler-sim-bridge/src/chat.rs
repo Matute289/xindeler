@@ -34,42 +34,51 @@
 //! `.after(tick_player)` so a chat event captured THIS frame is broadcast the
 //! SAME frame, not one frame stale.
 //!
-//! ## ⚠️ Known gap: not wired into `xindeler-server-app` yet (disclosed, not
-//! silently narrowed — ecs-design-reviewer finding, BL-82 EM-5.4)
-//! [`ChatBridgePlugin`] is added ONLY by `xindeler-client::listen_server`
-//! today. `xindeler-server-app` (the real dedicated multiplayer server) has
-//! NO chat wiring at all. This module's design — one [`EmbeddedPlayer`]'s
-//! inbox, broadcast via `SendTargets::All` — is safe ONLY because a
-//! listen-server has exactly ONE real chat participant; the sim's own
-//! `Server::send_chat` (`server/src/state_ext.rs`) already does correct
-//! per-client recipient narrowing (Say/Region by distance, Tell by uid, …),
-//! so copying this exact shape onto `xindeler-server-app`'s multi-client
-//! topology would leak one player's private/proximity-scoped lines to every
-//! other connected client. A real fix needs a NEW bridge reading each active
-//! replica session's own chat inbox and targeting `SendTargets::Single` per
-//! recipient — not a copy-paste of this module — resolving each recipient's
-//! `ClientId` via `xindeler_protocol::ActiveReplicaSessions` (BL-82 EM-8.2:
-//! the SAME correlation resource `crate::social`'s `NetGroupState`/
-//! `NetDialogue` mirrors now use for the identical problem, so this future
-//! chat fix no longer needs to invent its own). Tracked in
-//! `docs/backlog/engine-migration.md`'s EM-5.4 row as a required follow-up
-//! before the EM-5.13 cutover (§Q7=A locks "full parity" — multi-player chat
-//! on the real server is core, not optional).
+//! ## BL-82 EM-8.3b: [`broadcast_captured_chat`] — the dedicated-server half
+//! [`broadcast_embedded_chat`] above stays listen-server-only by design (one
+//! [`EmbeddedPlayer`] inbox, `SendTargets::All` — safe only because a
+//! listen-server has exactly one real chat participant). Closing chat for a
+//! REAL dedicated-server client needed a NEW sim-side hook (EM-8.3b): every
+//! `StateExt::send_chat` (`server/src/state_ext.rs`) arm now ALSO captures
+//! into `server::msg_capture::OutgoingMessageCapture`, keyed by recipient
+//! `Uid`, for exactly the recipients that have no legacy `comp::Client` (a
+//! real replicon-login player never has one). [`broadcast_captured_chat`]
+//! drains that buffer every `FixedUpdate` tick and resolves each recipient's
+//! `Uid` to a real `ClientId` via `xindeler_protocol::ActiveReplicaSessions`
+//! (BL-82 EM-8.2 — the SAME correlation resource `crate::social`'s
+//! `NetGroupState`/`NetDialogue` mirrors already use for the identical
+//! problem), targeting `SendTargets::Single` per recipient — NEVER `All`, so
+//! one player's private/proximity-scoped line can never leak to a different
+//! connected client. A captured `Uid` with no correlated session (a
+//! disconnect/login race) is simply DROPPED, not broadcast and not routed to
+//! `SendTargets::SERVER_ONLY` (unlike `crate::social::
+//! resolve_recipient_targets`'s fallback) — there is no legitimate "local
+//! echo" target on a dedicated server with no embedded player, so guessing
+//! one would risk misdelivering a captured line to the wrong place. Runs in
+//! `FixedUpdate` (sim cadence — the capture buffer is written by the sim's
+//! OWN tick, unlike [`broadcast_embedded_chat`]'s frame-rate embedded-Client
+//! read), `.after(tick_sim)`, matching `crate::social`'s own mirror
+//! ordering. [`ChatBridgePlugin`] now registers BOTH systems; on the listen
+//! server, [`broadcast_captured_chat`] is a harmless no-op (its capture
+//! buffer stays empty there — see `msg_capture`'s own doc comment for why).
 
 use bevy::{
-    app::{App, Plugin, Update},
+    app::{App, FixedUpdate, Plugin, Update},
     ecs::{
-        change_detection::NonSendMut,
+        change_detection::{NonSendMut, Res},
         message::{MessageReader, MessageWriter},
         schedule::IntoScheduleConfigs,
     },
 };
 use bevy_replicon::prelude::{SendTargets, ToClients};
 use common::{comp, uid::IdMaps};
+use server::msg_capture::CapturedChat;
 use specs::WorldExt;
-use xindeler_protocol::{ChatSendRequest, NetChatChannel, NetChatMsg, NetUid};
+use xindeler_protocol::{
+    ActiveReplicaSessions, ChatSendRequest, NetChatChannel, NetChatMsg, NetUid,
+};
 
-use crate::{EmbeddedPlayer, SimServer, player::tick_player};
+use crate::{EmbeddedPlayer, SimServer, player::tick_player, tick_sim};
 
 /// Resolves `uid`'s display alias off the sim's `comp::Player` storage
 /// (`None` if the uid doesn't currently resolve to a live entity, or that
@@ -158,22 +167,58 @@ pub fn apply_chat_send_requests(
     }
 }
 
-/// Registers both chat-bridge systems in `Update`, `.after(tick_player)` (see
-/// the module doc comment for why this schedule/ordering, not
-/// `FixedUpdate`/`tick_sim`). Add alongside [`crate::PlayerBridgePlugin`]
-/// (after it — same convention [`crate::CombatHudMirrorPlugin`] follows for
-/// its own `.after` dependency) in whichever shell hosts the embedded player
-/// (only the listen-server client does today; `xindeler-server-app` has no
-/// embedded player, so this plugin has nothing to do there and is simply not
-/// added).
+/// BL-82 EM-8.3b: drains `server::msg_capture::OutgoingMessageCapture`'s
+/// captured chat lines (see the module doc comment) and forwards each to its
+/// resolved recipient `ClientId` via [`ActiveReplicaSessions`] — targeted
+/// `SendTargets::Single`, NEVER `All`. A captured recipient `Uid` with no
+/// correlated session is dropped (see module doc comment for why, not routed
+/// to a fallback). A no-op if no [`SimServer`] exists yet.
+pub fn broadcast_captured_chat(
+    sim: Option<NonSendMut<SimServer>>,
+    active: Res<ActiveReplicaSessions>,
+    mut writer: MessageWriter<ToClients<NetChatMsg>>,
+) {
+    let Some(sim) = sim else { return };
+    let captured = sim
+        .server
+        .state()
+        .ecs()
+        .write_resource::<server::msg_capture::OutgoingMessageCapture>()
+        .drain_chat();
+    for CapturedChat { recipient, msg } in captured {
+        let Some(client_id) = active.client_for_uid(recipient.0.get()) else {
+            continue;
+        };
+        writer.write(ToClients {
+            targets: SendTargets::Single(client_id),
+            message: project_chat_msg(&sim, &msg),
+        });
+    }
+}
+
+/// Registers all three chat-bridge systems: the two listen-server-only
+/// embedded-player systems in `Update`, `.after(tick_player)` (see the
+/// module doc comment for why this schedule/ordering) — add alongside
+/// [`crate::PlayerBridgePlugin`] (after it — same convention
+/// [`crate::CombatHudMirrorPlugin`] follows for its own `.after`
+/// dependency) in whichever shell hosts the embedded player — plus (BL-82
+/// EM-8.3b) [`broadcast_captured_chat`] in `FixedUpdate`, `.after(tick_sim)`,
+/// which works on ANY shell (listen server included, where it is a
+/// harmless no-op — see that function's own doc comment).
+/// `init_resource::<ActiveReplicaSessions>()` is idempotent (BL-82 EM-8.2/8.3
+/// precedent, see `crate::social::SocialMirrorPlugin`'s own doc comment) so
+/// this plugin's `broadcast_captured_chat` never panics for want of the
+/// resource existing even if added before `SocialMirrorPlugin`.
 pub struct ChatBridgePlugin;
 
 impl Plugin for ChatBridgePlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<ActiveReplicaSessions>();
         app.add_systems(
             Update,
             (apply_chat_send_requests, broadcast_embedded_chat).after(tick_player),
         );
+        app.add_systems(FixedUpdate, broadcast_captured_chat.after(tick_sim));
     }
 }
 
@@ -256,6 +301,7 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.add_message::<ChatSendRequest>();
         app.add_message::<ToClients<NetChatMsg>>();
+        app.init_resource::<ActiveReplicaSessions>();
         app.insert_non_send(sim);
         app
     }
@@ -295,5 +341,109 @@ mod tests {
             .drain()
             .collect();
         assert!(sent.is_empty(), "nothing to broadcast without a player");
+    }
+
+    /// BL-82 EM-8.3b end-to-end: a real `StateExt::send_chat` `Say` call
+    /// captures for a `comp::Client`-less recipient WITHIN range (via the new
+    /// sim-side hook in `server::state_ext::send_chat`), and
+    /// [`broadcast_captured_chat`] resolves that recipient's real `ClientId`
+    /// via `ActiveReplicaSessions` and delivers it `SendTargets::Single` —
+    /// while a second `comp::Client`-less recipient OUTSIDE `SAY_DISTANCE`
+    /// receives nothing at all. This is the exact regression this whole task
+    /// exists to prevent: a message captured for the wrong player (here,
+    /// captured despite being out of range) or delivered to the wrong
+    /// client.
+    #[test]
+    fn captured_say_chat_reaches_only_the_in_range_recipients_own_client() {
+        use bevy_replicon::prelude::ClientId;
+        use common::{
+            comp::Pos,
+            uid::{IdMaps, Uid},
+        };
+        use server::state_ext::StateExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = new_app_with_sim(dir.path());
+
+        let (uid_near, uid_far) = {
+            let mut sim = app.world_mut().non_send_mut::<SimServer>();
+            let ecs = sim.server.state_mut().ecs_mut();
+
+            // `IdMaps::allocate` only registers the uid<->entity MAPPING — it
+            // does NOT insert the `Uid` component onto the entity's own
+            // storage (confirmed against `common::uid::IdMaps::allocate`'s
+            // real body). `send_chat`'s `Say` arm joins on a REAL `Uid`
+            // component (`&uids` in the recipient loop), so every entity
+            // that must be found by that join needs BOTH: the mapping (for
+            // `entity_from_uid`) AND the component itself — matching the
+            // exact pattern `crate::social::tests::
+            // mirror_group_state_targets_each_connected_player_privately`
+            // already establishes for the identical reason.
+            let mut spawn_player_at = |x: f32| {
+                let entity = ecs
+                    .create_entity()
+                    .with(comp::Player::new(
+                        "recipient".to_owned(),
+                        common::resources::BattleMode::PvE,
+                        uuid::Uuid::nil(),
+                        None,
+                    ))
+                    .with(Pos(vek::Vec3::new(x, 0.0, 0.0)))
+                    .build();
+                let uid = ecs.write_resource::<IdMaps>().allocate(entity);
+                ecs.write_storage::<Uid>().insert(entity, uid).unwrap();
+                uid
+            };
+            let uid_near = spawn_player_at(50.0); // within SAY_DISTANCE (100.0)
+            let uid_far = spawn_player_at(500.0); // outside SAY_DISTANCE
+
+            // The speaker: any entity with a resolvable Uid + Pos.
+            let speaker_entity = ecs
+                .create_entity()
+                .with(Pos(vek::Vec3::new(0.0, 0.0, 0.0)))
+                .build();
+            let speaker_uid = ecs.write_resource::<IdMaps>().allocate(speaker_entity);
+            ecs.write_storage::<Uid>()
+                .insert(speaker_entity, speaker_uid)
+                .unwrap();
+
+            sim.server.state().send_chat(
+                comp::ChatType::Say(speaker_uid).into_msg(comp::Content::Plain("hello".to_owned())),
+                false,
+            );
+
+            (uid_near, uid_far)
+        };
+
+        let client_near = ClientId::Client(bevy::ecs::entity::Entity::from_raw_u32(1).unwrap());
+        let client_far = ClientId::Client(bevy::ecs::entity::Entity::from_raw_u32(2).unwrap());
+        {
+            let mut active = app.world_mut().resource_mut::<ActiveReplicaSessions>();
+            active.insert(uid_near.0.get(), client_near);
+            active.insert(uid_far.0.get(), client_far);
+        }
+
+        app.world_mut()
+            .run_system_once(broadcast_captured_chat)
+            .expect("system runs");
+
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ToClients<NetChatMsg>>>()
+            .drain()
+            .collect();
+
+        assert_eq!(
+            sent.len(),
+            1,
+            "exactly one captured chat message must be relayed — only the in-range recipient, \
+             never the out-of-range one"
+        );
+        assert!(
+            matches!(sent[0].targets, SendTargets::Single(cid) if cid == client_near),
+            "the captured message must target the IN-RANGE recipient's own client, never a \
+             broadcast and never the wrong client"
+        );
+        assert_eq!(sent[0].message.text, "hello");
     }
 }

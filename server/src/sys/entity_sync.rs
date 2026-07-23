@@ -1,6 +1,7 @@
 use super::sentinel::{DeletedEntities, TrackedStorages, UpdateTrackers};
 use crate::{
-    EditableSettings, Tick, client::Client, metrics::PlayerMetrics, presence::RegionSubscription,
+    EditableSettings, Tick, client::Client, metrics::PlayerMetrics,
+    msg_capture::OutgoingMessageCapture, presence::RegionSubscription,
 };
 use common::{
     calendar::Calendar,
@@ -46,6 +47,7 @@ impl<'a> System<'a> for Sys {
         Read<'a, EventBus<Outcome>>,
         ReadExpect<'a, EditableSettings>,
         ReadExpect<'a, PlayerMetrics>,
+        Write<'a, OutgoingMessageCapture>,
         (
             ReadStorage<'a, Pos>,
             ReadStorage<'a, Vel>,
@@ -84,6 +86,7 @@ impl<'a> System<'a> for Sys {
             outcomes,
             editable_settings,
             player_metrics,
+            mut msg_capture,
             (
                 positions,
                 velocities,
@@ -511,8 +514,23 @@ impl<'a> System<'a> for Sys {
         // Consume/clear the current outcomes and convert them to a vec
         let outcomes = outcomes.recv_all().collect::<Vec<_>>();
 
-        // Sync outcomes
-        for (presence, pos, client) in (presences.maybe(), positions.maybe(), &clients).join() {
+        // Sync outcomes. BL-82 EM-8.3b: the join used to require `&clients`
+        // (only a legacy `comp::Client`-having entity was ever considered a
+        // recipient at all); it now joins on `Uid`+`Player` (mandatory) with
+        // `Client` OPTIONAL, so a real dedicated-server replicon-login
+        // player — which never gets a `comp::Client` — still gets its own
+        // radius-filtered `Outcome`s, just captured into
+        // `OutgoingMessageCapture` instead of sent straight to a socket. A
+        // `comp::Client`-having recipient's behavior is UNCHANGED.
+        for (uid, _player, presence, pos, client) in (
+            uids,
+            &players,
+            presences.maybe(),
+            positions.maybe(),
+            clients.maybe(),
+        )
+            .join()
+        {
             let is_near = |o_pos: Vec3<f32>| {
                 pos.zip_with(presence, |pos, presence| {
                     pos.0.xy().distance_squared(o_pos.xy())
@@ -522,14 +540,23 @@ impl<'a> System<'a> for Sys {
                 })
             };
 
-            let outcomes = outcomes
+            let filtered_outcomes = outcomes
                 .iter()
                 .filter(|o| o.get_pos().and_then(is_near).unwrap_or(true))
                 .cloned()
                 .collect::<Vec<_>>();
 
-            if !outcomes.is_empty() {
-                client.send_fallible(ServerGeneral::Outcomes(outcomes));
+            if filtered_outcomes.is_empty() {
+                continue;
+            }
+
+            match client {
+                Some(client) => client.send_fallible(ServerGeneral::Outcomes(filtered_outcomes)),
+                None => {
+                    for outcome in filtered_outcomes {
+                        msg_capture.capture_outcome(*uid, outcome);
+                    }
+                },
             }
         }
 
