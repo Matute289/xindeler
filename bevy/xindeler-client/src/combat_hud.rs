@@ -42,6 +42,8 @@ use xindeler_ui::{
     zlayer,
 };
 
+use crate::buff_i18n::buff_i18n_key;
+
 use crate::hud_layout;
 
 /// The `.ftl` key for the level readout's static abbreviation (e.g. `"Lv."` /
@@ -636,28 +638,14 @@ fn sync_local_player_bars(
 /// the strip only when `NetBuffs` actually changes (`Changed<NetBuffs>`), not
 /// every frame.
 ///
-/// ## BL-82 EM-5.16 (T56.44 follow-up) — the tooltip text stays English
-/// `tooltip_text` below (`{:?} ×{stacks} — {strength} ({remaining})`) is
-/// deliberately NOT routed through [`Localization::tr`]. The buff KIND
-/// portion is a `{:?}` Debug print of [`common::comp::buff::BuffKind`], and
-/// making it real prose needs a per-variant `BuffKind -> "buff-<key>"` lookup
-/// (the legacy `voxygen::hud::util::buff_key` table this crate hasn't ported
-/// is the reference) — but that table's target catalog, `assets/voxygen/
-/// i18n/*/buff.ftl`, is missing entries for several CURRENT `BuffKind`
-/// variants (e.g. `Amnesia`, `OffBalance` have no `buff-*` key at all; the
-/// file's only `buff-concussion`/`buff-staggered` entries correspond to
-/// variants that no longer exist), and `buff.ftl` is outside this task's
-/// owned-file scope (only `combat_hud.rs`/`hotbar.rs` + their OWN new `.ftl`
-/// catalogs). Porting the table here would still leave some kinds
-/// unresolvable via a catalog this module isn't allowed to complete — so
-/// this tooltip is left as an honest, flagged English/Debug-text gap rather
-/// than a half-working lookup. Follow-up: complete `buff.ftl`'s `BuffKind`
-/// coverage, then port/point a real key lookup at it (likely from a shared
-/// `xindeler-ui`/`xindeler-protocol` location so other screens can reuse it
-/// too, not duplicated per-screen).
+/// ## BL-82 EM-5.16 close-out — the tooltip's buff-kind name now resolves
+/// through [`crate::buff_i18n::buff_i18n_key`] + [`Localization::tr`]
+/// instead of a `{:?}` Debug print (see that module for the exhaustive
+/// `BuffKind -> "buff-<key>"` table, shared with `diary.rs`'s Stats tab).
 fn sync_buff_strip(
     mut commands: Commands,
     theme: Res<HudTheme>,
+    localization: NonSend<Localization>,
     player: Query<&NetBuffs, (With<NetLocalPlayer>, Changed<NetBuffs>)>,
     strip: Query<(Entity, Option<&Children>), With<BuffStripRoot>>,
     icons: Query<Entity, With<BuffIconSlot>>,
@@ -690,8 +678,10 @@ fn sync_buff_strip(
                 .remaining_secs
                 .map_or_else(|| "∞".to_owned(), |secs| format!("{secs:.0}s"));
             let tooltip_text = format!(
-                "{:?} ×{} — {:.1} ({remaining})",
-                entry.kind, entry.stacks, entry.strength
+                "{} ×{} — {:.1} ({remaining})",
+                localization.tr(buff_i18n_key(entry.kind)),
+                entry.stacks,
+                entry.strength
             );
             parent.spawn((
                 BuffIconSlot,
@@ -872,9 +862,12 @@ mod tests {
         // `settings_window.rs`/`esc_menu.rs`'s own hot-swap tests) so this
         // suite's existing "Lv. 3"/"4x combo" text assertions keep resolving
         // to real catalog values, not an empty-catalog bare-key fallback.
+        // BL-82 EM-5.16: `sync_buff_strip` now resolves buff tooltip names
+        // through `buff.ftl` (see `crate::buff_i18n::buff_i18n_key`) — needed
+        // alongside `hud/combat_hud.ftl` for this suite's tooltip assertions.
         app.insert_non_send(xindeler_ui::i18n::Localization::load(
             &xindeler_ui::i18n::fallback_locale(),
-            &["hud/combat_hud.ftl"],
+            &["hud/combat_hud.ftl", "buff.ftl"],
         ));
         app
     }
@@ -1552,7 +1545,9 @@ mod tests {
             .world()
             .get::<Tooltip>(children[0])
             .expect("the icon carries a Tooltip");
-        assert!(tooltip.text.contains("Regeneration"));
+        // `buff-heal` (Regeneration's real i18n key, see `crate::buff_i18n`)
+        // displays as "Heal" in `buff.ftl` — not the raw variant name.
+        assert!(tooltip.text.contains("Heal"));
         assert!(tooltip.text.contains("9s") || tooltip.text.contains("10s"));
     }
 
