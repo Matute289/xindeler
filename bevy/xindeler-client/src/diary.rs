@@ -1158,17 +1158,20 @@ fn sync_skill_tree_content(
 
                 let level = unlocked.get(&skill).copied().unwrap_or(0);
                 let max = shape.max_level(skill);
-                // BL-82 EM-5.16 (T56.44 follow-up): the STATUS phrasing
-                // (passive-note/maxed/level/cost/locked) is resolved through
-                // the active locale; `{skill:?}` itself (the skill's own
-                // identity, e.g. "Warrior(Rally)") deliberately stays a raw
-                // `Debug` name — there is no `Skill -> .ftl key` lookup
-                // anywhere in this crate today (legacy `voxygen`'s per-skill
-                // titles are hand-authored per widget TYPE, not derivable
-                // generically from the `Skill` enum — see this fn's own doc
-                // comment history), and building one (~200 skills.ftl
-                // `hud-skill-*`/`hud-skill-class-*` keys) is its own,
-                // much larger task, out of scope here.
+                // BL-82 EM-5.16 item D: resolve the node's own name (and, for
+                // feats, its description) through the `skill_i18n_key` table.
+                // `None` (a non-weapon unlock group, never a real node here)
+                // falls back to the Debug name, preserving prior behaviour.
+                let name = crate::skill_i18n::skill_i18n_key(skill)
+                    .map_or_else(|| format!("{skill:?}"), |k| localization.tr(k));
+                // Only the feat messages carry a `.desc` attribute; for every
+                // other key `tr_attr` returns its `"{key}.desc"` sentinel, which
+                // we drop so non-feat nodes stay name-only (today's behaviour).
+                let desc_line = crate::skill_i18n::skill_i18n_key(skill)
+                    .map(|k| (k, localization.tr_attr(k, "desc")))
+                    .filter(|(k, d)| *d != format!("{k}.desc"))
+                    .map(|(_, d)| format!("\n{d}"))
+                    .unwrap_or_default();
                 let kind_note = if shape.is_passive(skill) {
                     format!(" {}", localization.tr("hud-skill_tree-node_passive"))
                 } else {
@@ -1178,7 +1181,7 @@ fn sync_skill_tree_content(
                     (
                         theme.palette.buff_good,
                         format!(
-                            "{skill:?}{kind_note}\n{} ({level}/{max})",
+                            "{name}{kind_note}{desc_line}\n{} ({level}/{max})",
                             localization.tr("hud-skill_tree-node_maxed")
                         ),
                     )
@@ -1187,7 +1190,7 @@ fn sync_skill_tree_content(
                     (
                         theme.palette.accent,
                         format!(
-                            "{skill:?}{kind_note}\n{} {level}/{max}\n{}: {cost} {}",
+                            "{name}{kind_note}{desc_line}\n{} {level}/{max}\n{}: {cost} {}",
                             localization.tr("hud-skill_tree-node_level"),
                             localization.tr("hud-skill_tree-node_cost"),
                             localization.tr("hud-sp_arrow_txt"),
@@ -1197,7 +1200,7 @@ fn sync_skill_tree_content(
                     (
                         theme.palette.text_muted,
                         format!(
-                            "{skill:?}{kind_note}\n{}",
+                            "{name}{kind_note}{desc_line}\n{}",
                             localization.tr("hud-skill_tree-node_locked")
                         ),
                     )
