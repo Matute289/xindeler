@@ -302,6 +302,9 @@ pub const DEFAULT_HUD_FTL_FILES: &[&str] = &[
     "hud/trade.ftl",
     "hud/combat_hud.ftl",
     "char_selection.ftl",
+    // BL-82 EM-5.16 Phase 5 close-out: `settings_window.rs`'s new Subtitles
+    // toggle label.
+    "hud/subtitles.ftl",
 ];
 
 /// Tracks which BCP-47 tag the currently-loaded [`Localization`] catalog is

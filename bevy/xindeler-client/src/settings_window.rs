@@ -271,6 +271,7 @@ enum SettingControl {
     ShowCharacterName,
     ReduceFlashing,
     HighContrastUi,
+    Subtitles,
     // Enum (single cycle button):
     Tier,
     Language,
@@ -299,6 +300,7 @@ impl SettingControl {
             SettingControl::ShowCharacterName => "hud-settings-chat_character_name",
             SettingControl::ReduceFlashing => "hud-settings-reduce_flashing",
             SettingControl::HighContrastUi => "hud-settings-high_contrast_ui",
+            SettingControl::Subtitles => "hud-settings-subtitles",
             SettingControl::Tier => "hud-settings-quality_preset",
             SettingControl::Language => "hud-settings-language",
         }
@@ -845,6 +847,14 @@ fn spawn_tab_pane(
                     localization,
                     SettingControl::HighContrastUi,
                 );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
+                    SettingControl::Subtitles,
+                );
                 pane.spawn(button_bundle(theme, fonts, "Show tutorial again"))
                     .observe(|_a: On<Activate>, mut actions: MessageWriter<HudAction>| {
                         actions.write(HudAction::ToggleWindow(HudWindow::Tutorial));
@@ -1108,6 +1118,7 @@ fn value_label(
         SettingControl::HighContrastUi => {
             on_off(settings.accessibility.high_contrast_ui, localization)
         },
+        SettingControl::Subtitles => on_off(settings.accessibility.subtitles, localization),
         SettingControl::Tier => localization.tr(tier_label_key(g.tier)),
         SettingControl::Language => language_display_name(&settings.language),
     }
@@ -1186,6 +1197,9 @@ fn adjust(control: SettingControl, dir: i8, settings: &mut XindelerSettings) {
         },
         SettingControl::HighContrastUi => {
             settings.accessibility.high_contrast_ui = !settings.accessibility.high_contrast_ui;
+        },
+        SettingControl::Subtitles => {
+            settings.accessibility.subtitles = !settings.accessibility.subtitles;
         },
         SettingControl::Tier => {
             settings.graphics.tier = next_tier(settings.graphics.tier);
@@ -1597,14 +1611,15 @@ mod tests {
         assert!(!settings.graphics.vignette);
     }
 
-    /// BL-82 EM-5.16 (T56.43): the two Accessibility toggles flip their real
-    /// `XindelerSettings.accessibility` fields (not a graphics setting, so
-    /// they must NOT touch the graphics tier either).
+    /// BL-82 EM-5.16 (T56.43 + Phase 5 close-out): the three Accessibility
+    /// toggles flip their real `XindelerSettings.accessibility` fields (not a
+    /// graphics setting, so they must NOT touch the graphics tier either).
     #[test]
     fn accessibility_toggles_flip_their_real_fields() {
         let mut settings = XindelerSettings::default();
         assert!(!settings.accessibility.reduce_flashing);
         assert!(!settings.accessibility.high_contrast_ui);
+        assert!(!settings.accessibility.subtitles);
 
         adjust(SettingControl::ReduceFlashing, 1, &mut settings);
         assert!(settings.accessibility.reduce_flashing);
@@ -1617,11 +1632,21 @@ mod tests {
         adjust(SettingControl::HighContrastUi, 1, &mut settings);
         assert!(settings.accessibility.high_contrast_ui);
 
+        adjust(SettingControl::Subtitles, 1, &mut settings);
+        assert!(settings.accessibility.subtitles);
+        assert_eq!(
+            settings.graphics.tier,
+            GraphicsTier::Ultra,
+            "an accessibility toggle must not touch the graphics tier"
+        );
+
         // Cycling again flips each back off.
         adjust(SettingControl::ReduceFlashing, 1, &mut settings);
         adjust(SettingControl::HighContrastUi, 1, &mut settings);
+        adjust(SettingControl::Subtitles, 1, &mut settings);
         assert!(!settings.accessibility.reduce_flashing);
         assert!(!settings.accessibility.high_contrast_ui);
+        assert!(!settings.accessibility.subtitles);
     }
 
     /// [`apply_accessibility_theme`] reconciles the live [`HudTheme`]:

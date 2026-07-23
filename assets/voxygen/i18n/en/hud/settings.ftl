@@ -197,6 +197,7 @@ hud-settings-contact_shadows = Contact shadows
 hud-settings-vignette = Vignette
 hud-settings-reduce_flashing = Reduce flashing
 hud-settings-high_contrast_ui = High-contrast UI
+hud-settings-subtitles = Subtitles
 hud-settings-shadow_cascades = Shadow cascades
 hud-settings-mouse_sensitivity = Mouse sensitivity
 hud-settings-fly_speed = Fly-cam speed
