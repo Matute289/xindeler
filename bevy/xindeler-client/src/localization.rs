@@ -1836,12 +1836,112 @@ mod tests {
         }
     }
 
-    /// EM-5.20 drift guard: es-419 stays at parity with en for every batched
-    /// player-facing catalog. A new en key added without its es-419
-    /// translation (or a copy-pasted English value) fails here. Union of
-    /// every per-batch `KEYS`/`FILES`/`COGNATE_ALLOWLIST` array above,
-    /// deduplicated (the `item/items/internal.ftl` INTERNAL batch is
-    /// intentionally excluded — non-player-facing, not translated).
+    /// Every key in the non-player-facing `item/items/internal.ftl` (food/
+    /// herb/mineral flavor names, modular-weapon-component fragment titles,
+    /// unit-test fixture items) resolves to real, non-English es-419 text —
+    /// no fallthrough to bare key, no empty values, and distinct from EN.
+    #[test]
+    fn es419_internal_keys_are_translated() {
+        use xindeler_ui::i18n::{Localization, fallback_locale, parse_locale};
+        const FILES: &[&str] = &["item/items/internal.ftl"];
+        const KEYS: &[&str] = &[
+            "common-items-food-coltsfoot",
+            "common-items-food-dandelion",
+            "common-items-food-garlic",
+            "common-items-food-meat",
+            "common-items-food-onion",
+            "common-items-food-sage",
+            "common-items-tag_examples-cultist",
+            "common-items-tag_examples-witch",
+            "common-items-tag_examples-pirate",
+            "common-items-grasses-medium",
+            "common-items-grasses-short",
+            "common-items-boss_drops-exp_flask",
+            "common-items-boss_drops-xp_potion",
+            "common-items-crafting_ing-rock",
+            "common-items-crafting_ing-animal_misc-bone",
+            "common-items-crafting_ing-animal_misc-ember",
+            "common-items-crafting_ing-animal_misc-feather",
+            "common-items-tag_examples-gnarling",
+            "common-items-flowers-blue",
+            "common-items-flowers-pink",
+            "common-items-flowers-white",
+            "common-items-mineral-stone-basalt",
+            "common-items-mineral-stone-granite",
+            "common-items-mineral-stone-obsidian",
+            "common-items-mineral-stone-coal",
+            "common-items-weapons-sceptre-belzeshrub",
+            "common-items-tool-pickaxe_velorite",
+            "common-items-testing-test_bag_18_slot",
+            "common-items-testing-test_bag_9_slot",
+            "common-items-testing-test_boots",
+            "common-items-testing-test_draugr_blade",
+            "common-items-weapons-empty-empty",
+            "common-items-modular-weapon-primary-bow-bow",
+            "common-items-modular-weapon-primary-bow-composite",
+            "common-items-modular-weapon-primary-bow-greatbow",
+            "common-items-modular-weapon-primary-bow-longbow",
+            "common-items-modular-weapon-primary-bow-ornate",
+            "common-items-modular-weapon-primary-bow-shortbow",
+            "common-items-modular-weapon-primary-bow-warbow",
+            "common-items-modular-weapon-primary-axe-axe",
+            "common-items-modular-weapon-primary-axe-battleaxe",
+            "common-items-modular-weapon-primary-axe-greataxe",
+            "common-items-modular-weapon-primary-axe-jagged",
+            "common-items-modular-weapon-primary-axe-labrys",
+            "common-items-modular-weapon-primary-axe-ornate",
+            "common-items-modular-weapon-primary-axe-poleaxe",
+            "common-items-modular-weapon-primary-staff-brand",
+            "common-items-modular-weapon-primary-staff-grandstaff",
+            "common-items-modular-weapon-primary-staff-longpole",
+            "common-items-modular-weapon-primary-staff-ornate",
+            "common-items-modular-weapon-primary-staff-pole",
+            "common-items-modular-weapon-primary-staff-rod",
+            "common-items-modular-weapon-primary-staff-staff",
+            "common-items-modular-weapon-primary-sword-greatsword",
+            "common-items-modular-weapon-primary-sword-katana",
+            "common-items-modular-weapon-primary-sword-longsword",
+            "common-items-modular-weapon-primary-sword-ornate",
+            "common-items-modular-weapon-primary-sword-sabre",
+            "common-items-modular-weapon-primary-sword-sawblade",
+            "common-items-modular-weapon-primary-sword-zweihander",
+            "common-items-modular-weapon-primary-sceptre-arbor",
+            "common-items-modular-weapon-primary-sceptre-cane",
+            "common-items-modular-weapon-primary-sceptre-crook",
+            "common-items-modular-weapon-primary-sceptre-crozier",
+            "common-items-modular-weapon-primary-sceptre-grandsceptre",
+            "common-items-modular-weapon-primary-sceptre-ornate",
+            "common-items-modular-weapon-primary-sceptre-sceptre",
+            "common-items-modular-weapon-primary-hammer-greathammer",
+            "common-items-modular-weapon-primary-hammer-greatmace",
+            "common-items-modular-weapon-primary-hammer-hammer",
+            "common-items-modular-weapon-primary-hammer-maul",
+            "common-items-modular-weapon-primary-hammer-ornate",
+            "common-items-modular-weapon-primary-hammer-spikedmace",
+            "common-items-modular-weapon-primary-hammer-warhammer",
+        ];
+        let es = Localization::load(&parse_locale("es-419"), FILES);
+        let en = Localization::load(&fallback_locale(), FILES);
+        for &k in KEYS {
+            let v = es.tr(k);
+            assert_ne!(
+                v, k,
+                "{k}: es-419 does not resolve (fell through to bare key)"
+            );
+            assert!(!v.trim().is_empty(), "{k}: es-419 resolves to empty");
+            assert_ne!(
+                v,
+                en.tr(k),
+                "{k}: es-419 is byte-identical to en (untranslated?)"
+            );
+        }
+    }
+
+    /// Drift guard: es-419 stays at parity with en for every batched
+    /// player-facing and non-player-facing catalog. A new en key added
+    /// without its es-419 translation (or a copy-pasted English value)
+    /// fails here. Union of every per-batch `KEYS`/`FILES`/
+    /// `COGNATE_ALLOWLIST` array above, deduplicated.
     #[test]
     fn es419_reaches_en_parity_for_batched_catalogs() {
         use xindeler_ui::i18n::{Localization, fallback_locale, parse_locale};
@@ -1881,6 +1981,7 @@ mod tests {
             "quest/courier_quests.ftl",
             "item/armor/npc.ftl",
             "item/weapon/npc.ftl",
+            "item/items/internal.ftl",
         ];
 
         const ALL_EM520_KEYS: &[&str] = &[
@@ -3039,6 +3140,80 @@ mod tests {
             "common-items-npc_weapons-unique-bloodmoon_bat",
             "common-items-npc_weapons-unique-vampire_bat",
             "common-items-npc_weapons-unique-strigoi_claws",
+            "common-items-food-coltsfoot",
+            "common-items-food-dandelion",
+            "common-items-food-garlic",
+            "common-items-food-meat",
+            "common-items-food-onion",
+            "common-items-food-sage",
+            "common-items-tag_examples-cultist",
+            "common-items-tag_examples-witch",
+            "common-items-tag_examples-pirate",
+            "common-items-grasses-medium",
+            "common-items-grasses-short",
+            "common-items-boss_drops-exp_flask",
+            "common-items-boss_drops-xp_potion",
+            "common-items-crafting_ing-rock",
+            "common-items-crafting_ing-animal_misc-bone",
+            "common-items-crafting_ing-animal_misc-ember",
+            "common-items-crafting_ing-animal_misc-feather",
+            "common-items-tag_examples-gnarling",
+            "common-items-flowers-blue",
+            "common-items-flowers-pink",
+            "common-items-flowers-white",
+            "common-items-mineral-stone-basalt",
+            "common-items-mineral-stone-granite",
+            "common-items-mineral-stone-obsidian",
+            "common-items-mineral-stone-coal",
+            "common-items-weapons-sceptre-belzeshrub",
+            "common-items-tool-pickaxe_velorite",
+            "common-items-testing-test_bag_18_slot",
+            "common-items-testing-test_bag_9_slot",
+            "common-items-testing-test_boots",
+            "common-items-testing-test_draugr_blade",
+            "common-items-weapons-empty-empty",
+            "common-items-modular-weapon-primary-bow-bow",
+            "common-items-modular-weapon-primary-bow-composite",
+            "common-items-modular-weapon-primary-bow-greatbow",
+            "common-items-modular-weapon-primary-bow-longbow",
+            "common-items-modular-weapon-primary-bow-ornate",
+            "common-items-modular-weapon-primary-bow-shortbow",
+            "common-items-modular-weapon-primary-bow-warbow",
+            "common-items-modular-weapon-primary-axe-axe",
+            "common-items-modular-weapon-primary-axe-battleaxe",
+            "common-items-modular-weapon-primary-axe-greataxe",
+            "common-items-modular-weapon-primary-axe-jagged",
+            "common-items-modular-weapon-primary-axe-labrys",
+            "common-items-modular-weapon-primary-axe-ornate",
+            "common-items-modular-weapon-primary-axe-poleaxe",
+            "common-items-modular-weapon-primary-staff-brand",
+            "common-items-modular-weapon-primary-staff-grandstaff",
+            "common-items-modular-weapon-primary-staff-longpole",
+            "common-items-modular-weapon-primary-staff-ornate",
+            "common-items-modular-weapon-primary-staff-pole",
+            "common-items-modular-weapon-primary-staff-rod",
+            "common-items-modular-weapon-primary-staff-staff",
+            "common-items-modular-weapon-primary-sword-greatsword",
+            "common-items-modular-weapon-primary-sword-katana",
+            "common-items-modular-weapon-primary-sword-longsword",
+            "common-items-modular-weapon-primary-sword-ornate",
+            "common-items-modular-weapon-primary-sword-sabre",
+            "common-items-modular-weapon-primary-sword-sawblade",
+            "common-items-modular-weapon-primary-sword-zweihander",
+            "common-items-modular-weapon-primary-sceptre-arbor",
+            "common-items-modular-weapon-primary-sceptre-cane",
+            "common-items-modular-weapon-primary-sceptre-crook",
+            "common-items-modular-weapon-primary-sceptre-crozier",
+            "common-items-modular-weapon-primary-sceptre-grandsceptre",
+            "common-items-modular-weapon-primary-sceptre-ornate",
+            "common-items-modular-weapon-primary-sceptre-sceptre",
+            "common-items-modular-weapon-primary-hammer-greathammer",
+            "common-items-modular-weapon-primary-hammer-greatmace",
+            "common-items-modular-weapon-primary-hammer-hammer",
+            "common-items-modular-weapon-primary-hammer-maul",
+            "common-items-modular-weapon-primary-hammer-ornate",
+            "common-items-modular-weapon-primary-hammer-spikedmace",
+            "common-items-modular-weapon-primary-hammer-warhammer",
         ];
 
         const ALL_EM520_COGNATE_ALLOWLIST: &[&str] = &[
