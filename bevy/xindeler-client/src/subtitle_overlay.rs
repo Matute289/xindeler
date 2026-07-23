@@ -146,6 +146,8 @@ fn fade_and_despawn_subtitle_rows(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
 
     #[test]
@@ -157,5 +159,25 @@ mod tests {
         assert_eq!(subtitle_arrow(fwd, right, Vec3::new(-5.0, 0.0, 0.0)), "←"); // to the left
         assert_eq!(subtitle_arrow(fwd, right, Vec3::new(0.0, 0.0, 5.0)), "↓"); // behind
         assert_eq!(subtitle_arrow(fwd, right, Vec3::ZERO), "•"); // on top of listener
+    }
+
+    /// BL-82 `zlayer_audit`'s own registry entry for `SubtitleOverlayRoot`
+    /// requires a dedicated regression test proving the TopLevel panel it
+    /// spawns actually carries an explicit `GlobalZIndex` (the audit only
+    /// checks source text, not the live value) — same shape as
+    /// `combat_hud.rs`'s `buff_strip_root_carries_the_ambient_chrome_z_index`.
+    #[test]
+    fn subtitle_overlay_root_carries_its_global_z_index() {
+        let mut app = App::new();
+        app.world_mut()
+            .run_system_once(spawn_subtitle_overlay_root)
+            .expect("spawn_subtitle_overlay_root runs");
+
+        let world = app.world_mut();
+        let z_index = world
+            .query_filtered::<&GlobalZIndex, With<SubtitleOverlayRoot>>()
+            .single(world)
+            .expect("SubtitleOverlayRoot exists");
+        assert_eq!(z_index.0, 50);
     }
 }

@@ -207,6 +207,10 @@ const ROOT_REGISTRY: &[(&str, RootKind)] = &[
     // above (`GlobalZIndex(zlayer::MODAL_WINDOWS)` at its spawn site,
     // `spawn_settings_window`).
     ("SettingsWindowRoot", RootKind::TopLevel), // GlobalZIndex(MODAL_WINDOWS)
+    // subtitle_overlay.rs (BL-82 EM-5.16 Phase 5 close-out): the
+    // positional-sound subtitle column — ambient chrome, never claims the
+    // HudState window slot.
+    ("SubtitleOverlayRoot", RootKind::TopLevel), // GlobalZIndex(50)
 ];
 
 /// Scans every `.rs` file under `dir` (recursively) for a top-level `struct
