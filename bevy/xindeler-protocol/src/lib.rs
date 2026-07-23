@@ -57,7 +57,7 @@ pub use crate::{
         CharCreateParams, CharCreateRequest, CharDeleteRequest, CharSelectRequest, LocalCharCreate,
         LocalCharDelete, LocalCharSelect, NetCharList, NetCharListEntry,
     },
-    chat::{ChatSendRequest, NetChatChannel, NetChatMsg},
+    chat::{ChatSendRequest, NetChatArg, NetChatChannel, NetChatMsg, NetLocalizedContent},
     client_session::ActiveReplicaSessions,
     crafting::{
         NetCrafting, NetModularComponentSlot, NetRecipe, NetRecipeInput, NetRepairableSlot,

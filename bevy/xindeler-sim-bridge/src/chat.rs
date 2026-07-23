@@ -75,7 +75,8 @@ use common::{comp, uid::IdMaps};
 use server::msg_capture::CapturedChat;
 use specs::WorldExt;
 use xindeler_protocol::{
-    ActiveReplicaSessions, ChatSendRequest, NetChatChannel, NetChatMsg, NetUid,
+    ActiveReplicaSessions, ChatSendRequest, NetChatArg, NetChatChannel, NetChatMsg,
+    NetLocalizedContent, NetUid,
 };
 
 use crate::{EmbeddedPlayer, SimServer, player::tick_player, tick_sim};
@@ -91,32 +92,113 @@ fn resolve_sender_alias(sim: &SimServer, uid: common::uid::Uid) -> Option<String
         .map(|player| player.alias.clone())
 }
 
-/// Renders a chat message's [`comp::Content`] to plain text. v1 uses
-/// `Content::as_plain()` where possible (the overwhelming common case —
-/// player-typed lines are always `Content::Plain`); genuinely localized
-/// content (system/command messages built from a `Content::Localized` key)
-/// falls back to its `hacky_descriptor()` wrapped in brackets rather than
-/// rendering nothing — full Fluent rendering of arbitrary chat `Content` is
-/// EM-5.16's job (the i18n-depth epic), not this task's.
-fn render_content(content: &comp::Content) -> String {
-    content
-        .as_plain()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("[{}]", content.hacky_descriptor()))
+/// Flattens one `common_i18n::LocalizationArg` to its wire leaf. A nested
+/// `Content` arg degrades to a plain string (`Content::Plain` verbatim; any
+/// other nested content → its `hacky_descriptor` — a documented v1 cut, since
+/// chat args are `Nat` or plain strings in practice, never nested localized
+/// content).
+fn project_arg(arg: &common::comp::LocalizationArg) -> NetChatArg {
+    use common::comp::{Content, LocalizationArg};
+    match arg {
+        LocalizationArg::Nat(n) => NetChatArg::Nat(*n),
+        LocalizationArg::Content(Content::Plain(text)) => NetChatArg::Text(text.clone()),
+        LocalizationArg::Content(other) => NetChatArg::Text(other.hacky_descriptor().to_owned()),
+    }
+}
+
+/// Projects a chat message's [`comp::Content`] into a (plain-text fallback,
+/// optional localized payload) pair. `Content::Plain` → verbatim text, no
+/// payload. `Content::Localized`/`Key`/`Attr` → a [`NetLocalizedContent`]
+/// resolved CLIENT-side, with the bare key as the plain fallback.
+/// `Content::WithFallback` recurses into its primary content (the rare second
+/// fallback is dropped for v1 — see the spec).
+fn project_content(content: &comp::Content) -> (String, Option<NetLocalizedContent>) {
+    use common::comp::Content;
+    match content {
+        Content::Plain(text) => (text.clone(), None),
+        Content::Key(key) => (
+            key.clone(),
+            Some(NetLocalizedContent {
+                key: key.clone(),
+                attr: None,
+                args: Vec::new(),
+            }),
+        ),
+        Content::Attr(key, attr) => (
+            format!("{key}.{attr}"),
+            Some(NetLocalizedContent {
+                key: key.clone(),
+                attr: Some(attr.clone()),
+                args: Vec::new(),
+            }),
+        ),
+        Content::Localized { key, args, .. } => (
+            key.clone(),
+            Some(NetLocalizedContent {
+                key: key.clone(),
+                attr: None,
+                args: args
+                    .iter()
+                    .map(|(k, v)| (k.clone(), project_arg(v)))
+                    .collect(),
+            }),
+        ),
+        Content::WithFallback(primary, _) => project_content(primary),
+    }
+}
+
+/// Localizes the join/leave lines whose meaning lives in the [`comp::ChatType`]
+/// (not the message `Content`, which the server leaves empty for these):
+/// `Online`/`Offline` → the `hud-chat-online_msg`/`hud-chat-offline_msg` key
+/// with the speaker's resolved alias as the `name` arg. Returns `None` for
+/// every other chat type (its `Content` is projected normally) and when the
+/// speaker's alias can't be resolved (degrade to the content projection). The
+/// larger `Kill` death-line matrix is deliberately deferred — see the spec.
+fn chat_type_localized(
+    sim: &SimServer,
+    chat_type: &comp::ChatType<String>,
+) -> Option<NetLocalizedContent> {
+    let (key, uid) = match chat_type {
+        comp::ChatType::Online(uid) => ("hud-chat-online_msg", *uid),
+        comp::ChatType::Offline(uid) => ("hud-chat-offline_msg", *uid),
+        _ => return None,
+    };
+    let alias = resolve_sender_alias(sim, uid)?;
+    Some(NetLocalizedContent {
+        key: key.to_owned(),
+        attr: None,
+        args: vec![("name".to_owned(), NetChatArg::Text(alias))],
+    })
 }
 
 /// Projects one sim [`comp::ChatMsg`] onto the wire [`NetChatMsg`] shape:
 /// classify the channel + speaker uid ([`NetChatChannel::from_chat_type`],
 /// pure data mapping), resolve the speaker's alias off the sim (`None` for a
-/// speakerless/unresolvable line), and render the content to plain text.
+/// speakerless/unresolvable line), and project the content into a
+/// (plain-text, optional localized payload) pair — see [`project_content`]/
+/// [`chat_type_localized`].
 fn project_chat_msg(sim: &SimServer, msg: &comp::ChatMsg) -> NetChatMsg {
     let (channel, sender_uid) = NetChatChannel::from_chat_type(&msg.chat_type);
     let sender_alias = sender_uid.and_then(|uid| resolve_sender_alias(sim, uid));
+    let (content_text, content_localized) = project_content(msg.content());
+    // A localizable ChatType (join/leave) wins over the (empty) content; else
+    // use whatever the content itself localized to.
+    let localized = chat_type_localized(sim, &msg.chat_type).or(content_localized);
+    // When the source was a localized ChatType with empty content, surface the
+    // key as the best-effort `text` fallback rather than an empty string.
+    let text = if content_text.is_empty() {
+        localized
+            .as_ref()
+            .map_or_else(String::new, |lc| lc.key.clone())
+    } else {
+        content_text
+    };
     NetChatMsg {
         channel,
         sender_uid: sender_uid.map(|uid| NetUid(uid.0.get())),
         sender_alias,
-        text: render_content(msg.content()),
+        text,
+        localized,
     }
 }
 
@@ -271,28 +353,95 @@ mod tests {
         assert_eq!(net.sender_uid, Some(NetUid(uid.0.get())));
         assert_eq!(net.sender_alias.as_deref(), Some("Hero"));
         assert_eq!(net.text, "hello there");
+        assert_eq!(net.localized, None);
     }
 
-    /// A `System`-collapsed chat type (no speaker) projects with no
-    /// `sender_uid`/`sender_alias`, and non-plain `Content` falls back to a
-    /// bracketed descriptor rather than rendering nothing.
+    /// A `Content::Localized` command-feedback line projects its key +
+    /// flattened args into the wire payload (Nat stays Nat, a String arg
+    /// becomes Text), and `text` carries the bare key as a best-effort
+    /// fallback.
     #[test]
-    fn projects_a_system_message_with_no_sender_and_a_content_fallback() {
+    fn projects_localized_command_feedback_into_a_payload() {
+        use common::comp::LocalizationArg;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sim = boot_test_server(dir.path()).expect("test server boots");
+
+        let content = comp::Content::localized_with_args("players-list-header", [
+            ("count", LocalizationArg::from(2u64)),
+            (
+                "player_list",
+                LocalizationArg::from("Hero, Villain".to_owned()),
+            ),
+        ]);
+        let msg: comp::ChatMsg = comp::ChatType::CommandInfo.into_msg(content);
+        let net = project_chat_msg(&sim, &msg);
+
+        assert_eq!(net.channel, NetChatChannel::System);
+        assert_eq!(net.text, "players-list-header");
+        let lc = net.localized.expect("a localized payload");
+        assert_eq!(lc.key, "players-list-header");
+        assert_eq!(lc.attr, None);
+        // order-independent membership checks (args is built from a HashMap)
+        assert!(lc.args.contains(&("count".to_owned(), NetChatArg::Nat(2))));
+        assert!(lc.args.contains(&(
+            "player_list".to_owned(),
+            NetChatArg::Text("Hero, Villain".to_owned())
+        )));
+    }
+
+    /// A plain player-typed line projects to `text` verbatim with NO payload.
+    #[test]
+    fn projects_a_plain_line_with_no_payload() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sim = boot_test_server(dir.path()).expect("test server boots");
 
         let msg: comp::ChatMsg =
-            ChatType::CommandInfo.into_msg(comp::Content::localized("command-help"));
+            comp::ChatType::CommandInfo.into_msg(comp::Content::Plain("just text".to_owned()));
+        let net = project_chat_msg(&sim, &msg);
+
+        assert_eq!(net.text, "just text");
+        assert_eq!(net.localized, None);
+    }
+
+    /// A join line (`ChatType::Online`, whose Content is empty) projects the
+    /// `hud-chat-online_msg` key with the speaker's resolved alias as the
+    /// `name` arg — the localization the empty Content can't carry.
+    #[test]
+    fn projects_online_join_line_with_the_resolved_name_arg() {
+        use common::{resources::BattleMode, uid::IdMaps};
+        use specs::{Builder, WorldExt};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sim = boot_test_server(dir.path()).expect("test server boots");
+
+        let uid = {
+            let ecs = sim.server.state_mut().ecs_mut();
+            let entity = ecs
+                .create_entity()
+                .with(comp::Player::new(
+                    "Aldwin".to_owned(),
+                    BattleMode::PvE,
+                    uuid::Uuid::nil(),
+                    None,
+                ))
+                .build();
+            ecs.write_resource::<IdMaps>().allocate(entity)
+        };
+
+        let msg: comp::ChatMsg =
+            comp::ChatType::Online(uid).into_msg(comp::Content::Plain(String::new()));
         let net = project_chat_msg(&sim, &msg);
 
         assert_eq!(net.channel, NetChatChannel::System);
-        assert_eq!(net.sender_uid, None);
-        assert_eq!(net.sender_alias, None);
-        assert!(
-            net.text.starts_with('[') && net.text.ends_with(']'),
-            "non-plain content must fall back to a bracketed descriptor, got {:?}",
-            net.text
-        );
+        let lc = net
+            .localized
+            .expect("a localized payload for the join line");
+        assert_eq!(lc.key, "hud-chat-online_msg");
+        assert_eq!(lc.args, vec![(
+            "name".to_owned(),
+            NetChatArg::Text("Aldwin".to_owned())
+        )]);
     }
 
     fn new_app_with_sim(data_dir: &std::path::Path) -> App {
