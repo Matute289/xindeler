@@ -14,8 +14,11 @@
 //! |               | SSAO/TAA apply LIVE, the rest persist for next boot |       |
 //! | Controls      | opens the EM-5.11 rebinding screen (`HudWindow::    | ✅    |
 //! |               | Controls`, keyboard+gamepad) — not rebuilt here     |       |
-//! | Gameplay      | `CameraSettings` (mouse sensitivity, fly speed)     | ✅    |
+//! | Gameplay      | `CameraSettings` (mouse sensitivity + Y-invert,     | ✅    |
+//! |               | fly speed + fast multiplier)                        |       |
 //! | Chat          | `chat.opacity` (→ `chat::sync_chat_scroll_opacity`) | ✅    |
+//! |               | + `chat.show_character_name` (→ `chat::            |       |
+//! |               | format_chat_line`)                                  |       |
 //! | Language       | `XindelerSettings::language` selector, LIVE hot-swap| ✅    |
 //! | Networking    | nothing configurable today (connection is automatic)| stub  |
 //! | Sound         | EM-5.10 audio — not built yet                       | stub  |
@@ -102,6 +105,9 @@ const SENS_MAX: f32 = 0.01;
 const FLY_STEP: f32 = 2.0;
 const FLY_MIN: f32 = 2.0;
 const FLY_MAX: f32 = 40.0;
+const FLY_FAST_MULTIPLIER_STEP: f32 = 0.5;
+const FLY_FAST_MULTIPLIER_MIN: f32 = 1.0;
+const FLY_FAST_MULTIPLIER_MAX: f32 = 10.0;
 const OPACITY_STEP: f32 = 0.05;
 const MIN_SHADOW_CASCADES: u8 = 1;
 const MAX_SHADOW_CASCADES: u8 = 4;
@@ -250,6 +256,7 @@ enum SettingControl {
     UiScale,
     MouseSensitivity,
     FlySpeed,
+    FlyFastMultiplier,
     ChatOpacity,
     ShadowCascades,
     // Boolean (single cycle button):
@@ -260,6 +267,8 @@ enum SettingControl {
     VolumetricFog,
     ContactShadows,
     Vignette,
+    InvertMouseY,
+    ShowCharacterName,
     ReduceFlashing,
     HighContrastUi,
     // Enum (single cycle button):
@@ -276,6 +285,7 @@ impl SettingControl {
             SettingControl::UiScale => "hud-settings-ui_scale",
             SettingControl::MouseSensitivity => "hud-settings-mouse_sensitivity",
             SettingControl::FlySpeed => "hud-settings-fly_speed",
+            SettingControl::FlyFastMultiplier => "hud-settings-fly_fast_multiplier",
             SettingControl::ChatOpacity => "hud-settings-background_opacity",
             SettingControl::ShadowCascades => "hud-settings-shadow_cascades",
             SettingControl::ShowCrosshair => "hud-settings-crosshair",
@@ -285,6 +295,8 @@ impl SettingControl {
             SettingControl::VolumetricFog => "hud-settings-volumetric_fog",
             SettingControl::ContactShadows => "hud-settings-contact_shadows",
             SettingControl::Vignette => "hud-settings-vignette",
+            SettingControl::InvertMouseY => "hud-settings-invert_mouse_y_axis",
+            SettingControl::ShowCharacterName => "hud-settings-chat_character_name",
             SettingControl::ReduceFlashing => "hud-settings-reduce_flashing",
             SettingControl::HighContrastUi => "hud-settings-high_contrast_ui",
             SettingControl::Tier => "hud-settings-quality_preset",
@@ -736,6 +748,14 @@ fn spawn_tab_pane(
                     localization,
                     SettingControl::MouseSensitivity,
                 );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
+                    SettingControl::InvertMouseY,
+                );
                 numeric_row(
                     pane,
                     theme,
@@ -743,6 +763,14 @@ fn spawn_tab_pane(
                     settings,
                     localization,
                     SettingControl::FlySpeed,
+                );
+                numeric_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
+                    SettingControl::FlyFastMultiplier,
                 );
                 note(
                     pane,
@@ -760,6 +788,14 @@ fn spawn_tab_pane(
                     settings,
                     localization,
                     SettingControl::ChatOpacity,
+                );
+                toggle_row(
+                    pane,
+                    theme,
+                    fonts,
+                    settings,
+                    localization,
+                    SettingControl::ShowCharacterName,
                 );
                 note(pane, fonts, theme, localization, "hud-settings-note_chat");
             },
@@ -1047,6 +1083,9 @@ fn value_label(
         SettingControl::UiScale => format!("{:.0}%", settings.ui_scale * 100.0),
         SettingControl::MouseSensitivity => format!("{:.4}", settings.camera.mouse_sensitivity),
         SettingControl::FlySpeed => format!("{:.0}", settings.camera.fly_speed),
+        SettingControl::FlyFastMultiplier => {
+            format!("{:.1}", settings.camera.fly_fast_multiplier)
+        },
         SettingControl::ChatOpacity => format!("{:.0}%", settings.chat.opacity * 100.0),
         SettingControl::ShadowCascades => g
             .shadow_cascades
@@ -1059,6 +1098,10 @@ fn value_label(
         SettingControl::VolumetricFog => on_off(g.volumetric_fog, localization),
         SettingControl::ContactShadows => on_off(g.contact_shadows, localization),
         SettingControl::Vignette => on_off(g.vignette, localization),
+        SettingControl::InvertMouseY => on_off(settings.camera.invert_pitch, localization),
+        SettingControl::ShowCharacterName => {
+            on_off(settings.chat.show_character_name, localization)
+        },
         SettingControl::ReduceFlashing => {
             on_off(settings.accessibility.reduce_flashing, localization)
         },
@@ -1103,6 +1146,11 @@ fn adjust(control: SettingControl, dir: i8, settings: &mut XindelerSettings) {
             settings.camera.fly_speed =
                 (settings.camera.fly_speed + FLY_STEP * df).clamp(FLY_MIN, FLY_MAX);
         },
+        SettingControl::FlyFastMultiplier => {
+            settings.camera.fly_fast_multiplier = (settings.camera.fly_fast_multiplier
+                + FLY_FAST_MULTIPLIER_STEP * df)
+                .clamp(FLY_FAST_MULTIPLIER_MIN, FLY_FAST_MULTIPLIER_MAX);
+        },
         SettingControl::ChatOpacity => {
             settings.chat.opacity =
                 snap((settings.chat.opacity + OPACITY_STEP * df).clamp(0.0, 1.0));
@@ -1127,6 +1175,12 @@ fn adjust(control: SettingControl, dir: i8, settings: &mut XindelerSettings) {
             settings.graphics.contact_shadows = !settings.graphics.contact_shadows;
         },
         SettingControl::Vignette => settings.graphics.vignette = !settings.graphics.vignette,
+        SettingControl::InvertMouseY => {
+            settings.camera.invert_pitch = !settings.camera.invert_pitch;
+        },
+        SettingControl::ShowCharacterName => {
+            settings.chat.show_character_name = !settings.chat.show_character_name;
+        },
         SettingControl::ReduceFlashing => {
             settings.accessibility.reduce_flashing = !settings.accessibility.reduce_flashing;
         },
@@ -1643,6 +1697,42 @@ mod tests {
             settings.graphics.shadow_cascades, MAX_SHADOW_CASCADES,
             "cascade count clamps at the max (no wrap — numeric, not cyclic)"
         );
+
+        settings.camera.fly_fast_multiplier = FLY_FAST_MULTIPLIER_MAX;
+        adjust(SettingControl::FlyFastMultiplier, 1, &mut settings);
+        assert_eq!(
+            settings.camera.fly_fast_multiplier, FLY_FAST_MULTIPLIER_MAX,
+            "fly-cam fast multiplier clamps at the max"
+        );
+        adjust(SettingControl::FlyFastMultiplier, -1, &mut settings);
+        assert!(
+            (settings.camera.fly_fast_multiplier
+                - (FLY_FAST_MULTIPLIER_MAX - FLY_FAST_MULTIPLIER_STEP))
+                .abs()
+                < 1e-4
+        );
+    }
+
+    /// BL-82 (legacy Gameplay/Chat tab port): the new invert-mouse-Y and
+    /// show-character-name toggles flip their real
+    /// `CameraSettings`/`ChatSettings` fields, cycling back off on a second
+    /// press — same shape [`accessibility_toggles_flip_their_real_fields`]
+    /// already establishes for the Accessibility tab's toggles.
+    #[test]
+    fn gameplay_and_chat_toggles_flip_their_real_fields() {
+        let mut settings = XindelerSettings::default();
+        assert!(!settings.camera.invert_pitch);
+        assert!(settings.chat.show_character_name);
+
+        adjust(SettingControl::InvertMouseY, 1, &mut settings);
+        assert!(settings.camera.invert_pitch);
+        adjust(SettingControl::ShowCharacterName, 1, &mut settings);
+        assert!(!settings.chat.show_character_name);
+
+        adjust(SettingControl::InvertMouseY, 1, &mut settings);
+        adjust(SettingControl::ShowCharacterName, 1, &mut settings);
+        assert!(!settings.camera.invert_pitch);
+        assert!(settings.chat.show_character_name);
     }
 
     /// Cycling the language wraps and covers every entry in

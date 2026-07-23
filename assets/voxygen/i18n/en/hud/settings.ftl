@@ -197,6 +197,7 @@ hud-settings-high_contrast_ui = High-contrast UI
 hud-settings-shadow_cascades = Shadow cascades
 hud-settings-mouse_sensitivity = Mouse sensitivity
 hud-settings-fly_speed = Fly-cam speed
+hud-settings-fly_fast_multiplier = Fly-cam fast multiplier
 hud-settings-language = Language
 hud-settings-custom_graphics = Custom
 hud-settings-open_controls = Open Controls / Rebinding
