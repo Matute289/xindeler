@@ -115,3 +115,55 @@ main-login-banned_until =
 main-server-rules = Este servidor tiene reglas que deben ser aceptadas.
 main-server-rules-seen-before = Las normas del servidor han cambiado desde la última vez que las aceptaste.
 main-credits-sound = Sonido
+## Nuevas claves agregadas para la conversión completa de i18n del cliente Bevy.
+## Estas son copias ESPECÍFICAS DE XINDELER (el flujo descargo de responsabilidad/login/navegador de servidores
+## no es el mismo UX que el flujo anterior de Veloren, así que el hervidero anterior no se aplica aquí)
+## más las cadenas del navegador de servidores de esta pantalla y las etapas de conexión.
+main-xindeler_disclaimer_body =
+    Xindeler es un software en desarrollo temprano, pre-alfa construido sobre el motor Veloren. Espera errores, características faltantes, arte provisional y cambios que pueden eliminar personajes y mundos entre compilaciones. Nada aquí es definitivo.
+
+    Al continuar, reconoces que es un trabajo en progreso inacabado.
+main-xindeler_disclaimer_accept = Entiendo — continuar
+main-xindeler_tagline = Un RPG de vóxeles — cliente Bevy BL-82
+main-xindeler_login_body = Modo Fuera de línea aloja un mundo en singleplayer privado. El multijugador en línea se conecta a través del navegador de servidores en el juego (próximamente).
+main-connect = Conectar
+main-login-username_placeholder = (haz clic para escribir un nombre de usuario)
+main-login-password_placeholder = (opcional — para servidores autenticados)
+main-login-server_placeholder = (fuera de línea: no es necesario)
+main-mode_offline = Modo: Fuera de línea (singleplayer)
+main-mode_online = Modo: En línea (multijugador)
+main-options_notice = La configuración está disponible en el menú Esc en el juego una vez que estés jugando.
+main-xindeler_server_browser_body = Servidores multijugador guardados. El ping / versión / jugadores se consultan en vivo y concurrentemente; elige un servidor y Conecta. (El juego remoto aún se está llevando en línea — consulta las notas en Conectar.)
+main-server_browser-add_server_heading = Agregar un servidor
+main-server_browser-address_label = Dirección (host o host:puerto)
+main-server_browser-nickname_label = Apodo (opcional)
+main-server_browser-address_placeholder = (p. ej. play.example.com:14004)
+main-server_browser-nickname_placeholder = (nombre de visualización opcional)
+main-server_browser-refresh = Actualizar
+main-server_browser-connect_selected = Conectar al seleccionado
+main-server_browser-delete_selected = Eliminar el seleccionado
+main-server_browser-no_saved_servers = No hay servidores guardados aún — agrega uno a continuación.
+main-server_browser-enter_address = Ingresa una dirección para agregar un servidor.
+main-server_browser-already_in_list = ya está en la lista.
+main-server_browser-added = Agregado
+main-server_browser-refreshing = Actualizando…
+main-server_browser-select_server_first = Primero selecciona un servidor.
+main-server_browser-removed = Removido
+main-server_browser-select_to_delete = Selecciona un servidor para eliminar.
+main-server_browser-connecting_to = Conectando a
+main-server_browser-querying = consultando…
+main-server_browser-unreachable = inaccesible
+main-server_browser-version_label = v:
+main-server_browser-players_label = jugadores:
+main-connect_stage-starting = Preparando…
+main-connect_stage-generating_world = Generando tu mundo…
+main-connect_stage-establishing_connection = Estableciendo conexión…
+main-connect_stage-checking_version = Verificando versión del servidor…
+main-connect_stage-authenticating = Autenticando…
+main-connect_stage-loading_world_data = Cargando datos del mundo…
+main-connect_stage-preparing_client = Preparando cliente…
+main-connect_stage-entering_world = Entrando al mundo…
+main-online_missing_server = Ingresa una dirección de servidor (o cambia a Fuera de línea).
+main-online_deferred_notice = El multijugador en línea se conecta a través del navegador de servidores en el juego (EM-5.9 T56.31). Este build aloja un mundo en singleplayer — cambia a Fuera de línea para jugar ahora.
+main-boot_crashed = No se pudo iniciar un mundo (el proceso de inicio falló). Verifica los registros e intenta de nuevo.
+main-boot_failed = No se pudo iniciar un mundo (faltan assets o datos de mapa). Verifica XINDELER_ASSETS / los blobs LFS del mapa e intenta de nuevo.
