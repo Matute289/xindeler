@@ -299,6 +299,13 @@ fn spawn_camera(
     let mut camera = commands.spawn((
         MainCamera,
         Camera3d::default(),
+        // Matches xindeler-old's default vertical FOV (`~63.5°`) — bevy's
+        // own `PerspectiveProjection` default is narrower (`45°`), which
+        // reads as visually "zoomed in" relative to the legacy client.
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.1,
+            ..default()
+        }),
         Hdr,
         // TAA requires Msaa::Off; MSAA also fights greedy meshing, so it
         // stays off regardless of the TAA toggle.
@@ -814,5 +821,32 @@ mod tests {
             "the same mouse delta must land at exactly opposite pitch when inverted: \
              normal={normal_pitch} inverted={inverted_pitch}"
         );
+    }
+
+    /// `spawn_camera` must give the main camera an explicit, wider-than-bevy's-
+    /// default perspective FOV — narrower framing reads as visually "zoomed
+    /// in" relative to xindeler-old's own default.
+    #[test]
+    fn spawned_camera_uses_the_veloren_parity_fov() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<XindelerSettings>();
+        app.init_resource::<OcclusionCullingConfig>();
+        app.add_systems(Startup, spawn_camera);
+        app.update();
+
+        let mut query = app.world_mut().query::<&Projection>();
+        let projection = query
+            .iter(app.world())
+            .next()
+            .expect("spawn_camera inserts a Projection component");
+        match projection {
+            Projection::Perspective(p) => assert!(
+                (p.fov - 1.1).abs() < f32::EPSILON,
+                "camera FOV must match xindeler-old's default (1.1 rad), got {}",
+                p.fov
+            ),
+            other => panic!("expected a perspective projection, got {other:?}"),
+        }
     }
 }
