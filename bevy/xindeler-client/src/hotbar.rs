@@ -633,35 +633,62 @@ fn spawn_hotbar(mut commands: Commands, theme: Res<HudTheme>, fonts: Res<HudFont
         spawn_slot_row_half(&mut commands, hud_layout::CLUSTER.slot_row_right_half_left);
     commands.entity(right_half).insert(HotbarRightHalf);
 
-    let text_font = |font: Handle<bevy::text::Font>| TextFont {
-        font: bevy::text::FontSource::Handle(font),
-        font_size: bevy::text::FontSize::Px(14.0),
-        ..Default::default()
-    };
-    commands.spawn((
+    spawn_ability_indicator_badge(
+        &mut commands,
+        &theme,
+        &fonts,
         HotbarPrimaryText,
-        Text(String::new()),
-        text_font(fonts.body.clone()),
-        TextColor(theme.palette.text),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(28.0),
-            left: Val::Px(16.0),
-            ..Default::default()
-        },
-    ));
-    commands.spawn((
+        hud_layout::CLUSTER.health_orb_left,
+    );
+    spawn_ability_indicator_badge(
+        &mut commands,
+        &theme,
+        &fonts,
         HotbarSecondaryText,
-        Text(String::new()),
-        text_font(fonts.body.clone()),
-        TextColor(theme.palette.text),
-        Node {
+        hud_layout::CLUSTER.mana_orb_left,
+    );
+}
+
+/// Spawns the M1/secondary-ability indicator as a small centred badge over
+/// the INNER-upper area of the Health (M1) or Mana (M2) orb — those globes
+/// are spawned by `combat_hud.rs`'s independent, un-ordered plugin, so this
+/// aligns via the SAME shared `hud_layout::CLUSTER` position both plugins
+/// already read, rather than a fragile cross-plugin parent/child reference.
+/// A fixed-width, centred container (not a bare `Text` node) so the label
+/// visually centres on the orb regardless of the ability name's length,
+/// instead of the previous fixed-corner placement that had nothing to do
+/// with either mouse button's actual orb.
+fn spawn_ability_indicator_badge(
+    commands: &mut Commands,
+    theme: &HudTheme,
+    fonts: &HudFonts,
+    marker: impl Component,
+    orb_left: f32,
+) {
+    commands
+        .spawn(Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(28.0),
-            right: Val::Px(16.0),
+            left: hud_layout::CENTER_LEFT,
+            margin: UiRect::left(Val::Px(orb_left)),
+            bottom: Val::Px(hud_layout::CLUSTER_BOTTOM_PX + hud_layout::ORB_SIZE_PX * 0.62),
+            width: Val::Px(hud_layout::ORB_SIZE_PX),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
             ..Default::default()
-        },
-    ));
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                marker,
+                Text(String::new()),
+                TextFont {
+                    font: bevy::text::FontSource::Handle(fonts.body.clone()),
+                    font_size: bevy::text::FontSize::Px(12.0),
+                    ..Default::default()
+                },
+                TextColor(theme.palette.text),
+                TextLayout::justify(bevy::text::Justify::Center),
+            ));
+        });
 }
 
 /// Resizes [`HotbarSlotEntities`] to the FIXED [`HOTBAR_SLOT_COUNT`] (BL-82
@@ -1959,6 +1986,62 @@ mod tests {
             assert_eq!(node.height, Val::Px(hud_layout::SLOT_ROW_HEIGHT_PX));
             assert_eq!(node.bottom, Val::Px(hud_layout::CLUSTER_BOTTOM_PX));
             assert_eq!(node.margin.left, Val::Px(expected_left_offset));
+        }
+    }
+
+    /// The M1/M2 ability-name labels must be centred badges over the
+    /// Health/Mana orbs (`hud_layout::CLUSTER.health_orb_left`/
+    /// `mana_orb_left`), NOT standalone screen-corner text unrelated to
+    /// either orb.
+    #[test]
+    fn primary_secondary_labels_are_centred_over_their_orb_not_screen_corners() {
+        let mut app = new_app();
+        app.world_mut()
+            .run_system_once(spawn_hotbar)
+            .expect("spawn_hotbar runs");
+        app.update();
+
+        let world = app.world();
+        let expectations = [
+            (
+                "primary/M1",
+                world
+                    .iter_entities()
+                    .find(|e| world.get::<HotbarPrimaryText>(e.id()).is_some())
+                    .expect("spawn_hotbar spawns a HotbarPrimaryText entity")
+                    .id(),
+                hud_layout::CLUSTER.health_orb_left,
+            ),
+            (
+                "secondary/M2",
+                world
+                    .iter_entities()
+                    .find(|e| world.get::<HotbarSecondaryText>(e.id()).is_some())
+                    .expect("spawn_hotbar spawns a HotbarSecondaryText entity")
+                    .id(),
+                hud_layout::CLUSTER.mana_orb_left,
+            ),
+        ];
+        for (name, text_entity, expected_orb_left) in expectations {
+            let parent = world
+                .get::<bevy::ecs::hierarchy::ChildOf>(text_entity)
+                .unwrap_or_else(|| {
+                    panic!("the {name} label must be a CHILD badge, not a standalone node")
+                })
+                .parent();
+            let node = world
+                .get::<Node>(parent)
+                .unwrap_or_else(|| panic!("the {name} badge container carries a Node"));
+            assert_eq!(
+                node.margin.left,
+                Val::Px(expected_orb_left),
+                "the {name} badge must align to its orb's own CLUSTER offset"
+            );
+            assert_eq!(
+                node.width,
+                Val::Px(hud_layout::ORB_SIZE_PX),
+                "the {name} badge must be centred within the orb's full width"
+            );
         }
     }
 
