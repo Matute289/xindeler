@@ -123,7 +123,14 @@ pub struct ListenServerPlugin {
 
 impl Plugin for ListenServerPlugin {
     fn build(&self, app: &mut App) {
-        // EM-3.11b: pace the embedded sim + player at the sim's real 30 TPS
+        // Marker for `crate::esc_menu::toggle_esc_menu` — present ONLY in
+        // this (listen-server / singleplayer) mode, never inserted by
+        // `crate::net_client::NetClientPlugin`. Defined in `esc_menu` itself
+        // (not here) since that module compiles under EITHER the
+        // `listen-server` or `net-client` feature alone, while this one only
+        // compiles under `listen-server`.
+        app.init_resource::<crate::esc_menu::ListenServerSession>();
+        // Pace the embedded sim + player at the sim's real 30 TPS
         // via `FixedUpdate`, decoupled from the window's display-rate
         // `Update`. Previously `tick_sim`/`tick_player` ran once per `Update`
         // — 60–144 Hz on the dev machines that hit this — which ran the FULL
