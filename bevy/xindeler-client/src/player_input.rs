@@ -258,6 +258,10 @@ pub(crate) fn gather_input(
     *input = LocalPlayerInput {
         move_dir,
         jump: grabbed && action_state.pressed(xindeler_input::GameInput::Jump),
+        roll: grabbed && action_state.pressed(xindeler_input::GameInput::Roll),
+        glide_toggle: grabbed && action_state.pressed(xindeler_input::GameInput::Glide),
+        toggle_lantern: grabbed && action_state.pressed(xindeler_input::GameInput::ToggleLantern),
+        swap_loadout: grabbed && action_state.pressed(xindeler_input::GameInput::SwapLoadout),
         look,
     };
 }
@@ -811,6 +815,10 @@ fn smoke_auto_move(
     *input = LocalPlayerInput {
         move_dir,
         jump,
+        roll: false,
+        glide_toggle: false,
+        toggle_lantern: false,
+        swap_loadout: false,
         // Sim (x, y) horizontal look, matching the walk direction (full 3D
         // look vector with z=0, same convention `gather_input` uses).
         look: Vec3::new(move_dir.x, move_dir.y, 0.0),
@@ -1102,6 +1110,71 @@ mod tests {
     fn bevy_up_maps_to_sim_up() {
         let sim = bevy_to_sim(Vec3::Y);
         assert!((sim - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5, "{sim:?}");
+    }
+
+    /// `gather_input` reads `GameInput::Roll`/`Glide`/`ToggleLantern`/
+    /// `SwapLoadout` into their matching `LocalPlayerInput` fields. Drives
+    /// `ActionState` through the real key-resolution pipeline
+    /// (`xindeler_input::action_state::update_action_state`), so this also
+    /// proves the DEFAULT keybinds actually reach `ActionState`, not just
+    /// that `gather_input` reads whatever's already set.
+    #[test]
+    fn gather_input_reads_roll_glide_lantern_and_loadout_swap() {
+        use bevy::input::mouse::AccumulatedMouseMotion;
+        use xindeler_input::{
+            ActionState, GameInput, KeyMap, KeyOrMouse, action_state::update_action_state,
+        };
+
+        let mut app = App::new();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        app.init_resource::<AccumulatedMouseMotion>();
+        app.init_resource::<LocalPlayerInput>();
+        app.world_mut().spawn((PrimaryWindow, CursorOptions {
+            grab_mode: CursorGrabMode::Locked,
+            ..Default::default()
+        }));
+        app.world_mut()
+            .spawn((FlyCam::default(), Transform::IDENTITY));
+
+        let key_map = app.world().resource::<KeyMap>().clone();
+        for input in [
+            GameInput::Roll,
+            GameInput::Glide,
+            GameInput::ToggleLantern,
+            GameInput::SwapLoadout,
+        ] {
+            match key_map.keyboard.get_binding(input) {
+                Some(KeyOrMouse::Key(key)) => {
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<KeyCode>>()
+                        .press(key);
+                },
+                Some(KeyOrMouse::Mouse(button)) => {
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(button);
+                },
+                None => panic!("{input:?} has no default binding"),
+            }
+        }
+
+        app.add_systems(Update, (update_action_state, gather_input).chain());
+        app.update();
+
+        let input = *app.world().resource::<LocalPlayerInput>();
+        assert!(input.roll, "Roll must reach LocalPlayerInput");
+        assert!(input.glide_toggle, "Glide must reach LocalPlayerInput");
+        assert!(
+            input.toggle_lantern,
+            "ToggleLantern must reach LocalPlayerInput"
+        );
+        assert!(
+            input.swap_loadout,
+            "SwapLoadout must reach LocalPlayerInput"
+        );
     }
 
     /// A Bevy heading due −z (yaw 0 forward) maps to sim +y (north).

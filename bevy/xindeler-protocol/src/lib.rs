@@ -495,6 +495,20 @@ pub struct LocalPlayerInput {
     pub move_dir: Vec2,
     /// Whether the jump control is held this sample.
     pub jump: bool,
+    /// Whether the roll control is held this sample — same press/release-edge
+    /// shape as `jump` (both route through `InputKind::{Jump,Roll}`).
+    pub roll: bool,
+    /// Whether the glide-toggle control is held this sample. Glide itself is
+    /// a discrete toggle (`Client::toggle_glide`), not a held state — the
+    /// sim-bridge fires it once on the press edge, the same way it already
+    /// edge-detects `jump`.
+    pub glide_toggle: bool,
+    /// Whether the lantern-toggle control is held this sample. Same
+    /// edge-fired-once shape as `glide_toggle`.
+    pub toggle_lantern: bool,
+    /// Whether the loadout-swap control is held this sample. Same
+    /// edge-fired-once shape as `glide_toggle`.
+    pub swap_loadout: bool,
     /// Look direction in sim axes (x-east, y-north, z-up), unit-ish.
     pub look: Vec3,
 }
