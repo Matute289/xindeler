@@ -949,8 +949,11 @@ fn sync_hotbar_slots(
                     .as_deref()
                     .map(short_glyph)
                     .unwrap_or_default(),
+                // Abilities, not items, have no `ItemKey`/manifest entry to
+                // rasterize — hotbar slots stay glyph-only.
+                icon: None,
                 // Hotbar slots hold abilities, not stackable items — no
-                // quantity badge (`xindeler_ui::slot`'s own field for EM-5.6's
+                // quantity badge (`xindeler_ui::slot`'s own field, meant for
                 // bag/trade screens).
                 quantity: None,
                 tooltip: slot
@@ -960,6 +963,7 @@ fn sync_hotbar_slots(
             },
             None => SlotContents {
                 icon_text: String::new(),
+                icon: None,
                 quantity: None,
                 tooltip: localization.tr("common-empty"),
             },

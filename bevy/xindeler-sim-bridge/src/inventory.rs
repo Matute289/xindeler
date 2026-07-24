@@ -29,7 +29,9 @@ use bevy::{
     },
 };
 use bevy_replicon::prelude::{ClientId, FromClient};
-use common::{comp, event::InventoryManipEvent, uid::Uid};
+use common::{
+    comp, comp::inventory::item::item_key::ItemKey, event::InventoryManipEvent, uid::Uid,
+};
 use specs::WorldExt;
 use xindeler_protocol::{
     InventoryActionRequest, NetEquippedSlot, NetInventory, NetInventorySlot, NetOwnerOnly,
@@ -178,6 +180,7 @@ fn build_net_item_stack(
         quality: item.quality(),
         is_two_handed: item_is_two_handed(item),
         equippable_slots: item_equippable_slots_cached(item, equippable_slots_cache),
+        icon_key: ItemKey::from(item),
     }
 }
 

@@ -40,7 +40,10 @@ use bevy::{
 use bevy_replicon::prelude::FromClient;
 use common::{
     comp,
-    comp::invite::{Invite, InviteKind, InviteResponse},
+    comp::{
+        inventory::item::item_key::ItemKey,
+        invite::{Invite, InviteKind, InviteResponse},
+    },
     event::{InitiateInviteEvent, InviteResponseEvent, ProcessTradeActionEvent},
     trade::Trades,
     uid::{IdMaps, Uid},
@@ -95,6 +98,7 @@ fn resolve_offer(
                     quality: item.quality(),
                     is_two_handed: item_is_two_handed(item),
                     equippable_slots: item_equippable_slots(item),
+                    icon_key: ItemKey::from(item),
                 },
                 offered,
                 owned: item.amount(),

@@ -96,9 +96,6 @@ impl Plugin for NetClientPlugin {
             TerrainStreamPlugin,
             EntityViewPlugin,
             FigureViewPlugin,
-            // Real rasterized item icons (reuses FigureViewPlugin's VoxAsset
-            // loader above) for every slot consumer below.
-            crate::item_icon::ItemIconPlugin,
             SpriteViewPlugin,
             LodCullingPlugin,
             FarTerrainPlugin,
@@ -190,9 +187,13 @@ impl Plugin for NetClientPlugin {
             // degrades clean (no `NetLocalPlayer` entity to query) exactly
             // like `CombatHudViewPlugin` already does here.
             HotbarViewPlugin,
-            // BL-82 EM-5.6: the inventory/bag + paper-doll screen and the
-            // two-party trade window — verbatim reuse, same as every other
-            // consumer plugin in this list (both are pure Bevy, reading the
+            // Real rasterized item icons (reuses FigureViewPlugin's VoxAsset
+            // loader, added in the app's first plugin tuple above) — needed
+            // by both consumers right below.
+            crate::item_icon::ItemIconPlugin,
+            // The inventory/bag + paper-doll screen and the two-party trade
+            // window — verbatim reuse, same as every other consumer plugin
+            // in this list (both are pure Bevy, reading the
             // `NetInventory`/`NetTrade`/`NetIncomingTradeInvite` mirrors the
             // SAME way regardless of which transport carried them here).
             InventoryUiPlugin,
