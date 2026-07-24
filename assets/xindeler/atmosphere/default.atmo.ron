@@ -30,7 +30,7 @@
     // sRGB color + brightness in cd/m². The indirect floor vertex AO acts on.
     ambient_sky: (
         color: (0.75, 0.85, 1.0),
-        brightness: 6000.0,
+        brightness: 12000.0,
     ),
     // Placeholder weather tag: None | Rain | Storm (data only for now).
     weather_effect: None,

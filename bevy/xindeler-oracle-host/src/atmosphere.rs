@@ -59,10 +59,15 @@ pub struct AmbientSky {
 impl Default for AmbientSky {
     fn default() -> Self {
         Self {
-            // The EM-3.3-era values that used to be hardcoded in the client's
+            // Values that used to be hardcoded in the client's
             // AtmospherePlugin — now data like every other atmosphere knob.
             color: [0.75, 0.85, 1.0],
-            brightness: 6_000.0,
+            // xindeler-old's shading model applies an unconditional,
+            // shadow-independent ambient/sky-scatter term to every surface
+            // so a shadowed surface never reads as near-black — bumped
+            // toward that guarantee (the previous value was picked by feel,
+            // never validated against the reference).
+            brightness: 12_000.0,
         }
     }
 }
