@@ -11766,6 +11766,7 @@ dependencies = [
  "bevy_replicon",
  "dot_vox",
  "hashbrown 0.17.1",
+ "image",
  "rand 0.10.2",
  "ron",
  "serde",

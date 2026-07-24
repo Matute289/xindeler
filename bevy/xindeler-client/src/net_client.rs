@@ -96,6 +96,9 @@ impl Plugin for NetClientPlugin {
             TerrainStreamPlugin,
             EntityViewPlugin,
             FigureViewPlugin,
+            // Real rasterized item icons (reuses FigureViewPlugin's VoxAsset
+            // loader above) for every slot consumer below.
+            crate::item_icon::ItemIconPlugin,
             SpriteViewPlugin,
             LodCullingPlugin,
             FarTerrainPlugin,

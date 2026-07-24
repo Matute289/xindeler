@@ -243,7 +243,9 @@ impl AssetLoader for QsLateralManifestLoader {
 /// on-disk relative path Bevy's `AssetServer` resolves (`voxygen/voxel/…`).
 /// Names are frozen (isolation law rule 3): we only translate the `.`
 /// separator and append the extension.
-fn asset_path(dotted: &str, ext: &str) -> String { format!("{}.{ext}", dotted.replace('.', "/")) }
+pub(crate) fn asset_path(dotted: &str, ext: &str) -> String {
+    format!("{}.{ext}", dotted.replace('.', "/"))
+}
 
 /// The Veloren namespace figure `.vox` names in the manifests are relative to
 /// (`graceful_load_vox` prepends it): the manifest `("npc.pig.male.head")`
