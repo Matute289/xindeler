@@ -141,7 +141,17 @@ fn spawn_light_rig(
             // Clamp to the range the renderer meaningfully supports — a user-edited
             // settings.ron with e.g. 255 would allocate 255 cascade frusta (reviewer m2).
             num_cascades: usize::from(graphics.shadow_cascades.clamp(1, 4)),
-            maximum_distance: 500.0,
+            // 500m across 4 cascades in Bevy's default 2048px shadow-map
+            // texture (no DirectionalLightShadowMap override exists
+            // anywhere in this codebase) put the far cascade's texels
+            // several METRES wide — read as large, blocky, hard-edged dark
+            // rectangles, not fine shadow-map acne. xindeler-old capped
+            // shadow-casting distance at 96m with a single non-cascaded map
+            // — it never needed to resolve shadows over hundreds of
+            // metres. 150m keeps meaningful near-camera texel density
+            // across all 4 cascades; distant terrain simply stops
+            // receiving dynamic shadows past that range.
+            maximum_distance: 150.0,
             ..Default::default()
         }
         .build(),

@@ -422,7 +422,12 @@ impl Default for GraphicsSettings {
             // field doc above.
             contact_shadows: false,
             shadow_cascades: 4,
-            vignette: true,
+            // xindeler-old has no vignette effect at all. At the shipped
+            // strength, this darkened most of the frame outside dead centre
+            // regardless of scene lighting -- a real contributor to a
+            // "murky/washed-out" look. Off by default; a player who wants
+            // the look can still opt in via Settings.
+            vignette: false,
             experimental: ExperimentalGraphics::default(),
         }
     }
@@ -551,8 +556,10 @@ mod tests {
         assert!(!settings.taa && !settings.ssao && !settings.bloom);
         assert!(!settings.volumetric_fog && !settings.contact_shadows);
         assert_eq!(settings.shadow_cascades, 1);
-        // Vignette is independent of the tier presets.
-        assert!(settings.vignette);
+        // Vignette is independent of the tier presets: it stays at whatever
+        // the struct default set it to (currently false), not flipped by a
+        // tier preset.
+        assert!(!settings.vignette);
     }
 
     #[test]
@@ -611,7 +618,7 @@ mod tests {
         assert!(!settings.graphics.taa);
         assert_eq!(settings.graphics.shadow_cascades, 2);
         // New fields still get their defaults.
-        assert!(settings.graphics.vignette);
+        assert!(!settings.graphics.vignette);
         assert_eq!(
             settings.graphics.experimental,
             ExperimentalGraphics::default()

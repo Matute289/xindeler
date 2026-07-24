@@ -6,7 +6,7 @@
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, Hdr},
-    core_pipeline::prepass::DepthPrepass,
+    core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     input::mouse::AccumulatedMouseMotion,
     pbr::{AtmosphereSettings, ContactShadows, ScreenSpaceAmbientOcclusion},
     post_process::bloom::Bloom,
@@ -307,6 +307,13 @@ fn spawn_camera(
             ..default()
         }),
         Hdr,
+        // Nobody had deliberately chosen a tonemapping curve — every camera
+        // silently inherited Bevy's own default (TonyMcMapface) via
+        // required-components, with zero exposure/gamma/contrast/
+        // saturation tuning to compensate (xindeler-old hand-rolls and
+        // tunes its own exponential-exposure + gamma curve). AcesFitted
+        // reads closer to that punchier, less-desaturated reference look.
+        Tonemapping::AcesFitted,
         // TAA requires Msaa::Off; MSAA also fights greedy meshing, so it
         // stays off regardless of the TAA toggle.
         Msaa::Off,

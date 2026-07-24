@@ -52,7 +52,7 @@ use bevy::{
     mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology},
     transform::components::Transform,
 };
-use common::figure::Segment;
+use common::{figure::Segment, util::srgb_to_linear_fast};
 use dot_vox::DotVoxData;
 use serde::Deserialize;
 use vek::*;
@@ -375,16 +375,20 @@ fn figure_mesh_to_bevy(
         positions.push(to_bevy(v.pos));
         normals.push(to_bevy(v.norm));
         let col = atlas.col_lights[texel(v.atlas_pos)].col;
-        // sRGB 8-bit voxel colour → linear-ish vertex colour. bevy multiplies
-        // vertex colour into base_color in the (linear) fragment; feed the
-        // 0..1 sRGB value and let the material's tonemapper handle it (matches
-        // how the terrain palette colours are authored).
-        colors.push([
+        // sRGB 8-bit voxel colour -> LINEAR vertex colour: bevy's PBR
+        // fragment shader multiplies vertex colour straight into (linear)
+        // base_color with no gamma decode of its own (a plain Float32x4
+        // vertex attribute carries no colour-space tag, unlike a
+        // Rgba8UnormSrgb texture) -- feeding raw sRGB bytes here inflates
+        // mid/dark tones toward white and crushes saturation. Tonemapping
+        // operates on the final LIT colour and cannot substitute for
+        // decoding this INPUT.
+        let linear = srgb_to_linear_fast(Rgb::new(
             f32::from(col.r) / 255.0,
             f32::from(col.g) / 255.0,
             f32::from(col.b) / 255.0,
-            1.0,
-        ]);
+        ));
+        colors.push([linear.r, linear.g, linear.b, 1.0]);
     }
 
     let mut out = BevyMesh::new(
@@ -646,6 +650,24 @@ fn bone_name(bone: FigureBoneName) -> &'static str {
 mod tests {
     use super::*;
     use common::comp::quadruped_small::{BodyType, Species};
+
+    /// A mid-gray sRGB byte must decode to a NOTICEABLY darker linear value
+    /// (sRGB gamma crushes midtones on decode) -- pins that
+    /// `figure_mesh_to_bevy` actually converts colour space instead of
+    /// passing the raw byte through unchanged.
+    #[test]
+    fn figure_vertex_colour_decodes_srgb_not_passthrough() {
+        let linear = srgb_to_linear_fast(Rgb::new(0.502, 0.502, 0.502));
+        assert!(
+            linear.r < 0.3,
+            "128/255 sRGB gray must decode to a noticeably darker linear value, got {}",
+            linear.r
+        );
+        assert!(
+            (linear.r - 0.502).abs() > 0.1,
+            "decoded value must differ meaningfully from the raw sRGB input (no passthrough)"
+        );
+    }
 
     /// The manifest deser structs must parse the REAL Veloren RON (the `.vox`
     /// reference shape is `("model.name")` — a 1-tuple, NOT a bare string).

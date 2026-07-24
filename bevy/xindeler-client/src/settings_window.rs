@@ -1608,7 +1608,9 @@ mod tests {
         let mut settings = XindelerSettings::default();
         adjust(SettingControl::Vignette, 1, &mut settings);
         assert_eq!(settings.graphics.tier, GraphicsTier::Ultra);
-        assert!(!settings.graphics.vignette);
+        // The struct default is now off (xindeler-old has no vignette
+        // effect), so one toggle from that default turns it ON.
+        assert!(settings.graphics.vignette);
     }
 
     /// BL-82 EM-5.16 (T56.43 + Phase 5 close-out): the three Accessibility
