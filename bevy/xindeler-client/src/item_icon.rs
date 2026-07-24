@@ -70,13 +70,16 @@ impl Plugin for ItemIconPlugin {
             .init_resource::<PendingIconRequests>()
             .init_resource::<PendingIconVox>()
             .init_resource::<IconRasterTasks>()
+            .init_resource::<SmokeCatalogueState>()
             .add_systems(bevy::app::Startup, load_manifest)
             .add_systems(
                 Update,
                 (
+                    queue_full_catalogue_for_smoke,
                     start_pending_icon_loads,
                     poll_pending_icon_vox,
                     apply_finished_icon_tasks,
+                    log_full_catalogue_smoke_completion,
                 )
                     .chain(),
             );
@@ -126,6 +129,85 @@ fn load_manifest(
 ) {
     let handle = asset_server.load("voxygen/item_image_manifest.ron");
     commands.insert_resource(ItemIconManifestHandle(handle));
+}
+
+/// Tracks the one-shot full-catalogue smoke queue (see
+/// [`queue_full_catalogue_for_smoke`]) — both fields are STICKY (set at most
+/// once, never cleared) so queuing and the completion log each fire exactly
+/// once per run, however many frames pass afterward.
+#[derive(Resource, Default)]
+struct SmokeCatalogueState {
+    /// Set once the catalogue has been queued; `None` before that (and
+    /// permanently, if the env var was never set this run).
+    queued: Option<(std::time::Instant, usize)>,
+    /// Set once [`log_full_catalogue_smoke_completion`] has logged — guards
+    /// against logging a second time on every subsequent frame once
+    /// generation is done.
+    completion_logged: bool,
+}
+
+/// Queues EVERY manifest entry's icon for generation once, when
+/// `XINDELER_SMOKE_ICON_CATALOGUE` is set — the same env-var-gated,
+/// smoke-only convention `inventory_ui::force_open_inventory_for_smoke_
+/// capture` establishes. A normal player's real bag only ever exercises a
+/// handful of manifest entries; this lever exists so a live
+/// `--smoke-screenshot` run (or the `#[ignore]`d
+/// `the_full_catalogue_resolves_within_budget` test) can exercise the WHOLE
+/// manifest instead. A no-op unless the env var is set.
+fn queue_full_catalogue_for_smoke(
+    manifest_handle: Option<bevy::ecs::system::Res<ItemIconManifestHandle>>,
+    manifests: bevy::ecs::system::Res<Assets<ItemIconManifestAsset>>,
+    mut state: bevy::ecs::system::ResMut<SmokeCatalogueState>,
+    mut pending: ResMut<PendingIconRequests>,
+) {
+    if state.queued.is_some()
+        || !std::env::var("XINDELER_SMOKE_ICON_CATALOGUE").is_ok_and(|v| v != "0")
+    {
+        return;
+    }
+    let Some(manifest_handle) = manifest_handle else {
+        return;
+    };
+    let Some(ItemIconManifestAsset(manifest)) = manifests.get(&manifest_handle.0) else {
+        return; // still loading — retry next frame
+    };
+    pending.0.extend(manifest.keys().cloned());
+    tracing::info!(
+        count = manifest.len(),
+        "item-icon: queued the full catalogue for smoke generation"
+    );
+    state.queued = Some((std::time::Instant::now(), manifest.len()));
+}
+
+/// Logs a completion line (icon count + elapsed wall time) once every
+/// catalogue entry queued by [`queue_full_catalogue_for_smoke`] has resolved
+/// — the "record the cold-full-catalogue time" perf-gate evidence, without a
+/// bespoke benchmark harness (same reasoning as `perf_log.rs`'s own module
+/// doc comment). A no-op until the catalogue smoke has actually been queued;
+/// logs at most once per run (`state.completion_logged` latches it).
+fn log_full_catalogue_smoke_completion(
+    mut state: bevy::ecs::system::ResMut<SmokeCatalogueState>,
+    cache: bevy::ecs::system::Res<ItemIconCache>,
+    pending: bevy::ecs::system::Res<PendingIconRequests>,
+    vox_pending: bevy::ecs::system::Res<PendingIconVox>,
+    tasks: bevy::ecs::system::Res<IconRasterTasks>,
+) {
+    if state.completion_logged {
+        return;
+    }
+    let Some((queued_at, expected)) = state.queued else {
+        return;
+    };
+    if !pending.0.is_empty() || !vox_pending.0.is_empty() || !tasks.0.is_empty() {
+        return; // still generating
+    }
+    tracing::info!(
+        resolved = cache.map.len(),
+        expected,
+        elapsed_ms = queued_at.elapsed().as_millis(),
+        "item-icon: full catalogue smoke complete"
+    );
+    state.completion_logged = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -506,5 +588,88 @@ mod tests {
             .expect("the cached handle must resolve to a real Image asset");
         assert_eq!(image.texture_descriptor.size.width, u32::from(ICON_PX));
         assert_eq!(image.texture_descriptor.size.height, u32::from(ICON_PX));
+    }
+
+    /// The full-catalogue perf gate: requests EVERY manifest entry at once
+    /// (not just one item, unlike the test above) and ticks until they've
+    /// all either resolved or definitively failed, then asserts (a) every
+    /// entry resolved — no silent manifest/asset-resolution regressions
+    /// across the whole ~1400-entry catalogue — (b) it happened within a
+    /// documented wall-clock budget, and (c) the cache holds exactly one
+    /// handle per requested key (the "single canonical resolution" design,
+    /// not one entry per slot size — see the module doc comment). The
+    /// measured baseline on a warm build cache was well under a second; 30s
+    /// leaves generous headroom for a cold disk cache or a slower CI runner
+    /// without masking a real regression.
+    #[test]
+    #[ignore = "needs the real asset tree checked out (LFS); run locally"]
+    fn the_full_catalogue_resolves_within_budget() {
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let mut app = bevy::app::App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin {
+            file_path: crate::atmosphere::assets_root()
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        });
+        app.init_asset::<Image>();
+        app.init_asset::<bevy::mesh::Mesh>();
+        app.init_asset::<bevy::pbr::StandardMaterial>();
+        app.add_plugins(crate::figure_view::FigureViewPlugin);
+        app.add_plugins(ItemIconPlugin);
+
+        // Seeds `PendingIconRequests` directly (same as the single-item test
+        // above) rather than going through the env-var-gated
+        // `queue_full_catalogue_for_smoke` — that lever is a live
+        // `--smoke-screenshot` convenience, and setting a process-wide env
+        // var here would race any other test running concurrently in this
+        // same test binary.
+        let manifest = common::comp::inventory::item::item_image::load_manifest()
+            .expect("the real manifest RON parses");
+        let expected = manifest.len();
+        assert!(
+            expected > 1000,
+            "sanity: the real manifest should have ~1400 entries, got {expected}"
+        );
+        app.world_mut()
+            .resource_mut::<PendingIconRequests>()
+            .0
+            .extend(manifest.into_keys());
+
+        let start = std::time::Instant::now();
+        let resolved_count = loop {
+            app.update();
+            let resolved_count = app.world().resource::<ItemIconCache>().map.len();
+            let done = resolved_count >= expected
+                || (app.world().resource::<PendingIconRequests>().0.is_empty()
+                    && app.world().resource::<PendingIconVox>().0.is_empty()
+                    && app.world().resource::<IconRasterTasks>().0.is_empty());
+            if done {
+                break resolved_count;
+            }
+            assert!(
+                start.elapsed() < BUDGET,
+                "full catalogue did not finish within the {BUDGET:?} budget \
+                 ({resolved_count}/{expected} resolved so far)"
+            );
+        };
+        let elapsed = start.elapsed();
+
+        eprintln!("full catalogue: {resolved_count} icons resolved in {elapsed:?}");
+        assert_eq!(
+            resolved_count, expected,
+            "every manifest entry must resolve to a real icon — no silent misses"
+        );
+        assert_eq!(
+            app.world().resource::<ItemIconCache>().map.len(),
+            expected,
+            "bounded memory: exactly one cached handle per ItemKey, not per slot size"
+        );
+        assert!(
+            elapsed < BUDGET,
+            "full catalogue took {elapsed:?}, over the {BUDGET:?} budget"
+        );
     }
 }
