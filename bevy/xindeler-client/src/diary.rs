@@ -1300,6 +1300,7 @@ fn sync_abilities_tab(
                 ))
                 .insert(SlotContents {
                     icon_text,
+                    icon: None,
                     quantity: None,
                     tooltip,
                 });

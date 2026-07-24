@@ -78,7 +78,7 @@ use bevy::{
     prelude::*,
 };
 use common::comp::inventory::{
-    item::Quality,
+    item::{Quality, item_key::ItemKey},
     slot::{ArmorSlot, EquipSlot, InvSlotId, Slot},
 };
 use xindeler_input::{ActionState, GameInput};
@@ -125,6 +125,15 @@ const EQUIP_GROUP: SlotGroup = SlotGroup(2);
 /// same "unknown group" contract this file already tests) — flagged, not a
 /// blocker.
 const EQUIP_PICKER_GROUP: SlotGroup = SlotGroup(6);
+
+/// The [`ItemKey`] the currently-displayed item in this slot resolves to
+/// (`None` for an empty slot), carried alongside [`SlotContents`] rather than
+/// inside it. [`apply_item_icons`] reads this every frame — independent of
+/// whatever `Changed<NetInventory>`-gated system last wrote it — to request/
+/// backfill [`SlotContents::icon`] once its async generation finishes, which
+/// can land several frames after the slot's contents were last set.
+#[derive(Component, Clone, Debug, Default, PartialEq)]
+struct SlotIconKey(Option<ItemKey>);
 
 /// BL-82 EM-5.17/5.18 legacy-inventory rebuild — the same 18-of-22-slot
 /// Equipment layout (spec §3.7, `Bag1`-`Bag4` still excluded — this screen's
@@ -316,6 +325,7 @@ impl Plugin for InventoryUiPlugin {
                     sync_inventory_window_visibility,
                     spawn_bag_grid_once_capacity_known,
                     sync_slot_contents.after(spawn_bag_grid_once_capacity_known),
+                    apply_item_icons.after(sync_slot_contents),
                     // BL-82 EM-5.17 T57.15 — must run after slots exist so a
                     // fresh spawn's initial 2H state applies the same frame
                     // it can (a later `NetInventory` change self-corrects it
@@ -816,6 +826,7 @@ fn spawn_bag_grid_once_capacity_known(
                 ),
                 bevy::ui::widget::ImageNode::new(images.get(HudImageKey::InvSlot)),
                 TooltipBackground(HudImageKey::InventoryTooltipBg),
+                SlotIconKey::default(),
             ));
         }
     });
@@ -880,6 +891,7 @@ fn spawn_equip_slot(
         slot_bundle(theme, EQUIP_GROUP, address, size),
         bevy::ui::widget::ImageNode::new(images.get(equip_slot_frame(equip_slot))),
         TooltipBackground(HudImageKey::InventoryTooltipBg),
+        SlotIconKey::default(),
     ));
     slot_entity.entry::<Node>().and_modify(move |mut node| {
         node.position_type = PositionType::Absolute;
@@ -1054,6 +1066,7 @@ fn sync_slot_contents(
             &SlotAddress,
             &SlotGroup,
             &mut SlotContents,
+            &mut SlotIconKey,
             &mut bevy::ui::widget::ImageNode,
         ),
         With<HudSlot>,
@@ -1066,11 +1079,12 @@ fn sync_slot_contents(
 
     for net_slot in &inventory.slots {
         let address = SlotAddress::from_inv_slot_idx(net_slot.slot.idx());
-        if let Some((_, _, mut contents, mut image)) = slots
+        if let Some((_, _, mut contents, mut icon_key, mut image)) = slots
             .iter_mut()
-            .find(|(a, g, _, _)| **a == address && **g == BAG_GROUP)
+            .find(|(a, g, ..)| **a == address && **g == BAG_GROUP)
         {
             *contents = net_item_to_slot_contents(net_slot.item.as_ref());
+            *icon_key = SlotIconKey(net_slot.item.as_ref().map(|item| item.icon_key.clone()));
             *image = bag_rarity_image_node(net_slot.item.as_ref(), &images);
         }
     }
@@ -1080,11 +1094,41 @@ fn sync_slot_contents(
             reason = "ALL_EQUIP_SLOTS has 22 entries, far below u32::MAX"
         )]
         let address = SlotAddress::from_equip_slot_discriminant(idx as u32);
-        if let Some((_, _, mut contents, _image)) = slots
+        if let Some((_, _, mut contents, mut icon_key, _image)) = slots
             .iter_mut()
-            .find(|(a, g, _, _)| **a == address && **g == EQUIP_GROUP)
+            .find(|(a, g, ..)| **a == address && **g == EQUIP_GROUP)
         {
             *contents = net_item_to_slot_contents(equipped.item.as_ref());
+            *icon_key = SlotIconKey(equipped.item.as_ref().map(|item| item.icon_key.clone()));
+        }
+    }
+}
+
+/// Requests/backfills every tagged slot's real icon every frame, independent
+/// of whatever `Changed<NetInventory>`-gated system last touched
+/// [`SlotContents`] — generation is async
+/// ([`crate::item_icon::ItemIconPlugin`]'s three-stage pipeline), so a slot's
+/// icon can only be known several frames after its [`SlotIconKey`] was set.
+/// Only ever touches slots that carry a [`SlotIconKey`] — the trade/hotbar
+/// screens don't attach one, so they're untouched by this system (their
+/// `SlotContents::icon` stays permanently `None`, matching their current
+/// `icon_text`-only rendering).
+fn apply_item_icons(
+    mut slots: Query<(&SlotIconKey, &mut SlotContents), With<HudSlot>>,
+    cache: Res<crate::item_icon::ItemIconCache>,
+    mut pending: ResMut<crate::item_icon::PendingIconRequests>,
+    vox_pending: Res<crate::item_icon::PendingIconVox>,
+    tasks: Res<crate::item_icon::IconRasterTasks>,
+) {
+    for (icon_key, mut contents) in &mut slots {
+        let resolved = match &icon_key.0 {
+            Some(key) => {
+                crate::item_icon::request_icon(&cache, &mut pending, &vox_pending, &tasks, key)
+            },
+            None => None,
+        };
+        if contents.icon != resolved {
+            contents.icon = resolved;
         }
     }
 }
@@ -1238,24 +1282,18 @@ fn sync_slot_count(
     }
 }
 
-// TODO(BL-82 follow-up — its OWN EM task, NOT round 2): real `.vox` item icons
-// are a substantial subsystem, not a tweak. `NetItemStack` already carries the
-// `item_id: ItemDefinitionIdOwned` that would key them, but rendering them the
-// way legacy "xindeler-old" does needs an OFFSCREEN voxel→2D-icon render
-// pipeline: xindeler-old's `voxygen/src/hud/item_imgs.rs` maps each `ItemKey`
-// through `item_image_manifest.ron` (~5.7k lines, ~1400 `VoxTrans` entries —
-// nearly every icon is a `.vox` model with a per-item ortho rotation/zoom/
-// offset), which conrod renders via its built-in `Graphic::Voxel` offscreen
-// cache. Porting that to Bevy = a render-to-texture target + `.vox` segment
-// meshing + the manifest + `ItemKey` resolution (which crosses the logic/shell
-// isolation boundary this module deliberately keeps closed — see
-// `xindeler_protocol::inventory::NetItemStack`'s own doc comment). The 3-char
-// `icon_text` glyph below stays the documented v1 placeholder (see
-// `xindeler_ui::slot`'s own module doc comment) until that task lands.
+/// Builds a slot's text/quantity/tooltip from a mirrored item — the real
+/// `.vox` icon itself is NOT set here: [`sync_slot_contents`] additionally
+/// writes this slot's [`SlotIconKey`], and [`apply_item_icons`] fills in
+/// [`SlotContents::icon`] asynchronously once generation finishes. Until
+/// then (and permanently, for any item with no manifest entry), the 3-char
+/// `icon_text` glyph is what actually renders (see `xindeler_ui::slot`'s own
+/// module doc comment).
 fn net_item_to_slot_contents(item: Option<&xindeler_protocol::NetItemStack>) -> SlotContents {
     match item {
         Some(item) => SlotContents {
             icon_text: item.name.chars().take(3).collect(),
+            icon: None,
             quantity: Some(item.amount),
             tooltip: format!("{} ({:?}) ×{}", item.name, item.quality, item.amount),
         },
@@ -1619,7 +1657,7 @@ fn spawn_candidate_row(
                 40.0,
                 rarity_bg,
             ))
-            .insert(contents);
+            .insert((contents, SlotIconKey(Some(item.icon_key.clone()))));
             row.spawn((
                 Text(name),
                 TextFont {
@@ -1701,6 +1739,85 @@ mod tests {
     use xindeler_protocol::{NetEquippedSlot, NetInventorySlot};
 
     use super::*;
+
+    /// A slot whose [`SlotIconKey`] already has a cached icon gets it written
+    /// into [`SlotContents::icon`] on the very next `apply_item_icons` pass —
+    /// the "resolvable icon_key" half of the P3 acceptance bar.
+    #[test]
+    fn apply_item_icons_writes_a_cached_handle_into_a_resolvable_slot() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::item_icon::ItemIconCache>();
+        app.init_resource::<crate::item_icon::PendingIconRequests>();
+        app.init_resource::<crate::item_icon::PendingIconVox>();
+        app.init_resource::<crate::item_icon::IconRasterTasks>();
+
+        let key = ItemKey::Simple("common.items.weapons.sword.starter".to_owned());
+        let handle: bevy::asset::Handle<bevy::image::Image> = bevy::asset::Handle::default();
+        app.world_mut()
+            .resource_mut::<crate::item_icon::ItemIconCache>()
+            .map
+            .insert(key.clone(), handle.clone());
+
+        let slot = app
+            .world_mut()
+            .spawn((HudSlot, SlotIconKey(Some(key)), SlotContents {
+                icon_text: "Str".to_owned(),
+                icon: None,
+                quantity: None,
+                tooltip: String::new(),
+            }))
+            .id();
+
+        app.world_mut()
+            .run_system_once(apply_item_icons)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<SlotContents>(slot).unwrap().icon,
+            Some(handle)
+        );
+    }
+
+    /// A slot with no [`SlotIconKey`] (an empty slot, or a manifest miss)
+    /// never gets an icon — it just queues a generation request through
+    /// [`crate::item_icon::request_icon`]'s normal dedup path, exactly the
+    /// same as any other caller. `icon` stays `None`, so `xindeler_ui::slot`
+    /// keeps rendering `icon_text` — the fallback half of the P3 acceptance
+    /// bar.
+    #[test]
+    fn apply_item_icons_leaves_an_uncached_slots_icon_as_none() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::item_icon::ItemIconCache>();
+        app.init_resource::<crate::item_icon::PendingIconRequests>();
+        app.init_resource::<crate::item_icon::PendingIconVox>();
+        app.init_resource::<crate::item_icon::IconRasterTasks>();
+
+        let key = ItemKey::Simple("common.items.weapons.sword.starter".to_owned());
+        let slot = app
+            .world_mut()
+            .spawn((HudSlot, SlotIconKey(Some(key.clone())), SlotContents {
+                icon_text: "Str".to_owned(),
+                icon: None,
+                quantity: None,
+                tooltip: String::new(),
+            }))
+            .id();
+
+        app.world_mut()
+            .run_system_once(apply_item_icons)
+            .expect("system runs");
+
+        assert_eq!(app.world().get::<SlotContents>(slot).unwrap().icon, None);
+        assert!(
+            app.world()
+                .resource::<crate::item_icon::PendingIconRequests>()
+                .0
+                .contains(&key),
+            "an uncached, unqueued key must get queued for generation"
+        );
+    }
 
     #[test]
     fn bag_address_round_trips_through_inv_slot_idx() {
@@ -1850,6 +1967,7 @@ mod tests {
             quality: Quality::Common,
             is_two_handed: true,
             equippable_slots: vec![EquipSlot::ActiveMainhand, EquipSlot::InactiveMainhand],
+            icon_key: ItemKey::Simple("common.items.weapons.greatsword.starter".to_owned()),
         }
     }
 
@@ -1868,6 +1986,7 @@ mod tests {
                 EquipSlot::InactiveMainhand,
                 EquipSlot::InactiveOffhand,
             ],
+            icon_key: ItemKey::Simple("common.items.weapons.dagger.starter_dagger".to_owned()),
         }
     }
 
@@ -1883,6 +2002,7 @@ mod tests {
             quality: Quality::Low,
             is_two_handed: false,
             equippable_slots: vec![EquipSlot::Armor(ArmorSlot::Feet)],
+            icon_key: ItemKey::Simple("common.items.testing.test_boots".to_owned()),
         }
     }
 

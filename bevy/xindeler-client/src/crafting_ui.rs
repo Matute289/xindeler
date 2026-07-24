@@ -1245,6 +1245,7 @@ fn spawn_display_slot(
         ))
         .insert(SlotContents {
             icon_text: name.chars().next().map(String::from).unwrap_or_default(),
+            icon: None,
             quantity,
             tooltip: name.to_owned(),
         });

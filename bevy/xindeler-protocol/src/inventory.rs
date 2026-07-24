@@ -34,7 +34,7 @@
 //! client, even one that can already see the entity's `NetPos`/`NetHealth`/etc.
 
 use common::comp::inventory::{
-    item::{ItemDefinitionIdOwned, Quality},
+    item::{ItemDefinitionIdOwned, Quality, item_key::ItemKey},
     slot::{ArmorSlot, EquipSlot, InvSlotId},
 };
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,16 @@ pub struct NetItemStack {
     /// `is_two_handed`). Empty for non-equippable items (consumables,
     /// currency, quest items, etc.).
     pub equippable_slots: Vec<EquipSlot>,
+    /// The real, sim-authoritative [`ItemKey::from(&item)`] result,
+    /// projected so the client can look up this item's icon in
+    /// `voxygen/item_image_manifest.ron` without re-deriving item identity
+    /// itself (a naive client-side `ItemKey::Simple(item_id)` mis-keys
+    /// modular weapons and cannot produce `TagExamples`/
+    /// `ModularWeaponComponent` keys). `ItemKey` is already
+    /// `Serialize`/`Deserialize` (`item_key.rs`), so it travels unchanged,
+    /// matching this struct's own established "reuse `common` types
+    /// verbatim" discipline.
+    pub icon_key: ItemKey,
 }
 
 /// One bag slot, projected for the bag-grid UI (EM-5.6 T56.19) — EVERY
@@ -215,6 +225,7 @@ mod tests {
                 quality: Quality::Common,
                 is_two_handed: false,
                 equippable_slots: vec![EquipSlot::ActiveMainhand],
+                icon_key: ItemKey::Simple("common.items.weapons.sword.starter".to_owned()),
             }),
         };
         // Round-trips through bincode the same way every other Net* payload
@@ -259,6 +270,7 @@ mod tests {
                 quality: Quality::Common,
                 is_two_handed: true,
                 equippable_slots: vec![EquipSlot::ActiveMainhand, EquipSlot::InactiveMainhand],
+                icon_key: ItemKey::Simple("common.items.weapons.greatsword.starter".to_owned()),
             }),
         };
         let bytes =

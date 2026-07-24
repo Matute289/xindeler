@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn net_trade_offer_entry_round_trips_bincode() {
-        use common::comp::inventory::item::{ItemDefinitionIdOwned, Quality};
+        use common::comp::inventory::item::{ItemDefinitionIdOwned, Quality, item_key::ItemKey};
 
         let entry = NetTradeOfferEntry {
             slot: InvSlotId::new(0, 2),
@@ -156,11 +156,10 @@ mod tests {
                 quality: Quality::Common,
                 amount: 20,
                 is_two_handed: false,
-                // BL-82 EM-5.18 T58.7 — mechanical fixup: `NetItemStack`
-                // gained this field for the equip-picker (`inventory.rs`);
-                // coins are non-equippable, matching the field's own
+                // Coins are non-equippable, matching the field's own
                 // documented `[]` default for that case.
                 equippable_slots: Vec::new(),
+                icon_key: ItemKey::Simple("common.items.utility.coins".to_owned()),
             },
             offered: 5,
             owned: 20,

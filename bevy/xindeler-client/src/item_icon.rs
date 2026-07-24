@@ -136,14 +136,13 @@ fn load_manifest(
 /// Never evicted (the catalogue is a few thousand items at most).
 #[derive(Resource, Default)]
 pub struct ItemIconCache {
-    map: HashMap<ItemKey, Handle<Image>>,
+    pub(crate) map: HashMap<ItemKey, Handle<Image>>,
 }
 
 impl ItemIconCache {
     /// The icon for `key`, if it's already been generated. Consumed by each
     /// slot-rendering screen (bag/paperdoll/hotbar/trade/...) to swap its
     /// `icon_text` placeholder for the real image once one exists.
-    #[allow(dead_code, reason = "wired in by each slot-rendering screen, not yet")]
     pub fn get(&self, key: &ItemKey) -> Option<Handle<Image>> { self.map.get(key).cloned() }
 }
 
@@ -151,14 +150,12 @@ impl ItemIconCache {
 /// [`ItemIconManifestAsset`] to finish loading, or waiting to be drained on
 /// the frame they were requested).
 #[derive(Resource, Default)]
-pub struct PendingIconRequests(HashSet<ItemKey>);
+pub struct PendingIconRequests(pub(crate) HashSet<ItemKey>);
 
 /// Request an icon for `key`. Returns the cached handle if one already
 /// exists; otherwise queues generation (a no-op if already in flight) and
 /// returns `None` for this frame — callers should keep using their fallback
-/// (`icon_text`) until a later frame's cache lookup succeeds. Consumed by
-/// each slot-rendering screen, not yet wired into any of them.
-#[allow(dead_code, reason = "wired in by each slot-rendering screen, not yet")]
+/// (`icon_text`) until a later frame's cache lookup succeeds.
 pub fn request_icon(
     cache: &ItemIconCache,
     pending: &mut PendingIconRequests,

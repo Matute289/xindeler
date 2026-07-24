@@ -111,9 +111,15 @@ impl SlotAddress {
 /// [`update_slot_visuals`] is the only system that reads it.
 #[derive(Component, Clone, Debug, Default, PartialEq)]
 pub struct SlotContents {
-    /// Short placeholder glyph text shown in the slot (real `.vox`-icon
-    /// rendering is a documented follow-up — see module doc comment).
+    /// Short placeholder glyph text shown in the slot, rendered whenever
+    /// [`Self::icon`] is `None` — used both as the initial state while an
+    /// icon is still being generated, and as the permanent fallback for any
+    /// item with no manifest entry.
     pub icon_text: String,
+    /// The item's real rasterized icon, once one exists. Renders as an
+    /// absolute-fill `ImageNode` layer above the rarity background and below
+    /// the quantity badge; while `None`, [`Self::icon_text`] shows instead.
+    pub icon: Option<bevy::asset::Handle<bevy::image::Image>>,
     /// Stack count badge; `None`/`Some(1)` both render as no badge (a
     /// singleton item doesn't need a "×1").
     pub quantity: Option<u32>,
@@ -165,6 +171,10 @@ pub(crate) struct SlotIconText;
 /// doc comment for why.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(crate) struct SlotQuantityBadge;
+/// Marks a slot's real-icon `ImageNode` child. `pub(crate)` — see
+/// [`SlotIconText`]'s doc comment for why.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct SlotIcon;
 
 /// Fired when a drag ending over a slot completes — see the module doc
 /// comment for the full contract. `from`/`to` are `(group, address)` pairs;
@@ -268,9 +278,18 @@ pub(crate) fn update_slot_visuals(
     mut commands: Commands,
     slots: Query<(Entity, &SlotContents, Option<&Children>), Changed<SlotContents>>,
     mut icon_texts: Query<
-        &mut Text,
+        (&mut Text, &mut Visibility),
         (
             With<SlotIconText>,
+            bevy::ecs::query::Without<SlotQuantityBadge>,
+            bevy::ecs::query::Without<SlotIcon>,
+        ),
+    >,
+    mut icon_images: Query<
+        (&mut bevy::ui::widget::ImageNode, &mut Visibility),
+        (
+            With<SlotIcon>,
+            bevy::ecs::query::Without<SlotIconText>,
             bevy::ecs::query::Without<SlotQuantityBadge>,
         ),
     >,
@@ -279,13 +298,19 @@ pub(crate) fn update_slot_visuals(
         (
             With<SlotQuantityBadge>,
             bevy::ecs::query::Without<SlotIconText>,
+            bevy::ecs::query::Without<SlotIcon>,
         ),
     >,
 ) {
     for (slot_entity, contents, children) in &slots {
-        let existing_icon = children.and_then(|kids| {
+        let existing_icon_text = children.and_then(|kids| {
             kids.iter()
                 .find(|&&child| icon_texts.get(child).is_ok())
+                .copied()
+        });
+        let existing_icon_image = children.and_then(|kids| {
+            kids.iter()
+                .find(|&&child| icon_images.get(child).is_ok())
                 .copied()
         });
         let existing_badge = children.and_then(|kids| {
@@ -294,9 +319,15 @@ pub(crate) fn update_slot_visuals(
                 .copied()
         });
 
-        if let Some(icon_entity) = existing_icon {
-            if let Ok(mut text) = icon_texts.get_mut(icon_entity) {
+        let text_visibility = if contents.icon.is_some() {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if let Some(icon_entity) = existing_icon_text {
+            if let Ok((mut text, mut visibility)) = icon_texts.get_mut(icon_entity) {
                 text.0.clone_from(&contents.icon_text);
+                *visibility = text_visibility;
             }
         } else {
             commands.entity(slot_entity).with_children(|parent| {
@@ -309,22 +340,49 @@ pub(crate) fn update_slot_visuals(
                         ..Default::default()
                     },
                     TextColor(theme.palette.text),
-                    // BL-82 EM-5.17/5.18 legacy-inventory rebuild (STEP 4,
-                    // "the icon glyph never renders" bug): a PLAIN, auto-sized
-                    // flex child — the slot's own `Node` (see `slot_bundle`)
-                    // carries `justify_content: Center`/`align_items: Center`,
-                    // which centers this child over the rarity-background
-                    // `ImageNode`. It deliberately does NOT get an
-                    // absolute-fill `Node` of its own: `justify_content`/
-                    // `align_items` on a leaf `Text` node are no-ops (glyph
-                    // placement inside a text box is governed by `TextLayout`,
-                    // not flex align), so stretching the text node to fill the
-                    // slot would just move the glyph back to the box's
-                    // top-left — the exact bug this fixes (matches
-                    // `crate::button`'s label-centering idiom). The quantity
-                    // badge (spawned below) is the ONLY absolutely-positioned
-                    // child, so it stays out of flow in its own corner and
-                    // never fights this centered glyph.
+                    text_visibility,
+                    // A plain, auto-sized flex child — the slot's own `Node`
+                    // (see `slot_bundle`) carries `justify_content: Center`/
+                    // `align_items: Center`, which centers this child over
+                    // the rarity-background `ImageNode`. It deliberately
+                    // does NOT get an absolute-fill `Node` of its own:
+                    // `justify_content`/`align_items` on a leaf `Text` node
+                    // are no-ops (glyph placement inside a text box is
+                    // governed by `TextLayout`, not flex align), so
+                    // stretching the text node to fill the slot would just
+                    // move the glyph back to the box's top-left. The
+                    // quantity badge (spawned below) is the ONLY
+                    // absolutely-positioned child, so it stays out of flow
+                    // in its own corner and never fights this centered
+                    // glyph.
+                ));
+            });
+        }
+
+        let image_visibility = if contents.icon.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(icon_entity) = existing_icon_image {
+            if let Ok((mut image_node, mut visibility)) = icon_images.get_mut(icon_entity) {
+                if let Some(handle) = &contents.icon {
+                    image_node.image = handle.clone();
+                }
+                *visibility = image_visibility;
+            }
+        } else if let Some(handle) = &contents.icon {
+            commands.entity(slot_entity).with_children(|parent| {
+                parent.spawn((
+                    SlotIcon,
+                    bevy::ui::widget::ImageNode::new(handle.clone()),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..Default::default()
+                    },
+                    image_visibility,
                 ));
             });
         }
@@ -606,6 +664,7 @@ mod tests {
             .id();
         app.world_mut().entity_mut(slot).insert(SlotContents {
             icon_text: "Pot".to_owned(),
+            icon: None,
             quantity: Some(5),
             tooltip: "Minor Potion".to_owned(),
         });
@@ -633,6 +692,7 @@ mod tests {
         // Change the contents; the SAME children update, no new ones spawn.
         app.world_mut().entity_mut(slot).insert(SlotContents {
             icon_text: "Ax".to_owned(),
+            icon: None,
             quantity: None,
             tooltip: "Axe".to_owned(),
         });
@@ -647,6 +707,84 @@ mod tests {
         );
         assert_eq!(app.world().get::<Text>(icon).unwrap().0, "Ax");
         assert_eq!(app.world().get::<Text>(badge).unwrap().0, "");
+    }
+
+    /// A real `icon` handle spawns an `ImageNode` child and hides the
+    /// icon-text glyph; clearing it back to `None` reverts to the glyph
+    /// without despawning the (now-hidden) image child.
+    #[test]
+    fn slot_contents_icon_handle_shows_the_image_and_hides_the_glyph() {
+        let mut app = new_app();
+        app.add_systems(Update, update_slot_visuals);
+        let theme = HudTheme::default();
+        let handle: Handle<Image> = Handle::default();
+
+        let slot = app
+            .world_mut()
+            .spawn(slot_bundle(&theme, SlotGroup(0), SlotAddress(1), 48.0))
+            .id();
+        app.world_mut().entity_mut(slot).insert(SlotContents {
+            icon_text: "Pot".to_owned(),
+            icon: None,
+            quantity: None,
+            tooltip: "Minor Potion".to_owned(),
+        });
+        app.update();
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(slot)
+            .expect("icon/badge children spawned")
+            .iter()
+            .collect();
+        let icon_text_entity = children
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<SlotIconText>(e).is_some())
+            .expect("icon-text child exists");
+        assert_eq!(
+            *app.world().get::<Visibility>(icon_text_entity).unwrap(),
+            Visibility::Inherited,
+            "no real icon yet — the glyph fallback must be visible"
+        );
+        assert!(
+            children
+                .iter()
+                .all(|&e| app.world().get::<SlotIcon>(e).is_none()),
+            "no image child until a real icon handle is set"
+        );
+
+        app.world_mut().entity_mut(slot).insert(SlotContents {
+            icon_text: "Pot".to_owned(),
+            icon: Some(handle.clone()),
+            quantity: None,
+            tooltip: "Minor Potion".to_owned(),
+        });
+        app.update();
+
+        let children_after: Vec<Entity> =
+            app.world().get::<Children>(slot).unwrap().iter().collect();
+        let icon_image_entity = children_after
+            .iter()
+            .copied()
+            .find(|&e| app.world().get::<SlotIcon>(e).is_some())
+            .expect("image child spawned once a real icon handle is set");
+        assert_eq!(
+            app.world()
+                .get::<bevy::ui::widget::ImageNode>(icon_image_entity)
+                .unwrap()
+                .image,
+            handle
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(icon_image_entity).unwrap(),
+            Visibility::Inherited
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(icon_text_entity).unwrap(),
+            Visibility::Hidden,
+            "a real icon must hide the glyph fallback, not stack on top of it"
+        );
     }
 
     /// [`resolve_drop`] (the semantic core [`on_drag_drop`] delegates to)

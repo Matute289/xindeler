@@ -467,6 +467,10 @@ fn sync_trade_window(
 fn offer_entry_to_slot_contents(entry: &NetTradeOfferEntry) -> SlotContents {
     SlotContents {
         icon_text: entry.item.name.chars().take(3).collect(),
+        // Real icons aren't wired into the trade screen yet — untagged
+        // slots (no `SlotIconKey`) are simply invisible to
+        // `inventory_ui::apply_item_icons`, so this stays `icon_text`-only.
+        icon: None,
         quantity: Some(entry.offered),
         tooltip: format!(
             "{} ({:?}) — offering {} of {}",
@@ -598,11 +602,12 @@ mod tests {
                 amount: 10,
                 quality: Quality::Common,
                 is_two_handed: false,
-                // BL-82 EM-5.18 T58.7 — mechanical fixup: `NetItemStack`
-                // gained this field for the equip-picker (`inventory_ui.rs`);
-                // a potion is non-equippable, matching the field's own
+                // A potion is non-equippable, matching the field's own
                 // documented `[]` default for that case.
                 equippable_slots: Vec::new(),
+                icon_key: common::comp::inventory::item::item_key::ItemKey::Simple(
+                    "common.items.consumable.potion_minor".to_owned(),
+                ),
             },
             offered: 3,
             owned: 10,
