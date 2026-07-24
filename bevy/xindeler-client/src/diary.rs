@@ -1206,8 +1206,7 @@ fn sync_skill_tree_content(
                     )
                 };
 
-                let mut node_entity =
-                    parent.spawn(button_bundle(&theme, &fonts, &skill_glyph(skill)));
+                let mut node_entity = parent.spawn(button_bundle(&theme, &fonts, &name));
                 node_entity.entry::<Node>().and_modify(move |mut node| {
                     node.position_type = PositionType::Absolute;
                     node.top = Val::Px(y);
@@ -1230,28 +1229,6 @@ fn sync_skill_tree_content(
             }
         }
     });
-}
-
-/// A short, generic glyph for any [`Skill`] variant, derived from its
-/// `Debug` text (no per-skill hardcoded table — matches
-/// `xindeler-client::hotbar::short_glyph`'s own "derive from a string, don't
-/// enumerate every case" philosophy, applied to `Skill` instead of an
-/// ability-id string).
-fn skill_glyph(skill: Skill) -> String {
-    let debug = format!("{skill:?}");
-    let inner = debug.rsplit('(').next().unwrap_or(&debug);
-    let inner = inner.trim_end_matches(')');
-    let ident = inner
-        .split(|c: char| !c.is_alphanumeric())
-        .find(|s| !s.is_empty())
-        .unwrap_or(inner);
-    let mut glyph: String = ident.chars().take(4).collect();
-    glyph.make_ascii_uppercase();
-    if glyph.is_empty() {
-        "SKL".to_owned()
-    } else {
-        glyph
-    }
 }
 
 /// Rebuilds the Abilities tab's slot grid from the local player's real
@@ -1399,16 +1376,6 @@ mod tests {
     fn max_level_defaults_to_one_when_absent() {
         let shape = shape_with(&[], &[]);
         assert_eq!(shape.max_level(Skill::Warrior(WarriorSkill::Rally)), 1);
-    }
-
-    /// [`skill_glyph`] derives a short, non-empty glyph from any `Skill`
-    /// variant's `Debug` text without a hardcoded per-skill table.
-    #[test]
-    fn skill_glyph_is_short_and_nonempty() {
-        let glyph = skill_glyph(Skill::Warrior(WarriorSkill::Rally));
-        assert!(!glyph.is_empty());
-        assert!(glyph.len() <= 4);
-        assert_eq!(glyph, glyph.to_uppercase());
     }
 
     /// [`ability_glyph`] takes the last dotted segment, uppercased — same
@@ -1824,5 +1791,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The skill-tree node button's visible label must be the real localized
+    /// skill name (what a player reads without hovering), not the removed
+    /// `skill_glyph` compact-icon placeholder.
+    #[test]
+    fn skill_node_button_label_is_the_real_name_not_a_glyph() {
+        use bevy::ecs::system::RunSystemOnce;
+        use xindeler_ui::{
+            button::HudButtonLabel,
+            i18n::{DEFAULT_HUD_FTL_FILES, fallback_locale},
+        };
+
+        let mut app = diary_window_test_app();
+        app.insert_resource(HudFonts {
+            title: Handle::default(),
+            body: Handle::default(),
+        });
+        app.insert_resource(SkillTreeShape::load());
+        app.insert_resource(DiaryTab::Group(SkillGroupKind::Class(ClassKind::Warrior)));
+        app.init_resource::<CurrentLocale>();
+        app.insert_non_send(Localization::load(
+            &fallback_locale(),
+            DEFAULT_HUD_FTL_FILES,
+        ));
+        app.world_mut().spawn((NetLocalPlayer, NetSkillSet {
+            groups: Vec::new(),
+            skills: Vec::new(),
+        }));
+
+        app.world_mut()
+            .run_system_once(spawn_diary_window)
+            .expect("spawn_diary_window runs");
+        app.world_mut()
+            .run_system_once(sync_skill_tree_content)
+            .expect("sync_skill_tree_content runs");
+
+        let world = app.world_mut();
+        let node = world
+            .query_filtered::<(Entity, &SkillNodeTarget), ()>()
+            .iter(world)
+            .find(|(_, target)| target.0 == Skill::Warrior(WarriorSkill::Rally))
+            .map(|(entity, _)| entity)
+            .expect("the Warrior Rally node was spawned");
+        let label = &world
+            .get::<HudButtonLabel>(node)
+            .expect("skill node carries a HudButtonLabel")
+            .0;
+        assert_eq!(
+            label, "Rally",
+            "skill node label must be the real localized name, not a 4-char glyph"
+        );
     }
 }
