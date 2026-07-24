@@ -67,6 +67,8 @@ mod hud_scale;
 mod hud_toast;
 #[cfg(any(feature = "listen-server", feature = "net-client"))]
 mod inventory_ui;
+#[cfg(any(feature = "listen-server", feature = "net-client"))]
+mod item_icon;
 mod light;
 #[cfg(feature = "listen-server")]
 mod listen_server;

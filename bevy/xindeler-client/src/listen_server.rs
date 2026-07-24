@@ -379,8 +379,11 @@ impl Plugin for ListenServerPlugin {
         // widget kit `CombatHudViewPlugin` already added (`XindelerUiPlugin`)
         // — no new UI plugin registration needed.
         app.add_plugins(HotbarViewPlugin);
-        // BL-82 EM-5.6: the inventory/bag + paper-doll screen, loot feed, and
-        // the two-party trade window — pure Bevy, reading the mirrors above.
+        // Real rasterized item icons (reuses FigureViewPlugin's VoxAsset
+        // loader, added above) for every slot consumer below.
+        app.add_plugins(crate::item_icon::ItemIconPlugin);
+        // The inventory/bag + paper-doll screen, loot feed, and the
+        // two-party trade window — pure Bevy, reading the mirrors above.
         app.add_plugins((
             crate::inventory_ui::InventoryUiPlugin,
             crate::trade_ui::TradeUiPlugin,

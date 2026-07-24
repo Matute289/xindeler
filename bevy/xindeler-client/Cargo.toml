@@ -77,6 +77,8 @@ xindeler-render-voxel = { path = "../xindeler-render-voxel", features = [
     "pipeline",
     # EM-3.8: real `.vox` figures (figure mesher + anim rest-pose bones).
     "figure",
+    # Item-icon CPU voxel-to-image rasterizer.
+    "item-icon",
 ] }
 # Logic crates as TYPE LIBRARIES only ([Q3]=B): the voxel demo builds a
 # synthetic `VolGrid2d<TerrainChunk>` with `common` terrain types. Legal
@@ -85,6 +87,8 @@ common = { package = "xindeler-common", path = "../../common", features = [
     "no-assets",
 ] }
 vek = { workspace = true }
+# Names the RgbaImage type in xindeler-render-voxel::item_icon's public API.
+image = { workspace = true }
 # BL-82 EM-5.7: `diary.rs` parses the frozen skill-tree RON manifests directly
 # (see that module's own doc comment for why it does NOT go through
 # `common`'s `assets_manager`-backed statics despite linking `common` for
