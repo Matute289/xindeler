@@ -24,6 +24,7 @@
 //! heading `(bx, 0, bz)` becomes sim `(bx, −bz)`.
 
 use bevy::{
+    input::mouse::AccumulatedMouseScroll,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -60,6 +61,26 @@ const CAMERA_TOGGLE_KEY: KeyCode = KeyCode::KeyF;
 /// of this fix — that reference was already stale before this landed.)
 const CAM_BACK: f32 = 9.0;
 const CAM_LOOK_UP: f32 = 1.0;
+
+/// Mouse-wheel-adjustable third-person camera boom length — the desired
+/// (uncollided) distance fed into [`collide_boom`]/[`smoothed_boom`] in
+/// place of the old fixed [`CAM_BACK`] constant. Clamped to
+/// `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]` by [`handle_camera_zoom_input`] —
+/// keeps the camera from clipping into the character at the near end or
+/// drifting absurdly far at the far end.
+#[derive(Resource)]
+pub struct CameraZoom(pub f32);
+
+impl Default for CameraZoom {
+    fn default() -> Self { Self(CAM_BACK) }
+}
+
+const CAMERA_ZOOM_MIN: f32 = 2.0;
+const CAMERA_ZOOM_MAX: f32 = 20.0;
+/// Boom-length change (metres) per full wheel "line" of scroll — tuned so a
+/// couple of notches noticeably pulls the camera in/out without a single
+/// notch overshooting the clamp range in one step.
+const CAMERA_ZOOM_SCROLL_SENSITIVITY: f32 = 0.6;
 
 /// BL-82 EM-3.12 — camera-collision spring-arm geometry (code consts, not
 /// game-balance content — matches this file's `CAM_BACK`/`CAM_LOOK_UP`
@@ -109,6 +130,7 @@ pub struct PlayerInputPlugin;
 impl Plugin for PlayerInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ThirdPersonActive>()
+            .init_resource::<CameraZoom>()
             // `LocalPlayerInput` is inserted by the bridge's PlayerBridgePlugin;
             // init here too so the client compiles/runs even if that plugin's
             // order changes (init_resource is idempotent — first insert wins).
@@ -117,6 +139,7 @@ impl Plugin for PlayerInputPlugin {
                 Update,
                 (
                     toggle_camera_mode,
+                    handle_camera_zoom_input,
                     sync_fly_cam_gate,
                     gather_input,
                     third_person_camera,
@@ -127,6 +150,17 @@ impl Plugin for PlayerInputPlugin {
                     .after(FlyCamSet)
                     .in_set(GameplaySet),
             );
+    }
+}
+
+/// Mouse-wheel adjusts the third-person camera boom length live, clamped to
+/// `[CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX]`. Scrolling up (positive `y`, the same
+/// convention `map_view.rs`'s own scroll-zoom already uses) pulls the camera
+/// IN; scrolling down pushes it back out.
+fn handle_camera_zoom_input(mut zoom: ResMut<CameraZoom>, scroll: Res<AccumulatedMouseScroll>) {
+    if scroll.delta.y.abs() > f32::EPSILON {
+        zoom.0 = (zoom.0 - scroll.delta.y * CAMERA_ZOOM_SCROLL_SENSITIVITY)
+            .clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
     }
 }
 
@@ -224,6 +258,10 @@ pub(crate) fn gather_input(
     *input = LocalPlayerInput {
         move_dir,
         jump: grabbed && action_state.pressed(xindeler_input::GameInput::Jump),
+        roll: grabbed && action_state.pressed(xindeler_input::GameInput::Roll),
+        glide_toggle: grabbed && action_state.pressed(xindeler_input::GameInput::Glide),
+        toggle_lantern: grabbed && action_state.pressed(xindeler_input::GameInput::ToggleLantern),
+        swap_loadout: grabbed && action_state.pressed(xindeler_input::GameInput::SwapLoadout),
         look,
     };
 }
@@ -279,6 +317,7 @@ fn third_person_camera(
     // tracks — see `terrain_stream::TerrainStore::boom_cast`'s doc comment
     // for the "colliding with something invisible" bug this closes.
     mesh_index: Res<ChunkMeshIndex>,
+    zoom: Res<CameraZoom>,
     mut focus: Local<Option<Vec3>>,
     mut cam_dist: Local<Option<f32>>,
     mut perf_log: Local<Option<bool>>,
@@ -364,10 +403,10 @@ fn third_person_camera(
         let dist = if collision_enabled {
             let pivot_sim = to_vek(bevy_to_sim(look_at));
             let dir_sim = to_vek(bevy_to_sim(-forward));
-            let clamped = terrain.boom_cast(pivot_sim, dir_sim, CAM_BACK, &mesh_index);
+            let clamped = terrain.boom_cast(pivot_sim, dir_sim, zoom.0, &mesh_index);
             smoothed_boom(&mut cam_dist, clamped, snap_boom, time.delta_secs())
         } else {
-            CAM_BACK
+            zoom.0
         };
         let eye = look_at - forward * dist;
         *cam_tf = Transform::from_translation(eye).looking_at(look_at, Vec3::Y);
@@ -776,6 +815,10 @@ fn smoke_auto_move(
     *input = LocalPlayerInput {
         move_dir,
         jump,
+        roll: false,
+        glide_toggle: false,
+        toggle_lantern: false,
+        swap_loadout: false,
         // Sim (x, y) horizontal look, matching the walk direction (full 3D
         // look vector with z=0, same convention `gather_input` uses).
         look: Vec3::new(move_dir.x, move_dir.y, 0.0),
@@ -1069,12 +1112,101 @@ mod tests {
         assert!((sim - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5, "{sim:?}");
     }
 
+    /// `gather_input` reads `GameInput::Roll`/`Glide`/`ToggleLantern`/
+    /// `SwapLoadout` into their matching `LocalPlayerInput` fields. Drives
+    /// `ActionState` through the real key-resolution pipeline
+    /// (`xindeler_input::action_state::update_action_state`), so this also
+    /// proves the DEFAULT keybinds actually reach `ActionState`, not just
+    /// that `gather_input` reads whatever's already set.
+    #[test]
+    fn gather_input_reads_roll_glide_lantern_and_loadout_swap() {
+        use bevy::input::mouse::AccumulatedMouseMotion;
+        use xindeler_input::{
+            ActionState, GameInput, KeyMap, KeyOrMouse, action_state::update_action_state,
+        };
+
+        let mut app = App::new();
+        app.insert_resource(KeyMap::default());
+        app.insert_resource(ActionState::default());
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ButtonInput<MouseButton>>();
+        app.init_resource::<AccumulatedMouseMotion>();
+        app.init_resource::<LocalPlayerInput>();
+        app.world_mut().spawn((PrimaryWindow, CursorOptions {
+            grab_mode: CursorGrabMode::Locked,
+            ..Default::default()
+        }));
+        app.world_mut()
+            .spawn((FlyCam::default(), Transform::IDENTITY));
+
+        let key_map = app.world().resource::<KeyMap>().clone();
+        for input in [
+            GameInput::Roll,
+            GameInput::Glide,
+            GameInput::ToggleLantern,
+            GameInput::SwapLoadout,
+        ] {
+            match key_map.keyboard.get_binding(input) {
+                Some(KeyOrMouse::Key(key)) => {
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<KeyCode>>()
+                        .press(key);
+                },
+                Some(KeyOrMouse::Mouse(button)) => {
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(button);
+                },
+                None => panic!("{input:?} has no default binding"),
+            }
+        }
+
+        app.add_systems(Update, (update_action_state, gather_input).chain());
+        app.update();
+
+        let input = *app.world().resource::<LocalPlayerInput>();
+        assert!(input.roll, "Roll must reach LocalPlayerInput");
+        assert!(input.glide_toggle, "Glide must reach LocalPlayerInput");
+        assert!(
+            input.toggle_lantern,
+            "ToggleLantern must reach LocalPlayerInput"
+        );
+        assert!(
+            input.swap_loadout,
+            "SwapLoadout must reach LocalPlayerInput"
+        );
+    }
+
     /// A Bevy heading due −z (yaw 0 forward) maps to sim +y (north).
     #[test]
     fn forward_maps_to_north() {
         let move_bevy = flatten(Vec3::new(0.0, 0.0, -1.0));
         let move_dir = Vec2::new(move_bevy.x, -move_bevy.z);
         assert!((move_dir - Vec2::new(0.0, 1.0)).length() < 1e-5);
+    }
+
+    /// Scrolling up (positive `y`, `map_view.rs`'s own scroll-zoom
+    /// convention) pulls the camera IN toward [`CAMERA_ZOOM_MIN`]; scrolling
+    /// down pushes it back OUT — and both directions clamp rather than
+    /// overshoot the configured range.
+    #[test]
+    fn camera_zoom_clamps_to_the_configured_range() {
+        let mut app = App::new();
+        app.init_resource::<CameraZoom>();
+        app.insert_resource(AccumulatedMouseScroll {
+            unit: bevy::input::mouse::MouseScrollUnit::Line,
+            delta: Vec2::new(0.0, 1000.0), // scroll far past the near clamp
+        });
+        app.add_systems(Update, handle_camera_zoom_input);
+        app.update();
+        assert_eq!(app.world().resource::<CameraZoom>().0, CAMERA_ZOOM_MIN);
+
+        app.insert_resource(AccumulatedMouseScroll {
+            unit: bevy::input::mouse::MouseScrollUnit::Line,
+            delta: Vec2::new(0.0, -1000.0), // scroll far past the far clamp
+        });
+        app.update();
+        assert_eq!(app.world().resource::<CameraZoom>().0, CAMERA_ZOOM_MAX);
     }
 
     /// A quarter-turn rotates a heading 90° (right-hand rotation in the xz

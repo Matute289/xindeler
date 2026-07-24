@@ -107,6 +107,17 @@ impl Plugin for EscMenuPlugin {
 #[derive(Component)]
 struct EscMenuRoot;
 
+/// Marker resource present only in a listen-server (singleplayer, embedded
+/// sim) session — inserted by `crate::listen_server::ListenServerPlugin`,
+/// never by `crate::net_client::NetClientPlugin`. Lets [`toggle_esc_menu`]
+/// tell the two modes apart via `Option<Res<ListenServerSession>>` (present
+/// = listen-server) without a new `AppState`/feature check. Defined here
+/// (not in `listen_server`) since this module compiles under EITHER the
+/// `listen-server` or `net-client` feature alone, while `listen_server` only
+/// compiles under the former.
+#[derive(Resource, Default)]
+pub(crate) struct ListenServerSession;
+
 /// Escape is the universal "back out" key: it closes whatever window is open
 /// (the pause menu, Diary, Inventory, Map, …), and only summons the pause menu
 /// when NOTHING is open. This mirrors legacy `voxygen`'s `Show::toggle_windows`
@@ -126,17 +137,35 @@ struct EscMenuRoot;
 /// why the ORDER (not just the `hard_lock_active` run-condition gate above) is
 /// load-bearing for "Escape-while-locked clears the lock without also opening
 /// the pause menu on the same press."
+///
+/// Also pauses/unpauses `Time<Virtual>` when [`ListenServerSession`] is
+/// present (a listen-server/singleplayer session): opening the esc menu
+/// specifically (nothing was open) pauses; closing it specifically (it WAS
+/// the open window) unpauses. Escape closing some OTHER window (Diary/
+/// Inventory/…) neither pauses nor unpauses — only the esc menu's own
+/// open/close transition drives simulation pause, matching legacy's
+/// singleplayer-only pause behaviour. In multiplayer (`ListenServerSession`
+/// absent) this never touches `Time<Virtual>` at all — pausing a real
+/// remote server's tick from one client makes no sense.
 pub(crate) fn toggle_esc_menu(
     action_state: Res<ActionState>,
     hud_state: Res<HudState>,
     mut actions: MessageWriter<HudAction>,
+    listen_server: Option<Res<ListenServerSession>>,
+    mut time: ResMut<Time<Virtual>>,
 ) {
     if !action_state.just_pressed(GameInput::Escape) {
         return;
     }
     if hud_state.any_window_open() {
+        if listen_server.is_some() && hud_state.is_open(HudWindow::EscMenu) {
+            time.unpause();
+        }
         actions.write(HudAction::CloseWindow);
     } else {
+        if listen_server.is_some() {
+            time.pause();
+        }
         actions.write(HudAction::ToggleWindow(HudWindow::EscMenu));
     }
 }
@@ -374,6 +403,7 @@ mod tests {
             app.insert_resource(ActionState::default());
             app.init_resource::<ButtonInput<KeyCode>>();
             app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+            app.init_resource::<Time<Virtual>>();
             app.add_message::<HudAction>();
             if open != HudWindow::None {
                 app.world_mut().resource_mut::<HudState>().toggle(open);
@@ -422,6 +452,69 @@ mod tests {
         );
     }
 
+    /// A listen-server (singleplayer) session: opening the esc menu pauses
+    /// `Time<Virtual>`, closing it unpauses. Escape closing a DIFFERENT
+    /// window (Diary) neither pauses nor unpauses — only the esc menu's own
+    /// transition drives the simulation pause.
+    #[test]
+    fn esc_menu_pauses_time_in_listen_server_mode_only_when_it_is_the_esc_menu_itself() {
+        fn run(open: HudWindow, listen_server: bool) -> bool {
+            use xindeler_input::KeyMap;
+
+            let mut app = App::new();
+            app.init_resource::<HudState>();
+            app.insert_resource(KeyMap::default());
+            app.insert_resource(ActionState::default());
+            app.init_resource::<ButtonInput<KeyCode>>();
+            app.insert_resource(ButtonInput::<bevy::input::mouse::MouseButton>::default());
+            app.init_resource::<Time<Virtual>>();
+            app.add_message::<HudAction>();
+            if listen_server {
+                app.init_resource::<ListenServerSession>();
+            }
+            if open != HudWindow::None {
+                app.world_mut().resource_mut::<HudState>().toggle(open);
+            }
+            let esc_key = app
+                .world()
+                .resource::<KeyMap>()
+                .keyboard
+                .get_binding(GameInput::Escape);
+            if let Some(xindeler_input::KeyOrMouse::Key(key)) = esc_key {
+                app.world_mut()
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(key);
+            }
+            app.add_systems(
+                Update,
+                (
+                    xindeler_input::action_state::update_action_state,
+                    toggle_esc_menu,
+                )
+                    .chain(),
+            );
+            app.update();
+            app.world().resource::<Time<Virtual>>().is_paused()
+        }
+
+        assert!(
+            run(HudWindow::None, true),
+            "opening the esc menu in a listen-server session must pause"
+        );
+        assert!(
+            !run(HudWindow::EscMenu, true),
+            "closing the esc menu in a listen-server session must unpause"
+        );
+        assert!(
+            !run(HudWindow::Diary, true),
+            "closing a DIFFERENT window (Diary) must not touch the pause state at all"
+        );
+        assert!(
+            !run(HudWindow::None, false),
+            "opening the esc menu in multiplayer (no ListenServerSession) must never pause"
+        );
+    }
+
     /// BL-82 EM-5.19 Phase 3: while a hard lock is active, Escape must NOT
     /// open/close the pause menu at all —
     /// `targeting::clear_hard_lock_on_escape` (not exercised by this
@@ -449,6 +542,7 @@ mod tests {
         // this test's whole point is the `hard_lock_active` gate, not chat
         // focus (`chat::tests` is what actually exercises the focused case).
         app.init_resource::<InputFocus>();
+        app.init_resource::<Time<Virtual>>();
         app.add_message::<HudAction>();
         let locked = app.world_mut().spawn_empty().id();
         app.insert_resource(HardLock(Some(locked)));

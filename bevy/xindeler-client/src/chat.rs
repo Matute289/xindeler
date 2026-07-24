@@ -1653,7 +1653,22 @@ fn sync_chat_tabs(
 /// A tab click updates [`ChatUiState`]: "All" only changes the view filter; a
 /// sendable channel changes both filter and send channel; view-only kinds
 /// (`Tell`) only change the filter.
-fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: ResMut<ChatUiState>) {
+///
+/// Also focuses the chat input box, the same [`InputFocus::set`] call
+/// [`focus_chat_on_click`] makes — without this, a tab click (which never
+/// touches [`InputFocus`] on its own) left `cursor::update_cursor_free`'s
+/// `chat_focused` check reading whatever focus state predates the click, so
+/// the very next frame could re-grab the OS cursor mid-interaction with the
+/// tab row, and a follow-up Escape would fall through to the pause menu
+/// instead of blurring chat (`blur_chat_input_on_escape` only clears focus
+/// when the input box currently holds it).
+fn handle_tab_click(
+    activate: On<Activate>,
+    tabs: Query<&ChatTab>,
+    mut state: ResMut<ChatUiState>,
+    mut focus: ResMut<InputFocus>,
+    inputs: Query<Entity, With<ChatInputBox>>,
+) {
     let Ok(tab) = tabs.get(activate.entity) else {
         return;
     };
@@ -1662,6 +1677,9 @@ fn handle_tab_click(activate: On<Activate>, tabs: Query<&ChatTab>, mut state: Re
         && channel.send_command_name().is_some()
     {
         state.send_channel = channel;
+    }
+    if let Ok(input_entity) = inputs.single() {
+        focus.set(input_entity, FocusCause::Pressed);
     }
 }
 
@@ -2583,6 +2601,30 @@ mod tests {
             state.send_channel,
             NetChatChannel::Say,
             "a view-only tab must not clobber the send channel"
+        );
+    }
+
+    /// A real channel-tab click must focus the chat input box — otherwise
+    /// `cursor::update_cursor_free`'s `chat_focused` check reads no focus at
+    /// all, and the OS cursor can re-grab mid-interaction with the tab row.
+    #[test]
+    fn clicking_a_channel_tab_focuses_the_chat_input_box() {
+        let mut app = new_app();
+        app.init_resource::<InputFocus>();
+        app.add_observer(handle_tab_click);
+
+        let input_box = app.world_mut().spawn(ChatInputBox).id();
+        let tab = app
+            .world_mut()
+            .spawn(ChatTab(Some(NetChatChannel::Say)))
+            .id();
+
+        app.world_mut().trigger(Activate { entity: tab });
+
+        assert_eq!(
+            app.world().resource::<InputFocus>().get(),
+            Some(input_box),
+            "a tab click must focus the chat input box, the same as clicking it directly"
         );
     }
 

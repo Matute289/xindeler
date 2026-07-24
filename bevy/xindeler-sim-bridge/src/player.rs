@@ -255,6 +255,15 @@ pub struct EmbeddedPlayer {
     /// Last jump state we sent to the sim, so [`tick_player`] only emits jump
     /// press/release edges (the Client has no "is jump held" query).
     jumping: bool,
+    /// Same edge-tracking as `jumping`, for `InputKind::Roll`.
+    rolling: bool,
+    /// Whether the glide-toggle/lantern-toggle/loadout-swap controls were
+    /// held on the PREVIOUS sample — [`tick_player`] fires each one-shot
+    /// `Client` action exactly once, on the false→true rising edge, so
+    /// holding the key down does not repeatedly toggle every tick.
+    glide_toggle_held: bool,
+    toggle_lantern_held: bool,
+    swap_loadout_held: bool,
     /// Wall-clock instant of the last REAL `client.tick()` dispatch, used by
     /// [`tick_player`]'s Hz safety ceiling (BL-82 EM-4.11 follow-up — see
     /// [`max_player_tick_interval`]). `None` until the first dispatch ever
@@ -574,6 +583,22 @@ impl EmbeddedPlayer {
     fn character_jumping(&self) -> bool { self.jumping }
 
     fn set_character_jumping(&mut self, jumping: bool) { self.jumping = jumping; }
+
+    fn character_rolling(&self) -> bool { self.rolling }
+
+    fn set_character_rolling(&mut self, rolling: bool) { self.rolling = rolling; }
+
+    fn glide_toggle_held(&self) -> bool { self.glide_toggle_held }
+
+    fn set_glide_toggle_held(&mut self, held: bool) { self.glide_toggle_held = held; }
+
+    fn toggle_lantern_held(&self) -> bool { self.toggle_lantern_held }
+
+    fn set_toggle_lantern_held(&mut self, held: bool) { self.toggle_lantern_held = held; }
+
+    fn swap_loadout_held(&self) -> bool { self.swap_loadout_held }
+
+    fn set_swap_loadout_held(&mut self, held: bool) { self.swap_loadout_held = held; }
 
     /// Takes every chat line captured this tick (BL-82 EM-5.4), leaving the
     /// internal queue empty — called once per frame by
@@ -939,6 +964,10 @@ pub fn boot_embedded_player_reporting(
         pending_create_pre_ids: None,
         uid: None,
         jumping: false,
+        rolling: false,
+        glide_toggle_held: false,
+        toggle_lantern_held: false,
+        swap_loadout_held: false,
         last_tick_wall: None,
         pending_dialogue: Vec::new(),
         pending_chat: Vec::new(),
@@ -1124,6 +1153,41 @@ pub(crate) fn tick_player(
             .handle_input(comp::InputKind::Jump, jump_now, None, None);
         player.set_character_jumping(jump_now);
     }
+
+    // Roll is the same press/release-edge shape as jump (InputKind::Roll).
+    let roll_now = player.stage == PlayerStage::InGame && input.roll;
+    let was_rolling = player.character_rolling();
+    if roll_now != was_rolling {
+        player
+            .client
+            .handle_input(comp::InputKind::Roll, roll_now, None, None);
+        player.set_character_rolling(roll_now);
+    }
+
+    // Glide/lantern/loadout-swap are one-shot toggles, not press/release
+    // inputs — fire the `Client` action exactly once, on the false→true
+    // rising edge, so holding the key does not re-toggle every tick.
+    let glide_toggle_now = player.stage == PlayerStage::InGame && input.glide_toggle;
+    if glide_toggle_now && !player.glide_toggle_held() {
+        player.client.toggle_glide();
+    }
+    player.set_glide_toggle_held(glide_toggle_now);
+
+    let toggle_lantern_now = player.stage == PlayerStage::InGame && input.toggle_lantern;
+    if toggle_lantern_now && !player.toggle_lantern_held() {
+        if player.client.is_lantern_enabled() {
+            player.client.disable_lantern();
+        } else {
+            player.client.enable_lantern();
+        }
+    }
+    player.set_toggle_lantern_held(toggle_lantern_now);
+
+    let swap_loadout_now = player.stage == PlayerStage::InGame && input.swap_loadout;
+    if swap_loadout_now && !player.swap_loadout_held() {
+        player.client.swap_loadout();
+    }
+    player.set_swap_loadout_held(swap_loadout_now);
 
     let events = match player.client.tick(inputs, dt) {
         Ok(events) => events,
@@ -1496,6 +1560,10 @@ mod tests {
         let inputs = controller_inputs_from(&LocalPlayerInput {
             move_dir: BVec2::new(0.0, 1.0),
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         assert!((inputs.move_dir - vek::Vec2::new(0.0, 1.0)).magnitude() < 1e-5);
@@ -1508,6 +1576,10 @@ mod tests {
         let inputs = controller_inputs_from(&LocalPlayerInput {
             move_dir: BVec2::new(1.0, 1.0),
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         assert!((inputs.move_dir.magnitude() - 1.0).abs() < 1e-5);
@@ -1554,6 +1626,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::ZERO,
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
 
@@ -1618,6 +1694,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::ZERO,
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
 
@@ -1727,6 +1807,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::new(0.0, 1.0),
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
 
@@ -1829,6 +1913,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::ZERO,
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
 
@@ -1860,6 +1948,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::ZERO,
             jump: true,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         let mut max_z = start.z;
@@ -1875,6 +1967,10 @@ mod tests {
         app.insert_resource(LocalPlayerInput {
             move_dir: BVec2::ZERO,
             jump: false,
+            roll: false,
+            glide_toggle: false,
+            toggle_lantern: false,
+            swap_loadout: false,
             look: bevy::math::Vec3::new(0.0, 1.0, 0.0),
         });
         for _ in 0..POST_RELEASE_TICKS {

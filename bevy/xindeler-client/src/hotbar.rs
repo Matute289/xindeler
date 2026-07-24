@@ -366,7 +366,10 @@ impl Plugin for HotbarViewPlugin {
                     sync_hotbar_slots.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_slot_half_parenting.after(sync_hotbar_slots),
                     sync_empty_slot_backgrounds.after(sync_hotbar_slots),
-                    sync_primary_secondary_indicators,
+                    // Reads `NonSend<Localization>` to resolve the real
+                    // ability name — same `LocaleSyncSet` ordering
+                    // requirement as `sync_hotbar_slots` right above.
+                    sync_primary_secondary_indicators.after(xindeler_ui::i18n::LocaleSyncSet),
                     sync_keybind_labels,
                     sync_cooldown_overlays.after(sync_hotbar_slots),
                     handle_hotbar_drag_drop,
@@ -550,6 +553,17 @@ fn short_glyph(ability_id: &str) -> String {
     let mut glyph: String = segment.chars().take(4).collect();
     glyph.make_ascii_uppercase();
     glyph
+}
+
+/// Resolves a dotted ability id (e.g. `"common.abilities.sword.dash"`, the
+/// same `.`-separated specifier convention `assets/voxygen/i18n/en/hud/
+/// ability.ftl`'s keys already use dashed — `common-abilities-sword-dash`)
+/// into its real localized display name. Falls back to the dashed id itself
+/// (never panics) if the ability has no `.ftl` entry, via
+/// [`Localization::tr`]'s own built-in fallback — same posture
+/// `diary.rs`'s `skill_i18n_key` establishes for skill-tree nodes.
+fn ability_display_name(localization: &Localization, ability_id: &str) -> String {
+    localization.tr(&ability_id.replace('.', "-"))
 }
 
 /// Spawns one of the two ability-slot row halves flanking the centre Stamina
@@ -1102,6 +1116,7 @@ fn sync_primary_secondary_indicators(
     abilities: Query<&NetAbilities, With<NetLocalPlayer>>,
     mut primary_text: Query<&mut Text, (With<HotbarPrimaryText>, Without<HotbarSecondaryText>)>,
     mut secondary_text: Query<&mut Text, (With<HotbarSecondaryText>, Without<HotbarPrimaryText>)>,
+    localization: NonSend<Localization>,
 ) {
     let Ok(abilities) = abilities.single() else {
         return;
@@ -1112,7 +1127,7 @@ fn sync_primary_secondary_indicators(
             abilities
                 .primary
                 .as_deref()
-                .map(short_glyph)
+                .map(|id| ability_display_name(&localization, id))
                 .unwrap_or_else(|| "-".to_owned())
         );
         if text.0 != new_text {
@@ -1125,7 +1140,7 @@ fn sync_primary_secondary_indicators(
             abilities
                 .secondary
                 .as_deref()
-                .map(short_glyph)
+                .map(|id| ability_display_name(&localization, id))
                 .unwrap_or_else(|| "-".to_owned())
         );
         if text.0 != new_text {
@@ -1346,6 +1361,68 @@ mod tests {
     fn short_glyph_takes_the_last_dotted_segment_uppercased() {
         assert_eq!(short_glyph("class.warrior.rally"), "RALL");
         assert_eq!(short_glyph("m1"), "M1");
+    }
+
+    /// Dots convert to dashes, matching `hud/ability.ftl`'s own key
+    /// convention — a real ability id resolves to its real display name, not
+    /// the dashed key itself.
+    #[test]
+    fn ability_display_name_resolves_a_real_catalog_entry() {
+        let localization =
+            Localization::load(&xindeler_ui::i18n::fallback_locale(), &["hud/ability.ftl"]);
+        assert_eq!(
+            ability_display_name(&localization, "common.abilities.hammer.leap"),
+            "Smash of Doom"
+        );
+    }
+
+    /// An ability id with no `.ftl` entry falls back to the dashed key
+    /// itself rather than panicking — [`Localization::tr`]'s own built-in
+    /// fallback.
+    #[test]
+    fn ability_display_name_falls_back_to_the_dashed_key_when_unmapped() {
+        let localization =
+            Localization::load(&xindeler_ui::i18n::fallback_locale(), &["common.ftl"]);
+        assert_eq!(
+            ability_display_name(&localization, "not.a.real.ability"),
+            "not-a-real-ability"
+        );
+    }
+
+    /// The M1/M2 indicator text must show the real ability display name, not
+    /// a truncated 4-char glyph.
+    #[test]
+    fn primary_secondary_indicators_show_the_real_ability_name_not_a_glyph() {
+        let mut app = new_app();
+        // `new_app()` only loads `common.ftl`; reload with the real ability
+        // catalog too so this test proves the actual end-to-end resolution.
+        app.insert_non_send(Localization::load(
+            &xindeler_ui::i18n::fallback_locale(),
+            &["hud/ability.ftl"],
+        ));
+        app.world_mut().spawn((NetLocalPlayer, NetAbilities {
+            primary: Some("common.abilities.hammer.leap".to_owned()),
+            secondary: None,
+            slots: Vec::new(),
+        }));
+        let primary_text = app
+            .world_mut()
+            .spawn((HotbarPrimaryText, Text::default()))
+            .id();
+        let secondary_text = app
+            .world_mut()
+            .spawn((HotbarSecondaryText, Text::default()))
+            .id();
+
+        app.world_mut()
+            .run_system_once(sync_primary_secondary_indicators)
+            .expect("system runs");
+
+        assert_eq!(
+            app.world().get::<Text>(primary_text).unwrap().0,
+            "M1: Smash of Doom"
+        );
+        assert_eq!(app.world().get::<Text>(secondary_text).unwrap().0, "M2: -");
     }
 
     /// BL-82 EM-5.17 "5+5 slot-holders" follow-up (Matías's ask: 5 holders on
