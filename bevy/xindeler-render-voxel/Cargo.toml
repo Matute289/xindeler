@@ -39,6 +39,13 @@ pipeline = ["material", "bevy/multi_threaded"]
 # `xindeler-anim` (the kept skeletal-anim crate, C13 — a LOGIC crate, so this
 # is the legal shell→logic direction the isolation guard allows).
 figure = ["convert", "dep:dot_vox", "dep:xindeler-anim", "dep:serde"]
+# EM-7.14 P1: the item-icon CPU voxel-to-image rasterizer. A faithful port of
+# xindeler-old's `voxygen::ui::graphic::renderer` (`euc`-based software
+# triangle rasterizer + per-voxel AO meshing) — reuses `figure`'s `dot_vox`/
+# `common::figure::MatSegment` machinery to load+skin-strip the model, then
+# rasterizes to a plain `image::RgbaImage`. No bevy render/wgpu dependency —
+# the output is a CPU pixel buffer the client wraps as a `bevy::Image`.
+item-icon = ["figure", "dep:euc", "dep:image"]
 
 [dependencies]
 # Bevy pinned EXACT per BL-82 [Q5]=A — bump only via the contained per-release PR (EM-6.3).
@@ -71,6 +78,14 @@ vek = { workspace = true }
 # features on either (mirrors the per-phase minimalism above).
 dot_vox = { version = "5.1", optional = true }
 xindeler-anim = { path = "../../voxygen/anim", optional = true, default-features = false }
+
+# EM-7.14 P1 (`item-icon` feature): `euc` is the SAME software rasterizer
+# xindeler-old's icon renderer used (`voxygen/Cargo.toml: euc = "0.5.3"`) —
+# ported for faithful legacy fidelity (same per-voxel AO, same fixed
+# lighting model) rather than hand-rolled. `image` produces the plain
+# `RgbaImage` output; the workspace already pins it (`common/assets`).
+euc = { version = "0.5.3", optional = true }
+image = { workspace = true, optional = true }
 
 [dev-dependencies]
 # EM-3.8: the ignored `real_pig_manifests_parse` test reads + parses the frozen

@@ -32,6 +32,7 @@
 
 #[cfg(feature = "convert")] pub mod convert;
 #[cfg(feature = "figure")] pub mod figure;
+#[cfg(feature = "item-icon")] pub mod item_icon;
 #[cfg(feature = "material")] pub mod material;
 pub mod mesh;
 #[cfg(feature = "material")] pub mod palette;

@@ -164,7 +164,7 @@ impl HumColorSpec {
 /// Tint a greyscale voxel colour toward `color` (voxygen `load::recolor_grey`).
 /// Only greys (`r == g == b`) are tinted; other colours pass through, so
 /// pre-coloured detail on an armour piece survives.
-fn recolor_grey(rgb: Rgb<u8>, color: Rgb<u8>) -> Rgb<u8> {
+pub(crate) fn recolor_grey(rgb: Rgb<u8>, color: Rgb<u8>) -> Rgb<u8> {
     use common::util::{linear_to_srgb, srgb_to_linear_fast};
 
     const BASE_GREY: f32 = 178.0;
