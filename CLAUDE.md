@@ -156,16 +156,29 @@ Custom profiles in the workspace `Cargo.toml`:
 - `release`: opt-level=3, full LTO, `panic=abort`.
 - `no_overflow`: Used in world-gen crates to skip overflow checks for performance.
 
-## 📋 Project Backlog (scored & prioritized)
+## 📋 Project Backlog — MERGED into xindeler-new-horizon's NH- backlog (2026-09-05)
 
-**The full scored master backlog lives in [`docs/backlog/backlog.md`](docs/backlog/backlog.md)** — moved
-out of this file to keep CLAUDE.md lean. It is **the single always-present roadmap** (all `BL-NN` epics +
-the scoring rubric + dependency edges + parallel tracks), each row referencing its specs/plans/tasks in
-the private `docs/design/`.
+**This repo no longer has its own backlog.** `docs/backlog/backlog.md` (the `BL-NN` master list) and
+`docs/backlog/engine-migration.md` (`EM-N`, BL-82's own sub-backlog) were retired 2026-09-05, at
+Matías's explicit request, after `xindeler-new-horizon` became the live successor project (see that
+repo's `CLAUDE.md`, "What this repo is"). Every `BL-NN` row was compared against `xindeler-new-horizon`'s
+`NH-` backlog for duplicates before this repo's copy was deleted:
 
-**Always read `docs/backlog/backlog.md` on resume and before starting / after finishing any work**, together
-with `docs/design/session-notes.md` + `agenda.md`. The backlog is **multi-session**: `git pull`/re-sync
-`development` before editing, add+score new `BL-NN` rows **there** (not here), and commit only your own rows.
+- **47 unique rows** were ported as `NH-94..NH-141` in the unified backlog, each citing its original
+  `BL-N` for traceability.
+- **~30 rows** were already duplicated/inherited (this repo and `xindeler-new-horizon` share the same
+  base engine content via `xindeler-old`) — each now has a `🔁 BL-N` cross-reference note directly
+  under the `NH-` row that covers it.
+- **~13 rows** (including all 105 `EM-N` rows, and `BL-82` itself — the Veloren→Bevy migration this
+  repo exists to attempt) were engine-specific or already closed, and did not carry over.
+
+**The single always-present roadmap is now**
+[`xindeler-new-horizon/docs/design/backlog/new-horizon.md`](../xindeler-new-horizon/docs/design/backlog/new-horizon.md)
+(same private `Matute289/xindeler-design` repo this project's own `docs/design/` already points at —
+no new remote, no new clone). Read its `🎯 PRIORITY EXECUTION ORDER` section first; it carries the
+tiering, dependency graph, and full BL-→NH- reconciliation ledger (search `🔁` for any specific old
+`BL-N`). Do not re-create a `docs/backlog/` file in this repo — add new work directly to the `NH-`
+backlog instead, scored with the same `Value + Leverage + (6 − Effort)` rubric.
 
 
 ## Comunicación asíncrona con Mati

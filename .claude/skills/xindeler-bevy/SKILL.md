@@ -5,13 +5,23 @@ description: Use when working on the Bevy engine migration (BL-82) or any code u
 
 # xindeler-bevy
 
-Xindeler is migrating 100% (client + server shell) from Veloren's bespoke engine to **Bevy ≥ 0.19**
+> **Superseded 2026-07-24, this repo kept as a frozen-not-deleted reference.** The engine-strategy
+> investigation concluded that reverting to the original Veloren-derived engine (now developed in
+> the sibling repo `xindeler-new-horizon`) was more viable than finishing this Bevy migration — see
+> `xindeler-new-horizon`'s `CLAUDE.md`, "What this repo is". This skill's Bevy/`bevy/*` technical
+> content stays accurate for anyone still touching that code here; only the backlog pointer below
+> is stale (the whole `EM-N`/`docs/backlog/engine-migration.md` program was retired 2026-09-05 when
+> the BL- backlog merged into `xindeler-new-horizon`'s NH- backlog — no replacement row was created
+> for it there, since it's Bevy-specific and the live project isn't on Bevy).
+
+Xindeler was migrating 100% (client + server shell) from Veloren's bespoke engine to **Bevy ≥ 0.19**
 (decision 2026-07-02, resolves BL-50 → Path B+). Canonical docs (private design repo):
 - Spec: `docs/design/specs/2026-07-02-bevy-migration-design.md`
 - Mapper (rename + concept map + sync triage): `docs/design/specs/2026-07-02-veloren-xindeler-mapper.md`
 - Plan: `docs/design/plans/2026-07-02-bevy-migration-plan.md` · Board: `docs/design/tasks/45-engine-migration-tasks.md`
-- **Human-readable program backlog (PUBLIC repo): `docs/backlog/engine-migration.md`** — all EM tasks,
-  done + pending, phase by phase. Keep it current when a task lands or a new one is added.
+- ~~Human-readable program backlog (PUBLIC repo): `docs/backlog/engine-migration.md`~~ — **removed
+  2026-09-05**, see the note above. If this migration resumes, track new work as its own row in
+  `xindeler-new-horizon/docs/design/backlog/new-horizon.md` instead of re-creating a local backlog.
 
 Review every migration PR with the **`bevy-migration-reviewer`** agent.
 
@@ -24,7 +34,8 @@ stack). So on **every new Bevy release** (standing track **EM-M1** in the migrat
    notes (`bevy.org/news/…`) — never upgrade blind.
 2. Catalog the breaking changes that touch our `bevy/*` crates; write a spec+plan+tasks for the bump.
 3. Bump the exact pin, fix everything that broke, re-run all gates + the smoke screenshots.
-4. Add the concrete tasks to `docs/backlog/engine-migration.md` when it fires.
+4. ~~Add the concrete tasks to `docs/backlog/engine-migration.md` when it fires.~~ File it as a new
+   row in `xindeler-new-horizon/docs/design/backlog/new-horizon.md` instead (see note above).
 Contained by design: engine churn lives only in `bevy/*`, so an upgrade is one bounded PR. Pin EXACT
 (`=0.19.0`) so a version never drifts by accident; ecosystem deps (replicon…) lag a new Bevy ~1–3
 months, so wait for the dep tree before upgrading. First real exercise = EM-6.3.
